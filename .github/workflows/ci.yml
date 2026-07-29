@@ -32,6 +32,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Test with race detector
+        run: go test -race ./internal/tensor/ ./internal/interp/
+
       - name: Build binary
         run: go build -o raster ./cmd/raster
 

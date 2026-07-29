@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.11). The reference implementation is a single Go
+It's an early prototype (v0.12). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -37,7 +37,8 @@ differentiable tensor programs from the start. Three things fall out of that:
   program runs, not a stack trace halfway through training.
 
 The language is deliberately small. The whole implementation is a few thousand
-lines of Go you can read in a sitting.
+lines of Go you can read in a sitting. Large tensor operations run across CPU
+cores (deterministically — parallelism never changes a result).
 
 ## Install
 

@@ -307,9 +307,11 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	switch {
 	case shapeEqual(a.Shape, b.Shape):
 		ad, bd := a.Data, b.Data
-		for i := 0; i < n; i++ {
-			out[i] = f(ad[i], bd[i])
-		}
+		parallelFor(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				out[i] = f(ad[i], bd[i])
+			}
+		})
 		res := &Tensor{Data: out, Shape: shape}
 		if !rg {
 			return res, nil
@@ -332,9 +334,11 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 
 	case len(b.Data) == 1: // scalar b broadcast over a
 		ad, bs := a.Data, b.Data[0]
-		for i := 0; i < n; i++ {
-			out[i] = f(ad[i], bs)
-		}
+		parallelFor(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				out[i] = f(ad[i], bs)
+			}
+		})
 		res := &Tensor{Data: out, Shape: shape}
 		if !rg {
 			return res, nil
@@ -357,9 +361,11 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 
 	case len(a.Data) == 1: // scalar a broadcast over b
 		as, bd := a.Data[0], b.Data
-		for i := 0; i < n; i++ {
-			out[i] = f(as, bd[i])
-		}
+		parallelFor(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				out[i] = f(as, bd[i])
+			}
+		})
 		res := &Tensor{Data: out, Shape: shape}
 		if !rg {
 			return res, nil
@@ -435,9 +441,12 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) *Tensor {
 	n := len(a.Data)
 	out := make([]float64, n)
-	for i := 0; i < n; i++ {
-		out[i] = f(a.Data[i])
-	}
+	ad := a.Data
+	parallelFor(n, func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			out[i] = f(ad[i])
+		}
+	})
 	res := &Tensor{Data: out, Shape: append([]int(nil), a.Shape...)}
 	if !a.RequiresGrad {
 		return res
@@ -542,19 +551,22 @@ func Mean(a *Tensor) *Tensor { return reduceAll(a, true) }
 
 func mm(a []float64, m, k int, b []float64, n int) []float64 {
 	c := make([]float64, m*n)
-	for i := 0; i < m; i++ {
-		for p := 0; p < k; p++ {
-			aip := a[i*k+p]
-			if aip == 0 {
-				continue
-			}
-			bRow := p * n
-			cRow := i * n
-			for j := 0; j < n; j++ {
-				c[cRow+j] += aip * b[bRow+j]
+	// Rows are independent, so split them across cores for large products.
+	runChunks(m, workersFor(m*k*n), func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			for p := 0; p < k; p++ {
+				aip := a[i*k+p]
+				if aip == 0 {
+					continue
+				}
+				bRow := p * n
+				cRow := i * n
+				for j := 0; j < n; j++ {
+					c[cRow+j] += aip * b[bRow+j]
+				}
 			}
 		}
-	}
+	})
 	return c
 }
 

@@ -52,10 +52,14 @@ autodiff Greeks.
 Ordered so each step is usable on its own and compounds toward the beachhead,
 then widens to the other workloads.
 
-1. **Parallelism.** A safe way to run independent work across cores (Monte-Carlo
-   paths, backtest windows, tree splits). The single biggest pure-Go speed lever.
-2. **Faster core numerics.** Cache-blocked, multicore matmul and reductions in
-   pure Go; keep the current engine as the reference.
+1. **Parallelism.** *(delivered v0.12)* Elementwise, unary, and matmul forward
+   passes run across cores for large tensors — deterministic and race-free
+   (each goroutine writes disjoint outputs, so results are bit-identical to a
+   serial run). Measured ~2–4.5× on large ops; small tensors stay serial. This
+   is the single biggest pure-Go speed lever for Monte-Carlo and backtesting.
+2. **Faster core numerics.** Cache-blocked matmul, parallel deterministic
+   reductions, and parallel backward passes; keep the current engine as the
+   reference.
 3. **Data I/O.** CSV is here (`read_csv`); add Parquet/Arrow and a time-indexed
    frame type. Finance is data-first.
 4. **Dimensioned types.** Optional units on quantities (USD, bps, years) checked

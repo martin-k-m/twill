@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0
+
+Multicore tensor ops (finance roadmap #1).
+
+- Large elementwise, unary, and matmul forward passes now run across CPU cores.
+  Each goroutine writes a disjoint slice of the output, so it's race-free and
+  **bit-identical to a serial run** — parallelism never changes a program's
+  result, and randomness stays deterministic. Small tensors (typical training
+  parameters) run serially, below a size threshold.
+- Measured scaling on large ops (1 core -> 16): `exp` ~3.8x, 256x256 matmul
+  ~4.5x, elementwise add ~2x (memory-bandwidth bound). This is the biggest
+  pure-Go speed lever for the Monte-Carlo and backtesting workloads.
+- CI now runs the suite under the race detector.
+
 ## 0.11.0
 
 Deterministic randomness, and the first finance step.
