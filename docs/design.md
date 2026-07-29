@@ -90,7 +90,7 @@ them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
 `grad`, loops that reshape, or values read at runtime — those are left unknown.
 
-## Known limitations (v0.5)
+## Known limitations (v0.6)
 
 Deliberate, for a prototype:
 
@@ -101,7 +101,8 @@ Deliberate, for a prototype:
 - Shape checking is stronger than it was — annotations support shape variables
   that must agree — but it's still best-effort, not a full type system that
   catches every mismatch.
-- No records or module namespaces. Imports share the global scope.
+- Records are structural (no declared record types the checker verifies across a
+  program), and record fields aren't mutable in place — you rebuild the record.
 - No named axes; broadcasting and reductions work on positional axes.
 
 ## Roadmap
@@ -114,7 +115,8 @@ Roughly in order of value:
    native library. Keep the interpreter as the reference.
 3. More autodiff: higher-order derivatives, forward mode, batching.
 4. Named axes and general einsum-style contraction.
-5. Records and a module system for organizing parameters and code.
+5. Declared record types the checker can verify, and record-aware optimizers in
+   the standard library.
 
 ## Non-goals for now
 

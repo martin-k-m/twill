@@ -100,8 +100,9 @@ type Return struct {
 }
 
 type Import struct {
-	Path string
-	Line int
+	Path  string
+	Alias string // non-empty for `import "..." as name` (a namespaced module)
+	Line  int
 }
 
 type ExprStmt struct {
@@ -201,6 +202,24 @@ type Slice struct {
 	Line   int
 }
 
+// RecordLit is a record/struct literal: { name: expr, ... }.
+type RecordLit struct {
+	Fields []RecordField
+	Line   int
+}
+
+type RecordField struct {
+	Name  string
+	Value Expr
+}
+
+// Field is record field access: target.name.
+type Field struct {
+	Target Expr
+	Name   string
+	Line   int
+}
+
 type IfExpr struct {
 	Cond Expr
 	Then *Block
@@ -225,6 +244,8 @@ func (e *Binary) Pos() int    { return e.Line }
 func (e *Call) Pos() int      { return e.Line }
 func (e *Index) Pos() int     { return e.Line }
 func (e *Slice) Pos() int     { return e.Line }
+func (e *RecordLit) Pos() int { return e.Line }
+func (e *Field) Pos() int     { return e.Line }
 func (e *IfExpr) Pos() int    { return e.Line }
 func (e *Block) Pos() int     { return e.Line }
 
@@ -240,6 +261,8 @@ func (e *Binary) expr()    {}
 func (e *Call) expr()      {}
 func (e *Index) expr()     {}
 func (e *Slice) expr()     {}
+func (e *RecordLit) expr() {}
+func (e *Field) expr()     {}
 func (e *IfExpr) expr()    {}
 func (e *Block) expr()     {}
 

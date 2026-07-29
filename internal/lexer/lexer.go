@@ -159,7 +159,9 @@ func Tokenize(src string) ([]Token, error) {
 			toks = append(toks, Token{OP, string(ch), startLine, startCol})
 			continue
 		}
-		if strings.ContainsRune("()[]{},:;", ch) {
+		// '.' is field access here; number literals like 3.14 and .5 were
+		// already handled by the number branch above.
+		if strings.ContainsRune("()[]{},:;.", ch) {
 			advance()
 			toks = append(toks, Token{PUNCT, string(ch), startLine, startCol})
 			continue

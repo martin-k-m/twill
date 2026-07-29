@@ -52,6 +52,7 @@ type tBool struct{}
 type tStr struct{}
 type tUnit struct{}
 type tList struct{ elems []Type } // nil elems: unknown contents
+type tRecord struct{ fields map[string]Type }
 type tFn struct {
 	node   ast.Node
 	params []ast.Param
@@ -67,6 +68,7 @@ func (tBool) isType()    {}
 func (tStr) isType()     {}
 func (tUnit) isType()    {}
 func (tList) isType()    {}
+func (tRecord) isType()  {}
 func (tFn) isType()      {}
 func (tBuiltin) isType() {}
 
@@ -153,7 +155,12 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 			c.inferExpr(st.Value, env)
 		}
 	case *ast.Import:
-		// Imported definitions are resolved at runtime; skip statically.
+		// Imported definitions are resolved at runtime. For a namespaced
+		// import, bind the alias so field access on it stays unknown rather
+		// than "undefined".
+		if st.Alias != "" {
+			env.define(st.Alias, tUnknown{})
+		}
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)
 	case *ast.Block:
@@ -225,6 +232,19 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		return c.inferIndex(ex, env)
 	case *ast.Slice:
 		return c.inferSlice(ex, env)
+	case *ast.RecordLit:
+		fields := map[string]Type{}
+		for _, f := range ex.Fields {
+			fields[f.Name] = c.inferExpr(f.Value, env)
+		}
+		return tRecord{fields: fields}
+	case *ast.Field:
+		if rec, ok := c.inferExpr(ex.Target, env).(tRecord); ok {
+			if ft, ok := rec.fields[ex.Name]; ok {
+				return ft
+			}
+		}
+		return tUnknown{}
 	case *ast.IfExpr:
 		c.inferExpr(ex.Cond, env)
 		then := c.inferBlock(ex.Then, newEnv(env))
@@ -393,7 +413,7 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 		return c.inferUserCall(fn, ex, argTypes)
 	case tUnknown:
 		return tUnknown{}
-	case tList, tBool, tStr, tUnit:
+	case tList, tBool, tStr, tUnit, tRecord:
 		c.report(ex.Line, "value is not callable")
 		return tUnknown{}
 	}
@@ -824,7 +844,7 @@ func join(a, b Type) Type {
 
 func isDefiniteNonTensor(t Type) bool {
 	switch t.(type) {
-	case tBool, tStr, tUnit, tList, tFn, tBuiltin:
+	case tBool, tStr, tUnit, tList, tRecord, tFn, tBuiltin:
 		return true
 	}
 	return false

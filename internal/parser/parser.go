@@ -223,7 +223,17 @@ func (p *parser) parseImport() (ast.Stmt, error) {
 		return nil, p.errf(t, "import expects a string path")
 	}
 	p.next()
-	return &ast.Import{Path: t.Value, Line: line}, nil
+	imp := &ast.Import{Path: t.Value, Line: line}
+	// Optional `as name` binds the module's definitions to a namespace record.
+	if p.peek(0).Kind == lexer.IDENT && p.peek(0).Value == "as" {
+		p.next()
+		name, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		imp.Alias = name
+	}
+	return imp, nil
 }
 
 // --- expressions -----------------------------------------------------------
@@ -294,7 +304,14 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 		if (p.check("(") || p.check("[")) && p.pos > 0 && p.peek(0).Line > p.toks[p.pos-1].Line {
 			break
 		}
-		if p.check("(") {
+		if p.check(".") {
+			line := p.next().Line // '.'
+			name, err := p.expectIdent()
+			if err != nil {
+				return nil, err
+			}
+			x = &ast.Field{Target: x, Name: name, Line: line}
+		} else if p.check("(") {
 			line := p.peek(0).Line
 			args, err := p.parseArgs()
 			if err != nil {
@@ -390,6 +407,9 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		return p.parseTensorOrList()
 	}
 	if p.check("{") {
+		if p.looksLikeRecord() {
+			return p.parseRecordLit()
+		}
 		return p.parseBlock()
 	}
 	return nil, p.errf(t, "unexpected token %q", tokenText(t))
@@ -494,6 +514,45 @@ func (p *parser) parseFnBody() (ast.Expr, error) {
 		return p.parseExpr()
 	}
 	return p.parseBlock()
+}
+
+// looksLikeRecord decides whether a `{` starts a record literal (`{ name: ...`)
+// rather than a block. A block never begins with `ident :`.
+func (p *parser) looksLikeRecord() bool {
+	return p.peek(0).Value == "{" &&
+		p.peek(1).Kind == lexer.IDENT &&
+		p.peek(2).Kind == lexer.PUNCT && p.peek(2).Value == ":"
+}
+
+func (p *parser) parseRecordLit() (ast.Expr, error) {
+	line := p.expectPunct("{").Line
+	rec := &ast.RecordLit{Line: line}
+	for !p.check("}") && !p.atEnd() {
+		name, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(":"); err != nil {
+			return nil, err
+		}
+		val, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		rec.Fields = append(rec.Fields, ast.RecordField{Name: name, Value: val})
+		if !p.match(",") {
+			break
+		}
+	}
+	if _, err := p.expect("}"); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (p *parser) expectPunct(value string) lexer.Token {
+	t, _ := p.expect(value)
+	return t
 }
 
 // parseSignature parses the parameter list and an optional "-> shape" return.

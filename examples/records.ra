@@ -1,0 +1,42 @@
+# records.ra — a model held in a record (named fields) instead of a list,
+# trained with a namespaced import of the nn library.
+#
+# `grad` flows through the record, so grad(loss)(model) returns a record with
+# the same fields holding each parameter's gradient.
+
+import "../std/nn.ra" as nn
+
+let X = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+let Y = [0.0, 1.0, 1.0, 0.0]
+
+fn forward(m, x) {
+  let h = tanh(nn.dense(m.w1, m.b1, x))
+  sigmoid(nn.dense(m.w2, m.b2, h))
+}
+
+fn loss(m) {
+  let total = 0.0
+  for i in range(4) {
+    total = total + nn.bce(forward(m, X[i]), Y[i])
+  }
+  total / 4.0
+}
+
+let model = { w1: nn.he_init(4, 2), b1: zeros(4),
+              w2: nn.he_init(1, 4), b2: zeros(1) }
+let lr = 0.5
+
+for step in range(2000) {
+  let g = grad(loss)(model)
+  model = { w1: model.w1 - g.w1 * lr, b1: model.b1 - g.b1 * lr,
+            w2: model.w2 - g.w2 * lr, b2: model.b2 - g.b2 * lr }
+  if step % 500 == 0 {
+    print("step", step, "loss", loss(model))
+  }
+}
+
+print("")
+print("predictions (want 0, 1, 1, 0):")
+for i in range(4) {
+  print("  ", X[i], "->", forward(model, X[i]))
+}

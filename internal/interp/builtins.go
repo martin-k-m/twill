@@ -556,9 +556,15 @@ func (ip *Interp) readCSV(path string) (value.Value, error) {
 // --- autodiff core ---------------------------------------------------------
 
 type gradNode struct {
-	leaf *tensor.Tensor
-	list []*gradNode
-	none bool
+	leaf   *tensor.Tensor
+	list   []*gradNode
+	record *recordNode
+	none   bool
+}
+
+type recordNode struct {
+	keys  []string
+	nodes map[string]*gradNode
 }
 
 func traceArg(v value.Value) (value.Value, *gradNode) {
@@ -573,6 +579,15 @@ func traceArg(v value.Value) (value.Value, *gradNode) {
 			passed[i], nodes[i] = traceArg(it)
 		}
 		return &value.List{Items: passed}, &gradNode{list: nodes}
+	case *value.Record:
+		rec := value.NewRecord()
+		rn := &recordNode{keys: t.Keys, nodes: map[string]*gradNode{}}
+		for _, k := range t.Keys {
+			pv, node := traceArg(t.Fields[k])
+			rec.Set(k, pv)
+			rn.nodes[k] = node
+		}
+		return rec, &gradNode{record: rn}
 	default:
 		return v, &gradNode{none: true}
 	}
@@ -594,6 +609,13 @@ func gradFromNode(n *gradNode) value.Value {
 			items[i] = gradFromNode(c)
 		}
 		return &value.List{Items: items}
+	}
+	if n.record != nil {
+		rec := value.NewRecord()
+		for _, k := range n.record.keys {
+			rec.Set(k, gradFromNode(n.record.nodes[k]))
+		}
+		return rec
 	}
 	return tensor.Scalar(0)
 }

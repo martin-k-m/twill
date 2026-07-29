@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+
+Records and modules.
+
+- Records with named fields: `{ w: [1.0, 2.0], b: 0.5 }`, accessed with `.`
+  (`p.w`). A `{` is a record when followed by `name:`, otherwise a block.
+- `grad` follows record structure: differentiating a loss over a record of
+  parameters returns a record of gradients with the same fields — so a model can
+  live in a record instead of a positional list.
+- Namespaced imports: `import "std/nn.ra" as nn` binds the module's definitions
+  as a record, called as `nn.dense(...)`. Plain `import` still shares scope.
+- The checker understands records and field access, and reports records used as
+  numbers or called as functions.
+- New example `records.ra`: an XOR net whose parameters live in a record,
+  trained via a namespaced import of the nn library.
+
 ## 0.5.0
 
 Slicing, shape variables, and a faster tensor engine.

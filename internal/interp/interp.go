@@ -28,7 +28,8 @@ type Interp struct {
 	Global   *value.Env
 	out      func(string)
 	dirStack []string
-	loaded   map[string]bool
+	loaded   map[string]bool // plain imports already loaded
+	loading  map[string]bool // namespaced imports currently loading (cycle guard)
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -37,9 +38,10 @@ func New(out func(string)) *Interp {
 		out = func(s string) { fmt.Println(s) }
 	}
 	ip := &Interp{
-		Global: value.NewEnv(nil),
-		out:    out,
-		loaded: map[string]bool{},
+		Global:  value.NewEnv(nil),
+		out:     out,
+		loaded:  map[string]bool{},
+		loading: map[string]bool{},
 	}
 	ip.installBuiltins()
 	return ip
@@ -177,28 +179,50 @@ func (ip *Interp) iterate(v value.Value, line int) []value.Value {
 	return nil
 }
 
-func (ip *Interp) doImport(st *ast.Import, _ *value.Env) {
+func (ip *Interp) doImport(st *ast.Import, env *value.Env) {
 	abs, err := ip.resolveImport(st.Path)
 	if err != nil {
 		ip.panicf(st.Line, "cannot read import %q", st.Path)
-	}
-	if ip.loaded[abs] {
-		return
 	}
 	src, err := os.ReadFile(abs)
 	if err != nil {
 		ip.panicf(st.Line, "cannot read import %q", st.Path)
 	}
-	ip.loaded[abs] = true
 	prog, perr := parser.Parse(string(src))
 	if perr != nil {
 		ip.panicf(st.Line, "in import %q: %s", st.Path, perr.Error())
 	}
 	ip.dirStack = append(ip.dirStack, filepath.Dir(abs))
 	defer func() { ip.dirStack = ip.dirStack[:len(ip.dirStack)-1] }()
-	// Imported top-level definitions land in the global scope.
+
+	if st.Alias != "" {
+		// Namespaced import: evaluate into a fresh module scope and bind its
+		// definitions as a record under the alias. Guard against cycles.
+		if ip.loading[abs] {
+			return
+		}
+		ip.loading[abs] = true
+		defer delete(ip.loading, abs)
+		modEnv := value.NewEnv(ip.Global)
+		for _, s := range prog.Body {
+			ip.execStmt(s, modEnv)
+		}
+		rec := value.NewRecord()
+		for name, v := range modEnv.Locals() {
+			rec.Set(name, v)
+		}
+		env.Define(st.Alias, rec)
+		return
+	}
+
+	// Plain import: definitions land in the importing scope. Load each file
+	// once to keep re-imports and cycles cheap.
+	if ip.loaded[abs] {
+		return
+	}
+	ip.loaded[abs] = true
 	for _, s := range prog.Body {
-		ip.execStmt(s, ip.Global)
+		ip.execStmt(s, env)
 	}
 }
 
@@ -265,6 +289,23 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		return ip.evalIndex(ex, env)
 	case *ast.Slice:
 		return ip.evalSlice(ex, env)
+	case *ast.RecordLit:
+		rec := value.NewRecord()
+		for _, f := range ex.Fields {
+			rec.Set(f.Name, ip.evalExpr(f.Value, env))
+		}
+		return rec
+	case *ast.Field:
+		target := ip.evalExpr(ex.Target, env)
+		rec, ok := target.(*value.Record)
+		if !ok {
+			ip.panicf(ex.Line, "cannot access field %q of a non-record", ex.Name)
+		}
+		v, ok := rec.Get(ex.Name)
+		if !ok {
+			ip.panicf(ex.Line, "record has no field %q", ex.Name)
+		}
+		return v
 	case *ast.IfExpr:
 		if value.Truthy(ip.evalExpr(ex.Cond, env)) {
 			return ip.execBlockIn(ex.Then, value.NewEnv(env))

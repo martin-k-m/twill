@@ -21,6 +21,29 @@ type List struct {
 	Items []Value
 }
 
+// Record is a struct with named fields. Keys preserves declaration order for
+// stable printing.
+type Record struct {
+	Keys   []string
+	Fields map[string]Value
+}
+
+func NewRecord() *Record {
+	return &Record{Fields: map[string]Value{}}
+}
+
+func (r *Record) Set(name string, v Value) {
+	if _, ok := r.Fields[name]; !ok {
+		r.Keys = append(r.Keys, name)
+	}
+	r.Fields[name] = v
+}
+
+func (r *Record) Get(name string) (Value, bool) {
+	v, ok := r.Fields[name]
+	return v, ok
+}
+
 type Closure struct {
 	Params []string
 	Body   ast.Expr
@@ -73,6 +96,10 @@ func (e *Env) Assign(name string, v Value) bool {
 	return false
 }
 
+// Locals returns this scope's own bindings (not parents'). Used to snapshot a
+// module's definitions into a namespace record.
+func (e *Env) Locals() map[string]Value { return e.vars }
+
 // --- helpers ---------------------------------------------------------------
 
 func Truthy(v Value) bool {
@@ -88,6 +115,8 @@ func Truthy(v Value) bool {
 		return len(t) > 0
 	case *List:
 		return len(t.Items) > 0
+	case *Record:
+		return len(t.Keys) > 0
 	case Unit:
 		return false
 	default:
@@ -116,6 +145,12 @@ func Format(v Value) string {
 			parts[i] = Format(it)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
+	case *Record:
+		parts := make([]string, len(t.Keys))
+		for i, k := range t.Keys {
+			parts[i] = k + ": " + Format(t.Fields[k])
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
 	case *Closure:
 		name := t.Name
 		if name == "" {

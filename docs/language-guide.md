@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.5. The language is small, so this is short.
+This is the reference for Raster v0.6. The language is small, so this is short.
 
 ## Running programs
 
@@ -35,6 +35,7 @@ value is printed; `:help` and `:quit` do the obvious things.
 | Bool | `true`, `false` | From comparisons and logic. |
 | String | `"hello"` | For `print` and messages. |
 | List | `range(5)`, `[grad(f), 2]` | Heterogeneous; from `[...]` of non-numbers, `list(...)`, or `range`. |
+| Record | `{ w: [1.0], b: 0.0 }` | Named fields; access with `.`. |
 | Function | `fn(x) = x + 1` | Closures capture their scope. |
 | Unit | `()` | The result of `print`, loops, etc. |
 
@@ -203,15 +204,40 @@ let you state a contract that the checker enforces at call sites and against the
 function body. A shape variable used more than once must resolve to the same
 size.
 
+## Records
+
+A record groups named fields. Fields are accessed with `.`.
+
+```rust
+let p = { w: [1.0, 2.0], b: 0.5 }
+p.w                   # tensor([1, 2], shape=[2])
+p.b                   # 0.5
+{ inner: { x: 3.0 } }.inner.x   # 3
+```
+
+`grad` follows record structure: if a loss takes a record of parameters, the
+gradient is a record with the same fields.
+
+```rust
+fn loss(m) = sum(m.w) + m.b
+grad(loss)({ w: [1.0, 2.0], b: 0.5 })   # { w: [1, 1], b: 1 }
+```
+
+This makes a record a natural container for a model's parameters. A `{` starts a
+record only when it is followed by `name:`; otherwise it is a block.
+
 ## Imports
 
 ```rust
-import "std/nn.ra"     # relative to the importing file, then the working dir
+import "std/nn.ra"          # drops the file's definitions into this scope
+import "std/nn.ra" as nn    # binds them as a namespace record instead
 ```
 
-An import evaluates another file and drops its top-level definitions into the
-global scope. Each file is loaded once, so re-imports and cycles are fine. Paths
-are resolved relative to the importing file first, then the working directory.
+A plain import evaluates another file and adds its top-level definitions to the
+importing scope; each file loads once, so re-imports and cycles are fine. An
+`as name` import instead evaluates the file into its own scope and binds a record
+of its definitions under `name`, so you call `nn.dense(...)`. Paths are resolved
+relative to the importing file first, then the working directory.
 
 ## Standard library
 

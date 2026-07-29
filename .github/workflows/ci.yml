@@ -42,4 +42,5 @@ jobs:
           ./raster examples/linreg.ra
           ./raster examples/nn_xor.ra
           ./raster examples/classifier.ra
+          ./raster examples/records.ra
           ./raster check examples/shapes.ra
