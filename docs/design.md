@@ -90,7 +90,7 @@ them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
 `grad`, loops that reshape, or values read at runtime — those are left unknown.
 
-## Known limitations (v0.7)
+## Known limitations (v0.8)
 
 Deliberate, for a prototype:
 
@@ -100,9 +100,10 @@ Deliberate, for a prototype:
   here need a bigger change (tensor/closure pooling or a bytecode VM). The
   interpreter is the reference semantics.
 - Reverse-mode, first-order autodiff. No `grad(grad(f))`.
-- Shape checking is stronger than it was — shape variables, and declared record
-  types the checker verifies — but it's still best-effort: a function body is
-  only checked when it is called, so an unused function's mistakes aren't caught.
+- Shape checking is stronger than it was — shape variables, declared record
+  types, and annotated bodies checked at definition — but it's still best-effort:
+  it can't infer shapes for unannotated parameters, so mismatches that depend on
+  them are only caught at call sites (or not at all).
 - Record fields aren't mutable in place — you rebuild the record.
 - No named axes; broadcasting and reductions work on positional axes.
 
@@ -115,9 +116,8 @@ Roughly in order of value:
 2. A faster backend: a bytecode VM, or lowering tensor ops to a vectorized or
    native library. Keep the interpreter as the reference.
 3. More autodiff: higher-order derivatives, forward mode, batching.
-4. Named axes and general einsum-style contraction.
-5. Check function bodies at definition (not only at call sites), and add
-   record-aware optimizers to the standard library.
+4. Named axes (einsum exists; a named-axis tensor type would go further).
+5. Record-aware optimizers in the standard library, and `grad(grad(f))`.
 
 ## Non-goals for now
 

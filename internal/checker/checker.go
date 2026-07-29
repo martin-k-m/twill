@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/martin-k-m/raster/internal/ast"
+	"github.com/martin-k-m/raster/internal/tensor"
 )
 
 // Diagnostic is a single shape/type finding.
@@ -35,7 +36,25 @@ func Check(prog *ast.Program) []Diagnostic {
 	for _, s := range prog.Body {
 		c.inferStmt(s, env)
 	}
-	return c.diags
+	return dedupe(c.diags)
+}
+
+// dedupe removes repeated diagnostics (a body checked at definition and again
+// at a call site can report the same finding twice).
+func dedupe(diags []Diagnostic) []Diagnostic {
+	if len(diags) < 2 {
+		return diags
+	}
+	seen := map[string]bool{}
+	out := diags[:0]
+	for _, d := range diags {
+		key := fmt.Sprintf("%d\x00%s", d.Line, d.Msg)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 type checker struct {
@@ -155,6 +174,10 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		env.define(st.Name, c.inferExpr(st.Value, env))
 	case *ast.FnDecl:
 		env.define(st.Name, tFn{node: st, params: st.Params, ret: st.Ret, body: st.Body, env: env})
+		// Check the body once at definition using the parameter annotations, so
+		// mistakes are caught even if the function is never called. Unannotated
+		// parameters are unknown, so this only reports definite errors.
+		c.checkFnDef(st, env)
 	case *ast.Assign:
 		env.assign(st.Name, c.inferExpr(st.Value, env))
 	case *ast.While:
@@ -439,6 +462,48 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 	return tUnknown{}
 }
 
+// paramType gives a parameter's type from its annotation alone (for checking a
+// body at definition). Shape variables and unannotated params are unknown.
+func (c *checker) paramType(p ast.Param) Type {
+	switch {
+	case p.TypeName != "":
+		if t, ok := c.types[p.TypeName]; ok {
+			return t
+		}
+		return tUnknown{}
+	case p.Shape != nil:
+		return tTensor{dims: p.Shape.ConcreteDims()}
+	default:
+		return tUnknown{}
+	}
+}
+
+func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
+	if c.stack[fn] {
+		return
+	}
+	scope := newEnv(env)
+	for _, p := range fn.Params {
+		scope.define(p.Name, c.paramType(p))
+	}
+	c.stack[fn] = true
+	var bodyType Type
+	if blk, ok := fn.Body.(*ast.Block); ok {
+		bodyType = c.inferBlock(blk, scope)
+	} else {
+		bodyType = c.inferExpr(fn.Body, scope)
+	}
+	delete(c.stack, fn)
+
+	if fn.Ret != nil {
+		expected := tTensor{dims: fn.Ret.ConcreteDims()}
+		if got, ok := bodyType.(tTensor); ok && fullyKnown(expected) && fullyKnown(got) && !shapeMatch(expected, got) {
+			c.report(fn.Line, "function %q returns %s but its signature declares %s",
+				fn.Name, dimsString(got), dimsString(expected))
+		}
+	}
+}
+
 func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	if len(fn.params) != len(argTypes) {
 		c.report(ex.Line, "function expects %d argument(s), got %d", len(fn.params), len(argTypes))
@@ -607,6 +672,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
+	case "einsum":
+		return c.inferEinsum(ex, argTypes)
 	case "concat", "fold":
 		return tUnknown{}
 	case "append", "enumerate":
@@ -696,6 +763,42 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	}
 	return tUnknown{}
+}
+
+// inferEinsum validates a literal einsum spec and, when the input shapes are
+// known, resolves the output shape.
+func (c *checker) inferEinsum(ex *ast.Call, argTypes []Type) Type {
+	if len(ex.Args) < 2 {
+		return tUnknown{}
+	}
+	lit, ok := ex.Args[0].(*ast.StringLit)
+	if !ok {
+		return tUnknown{}
+	}
+	inSubs, outSub, err := tensor.ParseEinsum(lit.Value, len(ex.Args)-1)
+	if err != nil {
+		c.report(ex.Line, "%s", err.Error())
+		return tUnknown{}
+	}
+	dims := make([][]int, len(inSubs))
+	for i := range inSubs {
+		t, ok := argTypes[i+1].(tTensor)
+		if !ok {
+			// Spec is valid but an operand's shape is unknown: known rank only.
+			od := make([]int, len(outSub))
+			for j := range od {
+				od[j] = -1
+			}
+			return tTensor{dims: od}
+		}
+		dims[i] = t.dims
+	}
+	out, err := tensor.EinsumOutputDims(inSubs, outSub, dims)
+	if err != nil {
+		c.report(ex.Line, "%s", err.Error())
+		return tUnknown{}
+	}
+	return tTensor{dims: out}
 }
 
 // reduceResult handles sum/mean/max/min: no axis reduces to a scalar; a
@@ -956,4 +1059,5 @@ var builtinNames = map[string]bool{
 	"where": true, "clip": true, "max": true, "min": true, "argmax": true,
 	"softmax": true, "logsumexp": true, "reshape": true, "concat": true,
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
+	"einsum": true,
 }

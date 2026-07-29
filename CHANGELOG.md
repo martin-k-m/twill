@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0
+
+Einsum and earlier error detection.
+
+- `einsum(spec, ...tensors)`: a differentiable Einstein-summation primitive.
+  Covers matrix multiply (`"ij,jk->ik"`), transpose (`"ij->ji"`), reductions
+  (`"ij->i"`, `"ij->"`), bilinear forms, and general contractions. The gradient
+  of an einsum is itself an einsum, so it backprops exactly. Repeated labels
+  within a single operand (traces/diagonals) are not supported yet.
+- The checker infers an einsum's output shape from a literal spec and known
+  input shapes, and reports malformed specs and rank mismatches.
+- The checker now checks each function body at its definition, using the
+  parameter annotations — so shape mistakes, field typos, and return mismatches
+  are caught even in functions that are never called. Unannotated parameters
+  stay unknown, so this adds no false positives.
+- New example `einsum.ra`.
+
 ## 0.7.0
 
 Declared record types and a faster interpreter.

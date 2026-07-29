@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.7. The language is small, so this is short.
+This is the reference for Raster v0.8. The language is small, so this is short.
 
 ## Running programs
 
@@ -186,7 +186,8 @@ g[1]   # [1, 2]   d/db
 Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `log`, `sin`, `cos`, `sqrt`, `sum`, `mean`, `abs`, `pow`.
 
-Note: v0.2 is reverse-mode and first-order, so `grad(grad(f))` is not supported.
+Note: autodiff is reverse-mode and first-order, so `grad(grad(f))` is not
+supported.
 
 ## Shape checking
 
@@ -202,7 +203,8 @@ bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 Annotations (`[3, 2]`, `[2]`, `[]`, `_` for unknown, or named shape variables)
 let you state a contract that the checker enforces at call sites and against the
 function body. A shape variable used more than once must resolve to the same
-size.
+size. Annotated function bodies are also checked at their definition, so a
+mistake is caught even if the function is never called.
 
 ## Records
 
@@ -269,7 +271,22 @@ index of the maximum. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
 the last axis.
 
 Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
-`transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`.
+`transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`,
+`einsum(spec, ...tensors)`.
+
+`einsum` is a general Einstein-summation contraction and is differentiable:
+
+```rust
+einsum("ij,jk->ik", A, B)   # matrix multiply
+einsum("ij->ji", A)         # transpose
+einsum("ij->i", A)          # sum over the second axis
+einsum("i,ij,j->", x, W, y) # bilinear form x' W y
+```
+
+Each label names an axis; repeated labels across operands are summed, and only
+the labels in the output remain. Omitting `->` keeps the labels that appear once.
+(A label repeated within one operand — a trace or diagonal — isn't supported
+yet.)
 
 Construction: `tensor(list)`, `scalar(x)`, `zeros(...shape)`, `ones(...shape)`,
 `fill(value, ...shape)`, `eye(n)`, `randn(...shape)` (standard normal),

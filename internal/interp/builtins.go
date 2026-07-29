@@ -223,6 +223,25 @@ func (ip *Interp) installBuiltins() {
 		return tensor.TransposePerm(t, axes)
 	})
 
+	def("einsum", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 2 {
+			return nil, fmt.Errorf("einsum expects a spec string and at least one tensor")
+		}
+		spec, ok := a[0].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("einsum's first argument must be a spec string")
+		}
+		tensors := make([]*tensor.Tensor, len(a)-1)
+		for i, v := range a[1:] {
+			t, err := asTensor(v, "einsum")
+			if err != nil {
+				return nil, err
+			}
+			tensors[i] = t
+		}
+		return tensor.Einsum(string(spec), tensors)
+	})
+
 	def("concat", 2, false, func(a []value.Value) (value.Value, error) {
 		items, err := toItems(a[0], "concat")
 		if err != nil {

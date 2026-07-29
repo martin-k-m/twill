@@ -60,7 +60,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.raster",
-      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|square|abs|pow|clip|sum|mean|max|min|argmax|softmax|logsumexp|maximum|minimum|where|greater|less|greater_equal|less_equal|equal|matmul|dot|transpose|reshape|concat|tensor|scalar|zeros|ones|fill|randn|rand|eye|shape|len|item|range|list|str|map|zip|fold|append|enumerate)\\b"
+      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|square|abs|pow|clip|sum|mean|max|min|argmax|softmax|logsumexp|maximum|minimum|where|greater|less|greater_equal|less_equal|equal|matmul|dot|einsum|transpose|reshape|concat|tensor|scalar|zeros|ones|fill|randn|rand|eye|shape|len|item|range|list|str|map|zip|fold|append|enumerate)\\b"
     },
     "numbers": {
       "name": "constant.numeric.raster",

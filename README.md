@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.7). The reference implementation is a single Go
+It's an early prototype (v0.8). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -149,8 +149,9 @@ correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
 `sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip`; `softmax` and
 `logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
 reductions `sum`, `mean`, `max`, `min`, and `argmax` (with an optional axis);
-and shape ops `reshape`, `transpose`, and `concat`. Tensors and lists also
-support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See the
+and shape ops `reshape`, `transpose`, and `concat`. There's a differentiable
+`einsum` for general contractions (`einsum("ij,jk->ik", A, B)`). Tensors and
+lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See the
 [language guide](docs/language-guide.md) for the full list.
 
 ## A small standard library
