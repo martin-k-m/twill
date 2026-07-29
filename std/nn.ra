@@ -16,6 +16,20 @@ fn dense(W, b, x) = W @ x + b
 # broadcasts across the spatial dimensions of the [Cout, OH, OW] output.
 fn conv(layer, x) = conv2d(x, layer[0]) + layer[1]
 
+# Embedding lookup: rows of `table` ([vocab, dim]) selected by integer `ids`.
+# Differentiable in the table — grad flows back through gather's scatter-add, so
+# the embeddings are learned.
+fn embed(table, ids) = gather(table, ids)
+
+# Single-head self-attention over a sequence X ([T, dim]). Wq, Wk, Wv are each
+# [dim, dim]; the result is the attended sequence [T, dim]. This is the core
+# transformer operation, and `grad` differentiates all the way through it.
+fn self_attention(Wq, Wk, Wv, X) {
+  let dim = len(X[0])
+  let scores = (X @ Wq) @ transpose(X @ Wk) / sqrt(dim)
+  softmax(scores, 1) @ (X @ Wv)
+}
+
 # ---- activations ---------------------------------------------------------
 # relu, tanh, sigmoid, and softmax are builtins; these are a few extras.
 
@@ -32,6 +46,9 @@ fn gelu(x) = 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
 fn he_init(nout, nin) = randn(nout, nin) * sqrt(2.0 / nin)
 
 fn xavier_init(nout, nin) = randn(nout, nin) * sqrt(1.0 / nin)
+
+# A [vocab, dim] embedding table with small random init.
+fn embedding_init(vocab, dim) = randn(vocab, dim) * 0.1
 
 # He-initialized convolution layer: kernel [Cout, Cin, KH, KW] with fan-in
 # Cin*KH*KW, and a zero bias [Cout, 1, 1]. Returns the [kernel, bias] pair the

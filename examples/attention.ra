@@ -1,0 +1,75 @@
+# attention.ra — a self-attention sequence classifier, trained with `grad`.
+#
+# This is the core transformer computation: embed a sequence of tokens, mix them
+# with single-head self-attention, pool, and classify. `grad` differentiates the
+# whole thing — embeddings, the attention softmax, and all — so the model learns
+# end-to-end. Same autodiff and single binary as everything else; now it does
+# sequences, not just tables and images.
+
+import "../std/nn.ra" as nn
+import "../std/data.ra" as data
+
+seed(2)
+
+# A toy sequence task: does the token sequence contain the "trigger" token 0?
+let vocab = 7
+let dim = 8
+let T = 6
+let n = 240
+let seqs = floor(rand(n, T) * vocab)                  # [n, T] token ids
+let y = greater(sum(equal(seqs, 0.0), 1), 0.0)        # 1 if the row contains a 0
+
+let split = data.train_test_split(seqs, y, 0.8)
+let Str = split[0]
+let ytr = split[1]
+let Ste = split[2]
+let yte = split[3]
+
+# Parameters: a [vocab, dim] embedding table, the query/key/value projections,
+# and a linear output head.
+let model = {
+  E: nn.embedding_init(vocab, dim),
+  Wq: nn.xavier_init(dim, dim),
+  Wk: nn.xavier_init(dim, dim),
+  Wv: nn.xavier_init(dim, dim),
+  wo: nn.he_init(1, dim),
+  bo: zeros(1)
+}
+
+# One sequence -> a probability.
+fn forward(m, ids) {
+  let X = nn.embed(m.E, ids)                      # [T, dim]
+  let ctx = nn.self_attention(m.Wq, m.Wk, m.Wv, X)  # [T, dim]
+  sigmoid(nn.dense(m.wo, m.bo, mean(ctx, 0)))     # [1]
+}
+
+fn loss(m, S, labels) {
+  let total = 0.0
+  for i in range(len(S)) {
+    total = total + nn.bce(forward(m, S[i]), labels[i])
+  }
+  total / len(S)
+}
+
+let mo = nn.zeros_like(model)
+let vo = nn.zeros_like(model)
+for step in range(80) {
+  let g = grad(fn(m) = loss(m, Str, ytr))(model)
+  let out = nn.adam_step(model, g, mo, vo, step + 1, 0.02, 0.9, 0.999, 0.00000001)
+  model = out[0]
+  mo = out[1]
+  vo = out[2]
+  if step % 20 == 0 {
+    print("step", step, "train loss", loss(model, Str, ytr))
+  }
+}
+
+# Test accuracy on the held-out sequences.
+let correct = 0.0
+for i in range(len(Ste)) {
+  let p = item(forward(model, Ste[i]))
+  if (p > 0.5) == (yte[i] > 0.5) {
+    correct = correct + 1.0
+  }
+}
+print("test accuracy:", correct / len(Ste))

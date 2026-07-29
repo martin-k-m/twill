@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.22.0
+
+Sequences and attention — embeddings and a transformer, not just tables and
+images.
+
+- `std/nn.ra` gains `embed(table, ids)` (a differentiable embedding lookup built
+  on `gather`, so embeddings are learned), `embedding_init`, and
+  `self_attention(Wq, Wk, Wv, X)` — single-head self-attention, the core
+  transformer operation, differentiable end to end.
+- New elementwise builtins `floor`, `ceil`, `round` (forward-only) — e.g. to turn
+  random draws into integer token ids.
+- New example `attention.ra`: a self-attention sequence classifier (embed →
+  self-attention → pool → dense) trained with Adam; `grad` differentiates the
+  attention softmax and the embeddings together.
+- Raster now spans tabular (boosted trees), vision (CNNs), and sequences
+  (attention) — one autodiff engine, one static checker, one binary.
+
 ## 0.21.0
 
 Data pipeline and real minibatch training.

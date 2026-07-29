@@ -10,13 +10,14 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It spans the ML stack in one dependency-free binary: neural networks (including
-**convolutional nets**), gradient-boosted trees, and a differentiable
-backtester — all sharing the same autodiff engine, static shape checking, and
-reproducible-by-default execution. Finance is one domain it's built out for; it
+It spans the ML stack in one dependency-free binary: neural networks — from MLPs
+to **convolutional nets** and **self-attention/transformers** — gradient-boosted
+trees, and a differentiable backtester, all sharing the same autodiff engine,
+static shape checking, and reproducible-by-default execution. Tabular, vision,
+and sequences, with the same `grad`. Finance is one domain it's built out for; it
 is not limited to it.
 
-It's an early prototype (v0.21). The reference implementation is a single Go
+It's an early prototype (v0.22). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -198,7 +199,9 @@ parameter list. For deep learning there are differentiable `conv2d` and
 convolutional net — conv → relu → max-pool → dense — end-to-end with `grad`,
 the kernel included. `examples/minibatch.ra` shows a full training loop —
 standardize, train/test split, and reshuffled minibatches each epoch — using the
-differentiable `gather` op and `std/data.ra`.
+differentiable `gather` op and `std/data.ra`. And `examples/attention.ra` trains
+a **self-attention** sequence classifier (embed → attention → pool → dense):
+`grad` differentiates the attention softmax and the learned embeddings together.
 
 Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
 `read_frame("data.csv")` (a header CSV as a *frame* — a record of named column

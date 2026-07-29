@@ -56,6 +56,7 @@ jobs:
           ./raster examples/cnn.ra
           ./raster examples/save_load.ra
           ./raster examples/minibatch.ra
+          ./raster examples/attention.ra
           ./raster check examples/shapes.ra
           ./raster fmt examples/hello.ra >/dev/null
 

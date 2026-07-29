@@ -314,7 +314,8 @@ the last axis.
 
 Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,
 `cummax`, `cummin`. These build signals, equity curves, and running peaks; they
-are forward-only (not differentiable).
+are forward-only (not differentiable). Elementwise rounding `floor`, `ceil`, and
+`round` are also forward-only (handy for turning random draws into integer ids).
 
 Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
 `transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`,
@@ -388,10 +389,11 @@ target/label vector, and `gbm_predict(model, X)` scores a `[n, d]` matrix into a
 regression, `"logistic"` for binary classification, where predictions are
 probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
 
-Libraries written in Raster live in `std/`: `nn.ra` (layers including `dense`
-and `conv`, activations, initializers, losses), `optim.ra` (SGD, momentum,
-Adam), `data.ra` (`standardize`, `train_test_split`, `shuffle` for real training
-loops — see `examples/minibatch.ra`), and `backtest.ra`
+Libraries written in Raster live in `std/`: `nn.ra` (layers including `dense`,
+`conv`, `embed`, and `self_attention`; activations, initializers, losses),
+`optim.ra` (SGD, momentum, Adam), `data.ra` (`standardize`, `train_test_split`,
+`shuffle` for real training loops — see `examples/minibatch.ra`), and
+`backtest.ra`
 (returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
 CAGR). The optimizers are container-agnostic — the same `sgd_step`/`adam_step`
 update a model held in a positional list or a named record. The backtest Sharpe
