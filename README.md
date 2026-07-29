@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.13). The reference implementation is a single Go
+It's an early prototype (v0.14). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -169,8 +169,10 @@ the tensor leaves with `map_leaves`/`zip_leaves`). Import with `import
 Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
 parameter list.
 
-Load your own data with `read_csv("data.csv")`, which returns a `[rows, cols]`
-tensor (comma- or whitespace-separated, `#` lines skipped).
+Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
+`read_frame("data.csv")` (a header CSV as a *frame* — a record of named column
+tensors, so `df.close`, slicing, and `grad` all work on it). See
+`examples/frames.ra`, which computes realized volatility from a price series.
 
 Randomness is **deterministic by default** (seeded), so a program reproduces
 exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.ra`

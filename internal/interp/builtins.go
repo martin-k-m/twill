@@ -551,6 +551,78 @@ func (ip *Interp) installBuiltins() {
 		}
 		return ip.readCSV(string(s))
 	})
+
+	// read_frame(path): a CSV whose first row is a header, returned as a record
+	// mapping each column name to its column tensor (a "frame").
+	def("read_frame", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := a[0].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("read_frame expects a string path")
+		}
+		return ip.readFrame(string(s))
+	})
+
+	// write_frame(frame, path): write a record of equal-length column tensors to
+	// a CSV with a header.
+	def("write_frame", 2, false, func(a []value.Value) (value.Value, error) {
+		rec, ok := a[0].(*value.Record)
+		if !ok {
+			return nil, fmt.Errorf("write_frame expects a frame (record of columns)")
+		}
+		path, ok := a[1].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("write_frame expects a string path")
+		}
+		return value.TheUnit, ip.writeFrame(rec, string(path))
+	})
+
+	// columns(record): the field names, in order, as a list of strings.
+	def("columns", 1, false, func(a []value.Value) (value.Value, error) {
+		rec, ok := a[0].(*value.Record)
+		if !ok {
+			return nil, fmt.Errorf("columns expects a record")
+		}
+		items := make([]value.Value, len(rec.Keys))
+		for i, k := range rec.Keys {
+			items[i] = value.Str(k)
+		}
+		return &value.List{Items: items}, nil
+	})
+
+	// field(record, name): look up a field by string name (dynamic access).
+	def("field", 2, false, func(a []value.Value) (value.Value, error) {
+		rec, ok := a[0].(*value.Record)
+		if !ok {
+			return nil, fmt.Errorf("field expects a record")
+		}
+		name, ok := a[1].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("field expects a string name")
+		}
+		v, present := rec.Get(string(name))
+		if !present {
+			return nil, fmt.Errorf("record has no field %q", string(name))
+		}
+		return v, nil
+	})
+
+	// with_field(record, name, value): a copy of the record with the field set.
+	def("with_field", 3, false, func(a []value.Value) (value.Value, error) {
+		rec, ok := a[0].(*value.Record)
+		if !ok {
+			return nil, fmt.Errorf("with_field expects a record")
+		}
+		name, ok := a[1].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("with_field expects a string name")
+		}
+		out := value.NewRecord()
+		for _, k := range rec.Keys {
+			out.Set(k, rec.Fields[k])
+		}
+		out.Set(string(name), a[2])
+		return out, nil
+	})
 }
 
 func (ip *Interp) readCSV(path string) (value.Value, error) {
@@ -594,6 +666,100 @@ func (ip *Interp) readCSV(path string) (value.Value, error) {
 		flat = append(flat, row...)
 	}
 	return tensor.New(flat, []int{len(rows), cols}), nil
+}
+
+func splitFields(line string) []string {
+	return strings.FieldsFunc(line, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\r' || r == ';'
+	})
+}
+
+// readFrame reads a header + numeric rows into a record of column tensors.
+func (ip *Interp) readFrame(path string) (value.Value, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ip.currentDir(), path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read_frame: cannot read %q", path)
+	}
+	var header []string
+	var rows [][]float64
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := splitFields(line)
+		if header == nil {
+			header = fields
+			continue
+		}
+		if len(fields) != len(header) {
+			return nil, fmt.Errorf("read_frame: row has %d values but %d columns", len(fields), len(header))
+		}
+		row := make([]float64, len(fields))
+		for i, f := range fields {
+			v, perr := strconv.ParseFloat(f, 64)
+			if perr != nil {
+				return nil, fmt.Errorf("read_frame: column %q value %q is not a number", header[i], f)
+			}
+			row[i] = v
+		}
+		rows = append(rows, row)
+	}
+	if header == nil {
+		return nil, fmt.Errorf("read_frame: %q has no header row", path)
+	}
+	frame := value.NewRecord()
+	for c, name := range header {
+		col := make([]float64, len(rows))
+		for r := range rows {
+			col[r] = rows[r][c]
+		}
+		frame.Set(name, tensor.New(col, []int{len(rows)}))
+	}
+	return frame, nil
+}
+
+// writeFrame writes a record of equal-length 1-D column tensors to a CSV.
+func (ip *Interp) writeFrame(frame *value.Record, path string) error {
+	if len(frame.Keys) == 0 {
+		return fmt.Errorf("write_frame: frame has no columns")
+	}
+	nrows := -1
+	cols := make([][]float64, len(frame.Keys))
+	for i, k := range frame.Keys {
+		t, ok := frame.Fields[k].(*tensor.Tensor)
+		if !ok || len(t.Shape) != 1 {
+			return fmt.Errorf("write_frame: column %q must be a 1-D tensor", k)
+		}
+		if nrows < 0 {
+			nrows = len(t.Data)
+		} else if len(t.Data) != nrows {
+			return fmt.Errorf("write_frame: column %q has %d rows, expected %d", k, len(t.Data), nrows)
+		}
+		cols[i] = t.Data
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ip.currentDir(), path)
+	}
+	var b strings.Builder
+	b.WriteString(strings.Join(frame.Keys, ","))
+	b.WriteByte('\n')
+	for r := 0; r < nrows; r++ {
+		for i := range cols {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(value.FormatNumber(cols[i][r]))
+		}
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("write_frame: cannot write %q", path)
+	}
+	return nil
 }
 
 // mapLeaves applies f to each tensor leaf of tree, preserving structure.

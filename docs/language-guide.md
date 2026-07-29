@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.13. The language is small, so this is short.
+This is the reference for Raster v0.14. The language is small, so this is short.
 
 ## Running programs
 
@@ -311,6 +311,13 @@ Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
 
 Data: `read_csv(path)` loads a file of numeric rows (comma- or
 whitespace-separated, `#` lines skipped) into a `[rows, cols]` tensor.
+
+Frames: a frame is a record whose fields are named column tensors, so field
+access, slicing, and `grad` all work on it. `read_frame(path)` loads a CSV whose
+first row is a header into such a record; `write_frame(frame, path)` writes one
+back. `columns(rec)` lists the field names, `field(rec, name)` looks one up by
+string, and `with_field(rec, name, value)` returns a copy with a field set. See
+`examples/frames.ra`.
 
 Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
 initializers, losses) and `optim.ra` (SGD, momentum, Adam). The optimizers are

@@ -63,8 +63,12 @@ then widens to the other workloads.
    both the forward and the gradient use all cores on large tensors. (Matmul is
    already row-parallel and cache-friendly; explicit blocking is a later
    micro-optimization.)
-3. **Data I/O.** CSV is here (`read_csv`); add Parquet/Arrow and a time-indexed
-   frame type. Finance is data-first.
+3. **Data I/O.** *(delivered v0.14)* A frame is a record of named column tensors;
+   `read_frame`/`write_frame` do header CSV, and `columns`/`field`/`with_field`
+   manipulate columns by name. Field access, slicing, and `grad` all work on a
+   frame, and a numeric time column makes it a time series. See
+   `examples/frames.ra`. Parquet/Arrow would need a third-party module, so it's
+   deferred to keep the zero-dependency single binary.
 4. **Dimensioned types.** Optional units on quantities (USD, bps, years) checked
    statically — correctness that Python structurally cannot offer.
 5. **Gradient-boosted trees.** A native GBM engine for tabular credit/fraud/

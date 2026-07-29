@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.14.0
+
+Data frames (finance roadmap #3).
+
+- A frame is a record whose fields are named column tensors — so field access,
+  slicing, and `grad` all work on it, and a numeric time column makes it a time
+  series. No new type, and it composes with everything.
+- `read_frame(path)` loads a CSV with a header row into such a record;
+  `write_frame(frame, path)` writes one back.
+- `columns(rec)` lists the field names, `field(rec, name)` looks one up by
+  string, and `with_field(rec, name, value)` returns a copy with a field set.
+- New example `frames.ra`: loads prices, computes daily log returns and realized
+  (annualized) volatility, and adds a column with `with_field`.
+- Kept pure Go / zero dependencies — Parquet/Arrow would need a third-party
+  module, so it's deferred.
+
 ## 0.13.0
 
 Faster core numerics (finance roadmap #2).

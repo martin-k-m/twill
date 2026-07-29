@@ -676,8 +676,10 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return c.inferEinsum(ex, argTypes)
 	case "concat", "fold":
 		return tUnknown{}
-	case "append", "enumerate":
+	case "append", "enumerate", "columns":
 		return tList{}
+	case "write_frame":
+		return tUnit{}
 	case "scalar":
 		return scalar()
 	case "pow":
@@ -1060,4 +1062,6 @@ var builtinNames = map[string]bool{
 	"softmax": true, "logsumexp": true, "reshape": true, "concat": true,
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
 	"einsum": true, "map_leaves": true, "zip_leaves": true, "seed": true,
+	"read_frame": true, "write_frame": true, "columns": true, "field": true,
+	"with_field": true,
 }
