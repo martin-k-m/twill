@@ -1,4 +1,4 @@
-// Package interp is the tree-walking evaluator and standard library for Aster.
+// Package interp is the tree-walking evaluator and standard library for Raster.
 package interp
 
 import (
@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/martin-k-m/aster/internal/ast"
-	"github.com/martin-k-m/aster/internal/parser"
-	"github.com/martin-k-m/aster/internal/tensor"
-	"github.com/martin-k-m/aster/internal/value"
+	"github.com/martin-k-m/raster/internal/ast"
+	"github.com/martin-k-m/raster/internal/parser"
+	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/raster/internal/value"
 )
 
 // RuntimeError carries a source line for errors raised during evaluation.
@@ -20,7 +20,7 @@ type RuntimeError struct {
 
 func (e *RuntimeError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Msg) }
 
-// returnSignal unwinds the stack for an Aster `return`.
+// returnSignal unwinds the stack for a Raster `return`.
 type returnSignal struct{ value value.Value }
 
 // Interp holds global state for a running program.

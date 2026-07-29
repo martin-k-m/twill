@@ -1,6 +1,6 @@
-// Package tensor is the differentiable tensor engine at the core of Aster.
+// Package tensor is the differentiable tensor engine at the core of Raster.
 //
-// Every numeric value in Aster is a Tensor. Scalars are rank-0 tensors
+// Every numeric value in Raster is a Tensor. Scalars are rank-0 tensors
 // (empty shape). Operations build a reverse-mode autodiff graph, but only
 // when an input requires gradients, so ordinary evaluation stays cheap.
 package tensor
@@ -192,59 +192,103 @@ func track(out *Tensor, prev []*Tensor, backward func()) *Tensor {
 	return out
 }
 
+// strides returns the row-major strides for a shape.
+func strides(shape []int) []int {
+	s := make([]int, len(shape))
+	acc := 1
+	for i := len(shape) - 1; i >= 0; i-- {
+		s[i] = acc
+		acc *= shape[i]
+	}
+	return s
+}
+
+// BroadcastShape computes the NumPy-style broadcast of two shapes, aligning
+// them from the right. Dimensions must be equal or one of them must be 1.
+func BroadcastShape(a, b []int) ([]int, bool) {
+	ra, rb := len(a), len(b)
+	r := ra
+	if rb > r {
+		r = rb
+	}
+	out := make([]int, r)
+	for i := 0; i < r; i++ {
+		da, db := 1, 1
+		if i < ra {
+			da = a[ra-1-i]
+		}
+		if i < rb {
+			db = b[rb-1-i]
+		}
+		switch {
+		case da == db:
+			out[r-1-i] = da
+		case da == 1:
+			out[r-1-i] = db
+		case db == 1:
+			out[r-1-i] = da
+		default:
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// effStrides gives, for each dimension of outShape, the stride to advance in
+// inShape's flat data — zero where inShape broadcasts (a size-1 or absent dim).
+func effStrides(inShape, outShape []int) []int {
+	rIn, rOut := len(inShape), len(outShape)
+	real := strides(inShape)
+	eff := make([]int, rOut)
+	for i := 0; i < rOut; i++ {
+		j := rOut - 1 - i
+		if i < rIn && inShape[rIn-1-i] != 1 {
+			eff[j] = real[rIn-1-i]
+		} else {
+			eff[j] = 0
+		}
+	}
+	return eff
+}
+
 func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	da func(x, y, o float64) float64, db func(x, y, o float64) float64) (*Tensor, error) {
-	var shape []int
-	switch {
-	case shapeEqual(a.Shape, b.Shape):
-		shape = append([]int(nil), a.Shape...)
-	case a.IsScalar():
-		shape = append([]int(nil), b.Shape...)
-	case b.IsScalar():
-		shape = append([]int(nil), a.Shape...)
-	default:
-		return nil, fmt.Errorf("shape mismatch: cannot combine %v with %v (only equal shapes or scalar broadcasting are supported)", a.Shape, b.Shape)
+	shape, ok := BroadcastShape(a.Shape, b.Shape)
+	if !ok {
+		return nil, fmt.Errorf("shape mismatch: cannot broadcast %v with %v", a.Shape, b.Shape)
 	}
 	n := numel(shape)
+	ostr := strides(shape)
+	effA := effStrides(a.Shape, shape)
+	effB := effStrides(b.Shape, shape)
+	idx := func(o int, eff []int) int {
+		ii, rem := 0, o
+		for d := 0; d < len(shape); d++ {
+			coord := rem / ostr[d]
+			rem = rem % ostr[d]
+			ii += coord * eff[d]
+		}
+		return ii
+	}
 	out := make([]float64, n)
-	av := func(i int) float64 {
-		if a.IsScalar() {
-			return a.Data[0]
-		}
-		return a.Data[i]
-	}
-	bv := func(i int) float64 {
-		if b.IsScalar() {
-			return b.Data[0]
-		}
-		return b.Data[i]
-	}
-	for i := 0; i < n; i++ {
-		out[i] = f(av(i), bv(i))
+	for o := 0; o < n; o++ {
+		out[o] = f(a.Data[idx(o, effA)], b.Data[idx(o, effB)])
 	}
 	res := &Tensor{Data: out, Shape: shape}
 	return track(res, []*Tensor{a, b}, func() {
 		g := res.Grad
 		if a.RequiresGrad {
 			ga := a.ensureGrad()
-			for i := 0; i < n; i++ {
-				c := da(av(i), bv(i), out[i]) * g[i]
-				if a.IsScalar() {
-					ga[0] += c
-				} else {
-					ga[i] += c
-				}
+			for o := 0; o < n; o++ {
+				ia, ib := idx(o, effA), idx(o, effB)
+				ga[ia] += da(a.Data[ia], b.Data[ib], out[o]) * g[o]
 			}
 		}
 		if b.RequiresGrad {
 			gb := b.ensureGrad()
-			for i := 0; i < n; i++ {
-				c := db(av(i), bv(i), out[i]) * g[i]
-				if b.IsScalar() {
-					gb[0] += c
-				} else {
-					gb[i] += c
-				}
+			for o := 0; o < n; o++ {
+				ia, ib := idx(o, effA), idx(o, effB)
+				gb[ib] += db(a.Data[ia], b.Data[ib], out[o]) * g[o]
 			}
 		}
 	}), nil

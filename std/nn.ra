@@ -1,0 +1,46 @@
+# nn.ra — a small neural-network toolkit written in Raster.
+#
+# Import it with:  import "std/nn.ra"  (adjust the path to your file). It pulls
+# in the optimizers from optim.ra as well. Parameters are held in plain lists,
+# so `grad` differentiates a whole model at once and the optimizers update it.
+
+import "optim.ra"
+
+# ---- layers --------------------------------------------------------------
+
+# Affine layer: y = W @ x + b.
+fn dense(W, b, x) = W @ x + b
+
+# ---- activations ---------------------------------------------------------
+# relu, tanh, sigmoid, and softmax are builtins; these are a few extras.
+
+fn softplus(x) = log(1.0 + exp(x))
+
+fn leaky_relu(x) = relu(x) - 0.01 * relu(-x)
+
+# Tanh approximation of GELU.
+fn gelu(x) = 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
+
+# ---- initializers --------------------------------------------------------
+# He/Kaiming and Xavier/Glorot scaling for a (nout x nin) weight matrix.
+
+fn he_init(nout, nin) = randn(nout, nin) * sqrt(2.0 / nin)
+
+fn xavier_init(nout, nin) = randn(nout, nin) * sqrt(1.0 / nin)
+
+# ---- losses --------------------------------------------------------------
+
+fn mse(pred, target) = mean(square(pred - target))
+
+fn bce(pred, target) {
+  let eps = 0.0000001
+  let terms = target * log(pred + eps) + (1.0 - target) * log(1.0 - pred + eps)
+  0.0 - mean(terms)
+}
+
+# One-hot vector of length n with a 1 at index i.
+fn onehot(i, n) = equal(tensor(range(n)), i)
+
+# Softmax cross-entropy from raw logits (a length-C vector) and a one-hot
+# target. Uses logsumexp for numerical stability.
+fn cross_entropy(logits, target) = logsumexp(logits, 0) - sum(logits * target)

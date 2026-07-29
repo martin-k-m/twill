@@ -1,12 +1,12 @@
-// Package value defines Aster's runtime values and lexical environments.
+// Package value defines Raster's runtime values and lexical environments.
 package value
 
 import (
 	"strconv"
 	"strings"
 
-	"github.com/martin-k-m/aster/internal/ast"
-	"github.com/martin-k-m/aster/internal/tensor"
+	"github.com/martin-k-m/raster/internal/ast"
+	"github.com/martin-k-m/raster/internal/tensor"
 )
 
 // Value is any runtime value. Concrete types: *tensor.Tensor, Bool, Str,

@@ -6,8 +6,8 @@ import (
 	"math/rand"
 	"strings"
 
-	"github.com/martin-k-m/aster/internal/tensor"
-	"github.com/martin-k-m/aster/internal/value"
+	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/raster/internal/value"
 )
 
 func (ip *Interp) installBuiltins() {
@@ -43,8 +43,7 @@ func (ip *Interp) installBuiltins() {
 	unaryOp("tanh", tensor.Tanh)
 	unaryOp("sigmoid", tensor.Sigmoid)
 	unaryOp("sqrt", tensor.Sqrt)
-	unaryOp("sum", tensor.Sum)
-	unaryOp("mean", tensor.Mean)
+	unaryOp("square", tensor.Square)
 
 	def("abs", 1, false, func(a []value.Value) (value.Value, error) {
 		t, err := asTensor(a[0], "abs")
@@ -84,6 +83,161 @@ func (ip *Interp) installBuiltins() {
 	}
 	binTensor("matmul", tensor.MatMul)
 	binTensor("dot", tensor.MatMul)
+	binTensor("maximum", tensor.Maximum)
+	binTensor("minimum", tensor.Minimum)
+	binTensor("greater", tensor.Greater)
+	binTensor("less", tensor.Less)
+	binTensor("greater_equal", tensor.GreaterEqual)
+	binTensor("less_equal", tensor.LessEqual)
+	binTensor("equal", tensor.EqualOp)
+
+	def("where", 3, false, func(a []value.Value) (value.Value, error) {
+		c, err := asTensor(a[0], "where")
+		if err != nil {
+			return nil, err
+		}
+		x, err := asTensor(a[1], "where")
+		if err != nil {
+			return nil, err
+		}
+		y, err := asTensor(a[2], "where")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Where(c, x, y)
+	})
+
+	def("clip", 3, false, func(a []value.Value) (value.Value, error) {
+		t, err := asTensor(a[0], "clip")
+		if err != nil {
+			return nil, err
+		}
+		lo, err := scalarOf(a[1], "clip")
+		if err != nil {
+			return nil, err
+		}
+		hi, err := scalarOf(a[2], "clip")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Clip(t, lo, hi), nil
+	})
+
+	// Reductions: one argument reduces everything to a scalar; a second
+	// argument reduces a single axis.
+	reduce := func(name string, full func(*tensor.Tensor) *tensor.Tensor,
+		axis func(*tensor.Tensor, int) (*tensor.Tensor, error)) {
+		def(name, -1, true, func(a []value.Value) (value.Value, error) {
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			switch len(a) {
+			case 1:
+				return full(t), nil
+			case 2:
+				ax, err := intOf(a[1], name)
+				if err != nil {
+					return nil, err
+				}
+				return axis(t, ax)
+			default:
+				return nil, fmt.Errorf("%s expects (tensor) or (tensor, axis)", name)
+			}
+		})
+	}
+	reduce("sum", tensor.Sum, tensor.SumAxis)
+	reduce("mean", tensor.Mean, tensor.MeanAxis)
+	reduce("max", tensor.MaxAll, tensor.MaxAxis)
+	reduce("min", tensor.MinAll, tensor.MinAxis)
+
+	def("argmax", -1, true, func(a []value.Value) (value.Value, error) {
+		t, err := asTensor(a[0], "argmax")
+		if err != nil {
+			return nil, err
+		}
+		axis := len(t.Shape) - 1
+		if len(a) == 2 {
+			axis, err = intOf(a[1], "argmax")
+			if err != nil {
+				return nil, err
+			}
+		}
+		return tensor.ArgmaxAxis(t, axis)
+	})
+
+	// Axis-aware ops that default to the last axis.
+	lastAxisOp := func(name string, f func(*tensor.Tensor, int) (*tensor.Tensor, error)) {
+		def(name, -1, true, func(a []value.Value) (value.Value, error) {
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			axis := len(t.Shape) - 1
+			if len(a) == 2 {
+				axis, err = intOf(a[1], name)
+				if err != nil {
+					return nil, err
+				}
+			}
+			return f(t, axis)
+		})
+	}
+	lastAxisOp("softmax", tensor.Softmax)
+	lastAxisOp("logsumexp", tensor.LogSumExp)
+
+	def("reshape", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 2 {
+			return nil, fmt.Errorf("reshape expects (tensor, ...shape)")
+		}
+		t, err := asTensor(a[0], "reshape")
+		if err != nil {
+			return nil, err
+		}
+		shape, err := shapeFromArgs(a[1:], "reshape")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Reshape(t, shape)
+	})
+
+	def("transpose", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 1 {
+			return nil, fmt.Errorf("transpose expects a tensor")
+		}
+		t, err := asTensor(a[0], "transpose")
+		if err != nil {
+			return nil, err
+		}
+		axes := make([]int, 0, len(a)-1)
+		for _, v := range a[1:] {
+			ax, err := intOf(v, "transpose")
+			if err != nil {
+				return nil, err
+			}
+			axes = append(axes, ax)
+		}
+		return tensor.TransposePerm(t, axes)
+	})
+
+	def("concat", 2, false, func(a []value.Value) (value.Value, error) {
+		items, err := toItems(a[0], "concat")
+		if err != nil {
+			return nil, err
+		}
+		tensors := make([]*tensor.Tensor, len(items))
+		for i, it := range items {
+			tensors[i], err = asTensor(it, "concat")
+			if err != nil {
+				return nil, err
+			}
+		}
+		axis, err := intOf(a[1], "concat")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Concat(tensors, axis)
+	})
 
 	// Automatic differentiation.
 	def("grad", 1, false, func(a []value.Value) (value.Value, error) {
@@ -153,6 +307,43 @@ func (ip *Interp) installBuiltins() {
 				row[c] = cols[c][r]
 			}
 			out[r] = &value.List{Items: row}
+		}
+		return &value.List{Items: out}, nil
+	})
+
+	// fold(f, init, xs): left fold, acc = f(acc, x) over xs.
+	def("fold", 3, false, func(a []value.Value) (value.Value, error) {
+		f := a[0]
+		acc := a[1]
+		items, err := toItems(a[2], "fold")
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			acc = ip.Apply(f, []value.Value{acc, it}, 0)
+		}
+		return acc, nil
+	})
+
+	def("append", 2, false, func(a []value.Value) (value.Value, error) {
+		items, err := toItems(a[0], "append")
+		if err != nil {
+			return nil, err
+		}
+		out := make([]value.Value, 0, len(items)+1)
+		out = append(out, items...)
+		out = append(out, a[1])
+		return &value.List{Items: out}, nil
+	})
+
+	def("enumerate", 1, false, func(a []value.Value) (value.Value, error) {
+		items, err := toItems(a[0], "enumerate")
+		if err != nil {
+			return nil, err
+		}
+		out := make([]value.Value, len(items))
+		for i, it := range items {
+			out[i] = &value.List{Items: []value.Value{tensor.Scalar(float64(i)), it}}
 		}
 		return &value.List{Items: out}, nil
 	})
@@ -228,14 +419,6 @@ func (ip *Interp) installBuiltins() {
 		}
 		return tensor.New(d, []int{n, n}), nil
 	})
-	def("transpose", 1, false, func(a []value.Value) (value.Value, error) {
-		t, err := asTensor(a[0], "transpose")
-		if err != nil {
-			return nil, err
-		}
-		return tensor.Transpose(t)
-	})
-
 	// Inspection and utilities.
 	def("shape", 1, false, func(a []value.Value) (value.Value, error) {
 		t, err := asTensor(a[0], "shape")

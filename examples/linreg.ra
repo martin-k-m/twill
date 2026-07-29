@@ -1,7 +1,7 @@
-# linreg.ast — train a linear model with gradient descent.
+# linreg.ra — train a linear model with gradient descent.
 #
 # We fit  y ≈ X @ w + b  to synthetic data generated from a known line,
-# using Aster's built-in `grads` to get the parameter gradients.
+# using Raster's built-in `grads` to get the parameter gradients.
 
 # --- data: y = 2*x0 - 3*x1 + 0.5 -----------------------------------------
 let X = [[1.0, 1.0],

@@ -1,13 +1,13 @@
 {
-  "name": "aster-lang",
-  "displayName": "Aster",
-  "description": "Syntax highlighting for the Aster tensor language (.ast).",
+  "name": "raster-lang",
+  "displayName": "Raster",
+  "description": "Syntax highlighting for the Raster tensor language (.ra).",
   "version": "0.1.0",
-  "publisher": "aster-lang",
+  "publisher": "raster-lang",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/martin-k-m/aster.git"
+    "url": "https://github.com/martin-k-m/raster.git"
   },
   "engines": {
     "vscode": "^1.75.0"
@@ -16,17 +16,17 @@
   "contributes": {
     "languages": [
       {
-        "id": "aster",
-        "aliases": ["Aster", "aster"],
-        "extensions": [".ast"],
+        "id": "raster",
+        "aliases": ["Raster", "raster"],
+        "extensions": [".ra"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "aster",
-        "scopeName": "source.aster",
-        "path": "./syntaxes/aster.tmLanguage.json"
+        "language": "raster",
+        "scopeName": "source.raster",
+        "path": "./syntaxes/raster.tmLanguage.json"
       }
     ]
   }

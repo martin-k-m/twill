@@ -1,10 +1,10 @@
-# nn_xor.ast — the XOR network again, but built on the nn library.
+# nn_xor.ra — the XOR network again, but built on the nn library.
 #
 # The whole model lives in one list of parameters, so `grads` returns all four
 # gradients at once and `sgd_step` updates the list with map/zip. Compare this
-# to mlp.ast, which threads each parameter through by hand.
+# to mlp.ra, which threads each parameter through by hand.
 
-import "../std/nn.ast"
+import "../std/nn.ra"
 
 let X = [[0.0, 0.0],
          [0.0, 1.0],

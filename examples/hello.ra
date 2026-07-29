@@ -1,6 +1,6 @@
-# hello.ast — the basics of Aster.
+# hello.ra — the basics of Raster.
 
-print("Hello from Aster!")
+print("Hello from Raster!")
 
 # Everything numeric is a tensor. Scalars are rank-0 tensors.
 let x = 3.0

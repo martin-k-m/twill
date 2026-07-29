@@ -1,7 +1,7 @@
-# shapes.ast — static shape checking.
+# shapes.ra — static shape checking.
 #
-# Aster infers tensor shapes and checks them before running. Run
-#   aster check examples/shapes.ast
+# Raster infers tensor shapes and checks them before running. Run
+#   raster check examples/shapes.ra
 # to shape-check without executing. Uncomment a bad line below to see the
 # checker reject the program.
 

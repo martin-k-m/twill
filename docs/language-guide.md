@@ -1,14 +1,14 @@
-# Aster language guide
+# Raster language guide
 
-This is the reference for Aster v0.2. The language is small, so this is short.
+This is the reference for Raster v0.3. The language is small, so this is short.
 
 ## Running programs
 
 ```bash
-aster path/to/program.ast    # shape-check, then run
-aster run path/to/program.ast
-aster check path/to/program.ast   # shape-check only
-aster                             # REPL
+raster path/to/program.ra    # shape-check, then run
+raster run path/to/program.ra
+raster check path/to/program.ra   # shape-check only
+raster                             # REPL
 ```
 
 Pass `--no-check` to run without the static shape check. In the REPL, each line's
@@ -17,9 +17,12 @@ value is printed; `:help` and `:quit` do the obvious things.
 ## Lexical structure
 
 - Comments run from `#` to end of line.
-- Whitespace is insignificant, with one exception: a `+` or `-` at the start of
-  a line begins a new statement instead of continuing the previous one. To
-  break a long expression across lines, end the line with the operator.
+- Whitespace is insignificant, with one exception: a token that could either
+  continue the previous line or start a new one begins a new statement when it
+  appears at the start of a line. This applies to a leading `+`/`-` (which would
+  otherwise read as subtraction) and to a leading `(`/`[` (which would otherwise
+  read as a call or index). To continue an expression across lines, end the line
+  with the operator, or keep the call/index on the same line as its target.
 - Identifiers match `[A-Za-z_][A-Za-z0-9_]*`.
 - Numbers are floating point: `3`, `3.14`, `1e-3`, `.5`.
 - Strings use double quotes with `\n`, `\t`, `\"`, `\\` escapes.
@@ -58,8 +61,11 @@ Lowest to highest precedence:
 | `^` | power (right-associative, scalar exponent) |
 | unary `-`, `not` / `!` | negation, logical not |
 
-Elementwise operators broadcast a scalar against a tensor. `@` covers
-vector·vector (dot), matrix·vector, vector·matrix, and matrix·matrix.
+Elementwise operators broadcast NumPy-style: a scalar against a tensor, a row
+vector across a matrix, a column vector down its rows, and so on. Two shapes
+combine when, aligned from the right, each pair of dimensions is equal or one of
+them is 1. `@` covers vector·vector (dot), matrix·vector, vector·matrix, and
+matrix·matrix.
 
 ## Bindings and assignment
 
@@ -159,13 +165,13 @@ Note: v0.2 is reverse-mode and first-order, so `grad(grad(f))` is not supported.
 
 ## Shape checking
 
-`aster check` (and the check that runs before `aster run`) infers tensor shapes
+`raster check` (and the check that runs before `raster run`) infers tensor shapes
 and reports mismatches it can prove. It stays quiet when a shape can't be
 determined, so dynamic code doesn't produce false alarms.
 
 ```
-$ aster check bad.ast
-bad.ast:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+$ raster check bad.ra
+bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 ```
 
 Annotations (`[3, 2]`, `[2]`, `[]`, `_` for unknown) let you state a contract
@@ -174,7 +180,7 @@ that the checker enforces at call sites and against the function body.
 ## Imports
 
 ```rust
-import "std/nn.ast"     # relative to the importing file, then the working dir
+import "std/nn.ra"     # relative to the importing file, then the working dir
 ```
 
 An import evaluates another file and drops its top-level definitions into the
@@ -183,19 +189,32 @@ are resolved relative to the importing file first, then the working directory.
 
 ## Standard library
 
-Math (differentiable): `relu`, `sigmoid`, `tanh`, `exp`, `log`, `sin`, `cos`,
-`sqrt`, `abs`, `pow(x, p)`, `sum`, `mean`.
+Elementwise math (differentiable): `relu`, `sigmoid`, `tanh`, `exp`, `log`,
+`sin`, `cos`, `sqrt`, `square`, `abs`, `pow(x, p)`, `clip(x, lo, hi)`.
 
-Linear algebra: `matmul(a, b)` / `dot(a, b)` (same as `@`), `transpose(m)`.
+Elementwise combine: `maximum(a, b)`, `minimum(a, b)`, `where(cond, a, b)`, and
+the comparisons `greater`, `less`, `greater_equal`, `less_equal`, `equal`
+(each returns a tensor of 1s and 0s).
+
+Reductions: `sum`, `mean`, `max`, `min` reduce the whole tensor to a scalar, or
+one axis with a second argument (`sum(t, 0)`). `argmax(t[, axis])` gives the
+index of the maximum. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
+the last axis.
+
+Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
+`transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`.
 
 Construction: `tensor(list)`, `scalar(x)`, `zeros(...shape)`, `ones(...shape)`,
 `fill(value, ...shape)`, `eye(n)`, `randn(...shape)` (standard normal),
 `rand(...shape)` (uniform). Shapes may be separate args or a list.
 
 Lists / higher-order: `range(...)`, `list(...)`, `map(f, xs)`, `zip(...)`,
-`len(x)`.
+`fold(f, init, xs)`, `append(xs, x)`, `enumerate(xs)`, `len(x)`.
 
 Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
+
+Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
+initializers, losses) and `optim.ra` (SGD, momentum, Adam).
 
 ## Example
 

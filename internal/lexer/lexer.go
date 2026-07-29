@@ -1,4 +1,4 @@
-// Package lexer turns Aster source text into a token stream.
+// Package lexer turns Raster source text into a token stream.
 package lexer
 
 import (

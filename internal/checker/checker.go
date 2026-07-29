@@ -1,4 +1,4 @@
-// Package checker performs best-effort static shape analysis of an Aster
+// Package checker performs best-effort static shape analysis of a Raster
 // program. It infers tensor shapes where it can and reports a diagnostic only
 // when a mismatch is certain (both operand shapes fully known and
 // incompatible). Anything it cannot determine is left as Unknown, so dynamic
@@ -8,7 +8,7 @@ package checker
 import (
 	"fmt"
 
-	"github.com/martin-k-m/aster/internal/ast"
+	"github.com/martin-k-m/raster/internal/ast"
 )
 
 // Diagnostic is a single shape/type finding.
@@ -413,15 +413,41 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 
 func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) Type {
 	switch name {
-	case "relu", "exp", "log", "sin", "cos", "tanh", "sigmoid", "sqrt", "abs":
-		if len(argTypes) == 1 {
+	case "relu", "exp", "log", "sin", "cos", "tanh", "sigmoid", "sqrt", "abs", "square", "softmax":
+		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
 				return t
 			}
 		}
 		return tUnknown{}
-	case "sum", "mean", "item", "len":
+	case "item", "len":
 		return scalar()
+	case "sum", "mean", "max", "min":
+		return c.reduceResult(ex, argTypes)
+	case "argmax", "logsumexp":
+		return c.axisReduceResult(ex, argTypes)
+	case "maximum", "minimum", "greater", "less", "greater_equal", "less_equal", "equal":
+		return c.broadcastTwo(ex, argTypes)
+	case "where":
+		return c.broadcastWhere(ex, argTypes)
+	case "clip":
+		if len(argTypes) >= 1 {
+			if t, ok := argTypes[0].(tTensor); ok {
+				return t
+			}
+		}
+		return tUnknown{}
+	case "reshape":
+		if len(ex.Args) >= 2 {
+			if dims, ok := constShape(ex.Args[1:]); ok {
+				return tTensor{dims: dims}
+			}
+		}
+		return tUnknown{}
+	case "concat", "fold":
+		return tUnknown{}
+	case "append", "enumerate":
+		return tList{}
 	case "scalar":
 		return scalar()
 	case "pow":
@@ -448,9 +474,31 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "shape":
 		return tList{}
 	case "transpose":
-		if len(argTypes) == 1 {
-			if t, ok := argTypes[0].(tTensor); ok && len(t.dims) == 2 {
-				return tTensor{dims: []int{t.dims[1], t.dims[0]}}
+		if t, ok := argTypes[0].(tTensor); ok {
+			if len(ex.Args) == 1 {
+				rev := make([]int, len(t.dims))
+				for i := range t.dims {
+					rev[i] = t.dims[len(t.dims)-1-i]
+				}
+				return tTensor{dims: rev}
+			}
+			axes := make([]int, 0, len(ex.Args)-1)
+			for _, a := range ex.Args[1:] {
+				ax, ok := constInt(a)
+				if !ok {
+					return tUnknown{}
+				}
+				axes = append(axes, ax)
+			}
+			if len(axes) == len(t.dims) {
+				perm := make([]int, len(axes))
+				for i, ax := range axes {
+					if ax < 0 || ax >= len(t.dims) {
+						return tUnknown{}
+					}
+					perm[i] = t.dims[ax]
+				}
+				return tTensor{dims: perm}
 			}
 		}
 		return tUnknown{}
@@ -487,6 +535,92 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	return tUnknown{}
 }
 
+// reduceResult handles sum/mean/max/min: no axis reduces to a scalar; a
+// constant axis over a known shape removes that dimension.
+func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
+	if len(argTypes) == 1 {
+		return scalar()
+	}
+	if len(argTypes) == 2 {
+		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) > 0 {
+			if ax, ok := constInt(ex.Args[1]); ok {
+				if ax < 0 {
+					ax += len(t.dims)
+				}
+				if ax >= 0 && ax < len(t.dims) {
+					return tTensor{dims: removeDim(t.dims, ax)}
+				}
+			}
+		}
+	}
+	return tUnknown{}
+}
+
+// axisReduceResult handles argmax/logsumexp, which always reduce one axis
+// (default: the last).
+func (c *checker) axisReduceResult(ex *ast.Call, argTypes []Type) Type {
+	t, ok := argTypes[0].(tTensor)
+	if !ok || len(t.dims) == 0 {
+		return tUnknown{}
+	}
+	axis := len(t.dims) - 1
+	if len(ex.Args) == 2 {
+		ax, ok := constInt(ex.Args[1])
+		if !ok {
+			return tUnknown{}
+		}
+		axis = ax
+	}
+	if axis < 0 {
+		axis += len(t.dims)
+	}
+	if axis < 0 || axis >= len(t.dims) {
+		return tUnknown{}
+	}
+	return tTensor{dims: removeDim(t.dims, axis)}
+}
+
+func (c *checker) broadcastTwo(ex *ast.Call, argTypes []Type) Type {
+	if len(argTypes) != 2 {
+		return tUnknown{}
+	}
+	a, aok := argTypes[0].(tTensor)
+	b, bok := argTypes[1].(tTensor)
+	if !aok || !bok {
+		return tUnknown{}
+	}
+	res, msg := elementwiseResult(a, b)
+	if msg != "" {
+		c.report(ex.Line, "%s", msg)
+		return tUnknown{}
+	}
+	return res
+}
+
+func (c *checker) broadcastWhere(ex *ast.Call, argTypes []Type) Type {
+	if len(argTypes) != 3 {
+		return tUnknown{}
+	}
+	a, aok := argTypes[1].(tTensor)
+	b, bok := argTypes[2].(tTensor)
+	if !aok || !bok {
+		return tUnknown{}
+	}
+	res, msg := elementwiseResult(a, b)
+	if msg != "" {
+		c.report(ex.Line, "%s", msg)
+		return tUnknown{}
+	}
+	return res
+}
+
+func removeDim(dims []int, axis int) []int {
+	out := make([]int, 0, len(dims)-1)
+	out = append(out, dims[:axis]...)
+	out = append(out, dims[axis+1:]...)
+	return out
+}
+
 // --- shape rules -----------------------------------------------------------
 
 func shapeMatch(a, b tTensor) bool {
@@ -501,32 +635,63 @@ func shapeMatch(a, b tTensor) bool {
 	return true
 }
 
-func elementwiseResult(a, b tTensor) (Type, string) {
-	if isScalar(a) {
-		return b, ""
+// broadcastDims applies NumPy broadcasting to two shapes that may contain
+// unknown dimensions (-1). It returns the result dims, or ok=false only when a
+// mismatch is certain (both dims known, unequal, and neither is 1).
+func broadcastDims(a, b tTensor) ([]int, bool) {
+	ra, rb := len(a.dims), len(b.dims)
+	r := ra
+	if rb > r {
+		r = rb
 	}
-	if isScalar(b) {
-		return a, ""
-	}
-	if len(a.dims) == len(b.dims) {
-		dims := make([]int, len(a.dims))
-		for i := range a.dims {
-			ad, bd := a.dims[i], b.dims[i]
-			switch {
-			case ad < 0 || bd < 0:
-				dims[i] = -1
-			case ad == bd:
-				dims[i] = ad
-			default:
-				return nil, fmt.Sprintf("shape mismatch: %s vs %s in elementwise op", dimsString(a), dimsString(b))
-			}
+	out := make([]int, r)
+	for i := 0; i < r; i++ {
+		da, db := 1, 1
+		aKnown, bKnown := true, true
+		if i < ra {
+			da = a.dims[ra-1-i]
+			aKnown = da >= 0
 		}
-		return tTensor{dims: dims}, ""
+		if i < rb {
+			db = b.dims[rb-1-i]
+			bKnown = db >= 0
+		}
+		var d int
+		switch {
+		case !aKnown && !bKnown:
+			d = -1
+		case !aKnown:
+			if db == 1 {
+				d = -1
+			} else {
+				d = db
+			}
+		case !bKnown:
+			if da == 1 {
+				d = -1
+			} else {
+				d = da
+			}
+		case da == db:
+			d = da
+		case da == 1:
+			d = db
+		case db == 1:
+			d = da
+		default:
+			return nil, false
+		}
+		out[r-1-i] = d
 	}
-	if fullyKnown(a) && fullyKnown(b) {
-		return nil, fmt.Sprintf("shape mismatch: %s vs %s in elementwise op", dimsString(a), dimsString(b))
+	return out, true
+}
+
+func elementwiseResult(a, b tTensor) (Type, string) {
+	dims, ok := broadcastDims(a, b)
+	if !ok {
+		return nil, fmt.Sprintf("shape mismatch: %s vs %s cannot broadcast", dimsString(a), dimsString(b))
 	}
-	return tUnknown{}, ""
+	return tTensor{dims: dims}, ""
 }
 
 func matmulResult(a, b tTensor) (Type, string) {
@@ -623,4 +788,9 @@ var builtinNames = map[string]bool{
 	"tensor": true, "scalar": true, "zeros": true, "ones": true, "fill": true,
 	"randn": true, "rand": true, "eye": true, "transpose": true, "shape": true,
 	"len": true, "item": true, "range": true, "list": true, "str": true,
+	"square": true, "maximum": true, "minimum": true, "greater": true,
+	"less": true, "greater_equal": true, "less_equal": true, "equal": true,
+	"where": true, "clip": true, "max": true, "min": true, "argmax": true,
+	"softmax": true, "logsumexp": true, "reshape": true, "concat": true,
+	"fold": true, "append": true, "enumerate": true,
 }

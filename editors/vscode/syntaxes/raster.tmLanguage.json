@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Aster",
-  "scopeName": "source.aster",
+  "name": "Raster",
+  "scopeName": "source.raster",
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
@@ -18,18 +18,18 @@
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.number-sign.aster",
+          "name": "comment.line.number-sign.raster",
           "match": "#.*$"
         }
       ]
     },
     "strings": {
-      "name": "string.quoted.double.aster",
+      "name": "string.quoted.double.raster",
       "begin": "\"",
       "end": "\"",
       "patterns": [
         {
-          "name": "constant.character.escape.aster",
+          "name": "constant.character.escape.raster",
           "match": "\\\\."
         }
       ]
@@ -37,50 +37,50 @@
     "keywords": {
       "patterns": [
         {
-          "name": "keyword.control.aster",
+          "name": "keyword.control.raster",
           "match": "\\b(if|else|while|for|in|return|import)\\b"
         },
         {
-          "name": "storage.type.aster",
+          "name": "storage.type.raster",
           "match": "\\b(let|fn)\\b"
         },
         {
-          "name": "keyword.operator.logical.aster",
+          "name": "keyword.operator.logical.raster",
           "match": "\\b(and|or|not)\\b"
         }
       ]
     },
     "constants": {
-      "name": "constant.language.aster",
+      "name": "constant.language.raster",
       "match": "\\b(true|false)\\b"
     },
     "autodiff": {
-      "name": "support.function.autodiff.aster",
+      "name": "support.function.autodiff.raster",
       "match": "\\b(grad|grads|value_and_grad)\\b"
     },
     "builtins": {
-      "name": "support.function.builtin.aster",
-      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|abs|pow|sum|mean|matmul|dot|transpose|tensor|scalar|zeros|ones|fill|randn|rand|eye|shape|len|item|range|list|str|map|zip)\\b"
+      "name": "support.function.builtin.raster",
+      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|square|abs|pow|clip|sum|mean|max|min|argmax|softmax|logsumexp|maximum|minimum|where|greater|less|greater_equal|less_equal|equal|matmul|dot|transpose|reshape|concat|tensor|scalar|zeros|ones|fill|randn|rand|eye|shape|len|item|range|list|str|map|zip|fold|append|enumerate)\\b"
     },
     "numbers": {
-      "name": "constant.numeric.aster",
+      "name": "constant.numeric.raster",
       "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?\\b"
     },
     "function-def": {
       "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
-        "1": { "name": "storage.type.aster" },
-        "2": { "name": "entity.name.function.aster" }
+        "1": { "name": "storage.type.raster" },
+        "2": { "name": "entity.name.function.raster" }
       }
     },
     "function-call": {
       "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
       "captures": {
-        "1": { "name": "entity.name.function.call.aster" }
+        "1": { "name": "entity.name.function.call.raster" }
       }
     },
     "operators": {
-      "name": "keyword.operator.aster",
+      "name": "keyword.operator.raster",
       "match": "(@|\\+|-|\\*|/|%|\\^|==|!=|<=|>=|<|>|=|->)"
     }
   }

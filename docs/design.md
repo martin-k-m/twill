@@ -1,12 +1,12 @@
 # Design notes
 
-Why Aster is built the way it is, and what's left to do.
+Why Raster is built the way it is, and what's left to do.
 
 ## The idea
 
 The usual machine-learning stack — Python plus a numeric framework — was
 assembled over time, not designed as a whole. Autodiff, shapes, and device
-placement are all added on top of a language that came first. Aster asks a
+placement are all added on top of a language that came first. Raster asks a
 narrower question: if you designed a language around differentiable tensor
 programs from the start, what would it look like?
 
@@ -55,11 +55,11 @@ source ─lexer─▶ tokens ─parser─▶ AST ─┬─ checker ─▶ shape 
 - `internal/interp` — evaluates the AST against lexical scopes. All arithmetic
   lowers to tensor-engine ops, so any computed value can be differentiated.
 - `internal/checker` — static shape inference over the AST.
-- `cmd/aster` — the CLI and REPL.
+- `cmd/raster` — the CLI and REPL.
 
 ## How autodiff works
 
-Aster uses reverse-mode automatic differentiation, the same approach as PyTorch
+Raster uses reverse-mode automatic differentiation, the same approach as PyTorch
 and JAX, implemented directly in the tensor engine.
 
 Besides computing its output, each operation can record the inputs it depended
@@ -90,17 +90,17 @@ them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
 `grad`, loops that reshape, or values read at runtime — those are left unknown.
 
-## Known limitations (v0.2)
+## Known limitations (v0.3)
 
 Deliberate, for a prototype:
 
 - Interpreted, not compiled. Tensor ops loop in Go. A vectorized or native
   backend is future work; the interpreter is the reference semantics.
-- Scalar-to-tensor broadcasting only, not full broadcasting.
 - Reverse-mode, first-order autodiff. No `grad(grad(f))`.
 - Shapes are checked but not part of a full type system; the checker is
   best-effort, not a proof.
 - No records or module namespaces. Imports share the global scope.
+- No named axes; broadcasting and reductions work on positional axes.
 
 ## Roadmap
 
@@ -111,13 +111,12 @@ Roughly in order of value:
 2. A faster backend: a bytecode VM, or lowering tensor ops to a vectorized or
    native library. Keep the interpreter as the reference.
 3. More autodiff: higher-order derivatives, forward mode, batching.
-4. Full broadcasting and named axes.
+4. Named axes and general einsum-style contraction.
 5. Records and a module system for organizing parameters and code.
-6. A larger `nn` library written in Aster: layers, initializers, optimizers.
 
 ## Non-goals for now
 
-- Being a general-purpose language. Aster is aimed at differentiable numeric
+- Being a general-purpose language. Raster is aimed at differentiable numeric
   programs.
 - Matching a mature framework's operator coverage on day one. The point is the
   core model; operators are easy to add once that's right.

@@ -1,11 +1,11 @@
-# Aster
+# Raster
 
-Aster is a small programming language for numeric and machine-learning code.
+Raster is a small programming language for numeric and machine-learning code.
 Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.2). The reference implementation is a single Go
+It's an early prototype (v0.3). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -21,7 +21,7 @@ but the framework is bolted onto a language that predates it: autodiff is a
 runtime library, tensor shapes are only known once you run the code, and a lot
 of glue sits between the math and the program.
 
-Aster is an experiment in the other direction — a language built around
+Raster is an experiment in the other direction — a language built around
 differentiable tensor programs from the start. Three things fall out of that:
 
 - Tensors are the primitive. Every number is a rank-0 tensor, vectors and
@@ -39,21 +39,21 @@ lines of Go you can read in a sitting.
 You need Go 1.23 or newer.
 
 ```bash
-git clone https://github.com/martin-k-m/aster.git
-cd aster
-go build -o aster ./cmd/aster
+git clone https://github.com/martin-k-m/raster.git
+cd raster
+go build -o raster ./cmd/raster
 ```
 
-That produces a single `aster` binary.
+That produces a single `raster` binary.
 
 ```bash
-./aster examples/autodiff.ast      # run a program
-./aster check examples/shapes.ast  # shape-check without running
-./aster                            # start the REPL
+./raster examples/autodiff.ra      # run a program
+./raster check examples/shapes.ra  # shape-check without running
+./raster                            # start the REPL
 go test ./...                      # run the test suite
 ```
 
-Without building first, `go run ./cmd/aster <file.ast>` works too.
+Without building first, `go run ./cmd/raster <file.ra>` works too.
 
 ## The language in a few lines
 
@@ -99,17 +99,17 @@ The function being differentiated has to return a scalar, as a loss does. The
 autodiff graph is only built while a value is being differentiated, so ordinary
 evaluation doesn't pay for it. Gradients also follow the structure of their
 argument, so a model held in a list gets a matching list of gradients back —
-see `examples/nn_xor.ast`.
+see `examples/nn_xor.ra`.
 
 ## Shape checking
 
-Before running, Aster infers tensor shapes and reports the ones that can't line
+Before running, Raster infers tensor shapes and reports the ones that can't line
 up. It only flags a mismatch when it's certain, so dynamic code (shapes that
 depend on runtime values) is left alone rather than guessed at.
 
 ```
-$ aster check bad.ast
-bad.ast:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+$ raster check bad.ra
+bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 ```
 
 Function parameters can carry optional shape annotations that document and
@@ -124,17 +124,33 @@ fn matvec(A: [3, 2], x: [2]) -> [3] {
 Use `[2]` for a vector, `[3, 2]` for a matrix, `[]` for a scalar, and `_` for a
 dimension you don't want to pin down.
 
+## Tensors and operations
+
+Elementwise ops broadcast NumPy-style (a row vector across a matrix, a column
+against rows, a scalar against anything), and the gradients broadcast back
+correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
+`sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip`; `softmax` and
+`logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
+reductions `sum`, `mean`, `max`, `min`, and `argmax` (with an optional axis);
+and shape ops `reshape`, `transpose`, and `concat`. See the
+[language guide](docs/language-guide.md) for the full list.
+
 ## A small standard library
 
-`std/nn.ast` is a neural-network toolkit written in Aster itself — dense layers,
-a few activations and losses, and an SGD step built from `map`/`zip`. Import it
-with `import "std/nn.ast"` (adjust the path to your file). `examples/nn_xor.ast`
-trains a network with it.
+The `std/` libraries are written in Raster itself. `std/nn.ra` has dense layers,
+activations (`gelu`, `softplus`, ...), initializers (He, Xavier), and losses
+including softmax cross-entropy. `std/optim.ra` has SGD, momentum, and Adam that
+operate on a model held as a list of tensors. Import with `import "std/nn.ra"`
+(it pulls in the optimizers too).
+
+`examples/classifier.ra` trains a 3-class MLP with softmax cross-entropy and
+Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
+parameter list.
 
 ## Layout
 
 ```
-cmd/aster/           the `aster` command (run / check / repl)
+cmd/raster/          the `raster` command (run / check / repl)
 internal/lexer/      source text -> tokens
 internal/parser/     tokens -> AST
 internal/ast/        AST node types
@@ -142,9 +158,9 @@ internal/tensor/     the differentiable tensor engine
 internal/value/      runtime values and environments
 internal/interp/     the tree-walking interpreter + builtins
 internal/checker/    static shape analysis
-std/nn.ast           neural-net library written in Aster
-examples/            runnable programs
-editors/vscode/      syntax highlighting for .ast files
+std/                 libraries written in Raster (nn.ra, optim.ra)
+examples/            runnable .ra programs
+editors/vscode/      syntax highlighting for .ra files
 docs/                language guide and design notes
 ```
 
@@ -154,8 +170,9 @@ This is a prototype, and some of it is deliberately left for later:
 
 - It's interpreted. Tensor ops loop in Go; there's no vectorized or GPU
   backend yet. The interpreter is the reference for the semantics.
-- Broadcasting is scalar-to-tensor only, not full NumPy-style broadcasting.
 - Autodiff is reverse-mode and first-order; `grad(grad(f))` isn't supported.
+- The shape checker is best-effort, not a full type system — it catches
+  mismatches when shapes are statically knowable and stays quiet otherwise.
 - There are no records or a module namespace yet; imports drop definitions into
   the global scope.
 

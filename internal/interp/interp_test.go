@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/aster/internal/interp"
-	"github.com/martin-k-m/aster/internal/tensor"
-	"github.com/martin-k-m/aster/internal/value"
+	"github.com/martin-k-m/raster/internal/interp"
+	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/raster/internal/value"
 )
 
 func run(t *testing.T, src string) (value.Value, []string) {
@@ -147,12 +147,12 @@ func TestPrintFormatting(t *testing.T) {
 
 func TestImport(t *testing.T) {
 	dir := t.TempDir()
-	lib := filepath.Join(dir, "lib.ast")
+	lib := filepath.Join(dir, "lib.ra")
 	if err := os.WriteFile(lib, []byte("fn triple(x) = x * 3.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	main := filepath.Join(dir, "main.ast")
-	body := "import \"lib.ast\"\nprint(triple(4.0))\n"
+	main := filepath.Join(dir, "main.ra")
+	body := "import \"lib.ra\"\nprint(triple(4.0))\n"
 	if err := os.WriteFile(main, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

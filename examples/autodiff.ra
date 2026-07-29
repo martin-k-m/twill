@@ -1,4 +1,4 @@
-# autodiff.ast — differentiation is a language primitive in Aster.
+# autodiff.ra — differentiation is a language primitive in Raster.
 #
 # `grad(f)` returns a new function: the derivative of f w.r.t. its first
 # argument. It works for scalars and tensors alike, with no tape wiring

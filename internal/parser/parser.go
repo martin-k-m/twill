@@ -1,4 +1,4 @@
-// Package parser builds an AST from Aster source using recursive descent
+// Package parser builds an AST from Raster source using recursive descent
 // with a Pratt loop for binary operators.
 package parser
 
@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/martin-k-m/aster/internal/ast"
-	"github.com/martin-k-m/aster/internal/lexer"
+	"github.com/martin-k-m/raster/internal/ast"
+	"github.com/martin-k-m/raster/internal/lexer"
 )
 
 var precedence = map[string]int{
@@ -287,6 +287,13 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 		return nil, err
 	}
 	for {
+		// A '(' or '[' that starts a new line begins a new expression rather
+		// than continuing this one as a call or index. This keeps a line like
+		// `[a, b]` from being read as an index on the previous line. Keep the
+		// call/index on the same line as its target to chain them.
+		if (p.check("(") || p.check("[")) && p.pos > 0 && p.peek(0).Line > p.toks[p.pos-1].Line {
+			break
+		}
 		if p.check("(") {
 			line := p.peek(0).Line
 			args, err := p.parseArgs()

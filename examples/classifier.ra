@@ -1,0 +1,59 @@
+# classifier.ra — a 3-class classifier trained with softmax cross-entropy
+# and Adam, using the nn/optim libraries.
+#
+# The data is three clusters in 2-D. The model is a 2-layer MLP producing
+# class logits; training minimizes mean cross-entropy.
+
+import "../std/nn.ra"
+
+# 18 points, 6 per class, around (0,0), (3,0), (0,3).
+let X = [[0.1, 0.0], [-0.2, 0.3], [0.2, -0.1], [0.0, 0.2], [-0.1, -0.2], [0.3, 0.1],
+         [3.1, 0.1], [2.8, -0.2], [3.2, 0.3], [3.0, -0.1], [2.9, 0.2], [3.3, 0.0],
+         [0.0, 3.1], [0.2, 2.8], [-0.1, 3.2], [0.1, 3.0], [-0.2, 2.9], [0.3, 3.1]]
+let y = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+
+let N = 18
+let C = 3
+let H = 8
+
+fn logits(p, x) {
+  let h = tanh(dense(p[0], p[1], x))
+  dense(p[2], p[3], h)
+}
+
+fn loss(p) {
+  let total = 0.0
+  for i in range(N) {
+    total = total + cross_entropy(logits(p, X[i]), onehot(y[i], C))
+  }
+  total / N
+}
+
+# Parameters: [W1, b1, W2, b2].
+let p = [he_init(H, 2), zeros(H), he_init(C, H), zeros(C)]
+
+# Adam state.
+let m = zeros_like(p)
+let v = zeros_like(p)
+let lr = 0.05
+
+for step in range(400) {
+  let g = grad(loss)(p)
+  let out = adam_step(p, g, m, v, step + 1, lr, 0.9, 0.999, 0.00000001)
+  p = out[0]
+  m = out[1]
+  v = out[2]
+  if step % 100 == 0 {
+    print("step", step, "loss", loss(p))
+  }
+}
+
+# Accuracy on the training set.
+let correct = 0.0
+for i in range(N) {
+  if argmax(logits(p, X[i]), 0) == y[i] {
+    correct = correct + 1.0
+  }
+}
+print("")
+print("train accuracy:", correct / N)

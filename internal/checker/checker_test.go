@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/aster/internal/checker"
-	"github.com/martin-k-m/aster/internal/parser"
+	"github.com/martin-k-m/raster/internal/checker"
+	"github.com/martin-k-m/raster/internal/parser"
 )
 
 func diagnostics(t *testing.T, src string) []checker.Diagnostic {
