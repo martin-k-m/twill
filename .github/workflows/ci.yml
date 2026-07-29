@@ -49,5 +49,26 @@ jobs:
           ./raster examples/einsum.ra
           ./raster examples/montecarlo_option.ra
           ./raster examples/frames.ra
+          ./raster examples/units.ra
+          ./raster examples/gbm.ra
+          ./raster examples/backtest.ra
           ./raster check examples/shapes.ra
           ./raster fmt examples/hello.ra >/dev/null
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Dead code
+        run: |
+          out="$(go run golang.org/x/tools/cmd/deadcode@latest ./...)"
+          if [ -n "$out" ]; then echo "$out"; echo "::error::dead code found"; exit 1; fi
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...

@@ -75,9 +75,6 @@ type Model struct {
 	trees     []tree
 }
 
-// NumTrees reports how many trees the model holds.
-func (m *Model) NumTrees() int { return len(m.trees) }
-
 // String renders a short summary (used when a model is printed).
 func (m *Model) String() string {
 	obj := "squared"

@@ -20,8 +20,6 @@ type Diagnostic struct {
 	Line int
 }
 
-func (d Diagnostic) Error() string { return fmt.Sprintf("line %d: %s", d.Line, d.Msg) }
-
 // Check analyses a program and returns any diagnostics found.
 func Check(prog *ast.Program) []Diagnostic {
 	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}, units: map[string]bool{}}

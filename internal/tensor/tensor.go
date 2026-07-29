@@ -638,11 +638,3 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 	}), nil
 }
 
-// Transpose returns the transpose of a 2-D tensor (non-differentiable).
-func Transpose(t *Tensor) (*Tensor, error) {
-	if len(t.Shape) != 2 {
-		return nil, fmt.Errorf("transpose expects a 2-D tensor")
-	}
-	r, c := t.Shape[0], t.Shape[1]
-	return &Tensor{Data: transpose2d(t.Data, r, c), Shape: []int{c, r}}, nil
-}

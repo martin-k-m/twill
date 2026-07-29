@@ -32,11 +32,6 @@ func Source(src string) (string, error) {
 	return out, nil
 }
 
-// Program formats a parsed program (without comments).
-func Program(prog *ast.Program) string {
-	return format(prog, nil)
-}
-
 func format(prog *ast.Program, comments []lexer.Comment) string {
 	p := &printer{trailing: map[int]string{}}
 	for _, c := range comments {
