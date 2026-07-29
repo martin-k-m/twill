@@ -210,6 +210,44 @@ function body. A shape variable used more than once must resolve to the same
 size. Annotated function bodies are also checked at their definition, so a
 mistake is caught even if the function is never called.
 
+## Units of measure
+
+Declare a base unit at the top level with `unit`, then annotate scalar
+quantities with it. The checker tracks units through arithmetic and reports a
+mismatch, the same way it does for shapes — but units are erased at runtime, so
+annotated code runs as plain numbers with zero overhead.
+
+```rust
+unit USD
+unit share
+
+fn notional(px: USD/share, qty: share) -> USD { px * qty }
+```
+
+An annotation is a single unit (`USD`) or a compound expression: a product
+(`USD*share`), a quotient (`USD/year`), or a power (`year^-1`, `USD^2`). The
+checker applies the natural rules:
+
+- `*` multiplies units, `/` divides them, and `^` with a constant integer
+  exponent raises them (`sqrt` halves them).
+- `+`, `-`, `%`, and comparisons require both sides to share a unit — adding
+  `USD` to `share` is an error.
+- `matmul`/`dot` multiply the operand units; indexing and slicing preserve them.
+- `exp`, `log`, `sin`, `cos`, `tanh`, and `sigmoid` require a dimensionless
+  argument (their result is dimensionless).
+
+A bare numeric literal is dimensionless. To give a value a unit, annotate the
+`let` that binds it — the literal is adopted into the declared unit:
+
+```rust
+let price: USD/share = 150.0
+let qty: share = 200.0
+let value = notional(price, qty)   # inferred: USD
+```
+
+Naming a unit that was never declared (a typo like `USD/yr`) is a checker error.
+Code with no unit annotations is entirely dimensionless and unaffected.
+
 ## Records
 
 A record groups named fields. Fields are accessed with `.`.

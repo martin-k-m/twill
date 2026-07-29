@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.15.0
+
+Units of measure (finance roadmap #4).
+
+- Declare base units with `unit USD` (like `type`, top-level). Annotate scalars
+  with a unit or a compound unit expression: `px: USD/share`, `rate: USD/year`,
+  `t: year^-1`, `-> USD`.
+- The checker tracks units through arithmetic: `*` multiplies them, `/` divides,
+  `+`/`-`/comparisons require a match, `^` with a constant exponent raises them,
+  and `sqrt` halves them. `exp`/`log`/`sin`/`cos`/`tanh`/`sigmoid` require a
+  dimensionless argument. `matmul`/`dot` multiply the operand units.
+- Introduce a unit on a value with a `let` annotation — `let px: USD/share =
+  150.0` — bare numeric literals are dimensionless and adopted into the
+  declared unit. Undeclared unit names in an annotation are reported.
+- Units are checked statically and fully erased at runtime: annotated code
+  computes the same plain numbers with zero overhead, and unannotated code is
+  unaffected (everything is dimensionless).
+- New example `units.ra`: notional value and accrued interest, with the checker
+  proving price × quantity is money and rejecting dollars + shares.
+
 ## 0.14.0
 
 Data frames (finance roadmap #3).

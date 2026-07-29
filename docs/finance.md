@@ -30,10 +30,11 @@ Being clear up front avoids a costly surprise later:
 - **Deterministic by default.** Randomness is seeded, so a run reproduces
   exactly. `seed(n)` picks the starting point. This is what model-risk
   governance and audit trails require.
-- **Static shape (and soon unit) checking.** A shape mistake is caught before a
-  single path is simulated. The natural next step — dimensioned quantities
-  (currency, rates, time) checked at compile time — would catch a whole class of
-  finance bugs Python cannot.
+- **Static shape and unit checking.** A shape mistake is caught before a single
+  path is simulated, and dimensioned quantities (currency, rates, time) are
+  checked at compile time too — so adding dollars to shares, or passing a rate
+  where money is expected, is a compile error, not a silent production bug. This
+  catches a whole class of finance bugs Python cannot.
 - **One auditable binary.** No environment drift between research and
   production; the artifact you validate is the artifact you run.
 
@@ -69,8 +70,13 @@ then widens to the other workloads.
    frame, and a numeric time column makes it a time series. See
    `examples/frames.ra`. Parquet/Arrow would need a third-party module, so it's
    deferred to keep the zero-dependency single binary.
-4. **Dimensioned types.** Optional units on quantities (USD, bps, years) checked
-   statically — correctness that Python structurally cannot offer.
+4. **Dimensioned types.** *(delivered v0.15)* Declare base units (`unit USD`) and
+   annotate scalars with units or unit expressions (`px: USD/share`, `-> USD`).
+   The checker tracks units through arithmetic, `matmul`/`dot`, and powers,
+   requires dimensionless arguments to transcendentals, and rejects nonsense
+   like dollars + shares — all statically, then fully erased at runtime for zero
+   overhead. See `examples/units.ra`. This is correctness Python structurally
+   cannot offer.
 5. **Gradient-boosted trees.** A native GBM engine for tabular credit/fraud/
    default work — the model class that dominates finance tabular ML today and
    that Raster has none of yet. This is a large, separate build.

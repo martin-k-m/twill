@@ -119,7 +119,11 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 	p.emitLeading(indent, s.Pos())
 	switch st := s.(type) {
 	case *ast.Let:
-		p.lineC(indent, "let "+st.Name+" = "+p.expr(st.Value), st.Line)
+		name := st.Name
+		if st.Unit != nil {
+			name += ": " + p.unitAnno(st.Unit)
+		}
+		p.lineC(indent, "let "+name+" = "+p.expr(st.Value), st.Line)
 	case *ast.Assign:
 		p.lineC(indent, st.Name+" = "+p.expr(st.Value), st.Line)
 	case *ast.FnDecl:
@@ -156,7 +160,7 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 }
 
 func (p *printer) fnDecl(fn *ast.FnDecl, indent int) {
-	sig := "fn " + fn.Name + "(" + p.params(fn.Params) + ")" + p.ret(fn.Ret)
+	sig := "fn " + fn.Name + "(" + p.params(fn.Params) + ")" + p.retPart(fn.Ret, fn.RetUnit)
 	if blk, ok := fn.Body.(*ast.Block); ok {
 		p.blockStmt(indent, sig, blk, fn.Line)
 		return
@@ -184,17 +188,53 @@ func (p *printer) params(params []ast.Param) string {
 			s += ": " + p.shape(prm.Shape)
 		case prm.TypeName != "":
 			s += ": " + prm.TypeName
+		case prm.Unit != nil:
+			s += ": " + p.unitAnno(prm.Unit)
 		}
 		parts[i] = s
 	}
 	return strings.Join(parts, ", ")
 }
 
-func (p *printer) ret(r *ast.ShapeAnno) string {
-	if r == nil {
-		return ""
+// retPart prints the `-> ...` return annotation, which is either a shape or a
+// unit (never both).
+func (p *printer) retPart(r *ast.ShapeAnno, u *ast.UnitAnno) string {
+	if r != nil {
+		return " -> " + p.shape(r)
 	}
-	return " -> " + p.shape(r)
+	if u != nil {
+		return " -> " + p.unitAnno(u)
+	}
+	return ""
+}
+
+// unitAnno renders a unit expression as `USD`, `USD/share`, `USD/year^2`, or
+// `1/year`, grouping positive-exponent factors as the numerator and
+// negative-exponent factors as the denominator.
+func (p *printer) unitAnno(u *ast.UnitAnno) string {
+	var num, den []string
+	for _, f := range u.Factors {
+		switch {
+		case f.Exp == 0:
+			continue
+		case f.Exp == 1:
+			num = append(num, f.Name)
+		case f.Exp > 0:
+			num = append(num, f.Name+"^"+strconv.Itoa(f.Exp))
+		case f.Exp == -1:
+			den = append(den, f.Name)
+		default:
+			den = append(den, f.Name+"^"+strconv.Itoa(-f.Exp))
+		}
+	}
+	numS := "1"
+	if len(num) > 0 {
+		numS = strings.Join(num, "*")
+	}
+	if len(den) == 0 {
+		return numS
+	}
+	return numS + "/" + strings.Join(den, "*")
 }
 
 func (p *printer) shape(s *ast.ShapeAnno) string {
@@ -238,7 +278,7 @@ func (p *printer) expr(e ast.Expr) string {
 		}
 		return "{ " + strings.Join(parts, ", ") + " }"
 	case *ast.Lambda:
-		sig := "fn(" + p.params(ex.Params) + ")" + p.ret(ex.Ret)
+		sig := "fn(" + p.params(ex.Params) + ")" + p.retPart(ex.Ret, ex.RetUnit)
 		if blk, ok := ex.Body.(*ast.Block); ok {
 			return sig + " " + p.inlineBlock(blk)
 		}

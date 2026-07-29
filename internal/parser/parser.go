@@ -130,6 +130,8 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseImport()
 		case "type":
 			return p.parseTypeDecl()
+		case "unit":
+			return p.parseUnitDecl()
 		}
 	}
 
@@ -157,6 +159,14 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Optional unit annotation introduces a unit: `let px: USD/share = ...`.
+	var unit *ast.UnitAnno
+	if p.match(":") {
+		unit, err = p.parseUnitExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if _, err := p.expect("="); err != nil {
 		return nil, err
 	}
@@ -164,7 +174,7 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Let{Name: name, Value: v, Line: line}, nil
+	return &ast.Let{Name: name, Unit: unit, Value: v, Line: line}, nil
 }
 
 func (p *parser) parseFnDecl() (ast.Stmt, error) {
@@ -173,7 +183,7 @@ func (p *parser) parseFnDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	params, ret, err := p.parseSignature()
+	params, ret, retUnit, err := p.parseSignature()
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +191,7 @@ func (p *parser) parseFnDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FnDecl{Name: name, Params: params, Ret: ret, Body: body, Line: line}, nil
+	return &ast.FnDecl{Name: name, Params: params, Ret: ret, RetUnit: retUnit, Body: body, Line: line}, nil
 }
 
 func (p *parser) parseWhile() (ast.Stmt, error) {
@@ -454,7 +464,7 @@ func (p *parser) parseIf() (*ast.IfExpr, error) {
 
 func (p *parser) parseLambda() (ast.Expr, error) {
 	line := p.next().Line // 'fn'
-	params, ret, err := p.parseSignature()
+	params, ret, retUnit, err := p.parseSignature()
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +472,7 @@ func (p *parser) parseLambda() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Lambda{Params: params, Ret: ret, Body: body, Line: line}, nil
+	return &ast.Lambda{Params: params, Ret: ret, RetUnit: retUnit, Body: body, Line: line}, nil
 }
 
 func (p *parser) parseTensorOrList() (ast.Expr, error) {
@@ -571,19 +581,24 @@ func (p *parser) expectPunct(value string) lexer.Token {
 }
 
 // parseSignature parses the parameter list and an optional "-> shape" return.
-func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, error) {
+func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, *ast.UnitAnno, error) {
 	params, err := p.parseParams()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var ret *ast.ShapeAnno
+	var retUnit *ast.UnitAnno
 	if p.match("->") {
-		ret, err = p.parseShapeAnno()
+		if p.check("[") {
+			ret, err = p.parseShapeAnno()
+		} else {
+			retUnit, err = p.parseUnitExpr()
+		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return params, ret, nil
+	return params, ret, retUnit, nil
 }
 
 func (p *parser) parseParams() ([]ast.Param, error) {
@@ -614,6 +629,15 @@ func (p *parser) parseParams() ([]ast.Param, error) {
 	return params, nil
 }
 
+func (p *parser) parseUnitDecl() (ast.Stmt, error) {
+	line := p.next().Line // 'unit'
+	name, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.UnitDecl{Name: name, Line: line}, nil
+}
+
 func (p *parser) parseParam() (ast.Param, error) {
 	name, err := p.expectIdent()
 	if err != nil {
@@ -621,7 +645,8 @@ func (p *parser) parseParam() (ast.Param, error) {
 	}
 	param := ast.Param{Name: name}
 	if p.match(":") {
-		// A `[` starts a shape annotation; an identifier names a record type.
+		// `[` starts a shape; otherwise a unit expression, or a bare name that
+		// the checker resolves as a record type or a unit.
 		if p.check("[") {
 			shape, err := p.parseShapeAnno()
 			if err != nil {
@@ -629,14 +654,75 @@ func (p *parser) parseParam() (ast.Param, error) {
 			}
 			param.Shape = shape
 		} else {
-			typeName, err := p.expectIdent()
+			u, err := p.parseUnitExpr()
 			if err != nil {
 				return ast.Param{}, err
 			}
-			param.TypeName = typeName
+			if len(u.Factors) == 1 && u.Factors[0].Exp == 1 {
+				param.TypeName = u.Factors[0].Name // bare name: type or unit
+			} else {
+				param.Unit = u
+			}
 		}
 	}
 	return param, nil
+}
+
+// parseUnitExpr parses a scalar unit expression: `USD`, `USD/year`, `1/year`,
+// `USD*share^-1`, `year^2`.
+func (p *parser) parseUnitExpr() (*ast.UnitAnno, error) {
+	anno := &ast.UnitAnno{}
+	if err := p.parseUnitFactor(anno, 1); err != nil {
+		return nil, err
+	}
+	for {
+		if p.match("*") {
+			if err := p.parseUnitFactor(anno, 1); err != nil {
+				return nil, err
+			}
+		} else if p.match("/") {
+			if err := p.parseUnitFactor(anno, -1); err != nil {
+				return nil, err
+			}
+		} else {
+			break
+		}
+	}
+	return anno, nil
+}
+
+func (p *parser) parseUnitFactor(anno *ast.UnitAnno, sign int) error {
+	t := p.peek(0)
+	if t.Kind == lexer.NUMBER {
+		p.next()
+		if t.Value != "1" {
+			return p.errf(t, "a numeric unit factor must be 1 (dimensionless)")
+		}
+		return nil
+	}
+	if t.Kind != lexer.IDENT {
+		return p.errf(t, "expected a unit name")
+	}
+	p.next()
+	exp := sign
+	if p.match("^") {
+		neg := p.match("-")
+		nt := p.peek(0)
+		if nt.Kind != lexer.NUMBER {
+			return p.errf(nt, "expected a unit exponent")
+		}
+		p.next()
+		k, err := strconv.Atoi(nt.Value)
+		if err != nil {
+			return p.errf(nt, "unit exponent must be an integer")
+		}
+		exp = sign * k
+		if neg {
+			exp = -exp
+		}
+	}
+	anno.Factors = append(anno.Factors, ast.UnitFactor{Name: t.Value, Exp: exp})
+	return nil
 }
 
 func (p *parser) parseTypeDecl() (ast.Stmt, error) {
