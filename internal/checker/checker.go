@@ -223,6 +223,8 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		return c.inferCall(ex, env)
 	case *ast.Index:
 		return c.inferIndex(ex, env)
+	case *ast.Slice:
+		return c.inferSlice(ex, env)
 	case *ast.IfExpr:
 		c.inferExpr(ex.Cond, env)
 		then := c.inferBlock(ex.Then, newEnv(env))
@@ -342,6 +344,39 @@ func (c *checker) inferIndex(ex *ast.Index, env *checkEnv) Type {
 	return tUnknown{}
 }
 
+func (c *checker) inferSlice(ex *ast.Slice, env *checkEnv) Type {
+	t := c.inferExpr(ex.Target, env)
+	if ex.Start != nil {
+		c.inferExpr(ex.Start, env)
+	}
+	if ex.End != nil {
+		c.inferExpr(ex.End, env)
+	}
+	switch v := t.(type) {
+	case tTensor:
+		if len(v.dims) == 0 {
+			c.report(ex.Line, "cannot slice a scalar")
+			return tUnknown{}
+		}
+		first := -1
+		s, sok := 0, true
+		if ex.Start != nil {
+			s, sok = constInt(ex.Start)
+		}
+		if ex.End != nil {
+			if e, eok := constInt(ex.End); eok && sok && e-s >= 0 {
+				first = e - s
+			}
+		} else if sok && v.dims[0] >= 0 && v.dims[0]-s >= 0 {
+			first = v.dims[0] - s
+		}
+		return tTensor{dims: append([]int{first}, v.dims[1:]...)}
+	case tList:
+		return tList{}
+	}
+	return tUnknown{}
+}
+
 // --- calls -----------------------------------------------------------------
 
 func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
@@ -370,16 +405,18 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		c.report(ex.Line, "function expects %d argument(s), got %d", len(fn.params), len(argTypes))
 		return tUnknown{}
 	}
-	// Check annotated parameters against the supplied arguments.
+	// subst maps shape variables (n, k, ...) to the concrete sizes learned from
+	// the arguments, so a variable used in several places must agree.
+	subst := map[string]int{}
 	scope := newEnv(fn.env)
 	for i, p := range fn.params {
 		if p.Shape != nil {
-			want := tTensor{dims: p.Shape.Dims}
-			if got, ok := argTypes[i].(tTensor); ok && fullyKnown(want) && fullyKnown(got) && !shapeMatch(want, got) {
-				c.report(ex.Line, "argument %d has shape %s but %q expects %s",
-					i+1, dimsString(got), p.Name, dimsString(want))
+			if got, ok := argTypes[i].(tTensor); ok {
+				c.unify(ex.Line, i, p.Name, p.Shape.Dims, got.dims, subst)
+				scope.define(p.Name, got) // use the concrete arg shape in the body
+			} else {
+				scope.define(p.Name, tTensor{dims: p.Shape.ConcreteDims()})
 			}
-			scope.define(p.Name, want)
 		} else {
 			scope.define(p.Name, argTypes[i])
 		}
@@ -387,7 +424,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	// Guard against infinite recursion during inference.
 	if c.stack[fn.node] {
 		if fn.ret != nil {
-			return tTensor{dims: fn.ret.Dims}
+			return tTensor{dims: substitute(fn.ret.Dims, subst)}
 		}
 		return tUnknown{}
 	}
@@ -401,14 +438,66 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	delete(c.stack, fn.node)
 
 	if fn.ret != nil {
-		want := tTensor{dims: fn.ret.Dims}
-		if got, ok := bodyType.(tTensor); ok && fullyKnown(want) && fullyKnown(got) && !shapeMatch(want, got) {
+		expected := tTensor{dims: substitute(fn.ret.Dims, subst)}
+		if got, ok := bodyType.(tTensor); ok && fullyKnown(expected) && fullyKnown(got) && !shapeMatch(expected, got) {
 			c.report(ex.Line, "function returns %s but its signature declares %s",
-				dimsString(got), dimsString(want))
+				dimsString(got), dimsString(expected))
 		}
-		return want
+		return expected
 	}
 	return bodyType
+}
+
+// unify checks an argument's shape against a parameter's annotation, recording
+// shape variables in subst and reporting any definite mismatch.
+func (c *checker) unify(line, argIdx int, name string, pattern []ast.Dim, actual []int, subst map[string]int) {
+	if len(pattern) != len(actual) {
+		// Only a definite mismatch when the argument's rank is fully known,
+		// which it is here (actual comes from a tTensor).
+		c.report(line, "argument %d (%q) has rank %d but the signature expects rank %d",
+			argIdx+1, name, len(actual), len(pattern))
+		return
+	}
+	for i, pd := range pattern {
+		ad := actual[i]
+		switch {
+		case pd.IsConcrete():
+			if ad >= 0 && ad != pd.Size {
+				c.report(line, "argument %d (%q) axis %d is %d but the signature expects %d",
+					argIdx+1, name, i, ad, pd.Size)
+			}
+		case pd.Var != "":
+			if ad >= 0 {
+				if prev, ok := subst[pd.Var]; ok && prev != ad {
+					c.report(line, "shape variable %q is %d elsewhere but %d in argument %d",
+						pd.Var, prev, ad, argIdx+1)
+				} else {
+					subst[pd.Var] = ad
+				}
+			}
+		}
+	}
+}
+
+// substitute resolves an annotation's dims using known shape variables,
+// leaving -1 for anything still unknown.
+func substitute(dims []ast.Dim, subst map[string]int) []int {
+	out := make([]int, len(dims))
+	for i, d := range dims {
+		switch {
+		case d.IsConcrete():
+			out[i] = d.Size
+		case d.Var != "":
+			if v, ok := subst[d.Var]; ok {
+				out[i] = v
+			} else {
+				out[i] = -1
+			}
+		default:
+			out[i] = -1
+		}
+	}
+	return out
 }
 
 func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) Type {

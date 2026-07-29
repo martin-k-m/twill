@@ -90,15 +90,17 @@ them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
 `grad`, loops that reshape, or values read at runtime — those are left unknown.
 
-## Known limitations (v0.3)
+## Known limitations (v0.5)
 
 Deliberate, for a prototype:
 
-- Interpreted, not compiled. Tensor ops loop in Go. A vectorized or native
-  backend is future work; the interpreter is the reference semantics.
+- Interpreted, not compiled. Tensor ops loop in Go (the elementwise/broadcast
+  hot path avoids per-element division, but there's still no vectorized or
+  native backend). The interpreter is the reference semantics.
 - Reverse-mode, first-order autodiff. No `grad(grad(f))`.
-- Shapes are checked but not part of a full type system; the checker is
-  best-effort, not a proof.
+- Shape checking is stronger than it was — annotations support shape variables
+  that must agree — but it's still best-effort, not a full type system that
+  catches every mismatch.
 - No records or module namespaces. Imports share the global scope.
 - No named axes; broadcasting and reductions work on positional axes.
 
@@ -106,8 +108,8 @@ Deliberate, for a prototype:
 
 Roughly in order of value:
 
-1. Static shapes as a real type system, not just a best-effort pass — so shape
-   errors are always caught, not only when literals make them visible.
+1. Push static shapes further: infer shape variables without annotations and
+   catch more mismatches, moving from best-effort toward a real type system.
 2. A faster backend: a bytecode VM, or lowering tensor ops to a vectorized or
    native library. Keep the interpreter as the reference.
 3. More autodiff: higher-order derivatives, forward mode, batching.

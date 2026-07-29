@@ -263,6 +263,8 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		return ip.evalCall(ex, env)
 	case *ast.Index:
 		return ip.evalIndex(ex, env)
+	case *ast.Slice:
+		return ip.evalSlice(ex, env)
 	case *ast.IfExpr:
 		if value.Truthy(ip.evalExpr(ex.Cond, env)) {
 			return ip.execBlockIn(ex.Then, value.NewEnv(env))
@@ -514,6 +516,64 @@ func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {
 	}
 	ip.panicf(ex.Line, "value is not indexable")
 	return value.TheUnit
+}
+
+func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
+	target := ip.evalExpr(ex.Target, env)
+
+	dim0 := -1
+	switch t := target.(type) {
+	case *tensor.Tensor:
+		if len(t.Shape) == 0 {
+			ip.panicf(ex.Line, "cannot slice a scalar")
+		}
+		dim0 = t.Shape[0]
+	case *value.List:
+		dim0 = len(t.Items)
+	default:
+		ip.panicf(ex.Line, "value is not sliceable")
+	}
+
+	start := 0
+	end := dim0
+	if ex.Start != nil {
+		start = ip.sliceBound(ex.Start, env, ex.Line)
+	}
+	if ex.End != nil {
+		end = ip.sliceBound(ex.End, env, ex.Line)
+	}
+
+	switch t := target.(type) {
+	case *tensor.Tensor:
+		res, err := tensor.SliceAxis0(t, start, end)
+		if err != nil {
+			ip.panicf(ex.Line, "%s", err.Error())
+		}
+		return res
+	case *value.List:
+		if start < 0 {
+			start += dim0
+		}
+		if end < 0 {
+			end += dim0
+		}
+		if start < 0 || end > dim0 || start > end {
+			ip.panicf(ex.Line, "slice [%d:%d] out of range for length %d", start, end, dim0)
+		}
+		items := make([]value.Value, end-start)
+		copy(items, t.Items[start:end])
+		return &value.List{Items: items}
+	}
+	return value.TheUnit
+}
+
+func (ip *Interp) sliceBound(e ast.Expr, env *value.Env, line int) int {
+	v := ip.evalExpr(e, env)
+	t, ok := v.(*tensor.Tensor)
+	if !ok || !t.IsScalar() {
+		ip.panicf(line, "slice bounds must be scalar numbers")
+	}
+	return int(t.Data[0])
 }
 
 func (ip *Interp) indexTensor(t *tensor.Tensor, idx, line int) *tensor.Tensor {

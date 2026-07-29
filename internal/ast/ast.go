@@ -16,21 +16,37 @@ type Expr interface {
 	expr()
 }
 
-// ShapeAnno is an optional tensor-shape annotation on a parameter or return.
-// Dims holds each dimension size; a value of -1 means "unknown". An empty
-// Dims (len 0) means a scalar (rank-0 tensor).
-type ShapeAnno struct {
-	Dims []int
+// Dim is one dimension of a shape annotation: either a concrete Size (>= 0),
+// a named shape variable (Var != ""), or an anonymous unknown (both zero-ish:
+// Size < 0 and Var == "", written as `_`).
+type Dim struct {
+	Size int    // >= 0 for a concrete size, -1 otherwise
+	Var  string // non-empty for a named shape variable
 }
 
-// Unknown reports whether any dimension is unspecified.
-func (s ShapeAnno) Unknown() bool {
-	for _, d := range s.Dims {
-		if d < 0 {
-			return true
+func ConcreteDim(n int) Dim    { return Dim{Size: n} }
+func VarDim(name string) Dim   { return Dim{Size: -1, Var: name} }
+func AnonDim() Dim             { return Dim{Size: -1} }
+func (d Dim) IsConcrete() bool { return d.Size >= 0 }
+
+// ShapeAnno is an optional tensor-shape annotation on a parameter or return.
+// An empty Dims (len 0) means a scalar (rank-0 tensor).
+type ShapeAnno struct {
+	Dims []Dim
+}
+
+// ConcreteDims returns the annotation as plain sizes, with -1 for any
+// non-concrete dimension (variable or anonymous).
+func (s ShapeAnno) ConcreteDims() []int {
+	out := make([]int, len(s.Dims))
+	for i, d := range s.Dims {
+		if d.IsConcrete() {
+			out[i] = d.Size
+		} else {
+			out[i] = -1
 		}
 	}
-	return false
+	return out
 }
 
 // Param is a function parameter with an optional shape annotation.
@@ -176,6 +192,15 @@ type Index struct {
 	Line   int
 }
 
+// Slice is target[start:end] along the first axis. Start or End may be nil,
+// meaning the beginning or the end respectively.
+type Slice struct {
+	Target Expr
+	Start  Expr // nil = from the beginning
+	End    Expr // nil = to the end
+	Line   int
+}
+
 type IfExpr struct {
 	Cond Expr
 	Then *Block
@@ -199,6 +224,7 @@ func (e *Unary) Pos() int     { return e.Line }
 func (e *Binary) Pos() int    { return e.Line }
 func (e *Call) Pos() int      { return e.Line }
 func (e *Index) Pos() int     { return e.Line }
+func (e *Slice) Pos() int     { return e.Line }
 func (e *IfExpr) Pos() int    { return e.Line }
 func (e *Block) Pos() int     { return e.Line }
 
@@ -213,6 +239,7 @@ func (e *Unary) expr()     {}
 func (e *Binary) expr()    {}
 func (e *Call) expr()      {}
 func (e *Index) expr()     {}
+func (e *Slice) expr()     {}
 func (e *IfExpr) expr()    {}
 func (e *Block) expr()     {}
 

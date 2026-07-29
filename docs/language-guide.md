@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.4. The language is small, so this is short.
+This is the reference for Raster v0.5. The language is small, so this is short.
 
 ## Running programs
 
@@ -107,6 +107,19 @@ fn matvec(A: [3, 2], x: [2]) -> [3] {
 }
 ```
 
+A dimension can be a concrete size, `_` for an unknown, or a name (a shape
+variable). A name used in more than one place must stand for the same size, so
+the checker can tie shapes together and verify the return:
+
+```rust
+fn matmul2(A: [n, k], B: [k, m]) -> [n, m] {
+  A @ B
+}
+```
+
+Here `k` must match between `A` and `B`, and the result is checked against
+`[n, m]`.
+
 ## Control flow
 
 `if` is an expression:
@@ -124,7 +137,7 @@ for k in range(5) { print(k) }      # over a list
 for xi in [1.0, 2.0, 3.0] { ... }   # over a 1-D tensor
 ```
 
-## Indexing
+## Indexing and slicing
 
 ```rust
 let v = [10.0, 20.0, 30.0]
@@ -137,6 +150,17 @@ m[1][0]               # 3
 
 Indexing a tensor along the first axis returns a scalar (rank-1) or a slice
 (higher rank). Lists index directly.
+
+Slicing takes a half-open range along the first axis; either bound may be
+omitted. Slicing a tensor is differentiable.
+
+```rust
+v[1:3]                # tensor([20, 30], shape=[2])
+v[:2]                 # first two elements
+v[1:]                 # from index 1 to the end
+m[0:1]                # the first row, kept as a [1, 2] tensor
+range(10)[2:5]        # works on lists too
+```
 
 ## Differentiation
 
@@ -174,8 +198,10 @@ $ raster check bad.ra
 bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 ```
 
-Annotations (`[3, 2]`, `[2]`, `[]`, `_` for unknown) let you state a contract
-that the checker enforces at call sites and against the function body.
+Annotations (`[3, 2]`, `[2]`, `[]`, `_` for unknown, or named shape variables)
+let you state a contract that the checker enforces at call sites and against the
+function body. A shape variable used more than once must resolve to the same
+size.
 
 ## Imports
 

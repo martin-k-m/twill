@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0
+
+Slicing, shape variables, and a faster tensor engine.
+
+- Slicing: `v[1:3]`, `v[:2]`, `v[2:]`, and `m[0:2]` along the first axis, for
+  both tensors and lists. Tensor slicing is differentiable.
+- Shape annotations can use named dimensions (shape variables). A name used in
+  more than one place must resolve to the same size, so the checker ties shapes
+  together and verifies the declared return, e.g.
+  `fn mm(A: [n, k], B: [k, m]) -> [n, m]`.
+- The checker also reports argument rank mismatches against an annotation.
+- Performance: the elementwise/broadcast path was rewritten to avoid per-element
+  division — fast paths for equal shapes and scalar operands, and an
+  odometer-style walk for general broadcasting (~3x on the broadcast benchmark).
+  All gradient-check tests still pass.
+- The email in the git history was replaced with a GitHub noreply address.
+
 ## 0.4.0
 
 Usability and distribution.

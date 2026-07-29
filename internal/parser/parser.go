@@ -303,19 +303,45 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 			x = &ast.Call{Callee: x, Args: args, Line: line}
 		} else if p.check("[") {
 			line := p.next().Line // '['
-			idx, err := p.parseExpr()
+			node, err := p.parseIndexOrSlice(x, line)
 			if err != nil {
 				return nil, err
 			}
-			if _, err := p.expect("]"); err != nil {
-				return nil, err
-			}
-			x = &ast.Index{Target: x, Index: idx, Line: line}
+			x = node
 		} else {
 			break
 		}
 	}
 	return x, nil
+}
+
+// parseIndexOrSlice parses the body of a `[...]` after the '[' is consumed. It
+// produces an Index (`t[e]`) or a Slice (`t[a:b]`, with either side optional).
+func (p *parser) parseIndexOrSlice(target ast.Expr, line int) (ast.Expr, error) {
+	var start, end ast.Expr
+	var err error
+	if !p.check(":") {
+		start, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.match(":") {
+		if !p.check("]") {
+			end, err = p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := p.expect("]"); err != nil {
+			return nil, err
+		}
+		return &ast.Slice{Target: target, Start: start, End: end, Line: line}, nil
+	}
+	if _, err := p.expect("]"); err != nil {
+		return nil, err
+	}
+	return &ast.Index{Target: target, Index: start, Line: line}, nil
 }
 
 func (p *parser) parsePrimary() (ast.Expr, error) {
@@ -536,7 +562,7 @@ func (p *parser) parseShapeAnno() (*ast.ShapeAnno, error) {
 	if _, err := p.expect("["); err != nil {
 		return nil, err
 	}
-	anno := &ast.ShapeAnno{Dims: []int{}}
+	anno := &ast.ShapeAnno{Dims: []ast.Dim{}}
 	if !p.check("]") {
 		dim, err := p.parseDim()
 		if err != nil {
@@ -560,22 +586,25 @@ func (p *parser) parseShapeAnno() (*ast.ShapeAnno, error) {
 	return anno, nil
 }
 
-func (p *parser) parseDim() (int, error) {
+func (p *parser) parseDim() (ast.Dim, error) {
 	t := p.peek(0)
 	if t.Kind == lexer.NUMBER {
 		p.next()
 		n, err := strconv.Atoi(t.Value)
 		if err != nil || n < 0 {
-			return 0, p.errf(t, "shape dimension must be a non-negative integer")
+			return ast.Dim{}, p.errf(t, "shape dimension must be a non-negative integer")
 		}
-		return n, nil
+		return ast.ConcreteDim(n), nil
 	}
 	if t.Kind == lexer.IDENT {
-		// A name (including "_") denotes an unknown dimension.
+		// "_" is an anonymous unknown dim; any other name is a shape variable.
 		p.next()
-		return -1, nil
+		if t.Value == "_" {
+			return ast.AnonDim(), nil
+		}
+		return ast.VarDim(t.Value), nil
 	}
-	return 0, p.errf(t, "expected a dimension size or _")
+	return ast.Dim{}, p.errf(t, "expected a dimension size or name")
 }
 
 func (p *parser) parseArgs() ([]ast.Expr, error) {

@@ -459,6 +459,42 @@ func TransposePerm(t *Tensor, axes []int) (*Tensor, error) {
 	}), nil
 }
 
+// SliceAxis0 returns rows [start, end) along the first axis, keeping the
+// trailing dimensions. It is differentiable: gradient flows to the selected
+// rows.
+func SliceAxis0(t *Tensor, start, end int) (*Tensor, error) {
+	if len(t.Shape) == 0 {
+		return nil, fmt.Errorf("cannot slice a scalar")
+	}
+	dim0 := t.Shape[0]
+	if start < 0 {
+		start += dim0
+	}
+	if end < 0 {
+		end += dim0
+	}
+	if start < 0 || end > dim0 || start > end {
+		return nil, fmt.Errorf("slice [%d:%d] out of range for first dim %d", start, end, dim0)
+	}
+	rowSize := 1
+	for _, d := range t.Shape[1:] {
+		rowSize *= d
+	}
+	outShape := append([]int{end - start}, t.Shape[1:]...)
+	data := make([]float64, (end-start)*rowSize)
+	copy(data, t.Data[start*rowSize:end*rowSize])
+	res := &Tensor{Data: data, Shape: outShape}
+	return track(res, []*Tensor{t}, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for i := 0; i < len(data); i++ {
+			gt[start*rowSize+i] += res.Grad[i]
+		}
+	}), nil
+}
+
 // Concat joins tensors along an axis. Shapes must match on every other axis.
 func Concat(tensors []*Tensor, axis int) (*Tensor, error) {
 	if len(tensors) == 0 {

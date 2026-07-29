@@ -258,21 +258,108 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		return nil, fmt.Errorf("shape mismatch: cannot broadcast %v with %v", a.Shape, b.Shape)
 	}
 	n := numel(shape)
-	ostr := strides(shape)
+	out := make([]float64, n)
+
+	// Fast paths for the common cases, avoiding index arithmetic entirely:
+	// equal shapes, and a scalar on either side.
+	switch {
+	case shapeEqual(a.Shape, b.Shape):
+		ad, bd := a.Data, b.Data
+		for i := 0; i < n; i++ {
+			out[i] = f(ad[i], bd[i])
+		}
+		res := &Tensor{Data: out, Shape: shape}
+		return track(res, []*Tensor{a, b}, func() {
+			g := res.Grad
+			if a.RequiresGrad {
+				ga := a.ensureGrad()
+				for i := 0; i < n; i++ {
+					ga[i] += da(ad[i], bd[i], out[i]) * g[i]
+				}
+			}
+			if b.RequiresGrad {
+				gb := b.ensureGrad()
+				for i := 0; i < n; i++ {
+					gb[i] += db(ad[i], bd[i], out[i]) * g[i]
+				}
+			}
+		}), nil
+
+	case len(b.Data) == 1: // scalar b broadcast over a
+		ad, bs := a.Data, b.Data[0]
+		for i := 0; i < n; i++ {
+			out[i] = f(ad[i], bs)
+		}
+		res := &Tensor{Data: out, Shape: shape}
+		return track(res, []*Tensor{a, b}, func() {
+			g := res.Grad
+			if a.RequiresGrad {
+				ga := a.ensureGrad()
+				for i := 0; i < n; i++ {
+					ga[i] += da(ad[i], bs, out[i]) * g[i]
+				}
+			}
+			if b.RequiresGrad {
+				gb := b.ensureGrad()
+				for i := 0; i < n; i++ {
+					gb[0] += db(ad[i], bs, out[i]) * g[i]
+				}
+			}
+		}), nil
+
+	case len(a.Data) == 1: // scalar a broadcast over b
+		as, bd := a.Data[0], b.Data
+		for i := 0; i < n; i++ {
+			out[i] = f(as, bd[i])
+		}
+		res := &Tensor{Data: out, Shape: shape}
+		return track(res, []*Tensor{a, b}, func() {
+			g := res.Grad
+			if a.RequiresGrad {
+				ga := a.ensureGrad()
+				for i := 0; i < n; i++ {
+					ga[0] += da(as, bd[i], out[i]) * g[i]
+				}
+			}
+			if b.RequiresGrad {
+				gb := b.ensureGrad()
+				for i := 0; i < n; i++ {
+					gb[i] += db(as, bd[i], out[i]) * g[i]
+				}
+			}
+		}), nil
+	}
+
+	// General broadcasting. Walk the output with an odometer-style coordinate
+	// counter so input offsets update incrementally — no division per element.
+	rank := len(shape)
 	effA := effStrides(a.Shape, shape)
 	effB := effStrides(b.Shape, shape)
-	idx := func(o int, eff []int) int {
-		ii, rem := 0, o
-		for d := 0; d < len(shape); d++ {
-			coord := rem / ostr[d]
-			rem = rem % ostr[d]
-			ii += coord * eff[d]
-		}
-		return ii
+	coord := make([]int, rank)
+	ia, ib := 0, 0
+	// Record input offsets for the backward pass only when a gradient is needed.
+	rg := a.RequiresGrad || b.RequiresGrad
+	var iaHist, ibHist []int
+	if rg {
+		iaHist = make([]int, n)
+		ibHist = make([]int, n)
 	}
-	out := make([]float64, n)
 	for o := 0; o < n; o++ {
-		out[o] = f(a.Data[idx(o, effA)], b.Data[idx(o, effB)])
+		if rg {
+			iaHist[o], ibHist[o] = ia, ib
+		}
+		out[o] = f(a.Data[ia], b.Data[ib])
+		for d := rank - 1; d >= 0; d-- {
+			coord[d]++
+			ia += effA[d]
+			ib += effB[d]
+			if coord[d] < shape[d] {
+				break
+			}
+			coord[d] = 0
+			ia -= effA[d] * shape[d]
+			ib -= effB[d] * shape[d]
+		}
 	}
 	res := &Tensor{Data: out, Shape: shape}
 	return track(res, []*Tensor{a, b}, func() {
@@ -280,15 +367,13 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if a.RequiresGrad {
 			ga := a.ensureGrad()
 			for o := 0; o < n; o++ {
-				ia, ib := idx(o, effA), idx(o, effB)
-				ga[ia] += da(a.Data[ia], b.Data[ib], out[o]) * g[o]
+				ga[iaHist[o]] += da(a.Data[iaHist[o]], b.Data[ibHist[o]], out[o]) * g[o]
 			}
 		}
 		if b.RequiresGrad {
 			gb := b.ensureGrad()
 			for o := 0; o < n; o++ {
-				ia, ib := idx(o, effA), idx(o, effB)
-				gb[ib] += db(a.Data[ia], b.Data[ib], out[o]) * g[o]
+				gb[ibHist[o]] += db(a.Data[iaHist[o]], b.Data[ibHist[o]], out[o]) * g[o]
 			}
 		}
 	}), nil
