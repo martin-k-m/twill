@@ -357,6 +357,14 @@ back. `columns(rec)` lists the field names, `field(rec, name)` looks one up by
 string, and `with_field(rec, name, value)` returns a copy with a field set. See
 `examples/frames.ra`.
 
+Gradient-boosted trees: `gbm_fit(X, y)` (or `gbm_fit(X, y, opts)`) trains a
+native gradient-boosting model on a `[n, d]` feature matrix and an `[n]`
+target/label vector, and `gbm_predict(model, X)` scores a `[n, d]` matrix into an
+`[n]` vector. `opts` is a record of hyperparameters — `rounds`, `learning_rate`,
+`max_depth`, `min_leaf`, `lambda`, `gamma`, and `objective` (`"squared"` for
+regression, `"logistic"` for binary classification, where predictions are
+probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
+
 Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
 initializers, losses) and `optim.ra` (SGD, momentum, Adam). The optimizers are
 container-agnostic — the same `sgd_step`/`adam_step` update a model held in a

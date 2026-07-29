@@ -77,9 +77,16 @@ then widens to the other workloads.
    like dollars + shares — all statically, then fully erased at runtime for zero
    overhead. See `examples/units.ra`. This is correctness Python structurally
    cannot offer.
-5. **Gradient-boosted trees.** A native GBM engine for tabular credit/fraud/
-   default work — the model class that dominates finance tabular ML today and
-   that Raster has none of yet. This is a large, separate build.
+5. **Gradient-boosted trees.** *(delivered v0.16)* A native, pure-Go GBM engine
+   (`internal/gbm`) using the second-order (Newton) formulation, so regression
+   (squared error) and binary classification (logistic) share one exact-greedy
+   tree builder. `gbm_fit(X, y, opts)` trains, `gbm_predict(model, X)` scores;
+   the split search runs across cores but reduces in fixed order, so fits are
+   deterministic. This is the model class that dominates finance tabular ML
+   (credit/fraud/default), now native and dependency-free. See
+   `examples/gbm.ra`. Boosting-specific extras (early stopping, feature
+   importance, categorical splits, missing-value handling) are natural
+   follow-ups.
 6. **Backtesting toolkit.** Time model, event loop, and vectorized signal ops in
    the standard library.
 

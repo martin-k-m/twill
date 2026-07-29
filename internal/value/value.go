@@ -173,6 +173,11 @@ func Format(v Value) string {
 	case Unit:
 		return "()"
 	default:
+		// Native opaque values (e.g. a fitted model) render via String() if they
+		// provide one.
+		if s, ok := v.(interface{ String() string }); ok {
+			return s.String()
+		}
 		return "<value>"
 	}
 }

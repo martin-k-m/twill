@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.15). The reference implementation is a single Go
+It's an early prototype (v0.16). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -197,8 +197,14 @@ tensors, so `df.close`, slicing, and `grad` all work on it). See
 Randomness is **deterministic by default** (seeded), so a program reproduces
 exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.ra`
 prices a European option by Monte Carlo and gets its Greeks (delta, vega) *by
-autodiff* — no bump-and-revalue. See [docs/finance.md](docs/finance.md) for
-where Raster aims to be better than a Python stack for financial ML, and how.
+autodiff* — no bump-and-revalue.
+
+For tabular ML there's a native gradient-boosted-trees engine — the workhorse of
+credit, fraud, and default modeling — in pure Go, no XGBoost. `gbm_fit(X, y,
+opts)` trains a regression or logistic model and `gbm_predict(model, X)` scores
+it; fits are deterministic. See `examples/gbm.ra`. And
+[docs/finance.md](docs/finance.md) lays out where Raster aims to be better than a
+Python stack for financial ML, and how.
 
 Parameters can also live in a record with named fields instead of a positional
 list. `grad` follows the record structure, so differentiating a loss over a
@@ -221,9 +227,10 @@ internal/lexer/      source text -> tokens
 internal/parser/     tokens -> AST
 internal/ast/        AST node types
 internal/tensor/     the differentiable tensor engine
+internal/gbm/        native gradient-boosted trees
 internal/value/      runtime values and environments
 internal/interp/     the tree-walking interpreter + builtins
-internal/checker/    static shape analysis
+internal/checker/    static shape (and unit) analysis
 internal/format/     the source formatter (raster fmt)
 std/                 libraries written in Raster (nn.ra, optim.ra)
 examples/            runnable .ra programs
