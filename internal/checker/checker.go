@@ -1059,5 +1059,5 @@ var builtinNames = map[string]bool{
 	"where": true, "clip": true, "max": true, "min": true, "argmax": true,
 	"softmax": true, "logsumexp": true, "reshape": true, "concat": true,
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
-	"einsum": true, "map_leaves": true, "zip_leaves": true,
+	"einsum": true, "map_leaves": true, "zip_leaves": true, "seed": true,
 }

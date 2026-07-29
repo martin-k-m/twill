@@ -10,22 +10,16 @@ import (
 	"github.com/martin-k-m/raster/internal/interp"
 )
 
-// TestFormattedExamplesMatch formats each deterministic example and checks that
-// running the formatted source produces the same output as the original — so
-// formatting is proven to preserve behavior, not just re-parse.
+// TestFormattedExamplesMatch formats each example and checks that running the
+// formatted source produces the same output as the original — so formatting is
+// proven to preserve behavior, not just re-parse. Randomness is deterministic
+// by default, so even the stochastic examples reproduce.
 func TestFormattedExamplesMatch(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join("..", "..", "examples", "*.ra"))
 	for _, f := range files {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
-		}
-		// Skip examples whose output isn't reproducible (any randomness, including
-		// the random initializers from the nn library).
-		s := string(src)
-		if strings.Contains(s, "randn") || strings.Contains(s, "rand(") ||
-			strings.Contains(s, "he_init") || strings.Contains(s, "xavier_init") {
-			continue
 		}
 		f := f
 		t.Run(filepath.Base(f), func(t *testing.T) {

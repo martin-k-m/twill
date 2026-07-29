@@ -3,7 +3,6 @@ package interp
 import (
 	"fmt"
 	"math"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -437,14 +436,23 @@ func (ip *Interp) installBuiltins() {
 		if err != nil {
 			return nil, err
 		}
-		return randomTensor(shape, func() float64 { return rand.NormFloat64() }), nil
+		return randomTensor(shape, ip.rng.NormFloat64), nil
 	})
 	def("rand", -1, true, func(a []value.Value) (value.Value, error) {
 		shape, err := shapeFromArgs(a, "rand")
 		if err != nil {
 			return nil, err
 		}
-		return randomTensor(shape, rand.Float64), nil
+		return randomTensor(shape, ip.rng.Float64), nil
+	})
+	// seed makes subsequent randn/rand reproducible from a chosen starting point.
+	def("seed", 1, false, func(a []value.Value) (value.Value, error) {
+		n, err := intOf(a[0], "seed")
+		if err != nil {
+			return nil, err
+		}
+		ip.rng.Seed(int64(n))
+		return value.TheUnit, nil
 	})
 	def("eye", 1, false, func(a []value.Value) (value.Value, error) {
 		n, err := intOf(a[0], "eye")

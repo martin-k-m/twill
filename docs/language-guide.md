@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.10. The language is small, so this is short.
+This is the reference for Raster v0.11. The language is small, so this is short.
 
 ## Running programs
 
@@ -294,7 +294,10 @@ yet.)
 
 Construction: `tensor(list)`, `scalar(x)`, `zeros(...shape)`, `ones(...shape)`,
 `fill(value, ...shape)`, `eye(n)`, `randn(...shape)` (standard normal),
-`rand(...shape)` (uniform). Shapes may be separate args or a list.
+`rand(...shape)` (uniform), `seed(n)`. Shapes may be separate args or a list.
+Randomness is **deterministic by default** — a program gives the same result
+every run — and `seed(n)` chooses the starting point. That reproducibility
+matters for model governance and audit.
 
 Lists / higher-order: `range(...)`, `list(...)`, `map(f, xs)`, `zip(...)`,
 `fold(f, init, xs)`, `append(xs, x)`, `enumerate(xs)`, `len(x)`.

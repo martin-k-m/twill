@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.10). The reference implementation is a single Go
+It's an early prototype (v0.11). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -170,6 +170,12 @@ parameter list.
 
 Load your own data with `read_csv("data.csv")`, which returns a `[rows, cols]`
 tensor (comma- or whitespace-separated, `#` lines skipped).
+
+Randomness is **deterministic by default** (seeded), so a program reproduces
+exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.ra`
+prices a European option by Monte Carlo and gets its Greeks (delta, vega) *by
+autodiff* — no bump-and-revalue. See [docs/finance.md](docs/finance.md) for
+where Raster aims to be better than a Python stack for financial ML, and how.
 
 Parameters can also live in a record with named fields instead of a positional
 list. `grad` follows the record structure, so differentiating a loss over a

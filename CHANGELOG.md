@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.0
+
+Deterministic randomness, and the first finance step.
+
+- Randomness is now deterministic by default: a program gives the same result
+  every run. `seed(n)` chooses the starting point. Reproducibility like this is
+  what model governance and audit require. (Because runs are reproducible, the
+  formatter's behavior-equivalence test now covers the stochastic examples too.)
+- New example `montecarlo_option.ra`: prices a European call by Monte Carlo and
+  computes its Greeks (delta, vega) by autodiff — matching Black-Scholes closed
+  form, with no bump-and-revalue.
+- `docs/finance.md`: an honest assessment of where Raster can beat a Python
+  stack for financial ML under a pure-Go, no-native-deps constraint, and the
+  roadmap to get there.
+
 ## 0.10.0
 
 A formatter, and a tape tweak.

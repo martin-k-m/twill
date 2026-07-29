@@ -44,4 +44,6 @@ jobs:
           ./raster examples/classifier.ra
           ./raster examples/records.ra
           ./raster examples/einsum.ra
+          ./raster examples/montecarlo_option.ra
           ./raster check examples/shapes.ra
+          ./raster fmt examples/hello.ra >/dev/null

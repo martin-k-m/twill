@@ -3,6 +3,7 @@ package interp
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 
@@ -11,6 +12,11 @@ import (
 	"github.com/martin-k-m/raster/internal/tensor"
 	"github.com/martin-k-m/raster/internal/value"
 )
+
+// defaultSeed makes randomness reproducible by default — a run gives the same
+// result every time unless seed(...) changes it. Determinism matters for model
+// governance and audit.
+const defaultSeed = 1
 
 // RuntimeError carries a source line for errors raised during evaluation.
 type RuntimeError struct {
@@ -30,6 +36,7 @@ type Interp struct {
 	dirStack []string
 	loaded   map[string]bool // plain imports already loaded
 	loading  map[string]bool // namespaced imports currently loading (cycle guard)
+	rng      *rand.Rand      // deterministic RNG for randn/rand/seed
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -42,6 +49,7 @@ func New(out func(string)) *Interp {
 		out:     out,
 		loaded:  map[string]bool{},
 		loading: map[string]bool{},
+		rng:     rand.New(rand.NewSource(defaultSeed)),
 	}
 	ip.installBuiltins()
 	return ip
