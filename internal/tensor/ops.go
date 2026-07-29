@@ -114,7 +114,7 @@ func Where(cond, a, b *Tensor) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: shape}
-	return track(res, []*Tensor{a, b}, func() {
+	return track2(res, a, b, func() {
 		g := res.Grad
 		for o := 0; o < n; o++ {
 			if cond.Data[idx(o, effC)] != 0 {
@@ -183,7 +183,7 @@ func reduceAxis(t *Tensor, axis int, mean bool) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -230,7 +230,7 @@ func extremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -276,7 +276,7 @@ func extremeAll(t *Tensor, wantMax bool) *Tensor {
 		}
 	}
 	res := Scalar(best)
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if t.RequiresGrad {
 			t.ensureGrad()[bestIdx] += res.Grad[0]
 		}
@@ -317,7 +317,7 @@ func Softmax(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -370,7 +370,7 @@ func LogSumExp(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -397,7 +397,7 @@ func Reshape(t *Tensor, shape []int) (*Tensor, error) {
 	data := make([]float64, len(t.Data))
 	copy(data, t.Data)
 	res := &Tensor{Data: data, Shape: append([]int(nil), shape...)}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -448,7 +448,7 @@ func TransposePerm(t *Tensor, axes []int) (*Tensor, error) {
 		out[o] = t.Data[inIndex(o)]
 	}
 	res := &Tensor{Data: out, Shape: outShape}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -484,7 +484,7 @@ func SliceAxis0(t *Tensor, start, end int) (*Tensor, error) {
 	data := make([]float64, (end-start)*rowSize)
 	copy(data, t.Data[start*rowSize:end*rowSize])
 	res := &Tensor{Data: data, Shape: outShape}
-	return track(res, []*Tensor{t}, func() {
+	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
 		}
@@ -545,7 +545,7 @@ func Concat(tensors []*Tensor, axis int) (*Tensor, error) {
 	prev := make([]*Tensor, len(tensors))
 	copy(prev, tensors)
 	res := &Tensor{Data: out, Shape: outShape}
-	return track(res, prev, func() {
+	return trackN(res, prev, func() {
 		for _, pl := range places {
 			if !pl.t.RequiresGrad {
 				continue

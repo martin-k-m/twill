@@ -46,9 +46,24 @@ var keywords = map[string]bool{
 // multiOps are matched greedily before single-character operators.
 var multiOps = []string{"==", "!=", "<=", ">=", "->", "&&", "||"}
 
+// Comment is a source comment, kept so tools like the formatter can preserve
+// it. Trailing is true when code precedes it on the same line.
+type Comment struct {
+	Line     int
+	Text     string
+	Trailing bool
+}
+
 // Tokenize scans src into tokens, ending with an EOF token.
 func Tokenize(src string) ([]Token, error) {
+	toks, _, err := TokenizeWithComments(src)
+	return toks, err
+}
+
+// TokenizeWithComments is like Tokenize but also returns the comments found.
+func TokenizeWithComments(src string) ([]Token, []Comment, error) {
 	var toks []Token
+	var comments []Comment
 	runes := []rune(src)
 	i, line, col := 0, 1, 1
 
@@ -78,9 +93,14 @@ func Tokenize(src string) ([]Token, error) {
 			continue
 		}
 		if ch == '#' {
+			cl := line
+			advance() // consume '#'
+			var sb strings.Builder
 			for i < len(runes) && peek(0) != '\n' {
-				advance()
+				sb.WriteRune(advance())
 			}
+			trailing := len(toks) > 0 && toks[len(toks)-1].Line == cl
+			comments = append(comments, Comment{Line: cl, Text: strings.TrimSpace(sb.String()), Trailing: trailing})
 			continue
 		}
 
@@ -136,7 +156,7 @@ func Tokenize(src string) ([]Token, error) {
 				}
 			}
 			if i >= len(runes) {
-				return nil, &SyntaxError{"unterminated string", startLine, startCol}
+				return nil, nil, &SyntaxError{"unterminated string", startLine, startCol}
 			}
 			advance() // closing quote
 			toks = append(toks, Token{STRING, sb.String(), startLine, startCol})
@@ -167,11 +187,11 @@ func Tokenize(src string) ([]Token, error) {
 			continue
 		}
 
-		return nil, &SyntaxError{fmt.Sprintf("unexpected character %q", string(ch)), startLine, startCol}
+		return nil, nil, &SyntaxError{fmt.Sprintf("unexpected character %q", string(ch)), startLine, startCol}
 	}
 
 	toks = append(toks, Token{EOF, "", line, col})
-	return toks, nil
+	return toks, comments, nil
 }
 
 func isDigit(ch rune) bool { return ch >= '0' && ch <= '9' }

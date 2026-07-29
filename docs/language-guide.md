@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.9. The language is small, so this is short.
+This is the reference for Raster v0.10. The language is small, so this is short.
 
 ## Running programs
 
@@ -8,8 +8,12 @@ This is the reference for Raster v0.9. The language is small, so this is short.
 raster path/to/program.ra    # shape-check, then run
 raster run path/to/program.ra
 raster check path/to/program.ra   # shape-check only
+raster fmt path/to/program.ra     # canonically format (add --write to edit in place)
 raster                             # REPL
 ```
+
+`raster fmt` reprints a program in a canonical style, preserving comments. It
+refuses rather than move a comment it can't place.
 
 Pass `--no-check` to run without the static shape check. In the REPL, each line's
 value is printed; `:help` and `:quit` do the obvious things.

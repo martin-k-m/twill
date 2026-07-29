@@ -244,8 +244,9 @@ type IfExpr struct {
 }
 
 type Block struct {
-	Body []Stmt
-	Line int
+	Body    []Stmt
+	Line    int // line of the opening '{'
+	EndLine int // line of the closing '}'
 }
 
 func (e *NumberLit) Pos() int { return e.Line }

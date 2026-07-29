@@ -24,12 +24,23 @@ var rightAssoc = map[string]bool{"^": true}
 
 // Parse tokenizes and parses src into a Program.
 func Parse(src string) (*ast.Program, error) {
-	toks, err := lexer.Tokenize(src)
+	prog, _, err := ParseWithComments(src)
+	return prog, err
+}
+
+// ParseWithComments parses src and also returns the source comments (for tools
+// like the formatter).
+func ParseWithComments(src string) (*ast.Program, []lexer.Comment, error) {
+	toks, comments, err := lexer.TokenizeWithComments(src)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	p := &parser{toks: toks}
-	return p.parseProgram()
+	prog, perr := p.parseProgram()
+	if perr != nil {
+		return nil, nil, perr
+	}
+	return prog, comments, nil
 }
 
 type parser struct {
@@ -505,9 +516,11 @@ func (p *parser) parseBlock() (*ast.Block, error) {
 		blk.Body = append(blk.Body, s)
 		p.skipSeparators()
 	}
-	if _, err := p.expect("}"); err != nil {
+	closeTok, err := p.expect("}")
+	if err != nil {
 		return nil, err
 	}
+	blk.EndLine = closeTok.Line
 	return blk, nil
 }
 

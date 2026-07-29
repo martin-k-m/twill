@@ -8,13 +8,14 @@ import (
 	"strings"
 
 	"github.com/martin-k-m/raster/internal/checker"
+	"github.com/martin-k-m/raster/internal/format"
 	"github.com/martin-k-m/raster/internal/interp"
 	"github.com/martin-k-m/raster/internal/lexer"
 	"github.com/martin-k-m/raster/internal/parser"
 	"github.com/martin-k-m/raster/internal/value"
 )
 
-const version = "0.9.0"
+const version = "0.10.0"
 
 func main() {
 	args := os.Args[1:]
@@ -34,6 +35,12 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(checkOnly(args[1]))
+	case "fmt":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: raster fmt <file> [--write]")
+			os.Exit(2)
+		}
+		os.Exit(formatFile(args[1], hasFlag(args, "--write") || hasFlag(args, "-w")))
 	case "run":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: raster run <file>")
@@ -104,6 +111,28 @@ func checkOnly(path string) int {
 		showContext(string(src), d.Line, 0)
 	}
 	return 1
+}
+
+func formatFile(path string, write bool) int {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "raster: cannot read file %q\n", path)
+		return 1
+	}
+	out, ferr := format.Source(string(src))
+	if ferr != nil {
+		reportError(path, string(src), ferr)
+		return 1
+	}
+	if write {
+		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "raster: cannot write file %q\n", path)
+			return 1
+		}
+		return 0
+	}
+	fmt.Print(out)
+	return 0
 }
 
 func repl() {
@@ -217,6 +246,8 @@ Usage:
   raster run <file.ra>        Same as above
   raster run <file> --no-check   Run without the static shape check
   raster check <file.ra>      Shape-check only, no execution
+  raster fmt <file.ra>        Print canonically formatted source
+  raster fmt <file> --write   Format the file in place
   raster                      Start the REPL
   raster --version            Print the version
 

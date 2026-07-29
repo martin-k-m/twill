@@ -15,8 +15,11 @@ type Tensor struct {
 	Shape        []int
 	RequiresGrad bool
 	Grad         []float64
-	prev         []*Tensor
-	backward     func()
+	// Autodiff parents. Most ops have one or two inputs, stored inline to avoid
+	// a per-op slice allocation; pRest holds any beyond two (einsum, concat).
+	p0, p1   *Tensor
+	pRest    []*Tensor
+	backward func()
 }
 
 func numel(shape []int) int {
@@ -160,7 +163,13 @@ func (t *Tensor) Backward() error {
 			return
 		}
 		seen[n] = true
-		for _, p := range n.prev {
+		if n.p0 != nil {
+			visit(n.p0)
+		}
+		if n.p1 != nil {
+			visit(n.p1)
+		}
+		for _, p := range n.pRest {
 			visit(p)
 		}
 		topo = append(topo, n)
@@ -175,8 +184,30 @@ func (t *Tensor) Backward() error {
 	return nil
 }
 
-// track wires an op's output into the autodiff graph when needed.
-func track(out *Tensor, prev []*Tensor, backward func()) *Tensor {
+// track1 wires a single-input op into the autodiff graph when needed.
+func track1(out, a *Tensor, backward func()) *Tensor {
+	if a.RequiresGrad {
+		out.RequiresGrad = true
+		out.p0 = a
+		out.backward = backward
+	}
+	return out
+}
+
+// track2 wires a two-input op into the autodiff graph when needed.
+func track2(out, a, b *Tensor, backward func()) *Tensor {
+	if a.RequiresGrad || b.RequiresGrad {
+		out.RequiresGrad = true
+		out.p0 = a
+		out.p1 = b
+		out.backward = backward
+	}
+	return out
+}
+
+// trackN wires an op with any number of inputs into the graph. Used by the few
+// ops (einsum, concat) that take more than two operands.
+func trackN(out *Tensor, prev []*Tensor, backward func()) *Tensor {
 	rg := false
 	for _, p := range prev {
 		if p.RequiresGrad {
@@ -186,7 +217,15 @@ func track(out *Tensor, prev []*Tensor, backward func()) *Tensor {
 	}
 	if rg {
 		out.RequiresGrad = true
-		out.prev = prev
+		if len(prev) > 0 {
+			out.p0 = prev[0]
+		}
+		if len(prev) > 1 {
+			out.p1 = prev[1]
+		}
+		if len(prev) > 2 {
+			out.pRest = prev[2:]
+		}
 		out.backward = backward
 	}
 	return out
@@ -275,7 +314,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
-		return track(res, []*Tensor{a, b}, func() {
+		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
 				ga := a.ensureGrad()
@@ -300,7 +339,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
-		return track(res, []*Tensor{a, b}, func() {
+		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
 				ga := a.ensureGrad()
@@ -325,7 +364,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
-		return track(res, []*Tensor{a, b}, func() {
+		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
 				ga := a.ensureGrad()
@@ -376,7 +415,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	if !rg {
 		return res, nil
 	}
-	return track(res, []*Tensor{a, b}, func() {
+	return track2(res, a, b, func() {
 		g := res.Grad
 		if a.RequiresGrad {
 			ga := a.ensureGrad()
@@ -403,7 +442,7 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) 
 	if !a.RequiresGrad {
 		return res
 	}
-	return track(res, []*Tensor{a}, func() {
+	return track1(res, a, func() {
 		ga := a.ensureGrad()
 		for i := 0; i < n; i++ {
 			ga[i] += df(a.Data[i], out[i]) * res.Grad[i]
@@ -486,7 +525,7 @@ func reduceAll(a *Tensor, mean bool) *Tensor {
 		scale = 1.0 / float64(n)
 	}
 	res := Scalar(s * scale)
-	return track(res, []*Tensor{a}, func() {
+	return track1(res, a, func() {
 		if !a.RequiresGrad {
 			return
 		}
@@ -560,7 +599,7 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 		outShape = []int{m, n}
 	}
 	res := &Tensor{Data: outData, Shape: outShape}
-	return track(res, []*Tensor{a, b}, func() {
+	return track2(res, a, b, func() {
 		g := res.Grad // flat length m*n
 		if a.RequiresGrad {
 			bt := transpose2d(b.Data, k, n)

@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.9). The reference implementation is a single Go
+It's an early prototype (v0.10). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -62,6 +62,7 @@ go build -o raster ./cmd/raster
 ```bash
 raster examples/autodiff.ra      # run a program
 raster check examples/shapes.ra  # shape-check without running
+raster fmt examples/hello.ra     # print canonically formatted source
 raster                           # start the REPL (multi-line aware)
 ```
 
@@ -194,6 +195,7 @@ internal/tensor/     the differentiable tensor engine
 internal/value/      runtime values and environments
 internal/interp/     the tree-walking interpreter + builtins
 internal/checker/    static shape analysis
+internal/format/     the source formatter (raster fmt)
 std/                 libraries written in Raster (nn.ra, optim.ra)
 examples/            runnable .ra programs
 editors/vscode/      syntax highlighting for .ra files

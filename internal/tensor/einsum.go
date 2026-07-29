@@ -202,7 +202,7 @@ func Einsum(spec string, inputs []*Tensor) (*Tensor, error) {
 		return res, nil
 	}
 	prev := append([]*Tensor(nil), inputs...)
-	return track(res, prev, func() {
+	return trackN(res, prev, func() {
 		gradOut := &Tensor{Data: res.Grad, Shape: res.Shape}
 		for p := range inputs {
 			if !inputs[p].RequiresGrad {

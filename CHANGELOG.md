@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0
+
+A formatter, and a tape tweak.
+
+- `raster fmt` reprints a program in a canonical style and preserves comments
+  (leading and trailing). It parenthesizes only where needed to keep the
+  operator tree, is idempotent, and refuses rather than move a comment it can't
+  place. Add `--write` to format in place.
+- The lexer now records comments (`TokenizeWithComments`), and the parser
+  exposes them (`ParseWithComments`).
+- Autodiff tape: parent pointers for the common one/two-input ops are stored
+  inline instead of in a per-op slice, trimming an allocation per differentiable
+  op. Measured as a small net win on the training benchmark; the tree-walking
+  interpreter is otherwise near its floor, so a real speed jump needs a
+  vectorized/bytecode backend (tracked in the roadmap). Gradient checks still
+  pass.
+
 ## 0.9.0
 
 Container-agnostic optimizers (pytrees).
