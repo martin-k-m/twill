@@ -312,6 +312,10 @@ one axis with a second argument (`sum(t, 0)`). `argmax(t[, axis])` gives the
 index of the maximum. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
 the last axis.
 
+Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,
+`cummax`, `cummin`. These build signals, equity curves, and running peaks; they
+are forward-only (not differentiable).
+
 Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
 `transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`,
 `einsum(spec, ...tensors)`.
@@ -366,9 +370,12 @@ regression, `"logistic"` for binary classification, where predictions are
 probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
 
 Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
-initializers, losses) and `optim.ra` (SGD, momentum, Adam). The optimizers are
-container-agnostic — the same `sgd_step`/`adam_step` update a model held in a
-positional list or a named record.
+initializers, losses), `optim.ra` (SGD, momentum, Adam), and `backtest.ra`
+(returns, moving averages, equity curves, drawdown, Sharpe, volatility, CAGR).
+The optimizers are container-agnostic — the same `sgd_step`/`adam_step` update a
+model held in a positional list or a named record. The backtest Sharpe is
+differentiable in the return series, so a smooth signal can be tuned by gradient
+ascent (`examples/backtest.ra`).
 
 ## Example
 
