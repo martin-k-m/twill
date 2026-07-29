@@ -98,9 +98,15 @@ then widens to the other workloads.
 With #1–#6 delivered, the original roadmap is complete: Raster now covers
 parallel numerics, data frames, dimensioned types, gradient-boosted trees, and
 backtesting — the pure-Go, deterministic, single-binary core of the finance
-pitch. Natural next steps live in each item's notes above (e.g. GBM early
-stopping / feature importance, Parquet I/O, a differentiable-signal optimizer
-built on the backtest metrics).
+pitch.
+
+Beyond the roadmap, the first follow-up is delivered: **gradient-optimized
+signals** *(v0.18)*. Because the backtest Sharpe/Sortino are differentiable in
+the return series, `grad` differentiates a whole backtest, so a signal's weights
+can be tuned by gradient ascent on risk-adjusted return — see
+`examples/signal_opt.ra`. Remaining ideas live in each item's notes above (GBM
+early stopping / feature importance / histogram splits, Parquet I/O, second-order
+autodiff for risk sensitivities, and a vectorized interpreter backend for speed).
 
 ## Non-goals
 

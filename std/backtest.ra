@@ -47,6 +47,13 @@ fn ann_vol(r, periods) {
   sqrt(mean(square(r - mu))) * sqrt(periods)
 }
 
+# Annualized Sortino ratio: like Sharpe, but penalizes only downside deviation
+# (returns below zero). Differentiable in r.
+fn sortino(r, periods) {
+  let downside = sqrt(mean(square(relu(0.0 - r))))
+  mean(r) / downside * sqrt(periods)
+}
+
 # Total compounded return of a series.
 fn total_return(r) {
   let eq = equity(r)
