@@ -15,5 +15,6 @@ coverage.txt
 !.vscode/extensions.json
 Thumbs.db
 
-# Local Go temp (avoids a Windows Application Control block on system temp)
+# Local Go temp / cache (avoids a Windows Application Control block on system temp)
 /.gotmp/
+/.gocache/

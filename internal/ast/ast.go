@@ -49,12 +49,26 @@ func (s ShapeAnno) ConcreteDims() []int {
 	return out
 }
 
-// Param is a function parameter with an optional annotation: either a shape
-// (`x: [n, 2]`) or the name of a declared record type (`m: Model`).
+// UnitFactor is one `name^exp` term of a unit expression (e.g. USD, year^-1).
+type UnitFactor struct {
+	Name string
+	Exp  int
+}
+
+// UnitAnno is a scalar unit expression like `USD`, `USD/year`, or `1/year`,
+// stored as a product of factors.
+type UnitAnno struct {
+	Factors []UnitFactor
+}
+
+// Param is a function parameter with an optional annotation: a shape
+// (`x: [n, 2]`), a declared record type or unit name (`m: Model`, `p: USD`), or
+// a compound unit expression (`r: USD/year`).
 type Param struct {
 	Name     string
 	Shape    *ShapeAnno // non-nil for a shape annotation
-	TypeName string     // non-empty for a record-type annotation
+	TypeName string     // a bare name: a record type or a unit (resolved by the checker)
+	Unit     *UnitAnno  // a compound unit expression (has operators)
 }
 
 type Program struct {
@@ -65,16 +79,18 @@ type Program struct {
 
 type Let struct {
 	Name  string
+	Unit  *UnitAnno // optional unit annotation: `let px: USD/share = ...`
 	Value Expr
 	Line  int
 }
 
 type FnDecl struct {
-	Name   string
-	Params []Param
-	Ret    *ShapeAnno // nil when unannotated
-	Body   Expr       // Block or single expression
-	Line   int
+	Name    string
+	Params  []Param
+	Ret     *ShapeAnno // shape return
+	RetUnit *UnitAnno  // unit return (`-> USD`)
+	Body    Expr       // Block or single expression
+	Line    int
 }
 
 type Assign struct {
@@ -107,6 +123,12 @@ type Import struct {
 	Line  int
 }
 
+// UnitDecl declares a base unit: `unit USD`.
+type UnitDecl struct {
+	Name string
+	Line int
+}
+
 // TypeDecl declares a record type: `type Name = { field: shape, ... }`.
 type TypeDecl struct {
 	Name   string
@@ -131,6 +153,7 @@ func (s *While) Pos() int    { return s.Line }
 func (s *For) Pos() int      { return s.Line }
 func (s *Return) Pos() int   { return s.Line }
 func (s *Import) Pos() int   { return s.Line }
+func (s *UnitDecl) Pos() int { return s.Line }
 func (s *TypeDecl) Pos() int { return s.Line }
 func (s *ExprStmt) Pos() int { return s.Line }
 
@@ -141,6 +164,7 @@ func (s *While) stmt()    {}
 func (s *For) stmt()      {}
 func (s *Return) stmt()   {}
 func (s *Import) stmt()   {}
+func (s *UnitDecl) stmt() {}
 func (s *TypeDecl) stmt() {}
 func (s *ExprStmt) stmt() {}
 
@@ -178,10 +202,11 @@ type ListLit struct {
 }
 
 type Lambda struct {
-	Params []Param
-	Ret    *ShapeAnno
-	Body   Expr
-	Line   int
+	Params  []Param
+	Ret     *ShapeAnno
+	RetUnit *UnitAnno
+	Body    Expr
+	Line    int
 }
 
 type Unary struct {

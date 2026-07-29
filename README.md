@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.14). The reference implementation is a single Go
+It's an early prototype (v0.15). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -33,8 +33,9 @@ differentiable tensor programs from the start. Three things fall out of that:
   matrices are literals, and `@` is matrix multiply.
 - `grad` is a keyword-like builtin backed by a real reverse-mode autodiff
   engine. No `requires_grad`, no `.backward()`, no optimizer objects.
-- Shapes are checked statically. `[2,3] @ [4]` is an error you see before the
-  program runs, not a stack trace halfway through training.
+- Shapes — and optional units of measure (USD, shares, years) — are checked
+  statically. `[2,3] @ [4]`, or adding dollars to shares, is an error you see
+  before the program runs, not a stack trace halfway through training.
 
 The language is deliberately small. The whole implementation is a few thousand
 lines of Go you can read in a sitting. Large tensor operations run across CPU
@@ -142,6 +143,25 @@ dimension you don't want to pin down. A dimension can also be a name (a shape
 variable): a name used more than once must be the same size, which lets the
 checker tie shapes together and verify the return —
 `fn mm(A: [n, k], B: [k, m]) -> [n, m]`.
+
+## Units of measure
+
+Scalars can carry units too. Declare base units, annotate quantities, and the
+checker tracks units through arithmetic — so price × quantity is money, but
+dollars + shares is a compile error. Units are erased at runtime (zero
+overhead).
+
+```rust
+unit USD
+unit share
+
+fn notional(px: USD/share, qty: share) -> USD { px * qty }
+
+let price: USD/share = 150.0
+let value = notional(price, 200.0)   # USD
+```
+
+See `examples/units.ra` and the [language guide](docs/language-guide.md#units-of-measure).
 
 ## Tensors and operations
 

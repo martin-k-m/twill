@@ -154,6 +154,9 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	case *ast.TypeDecl:
 		// Types are checked statically and erased at runtime.
 		return value.TheUnit
+	case *ast.UnitDecl:
+		// Units are checked statically and erased at runtime.
+		return value.TheUnit
 	case *ast.ExprStmt:
 		return ip.evalExpr(st.X, env)
 	case *ast.Block:

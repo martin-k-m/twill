@@ -7,6 +7,8 @@ package checker
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/martin-k-m/raster/internal/ast"
 	"github.com/martin-k-m/raster/internal/tensor"
@@ -22,11 +24,14 @@ func (d Diagnostic) Error() string { return fmt.Sprintf("line %d: %s", d.Line, d
 
 // Check analyses a program and returns any diagnostics found.
 func Check(prog *ast.Program) []Diagnostic {
-	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}}
-	// Register declared record types first so forward references resolve.
+	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}, units: map[string]bool{}}
+	// Register declared record types and units first so forward references resolve.
 	for _, s := range prog.Body {
-		if td, ok := s.(*ast.TypeDecl); ok {
-			c.registerType(td)
+		switch d := s.(type) {
+		case *ast.TypeDecl:
+			c.registerType(d)
+		case *ast.UnitDecl:
+			c.units[d.Name] = true
 		}
 	}
 	env := newEnv(nil)
@@ -61,6 +66,7 @@ type checker struct {
 	diags []Diagnostic
 	stack map[ast.Node]bool  // user functions currently being inferred
 	types map[string]tRecord // declared record types
+	units map[string]bool    // declared base units
 }
 
 func (c *checker) registerType(td *ast.TypeDecl) {
@@ -79,8 +85,16 @@ func (c *checker) report(line int, format string, args ...any) {
 
 type Type interface{ isType() }
 
+// unitMap is a physical unit as base-name -> integer exponent. A nil/empty map
+// is dimensionless. Units are checked statically and erased at runtime.
+type unitMap map[string]int
+
 // tTensor dims: a value of -1 means an unknown size; an empty slice is a scalar.
-type tTensor struct{ dims []int }
+// unit is the quantity's physical unit (nil = dimensionless).
+type tTensor struct {
+	dims []int
+	unit unitMap
+}
 type tUnknown struct{}
 type tBool struct{}
 type tStr struct{}
@@ -88,11 +102,12 @@ type tUnit struct{}
 type tList struct{ elems []Type } // nil elems: unknown contents
 type tRecord struct{ fields map[string]Type }
 type tFn struct {
-	node   ast.Node
-	params []ast.Param
-	ret    *ast.ShapeAnno
-	body   ast.Expr
-	env    *checkEnv
+	node    ast.Node
+	params  []ast.Param
+	ret     *ast.ShapeAnno
+	retUnit *ast.UnitAnno
+	body    ast.Expr
+	env     *checkEnv
 }
 type tBuiltin struct{ name string }
 
@@ -107,6 +122,116 @@ func (tFn) isType()      {}
 func (tBuiltin) isType() {}
 
 func scalar() tTensor { return tTensor{dims: []int{}} }
+
+// --- units ------------------------------------------------------------------
+
+func (u unitMap) clean() unitMap {
+	for k, v := range u {
+		if v == 0 {
+			delete(u, k)
+		}
+	}
+	if len(u) == 0 {
+		return nil
+	}
+	return u
+}
+
+func unitEqual(a, b unitMap) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func unitMul(a, b unitMap) unitMap {
+	r := unitMap{}
+	for k, v := range a {
+		r[k] += v
+	}
+	for k, v := range b {
+		r[k] += v
+	}
+	return r.clean()
+}
+
+func unitDiv(a, b unitMap) unitMap {
+	r := unitMap{}
+	for k, v := range a {
+		r[k] += v
+	}
+	for k, v := range b {
+		r[k] -= v
+	}
+	return r.clean()
+}
+
+func unitPow(a unitMap, k int) unitMap {
+	if k == 0 || len(a) == 0 {
+		return nil
+	}
+	r := unitMap{}
+	for name, v := range a {
+		r[name] = v * k
+	}
+	return r.clean()
+}
+
+// unitSqrt halves each exponent; ok is false if any is odd.
+func unitSqrt(a unitMap) (unitMap, bool) {
+	r := unitMap{}
+	for name, v := range a {
+		if v%2 != 0 {
+			return nil, false
+		}
+		r[name] = v / 2
+	}
+	return r.clean(), true
+}
+
+func unitString(u unitMap) string {
+	if len(u) == 0 {
+		return "1"
+	}
+	names := make([]string, 0, len(u))
+	for k := range u {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	parts := make([]string, len(names))
+	for i, n := range names {
+		if u[n] == 1 {
+			parts[i] = n
+		} else {
+			parts[i] = fmt.Sprintf("%s^%d", n, u[n])
+		}
+	}
+	return strings.Join(parts, "*")
+}
+
+func unitFromAnno(a *ast.UnitAnno) unitMap {
+	r := unitMap{}
+	for _, f := range a.Factors {
+		r[f.Name] += f.Exp
+	}
+	return r.clean()
+}
+
+// resolveUnit builds a unit map from an annotation and reports any factor that
+// names a unit which was never declared with `unit NAME`.
+func (c *checker) resolveUnit(a *ast.UnitAnno, line int) unitMap {
+	for _, f := range a.Factors {
+		if !c.units[f.Name] {
+			c.report(line, "unknown unit %q (declare it with `unit %s`)", f.Name, f.Name)
+		}
+	}
+	return unitFromAnno(a)
+}
 
 func isScalar(t tTensor) bool { return len(t.dims) == 0 }
 
@@ -171,9 +296,23 @@ func (e *checkEnv) assign(name string, t Type) {
 func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 	switch st := s.(type) {
 	case *ast.Let:
-		env.define(st.Name, c.inferExpr(st.Value, env))
+		rhs := c.inferExpr(st.Value, env)
+		if st.Unit != nil {
+			want := c.resolveUnit(st.Unit, st.Line)
+			if t, ok := rhs.(tTensor); ok {
+				if len(t.unit) != 0 && !unitEqual(t.unit, want) {
+					c.report(st.Line, "%q declares unit %s but the value has unit %s",
+						st.Name, unitString(want), unitString(t.unit))
+				}
+				env.define(st.Name, tTensor{dims: t.dims, unit: want})
+			} else {
+				env.define(st.Name, tTensor{dims: []int{}, unit: want})
+			}
+		} else {
+			env.define(st.Name, rhs)
+		}
 	case *ast.FnDecl:
-		env.define(st.Name, tFn{node: st, params: st.Params, ret: st.Ret, body: st.Body, env: env})
+		env.define(st.Name, tFn{node: st, params: st.Params, ret: st.Ret, retUnit: st.RetUnit, body: st.Body, env: env})
 		// Check the body once at definition using the parameter annotations, so
 		// mistakes are caught even if the function is never called. Unannotated
 		// parameters are unknown, so this only reports definite errors.
@@ -199,7 +338,7 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		if st.Alias != "" {
 			env.define(st.Alias, tUnknown{})
 		}
-	case *ast.TypeDecl:
+	case *ast.TypeDecl, *ast.UnitDecl:
 		// Already registered in the pre-pass.
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)
@@ -261,7 +400,7 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		}
 		return tList{elems: elems}
 	case *ast.Lambda:
-		return tFn{node: ex, params: ex.Params, ret: ex.Ret, body: ex.Body, env: env}
+		return tFn{node: ex, params: ex.Params, ret: ex.Ret, retUnit: ex.RetUnit, body: ex.Body, env: env}
 	case *ast.Unary:
 		return c.inferUnary(ex, env)
 	case *ast.Binary:
@@ -350,13 +489,16 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 	l := c.inferExpr(ex.Left, env)
 	r := c.inferExpr(ex.Right, env)
 
-	switch op {
-	case "==", "!=", "<", "<=", ">", ">=":
-		return tBool{}
-	}
-
 	lt, lok := l.(tTensor)
 	rt, rok := r.(tTensor)
+
+	switch op {
+	case "==", "!=", "<", "<=", ">", ">=":
+		if lok && rok && !unitEqual(lt.unit, rt.unit) {
+			c.report(ex.Line, "comparing incompatible units %s and %s", unitString(lt.unit), unitString(rt.unit))
+		}
+		return tBool{}
+	}
 
 	// A definite non-tensor operand to arithmetic is a type error.
 	if isDefiniteNonTensor(l) || isDefiniteNonTensor(r) {
@@ -374,17 +516,53 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 			c.report(ex.Line, "%s", msg)
 			return tUnknown{}
 		}
-		return res
+		return withUnit(res, unitMul(lt.unit, rt.unit))
 	case "^":
-		return lt
+		return c.powUnit(lt, ex)
 	default: // + - * / %
 		res, msg := elementwiseResult(lt, rt)
 		if msg != "" {
 			c.report(ex.Line, "%s", msg)
 			return tUnknown{}
 		}
-		return res
+		return withUnit(res, c.arithUnit(op, lt, rt, ex.Line))
 	}
+}
+
+// withUnit attaches a unit to a tTensor result, leaving other types unchanged.
+func withUnit(res Type, u unitMap) Type {
+	if t, ok := res.(tTensor); ok {
+		t.unit = u
+		return t
+	}
+	return res
+}
+
+func (c *checker) arithUnit(op string, lt, rt tTensor, line int) unitMap {
+	switch op {
+	case "+", "-", "%":
+		if !unitEqual(lt.unit, rt.unit) {
+			c.report(line, "unit mismatch: %s %s %s", unitString(lt.unit), op, unitString(rt.unit))
+		}
+		return lt.unit
+	case "*":
+		return unitMul(lt.unit, rt.unit)
+	case "/":
+		return unitDiv(lt.unit, rt.unit)
+	}
+	return nil
+}
+
+func (c *checker) powUnit(lt tTensor, ex *ast.Binary) Type {
+	if len(lt.unit) == 0 {
+		return lt
+	}
+	k, ok := constInt(ex.Right)
+	if !ok {
+		c.report(ex.Line, "a quantity with unit %s can only be raised to a constant integer power", unitString(lt.unit))
+		return withUnit(lt, nil)
+	}
+	return withUnit(lt, unitPow(lt.unit, k))
 }
 
 func (c *checker) inferIndex(ex *ast.Index, env *checkEnv) Type {
@@ -397,9 +575,9 @@ func (c *checker) inferIndex(ex *ast.Index, env *checkEnv) Type {
 			return tUnknown{}
 		}
 		if len(v.dims) == 1 {
-			return scalar()
+			return tTensor{dims: []int{}, unit: v.unit}
 		}
-		return tTensor{dims: v.dims[1:]}
+		return tTensor{dims: v.dims[1:], unit: v.unit}
 	case tList:
 		return tUnknown{}
 	}
@@ -432,7 +610,7 @@ func (c *checker) inferSlice(ex *ast.Slice, env *checkEnv) Type {
 		} else if sok && v.dims[0] >= 0 && v.dims[0]-s >= 0 {
 			first = v.dims[0] - s
 		}
-		return tTensor{dims: append([]int{first}, v.dims[1:]...)}
+		return tTensor{dims: append([]int{first}, v.dims[1:]...), unit: v.unit}
 	case tList:
 		return tList{}
 	}
@@ -466,9 +644,14 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 // body at definition). Shape variables and unannotated params are unknown.
 func (c *checker) paramType(p ast.Param) Type {
 	switch {
+	case p.Unit != nil:
+		return tTensor{dims: []int{}, unit: unitFromAnno(p.Unit)}
 	case p.TypeName != "":
 		if t, ok := c.types[p.TypeName]; ok {
 			return t
+		}
+		if c.units[p.TypeName] {
+			return tTensor{dims: []int{}, unit: unitMap{p.TypeName: 1}}
 		}
 		return tUnknown{}
 	case p.Shape != nil:
@@ -478,13 +661,33 @@ func (c *checker) paramType(p ast.Param) Type {
 	}
 }
 
+// checkReturnUnit reports if the body's unit disagrees with a declared unit
+// return.
+func (c *checker) checkReturnUnit(line int, name string, retUnit *ast.UnitAnno, bodyType Type) {
+	want := unitFromAnno(retUnit)
+	if got, ok := bodyType.(tTensor); ok && !unitEqual(got.unit, want) {
+		who := "function"
+		if name != "" {
+			who = fmt.Sprintf("function %q", name)
+		}
+		c.report(line, "%s returns unit %s but its signature declares %s",
+			who, unitString(got.unit), unitString(want))
+	}
+}
+
 func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 	if c.stack[fn] {
 		return
 	}
 	scope := newEnv(env)
 	for _, p := range fn.Params {
+		if p.Unit != nil {
+			c.resolveUnit(p.Unit, fn.Line) // report undeclared unit names
+		}
 		scope.define(p.Name, c.paramType(p))
+	}
+	if fn.RetUnit != nil {
+		c.resolveUnit(fn.RetUnit, fn.Line)
 	}
 	c.stack[fn] = true
 	var bodyType Type
@@ -502,6 +705,9 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 				fn.Name, dimsString(got), dimsString(expected))
 		}
 	}
+	if fn.RetUnit != nil {
+		c.checkReturnUnit(fn.Line, fn.Name, fn.RetUnit, bodyType)
+	}
 }
 
 func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
@@ -515,15 +721,22 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	scope := newEnv(fn.env)
 	for i, p := range fn.params {
 		switch {
+		case p.Unit != nil:
+			want := unitFromAnno(p.Unit)
+			c.checkArgUnit(ex.Line, i, p.Name, want, argTypes[i])
+			scope.define(p.Name, tTensor{dims: []int{}, unit: want})
 		case p.TypeName != "":
-			expected, ok := c.types[p.TypeName]
-			if !ok {
+			if expected, ok := c.types[p.TypeName]; ok {
+				c.checkRecordArg(ex.Line, i, p.Name, expected, argTypes[i])
+				scope.define(p.Name, expected) // field access in the body is typed
+			} else if c.units[p.TypeName] {
+				want := unitMap{p.TypeName: 1}
+				c.checkArgUnit(ex.Line, i, p.Name, want, argTypes[i])
+				scope.define(p.Name, tTensor{dims: []int{}, unit: want})
+			} else {
 				c.report(ex.Line, "unknown type %q on parameter %q", p.TypeName, p.Name)
 				scope.define(p.Name, argTypes[i])
-				continue
 			}
-			c.checkRecordArg(ex.Line, i, p.Name, expected, argTypes[i])
-			scope.define(p.Name, expected) // field access in the body is typed
 		case p.Shape != nil:
 			if got, ok := argTypes[i].(tTensor); ok {
 				c.unify(ex.Line, i, p.Name, p.Shape.Dims, got.dims, subst)
@@ -540,6 +753,9 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		if fn.ret != nil {
 			return tTensor{dims: substitute(fn.ret.Dims, subst)}
 		}
+		if fn.retUnit != nil {
+			return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
+		}
 		return tUnknown{}
 	}
 	c.stack[fn.node] = true
@@ -553,13 +769,32 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 
 	if fn.ret != nil {
 		expected := tTensor{dims: substitute(fn.ret.Dims, subst)}
-		if got, ok := bodyType.(tTensor); ok && fullyKnown(expected) && fullyKnown(got) && !shapeMatch(expected, got) {
-			c.report(ex.Line, "function returns %s but its signature declares %s",
-				dimsString(got), dimsString(expected))
+		if got, ok := bodyType.(tTensor); ok {
+			if fullyKnown(expected) && fullyKnown(got) && !shapeMatch(expected, got) {
+				c.report(ex.Line, "function returns %s but its signature declares %s",
+					dimsString(got), dimsString(expected))
+			}
+			expected.unit = got.unit // carry the body's unit through a shape return
 		}
 		return expected
 	}
+	if fn.retUnit != nil {
+		c.checkReturnUnit(ex.Line, "", fn.retUnit, bodyType)
+		return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
+	}
 	return bodyType
+}
+
+// checkArgUnit reports if a scalar argument's unit disagrees with a unit
+// parameter's declaration.
+func (c *checker) checkArgUnit(line, argIdx int, name string, want unitMap, arg Type) {
+	// A dimensionless value (a bare literal, or a computed quantity that carries
+	// no unit) is adopted into the parameter's unit; only a value that already
+	// carries a conflicting unit is an error.
+	if got, ok := arg.(tTensor); ok && len(got.unit) != 0 && !unitEqual(got.unit, want) {
+		c.report(line, "argument %d (%q) has unit %s but the signature expects %s",
+			argIdx+1, name, unitString(got.unit), unitString(want))
+	}
 }
 
 // checkRecordArg verifies a record argument against a declared record type:
@@ -641,10 +876,40 @@ func substitute(dims []ast.Dim, subst map[string]int) []int {
 
 func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) Type {
 	switch name {
-	case "relu", "exp", "log", "sin", "cos", "tanh", "sigmoid", "sqrt", "abs", "square", "softmax":
+	case "relu", "abs", "softmax":
+		// Shape and unit preserved.
 		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
 				return t
+			}
+		}
+		return tUnknown{}
+	case "exp", "log", "sin", "cos", "tanh", "sigmoid":
+		// Transcendental functions need a dimensionless argument.
+		if len(argTypes) >= 1 {
+			if t, ok := argTypes[0].(tTensor); ok {
+				if len(t.unit) != 0 {
+					c.report(ex.Line, "%s expects a dimensionless argument but got unit %s", name, unitString(t.unit))
+				}
+				return tTensor{dims: t.dims} // result is dimensionless
+			}
+		}
+		return tUnknown{}
+	case "sqrt":
+		if len(argTypes) >= 1 {
+			if t, ok := argTypes[0].(tTensor); ok {
+				u, ok := unitSqrt(t.unit)
+				if !ok {
+					c.report(ex.Line, "sqrt of unit %s is not a whole unit", unitString(t.unit))
+				}
+				return tTensor{dims: t.dims, unit: u}
+			}
+		}
+		return tUnknown{}
+	case "square":
+		if len(argTypes) >= 1 {
+			if t, ok := argTypes[0].(tTensor); ok {
+				return tTensor{dims: t.dims, unit: unitPow(t.unit, 2)}
 			}
 		}
 		return tUnknown{}
@@ -685,7 +950,16 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "pow":
 		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
-				return t
+				if len(t.unit) == 0 {
+					return t
+				}
+				if len(ex.Args) >= 2 {
+					if k, ok := constInt(ex.Args[1]); ok {
+						return tTensor{dims: t.dims, unit: unitPow(t.unit, k)}
+					}
+				}
+				c.report(ex.Line, "pow of a quantity with unit %s needs a constant integer exponent", unitString(t.unit))
+				return tTensor{dims: t.dims}
 			}
 		}
 		return tUnknown{}
@@ -699,7 +973,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 					c.report(ex.Line, "%s", msg)
 					return tUnknown{}
 				}
-				return res
+				return withUnit(res, unitMul(a.unit, b.unit))
 			}
 		}
 		return tUnknown{}
@@ -806,8 +1080,12 @@ func (c *checker) inferEinsum(ex *ast.Call, argTypes []Type) Type {
 // reduceResult handles sum/mean/max/min: no axis reduces to a scalar; a
 // constant axis over a known shape removes that dimension.
 func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
+	var u unitMap // reductions preserve the input's unit
+	if t, ok := argTypes[0].(tTensor); ok {
+		u = t.unit
+	}
 	if len(argTypes) == 1 {
-		return scalar()
+		return tTensor{dims: []int{}, unit: u}
 	}
 	if len(argTypes) == 2 {
 		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) > 0 {
@@ -816,7 +1094,7 @@ func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
 					ax += len(t.dims)
 				}
 				if ax >= 0 && ax < len(t.dims) {
-					return tTensor{dims: removeDim(t.dims, ax)}
+					return tTensor{dims: removeDim(t.dims, ax), unit: u}
 				}
 			}
 		}
