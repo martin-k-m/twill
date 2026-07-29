@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.21.0
+
+Data pipeline and real minibatch training.
+
+- New differentiable builtin `gather(x, indices)` selects rows of `x` by an index
+  list or 1-D tensor (gradient scatter-adds back, so repeated indices — e.g.
+  embedding lookups — accumulate correctly). Gradient-checked.
+- New `permutation(n)` returns a seeded random ordering of `0..n-1`, and `int(x)`
+  truncates a scalar — together enabling reproducible shuffling and sizing.
+- New `std/data.ra`: `standardize` (per-column z-score, returns the transform),
+  `apply_standardize`, `train_test_split`, and `shuffle` (features/labels kept
+  aligned).
+- New example `minibatch.ra`: a genuine training loop — standardize, hold out a
+  test set, then train a classifier with Adam over reshuffled minibatches each
+  epoch (96%+ held-out accuracy). This is the mechanics real models train with,
+  not full-batch toys.
+
 ## 0.20.0
 
 Model persistence — train once, save, and deploy.

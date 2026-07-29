@@ -911,6 +911,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
+	case "int":
+		return tTensor{dims: []int{}}
 	case "item", "len":
 		return scalar()
 	case "sum", "mean", "max", "min":
@@ -1025,7 +1027,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
-	case "range", "list", "map", "zip":
+	case "range", "list", "map", "zip", "permutation":
 		return tList{}
 	case "print":
 		return tUnit{}
@@ -1044,6 +1046,15 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// A cumulative scan preserves the input's shape.
 		if t, ok := argTypes[0].(tTensor); ok {
 			return tTensor{dims: t.dims}
+		}
+		return tUnknown{}
+	case "gather":
+		// Selecting rows keeps the trailing dims but the row count is dynamic.
+		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) >= 1 {
+			dims := make([]int, len(t.dims))
+			dims[0] = -1
+			copy(dims[1:], t.dims[1:])
+			return tTensor{dims: dims}
 		}
 		return tUnknown{}
 	case "conv2d":
@@ -1396,4 +1407,5 @@ var builtinNames = map[string]bool{
 	"with_field": true, "gbm_fit": true, "gbm_predict": true,
 	"cumsum": true, "cumprod": true, "cummax": true, "cummin": true,
 	"conv2d": true, "maxpool2d": true, "save": true, "load": true,
+	"gather": true, "permutation": true, "int": true,
 }

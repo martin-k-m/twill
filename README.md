@@ -16,7 +16,7 @@ backtester — all sharing the same autodiff engine, static shape checking, and
 reproducible-by-default execution. Finance is one domain it's built out for; it
 is not limited to it.
 
-It's an early prototype (v0.20). The reference implementation is a single Go
+It's an early prototype (v0.21). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -196,7 +196,9 @@ Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
 parameter list. For deep learning there are differentiable `conv2d` and
 `maxpool2d` ops (plus `nn.conv`/`nn.conv_init`): `examples/cnn.ra` trains a real
 convolutional net — conv → relu → max-pool → dense — end-to-end with `grad`,
-the kernel included.
+the kernel included. `examples/minibatch.ra` shows a full training loop —
+standardize, train/test split, and reshuffled minibatches each epoch — using the
+differentiable `gather` op and `std/data.ra`.
 
 Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
 `read_frame("data.csv")` (a header CSV as a *frame* — a record of named column
