@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.3. The language is small, so this is short.
+This is the reference for Raster v0.4. The language is small, so this is short.
 
 ## Running programs
 
@@ -212,6 +212,9 @@ Lists / higher-order: `range(...)`, `list(...)`, `map(f, xs)`, `zip(...)`,
 `fold(f, init, xs)`, `append(xs, x)`, `enumerate(xs)`, `len(x)`.
 
 Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
+
+Data: `read_csv(path)` loads a file of numeric rows (comma- or
+whitespace-separated, `#` lines skipped) into a `[rows, cols]` tensor.
 
 Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
 initializers, losses) and `optim.ra` (SGD, momentum, Adam).

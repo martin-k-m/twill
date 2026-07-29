@@ -1,11 +1,16 @@
 # Raster
 
+[![CI](https://github.com/martin-k-m/raster/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/raster/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/martin-k-m/raster?sort=semver)](https://github.com/martin-k-m/raster/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
+
 Raster is a small programming language for numeric and machine-learning code.
 Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.3). The reference implementation is a single Go
+It's an early prototype (v0.4). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -34,9 +39,17 @@ differentiable tensor programs from the start. Three things fall out of that:
 The language is deliberately small. The whole implementation is a few thousand
 lines of Go you can read in a sitting.
 
-## Build and run
+## Install
 
-You need Go 1.23 or newer.
+Download a prebuilt binary for your platform from the
+[releases page](https://github.com/martin-k-m/raster/releases) and put it on your
+`PATH`. With a Go toolchain (1.23+) you can also:
+
+```bash
+go install github.com/martin-k-m/raster/cmd/raster@latest
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/martin-k-m/raster.git
@@ -44,16 +57,17 @@ cd raster
 go build -o raster ./cmd/raster
 ```
 
-That produces a single `raster` binary.
+## Run
 
 ```bash
-./raster examples/autodiff.ra      # run a program
-./raster check examples/shapes.ra  # shape-check without running
-./raster                            # start the REPL
-go test ./...                      # run the test suite
+raster examples/autodiff.ra      # run a program
+raster check examples/shapes.ra  # shape-check without running
+raster                           # start the REPL (multi-line aware)
 ```
 
-Without building first, `go run ./cmd/raster <file.ra>` works too.
+The REPL keeps reading until brackets balance, so you can define block-body
+functions interactively. Without installing, `go run ./cmd/raster <file.ra>`
+works too, and `go test ./...` runs the suite.
 
 ## The language in a few lines
 
@@ -146,6 +160,9 @@ operate on a model held as a list of tensors. Import with `import "std/nn.ra"`
 `examples/classifier.ra` trains a 3-class MLP with softmax cross-entropy and
 Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
 parameter list.
+
+Load your own data with `read_csv("data.csv")`, which returns a `[rows, cols]`
+tensor (comma- or whitespace-separated, `#` lines skipped).
 
 ## Layout
 

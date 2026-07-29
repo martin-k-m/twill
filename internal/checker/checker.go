@@ -792,5 +792,5 @@ var builtinNames = map[string]bool{
 	"less": true, "greater_equal": true, "less_equal": true, "equal": true,
 	"where": true, "clip": true, "max": true, "min": true, "argmax": true,
 	"softmax": true, "logsumexp": true, "reshape": true, "concat": true,
-	"fold": true, "append": true, "enumerate": true,
+	"fold": true, "append": true, "enumerate": true, "read_csv": true,
 }

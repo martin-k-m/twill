@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/martin-k-m/raster/internal/tensor"
@@ -495,6 +498,59 @@ func (ip *Interp) installBuiltins() {
 	def("str", 1, false, func(a []value.Value) (value.Value, error) {
 		return value.Str(value.Format(a[0])), nil
 	})
+
+	// read_csv(path): load a file of numeric rows (comma- or whitespace-
+	// separated) into a [rows, cols] tensor. Blank and '#' lines are skipped.
+	def("read_csv", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := a[0].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("read_csv expects a string path")
+		}
+		return ip.readCSV(string(s))
+	})
+}
+
+func (ip *Interp) readCSV(path string) (value.Value, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ip.currentDir(), path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read_csv: cannot read %q", path)
+	}
+	var rows [][]float64
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.FieldsFunc(line, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t' || r == '\r' || r == ';'
+		})
+		row := make([]float64, 0, len(fields))
+		for _, f := range fields {
+			v, perr := strconv.ParseFloat(f, 64)
+			if perr != nil {
+				return nil, fmt.Errorf("read_csv: %q is not a number", f)
+			}
+			row = append(row, v)
+		}
+		if len(row) > 0 {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("read_csv: no numeric rows in %q", path)
+	}
+	cols := len(rows[0])
+	flat := make([]float64, 0, len(rows)*cols)
+	for i, row := range rows {
+		if len(row) != cols {
+			return nil, fmt.Errorf("read_csv: row %d has %d columns, expected %d", i+1, len(row), cols)
+		}
+		flat = append(flat, row...)
+	}
+	return tensor.New(flat, []int{len(rows), cols}), nil
 }
 
 // --- autodiff core ---------------------------------------------------------

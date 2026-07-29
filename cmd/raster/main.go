@@ -14,7 +14,7 @@ import (
 	"github.com/martin-k-m/raster/internal/value"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	args := os.Args[1:]
@@ -108,29 +108,66 @@ func checkOnly(path string) int {
 
 func repl() {
 	fmt.Printf("Raster %s — a tensor-first, differentiable language.\n", version)
-	fmt.Println("Type an expression, or :help / :quit.")
+	fmt.Println("Type an expression, or :help / :quit. Multi-line blocks continue")
+	fmt.Println("until brackets balance.")
 	ip := interp.New(nil)
 	sc := bufio.NewScanner(os.Stdin)
+	var buf strings.Builder
 	fmt.Print("raster> ")
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		switch line {
-		case ":quit", ":q":
-			return
-		case ":help":
-			usage()
-		case "":
-		default:
-			v, err := ip.Run(line)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err.Error())
-			} else if _, isUnit := v.(value.Unit); !isUnit && v != nil {
-				fmt.Println(value.Format(v))
+		line := sc.Text()
+		if buf.Len() == 0 {
+			switch strings.TrimSpace(line) {
+			case ":quit", ":q":
+				return
+			case ":help":
+				usage()
+				fmt.Print("raster> ")
+				continue
+			case "":
+				fmt.Print("raster> ")
+				continue
 			}
+		}
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		if needsMoreInput(buf.String()) {
+			fmt.Print("   ...> ")
+			continue
+		}
+		src := buf.String()
+		buf.Reset()
+		v, err := ip.Run(src)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+		} else if _, isUnit := v.(value.Unit); !isUnit && v != nil {
+			fmt.Println(value.Format(v))
 		}
 		fmt.Print("raster> ")
 	}
 	fmt.Println()
+}
+
+// needsMoreInput reports whether a REPL buffer has unbalanced brackets (or an
+// unterminated string), meaning the user should keep typing.
+func needsMoreInput(src string) bool {
+	toks, err := lexer.Tokenize(src)
+	if err != nil {
+		return true // e.g. an unterminated string literal
+	}
+	depth := 0
+	for _, t := range toks {
+		if t.Kind != lexer.PUNCT {
+			continue
+		}
+		switch t.Value {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+		}
+	}
+	return depth > 0
 }
 
 // reportError prints an error with a source-line excerpt and a caret.
