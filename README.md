@@ -17,7 +17,7 @@ static shape checking, and reproducible-by-default execution. Tabular, vision,
 and sequences, with the same `grad`. Finance is one domain it's built out for; it
 is not limited to it.
 
-It's an early prototype (v0.22). The reference implementation is a single Go
+It's an early prototype (v0.23). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -118,8 +118,11 @@ The [language guide](docs/language-guide.md) covers everything; the
 | `grad(f)` | a function computing `df/d(arg0)`, for scalar or tensor args |
 | `grads(f)` | a function returning the gradient of every argument, as a list |
 | `value_and_grad(f)` | a function returning `[f(x), df/d(arg0)]` |
+| `jacobian(f)` | a function returning the full `[m, n]` Jacobian of a vector output |
 
-The function being differentiated has to return a scalar, as a loss does. The
+`grad`/`grads`/`value_and_grad` differentiate a scalar output, as a loss does;
+`jacobian` handles a vector output, returning every partial derivative at once
+(`examples/jacobian.ra`). The
 autodiff graph is only built while a value is being differentiated, so ordinary
 evaluation doesn't pay for it. Gradients also follow the structure of their
 argument, so a model held in a list gets a matching list of gradients back —

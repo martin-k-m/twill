@@ -1038,7 +1038,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	case "str":
 		return tStr{}
-	case "grad", "grads", "value_and_grad", "tensor":
+	case "grad", "grads", "value_and_grad", "jacobian", "tensor":
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}
@@ -1408,5 +1408,5 @@ var builtinNames = map[string]bool{
 	"cumsum": true, "cumprod": true, "cummax": true, "cummin": true,
 	"conv2d": true, "maxpool2d": true, "save": true, "load": true,
 	"gather": true, "permutation": true, "int": true,
-	"floor": true, "ceil": true, "round": true,
+	"floor": true, "ceil": true, "round": true, "jacobian": true,
 }

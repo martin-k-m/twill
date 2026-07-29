@@ -1,0 +1,25 @@
+# jacobian.ra — full Jacobian (sensitivity) matrices by autodiff.
+#
+# `grad` differentiates a scalar output. `jacobian(f)(x)` gives the whole matrix
+# of partial derivatives of a *vector* output with respect to a vector input —
+# every output's sensitivity to every input at once, exactly (one reverse-mode
+# pass per output). Uses: risk/sensitivity matrices, input attribution, and
+# Jacobian regularization.
+
+# The Jacobian of a linear map A @ x is exactly A, at every point.
+let A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+print("Jacobian of A @ x  (equals A):")
+print(jacobian(fn(x) = A @ x)([0.5, -1.0, 2.0]))
+
+# A nonlinear vector function, R^2 -> R^3:
+#   f(x) = [ x0 * x1,  sin(x0),  exp(x1) ]
+# so the Jacobian is [[x1, x0], [cos(x0), 0], [0, exp(x1)]].
+fn f(x) {
+  let a = x[0:1]
+  let b = x[1:2]
+  concat([a * b, sin(a), exp(b)], 0)
+}
+
+print("Jacobian of f at [1, 0.5]:")
+print(jacobian(f)([1.0, 0.5]))
+print("expected rows: [0.5, 1.0] / [cos(1)=0.5403, 0] / [0, exp(0.5)=1.6487]")
