@@ -100,6 +100,20 @@ func (ip *Interp) installBuiltins() {
 		}
 		return tensor.MaxPool2D(x, k)
 	})
+
+	// gather(x, indices): select rows of x (first axis) by an index list or
+	// 1-D tensor. Differentiable — the base of embedding lookups and batching.
+	def("gather", 2, false, func(a []value.Value) (value.Value, error) {
+		x, err := asTensor(a[0], "gather")
+		if err != nil {
+			return nil, err
+		}
+		idx, err := indicesOf(a[1], "gather")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Gather(x, idx)
+	})
 	binTensor("maximum", tensor.Maximum)
 	binTensor("minimum", tensor.Minimum)
 	binTensor("greater", tensor.Greater)
@@ -469,6 +483,23 @@ func (ip *Interp) installBuiltins() {
 		ip.rng.Seed(int64(n))
 		return value.TheUnit, nil
 	})
+	// permutation(n): a shuffled ordering of 0..n-1, as a list, from the seeded
+	// RNG (so it's reproducible). Use it with gather to shuffle a dataset.
+	def("permutation", 1, false, func(a []value.Value) (value.Value, error) {
+		n, err := intOf(a[0], "permutation")
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("permutation: n must be >= 0")
+		}
+		perm := ip.rng.Perm(n)
+		items := make([]value.Value, n)
+		for i, p := range perm {
+			items[i] = tensor.Scalar(float64(p))
+		}
+		return &value.List{Items: items}, nil
+	})
 	def("eye", 1, false, func(a []value.Value) (value.Value, error) {
 		n, err := intOf(a[0], "eye")
 		if err != nil {
@@ -555,6 +586,14 @@ func (ip *Interp) installBuiltins() {
 	})
 	def("str", 1, false, func(a []value.Value) (value.Value, error) {
 		return value.Str(value.Format(a[0])), nil
+	})
+	// int(x): truncate a scalar toward zero (handy for computing sizes/indices).
+	def("int", 1, false, func(a []value.Value) (value.Value, error) {
+		f, err := scalarOf(a[0], "int")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(math.Trunc(f)), nil
 	})
 
 	// read_csv(path): load a file of numeric rows (comma- or whitespace-
@@ -1143,6 +1182,34 @@ func intOf(v value.Value, who string) (int, error) {
 		return 0, err
 	}
 	return int(math.Trunc(f)), nil
+}
+
+// indicesOf reads a sequence of integer indices from either a list (of scalars)
+// or a 1-D tensor.
+func indicesOf(v value.Value, who string) ([]int, error) {
+	switch t := v.(type) {
+	case *value.List:
+		out := make([]int, len(t.Items))
+		for i, it := range t.Items {
+			n, err := intOf(it, who)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n
+		}
+		return out, nil
+	case *tensor.Tensor:
+		if len(t.Shape) > 1 {
+			return nil, fmt.Errorf("%s expects a 1-D tensor or list of indices, got shape %v", who, t.Shape)
+		}
+		out := make([]int, len(t.Data))
+		for i, f := range t.Data {
+			out[i] = int(math.Trunc(f))
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s expects a list or 1-D tensor of indices", who)
+	}
 }
 
 func shapeFromArgs(args []value.Value, who string) ([]int, error) {

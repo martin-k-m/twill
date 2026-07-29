@@ -320,6 +320,12 @@ Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
 `transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`,
 `einsum(spec, ...tensors)`.
 
+Indexing / batching: `gather(x, indices)` selects rows of `x` (its first axis)
+by an index list or 1-D tensor, and is differentiable — the gradient scatters
+back to the selected rows, so repeated indices (embedding lookups) accumulate.
+`permutation(n)` returns a seeded random ordering of `0..n-1` (for shuffling),
+and `int(x)` truncates a scalar toward zero.
+
 Convolutions (differentiable): `conv2d(input, weight)` is a 2-D cross-correlation
 with `input` shaped `[Cin, H, W]` and `weight` shaped `[Cout, Cin, KH, KW]`,
 producing `[Cout, H-KH+1, W-KW+1]` (valid padding, unit stride).
@@ -384,7 +390,8 @@ probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
 
 Libraries written in Raster live in `std/`: `nn.ra` (layers including `dense`
 and `conv`, activations, initializers, losses), `optim.ra` (SGD, momentum,
-Adam), and `backtest.ra`
+Adam), `data.ra` (`standardize`, `train_test_split`, `shuffle` for real training
+loops — see `examples/minibatch.ra`), and `backtest.ra`
 (returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
 CAGR). The optimizers are container-agnostic — the same `sgd_step`/`adam_step`
 update a model held in a positional list or a named record. The backtest Sharpe
