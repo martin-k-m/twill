@@ -1,0 +1,24 @@
+# autodiff.ast — differentiation is a language primitive in Aster.
+#
+# `grad(f)` returns a new function: the derivative of f w.r.t. its first
+# argument. It works for scalars and tensors alike, with no tape wiring
+# or library calls.
+
+fn f(x) = x * x * x        # f(x) = x^3
+let df = grad(f)           # df(x) = 3x^2
+
+print("f(2)  =", f(2.0))   # 8
+print("f'(2) =", df(2.0))  # 12
+print("f'(3) =", df(3.0))  # 27
+
+# Gradients of multi-variable, tensor-valued functions.
+fn energy(w) = sum(relu(w) * relu(w)) / 2.0
+let w = [-1.0, 2.0, -3.0, 4.0]
+print("energy(w)      =", energy(w))
+print("grad energy(w) =", grad(energy)(w))   # [0, 2, 0, 4]
+
+# `grads` returns the gradient w.r.t. every argument.
+fn bilinear(a, b) = sum(a * b)
+let ga_gb = grads(bilinear)([1.0, 2.0], [10.0, 20.0])
+print("d/da =", ga_gb[0])   # [10, 20]
+print("d/db =", ga_gb[1])   # [1, 2]

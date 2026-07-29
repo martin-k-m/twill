@@ -1,0 +1,41 @@
+{
+  "name": "aster-lang",
+  "version": "0.1.0",
+  "description": "Aster — a lightweight, tensor-first programming language with automatic differentiation as a built-in primitive.",
+  "type": "module",
+  "bin": {
+    "aster": "src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "aster": "node src/cli.ts",
+    "test": "node --test",
+    "repl": "node src/cli.ts",
+    "examples": "node src/cli.ts examples/autodiff.ast && node src/cli.ts examples/linreg.ast"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "keywords": [
+    "machine-learning",
+    "autodiff",
+    "tensor",
+    "language",
+    "interpreter",
+    "differentiable-programming"
+  ],
+  "license": "MIT",
+  "files": [
+    "src",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,39 @@
+# linreg.ast — train a linear model with gradient descent.
+#
+# We fit  y ≈ X @ w + b  to synthetic data generated from a known line,
+# using Aster's built-in `grads` to get the parameter gradients.
+
+# --- data: y = 2*x0 - 3*x1 + 0.5 -----------------------------------------
+let X = [[1.0, 1.0],
+         [2.0, 1.0],
+         [1.0, 3.0],
+         [3.0, 2.0],
+         [0.0, 4.0]]
+let y = [-0.5, 1.5, -6.5, 0.5, -11.5]
+
+# --- model + loss --------------------------------------------------------
+fn predict(w, b, X) = X @ w + b
+
+fn loss(w, b) {
+  let err = predict(w, b, X) - y
+  mean(err * err)
+}
+
+# --- gradient descent ----------------------------------------------------
+let w = [0.0, 0.0]
+let b = 0.0
+let lr = 0.05
+
+for step in range(400) {
+  let g = grads(loss)(w, b)
+  w = w - g[0] * lr
+  b = b - g[1] * lr
+  if step % 100 == 0 {
+    print("step", step, "loss", loss(w, b))
+  }
+}
+
+print("")
+print("learned w =", w, "  (target [2, -3])")
+print("learned b =", b, "  (target 0.5)")
+print("final loss =", loss(w, b))
