@@ -1042,8 +1042,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}
-	case "cumsum", "cumprod", "cummax", "cummin":
-		// A cumulative scan preserves the input's shape.
+	case "cumsum", "cumprod", "cummax", "cummin", "floor", "ceil", "round":
+		// A cumulative scan or elementwise rounding preserves the input's shape.
 		if t, ok := argTypes[0].(tTensor); ok {
 			return tTensor{dims: t.dims}
 		}
@@ -1408,4 +1408,5 @@ var builtinNames = map[string]bool{
 	"cumsum": true, "cumprod": true, "cummax": true, "cummin": true,
 	"conv2d": true, "maxpool2d": true, "save": true, "load": true,
 	"gather": true, "permutation": true, "int": true,
+	"floor": true, "ceil": true, "round": true,
 }

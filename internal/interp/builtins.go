@@ -729,6 +729,25 @@ func (ip *Interp) installBuiltins() {
 	cumOp("cummax", math.Max)
 	cumOp("cummin", math.Min)
 
+	// Elementwise rounding (forward-only), handy for turning random draws into
+	// integer indices/tokens.
+	elemOp := func(name string, f func(float64) float64) {
+		def(name, 1, false, func(a []value.Value) (value.Value, error) {
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]float64, len(t.Data))
+			for i, v := range t.Data {
+				out[i] = f(v)
+			}
+			return tensor.New(out, append([]int{}, t.Shape...)), nil
+		})
+	}
+	elemOp("floor", math.Floor)
+	elemOp("ceil", math.Ceil)
+	elemOp("round", math.Round)
+
 	// gbm_fit(X, y) or gbm_fit(X, y, opts): train gradient-boosted trees on a
 	// [n, d] feature matrix and an [n] target/label vector. opts is an optional
 	// record of hyperparameters (rounds, learning_rate, max_depth, min_leaf,
