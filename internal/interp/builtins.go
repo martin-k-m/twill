@@ -86,6 +86,20 @@ func (ip *Interp) installBuiltins() {
 	}
 	binTensor("matmul", tensor.MatMul)
 	binTensor("dot", tensor.MatMul)
+	binTensor("conv2d", tensor.Conv2D)
+
+	// maxpool2d(x, k): non-overlapping k×k max pooling over each channel.
+	def("maxpool2d", 2, false, func(a []value.Value) (value.Value, error) {
+		x, err := asTensor(a[0], "maxpool2d")
+		if err != nil {
+			return nil, err
+		}
+		k, err := intOf(a[1], "maxpool2d")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.MaxPool2D(x, k)
+	})
 	binTensor("maximum", tensor.Maximum)
 	binTensor("minimum", tensor.Minimum)
 	binTensor("greater", tensor.Greater)

@@ -10,7 +10,13 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.18). The reference implementation is a single Go
+It spans the ML stack in one dependency-free binary: neural networks (including
+**convolutional nets**), gradient-boosted trees, and a differentiable
+backtester — all sharing the same autodiff engine, static shape checking, and
+reproducible-by-default execution. Finance is one domain it's built out for; it
+is not limited to it.
+
+It's an early prototype (v0.19). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -187,7 +193,10 @@ the tensor leaves with `map_leaves`/`zip_leaves`). Import with `import
 
 `examples/classifier.ra` trains a 3-class MLP with softmax cross-entropy and
 Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
-parameter list.
+parameter list. For deep learning there are differentiable `conv2d` and
+`maxpool2d` ops (plus `nn.conv`/`nn.conv_init`): `examples/cnn.ra` trains a real
+convolutional net — conv → relu → max-pool → dense — end-to-end with `grad`,
+the kernel included.
 
 Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
 `read_frame("data.csv")` (a header CSV as a *frame* — a record of named column

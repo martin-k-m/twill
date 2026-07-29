@@ -11,6 +11,11 @@ import "optim.ra"
 # Affine layer: y = W @ x + b.
 fn dense(W, b, x) = W @ x + b
 
+# 2-D convolution layer. `layer` is [kernel, bias] where kernel is
+# [Cout, Cin, KH, KW] and bias is [Cout, 1, 1]; x is [Cin, H, W]. The bias
+# broadcasts across the spatial dimensions of the [Cout, OH, OW] output.
+fn conv(layer, x) = conv2d(x, layer[0]) + layer[1]
+
 # ---- activations ---------------------------------------------------------
 # relu, tanh, sigmoid, and softmax are builtins; these are a few extras.
 
@@ -27,6 +32,12 @@ fn gelu(x) = 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
 fn he_init(nout, nin) = randn(nout, nin) * sqrt(2.0 / nin)
 
 fn xavier_init(nout, nin) = randn(nout, nin) * sqrt(1.0 / nin)
+
+# He-initialized convolution layer: kernel [Cout, Cin, KH, KW] with fan-in
+# Cin*KH*KW, and a zero bias [Cout, 1, 1]. Returns the [kernel, bias] pair the
+# `conv` layer expects.
+fn conv_init(cout, cin, kh, kw) =
+  [randn(cout, cin, kh, kw) * sqrt(2.0 / (cin * kh * kw)), zeros(cout, 1, 1)]
 
 # ---- losses --------------------------------------------------------------
 

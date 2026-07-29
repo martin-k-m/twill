@@ -320,6 +320,13 @@ Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
 `transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`,
 `einsum(spec, ...tensors)`.
 
+Convolutions (differentiable): `conv2d(input, weight)` is a 2-D cross-correlation
+with `input` shaped `[Cin, H, W]` and `weight` shaped `[Cout, Cin, KH, KW]`,
+producing `[Cout, H-KH+1, W-KW+1]` (valid padding, unit stride).
+`maxpool2d(input, k)` does non-overlapping `k×k` max pooling over each channel of
+a `[C, H, W]` tensor. `grad` flows through both, so a convolutional net trains
+like any other model — see `examples/cnn.ra`.
+
 `einsum` is a general Einstein-summation contraction and is differentiable:
 
 ```rust
@@ -369,8 +376,9 @@ target/label vector, and `gbm_predict(model, X)` scores a `[n, d]` matrix into a
 regression, `"logistic"` for binary classification, where predictions are
 probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
 
-Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
-initializers, losses), `optim.ra` (SGD, momentum, Adam), and `backtest.ra`
+Libraries written in Raster live in `std/`: `nn.ra` (layers including `dense`
+and `conv`, activations, initializers, losses), `optim.ra` (SGD, momentum,
+Adam), and `backtest.ra`
 (returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
 CAGR). The optimizers are container-agnostic — the same `sgd_step`/`adam_step`
 update a model held in a positional list or a named record. The backtest Sharpe

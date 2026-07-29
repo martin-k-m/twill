@@ -15,7 +15,7 @@ import (
 	"github.com/martin-k-m/raster/internal/value"
 )
 
-const version = "0.18.0"
+const version = "0.19.0"
 
 func main() {
 	args := os.Args[1:]

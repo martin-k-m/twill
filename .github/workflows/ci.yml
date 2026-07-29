@@ -53,6 +53,7 @@ jobs:
           ./raster examples/gbm.ra
           ./raster examples/backtest.ra
           ./raster examples/signal_opt.ra
+          ./raster examples/cnn.ra
           ./raster check examples/shapes.ra
           ./raster fmt examples/hello.ra >/dev/null
 
