@@ -1,0 +1,87 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Aster",
+  "scopeName": "source.aster",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#autodiff" },
+    { "include": "#builtins" },
+    { "include": "#numbers" },
+    { "include": "#function-def" },
+    { "include": "#function-call" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.aster",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.aster",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.aster",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.aster",
+          "match": "\\b(if|else|while|for|in|return|import)\\b"
+        },
+        {
+          "name": "storage.type.aster",
+          "match": "\\b(let|fn)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.aster",
+          "match": "\\b(and|or|not)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "name": "constant.language.aster",
+      "match": "\\b(true|false)\\b"
+    },
+    "autodiff": {
+      "name": "support.function.autodiff.aster",
+      "match": "\\b(grad|grads|value_and_grad)\\b"
+    },
+    "builtins": {
+      "name": "support.function.builtin.aster",
+      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|abs|pow|sum|mean|matmul|dot|transpose|tensor|scalar|zeros|ones|fill|randn|rand|eye|shape|len|item|range|list|str|map|zip)\\b"
+    },
+    "numbers": {
+      "name": "constant.numeric.aster",
+      "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?\\b"
+    },
+    "function-def": {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.aster" },
+        "2": { "name": "entity.name.function.aster" }
+      }
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.aster" }
+      }
+    },
+    "operators": {
+      "name": "keyword.operator.aster",
+      "match": "(@|\\+|-|\\*|/|%|\\^|==|!=|<=|>=|<|>|=|->)"
+    }
+  }
+}

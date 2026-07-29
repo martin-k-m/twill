@@ -1,0 +1,33 @@
+{
+  "name": "aster-lang",
+  "displayName": "Aster",
+  "description": "Syntax highlighting for the Aster tensor language (.ast).",
+  "version": "0.1.0",
+  "publisher": "aster-lang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/martin-k-m/aster.git"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "aster",
+        "aliases": ["Aster", "aster"],
+        "extensions": [".ast"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "aster",
+        "scopeName": "source.aster",
+        "path": "./syntaxes/aster.tmLanguage.json"
+      }
+    ]
+  }
+}

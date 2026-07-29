@@ -1,148 +1,166 @@
 # Aster
 
-**A lightweight, tensor-first programming language with automatic differentiation built into the language itself.**
+Aster is a small programming language for numeric and machine-learning code.
+Tensors are the built-in data type, differentiation is part of the language
+(`grad`, not a library call), and a static checker catches shape mistakes
+before a program runs.
 
-Aster treats tensors as the primitive data type and `grad` as a language keyword — not a library import. If you write a function, you can differentiate it. The result is ML code that reads like the math it implements, with none of the framework ceremony.
-
-```rust
-# The gradient of any function is just grad(f).
-fn f(x) = x * x * x        # f(x) = x³
-let df = grad(f)           # df(x) = 3x²
-
-print(df(2.0))             # 12
-```
+It's an early prototype (v0.2). The reference implementation is a single Go
+binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
-# Train a model in a dozen lines — no tape, no optimizer object, no boilerplate.
-fn loss(w, b) {
-  let err = X @ w + b - y
-  mean(err * err)
-}
-
-for step in range(400) {
-  let g = grads(loss)(w, b)   # gradients w.r.t. every parameter
-  w = w - g[0] * lr
-  b = b - g[1] * lr
-}
+fn f(x) = x * x * x     # f(x) = x^3
+let df = grad(f)        # df(x) = 3x^2
+print(df(2.0))          # 12
 ```
 
-> **Status:** early prototype (v0.1). The language runs today via a complete, zero-dependency reference interpreter. The design is stable enough to build on and simple enough to change. This is a foundation to iterate on, not a finished product.
+## Why
 
----
+Most machine-learning code today is Python plus a numeric framework. That works,
+but the framework is bolted onto a language that predates it: autodiff is a
+runtime library, tensor shapes are only known once you run the code, and a lot
+of glue sits between the math and the program.
 
-## Why Aster?
+Aster is an experiment in the other direction — a language built around
+differentiable tensor programs from the start. Three things fall out of that:
 
-Modern ML is written in a general-purpose language (Python) bolted to a numerical framework (PyTorch/JAX/TensorFlow). That stack is powerful but heavy: autodiff is a runtime library, shapes are discovered at runtime, and a mountain of glue code sits between your idea and the math.
+- Tensors are the primitive. Every number is a rank-0 tensor, vectors and
+  matrices are literals, and `@` is matrix multiply.
+- `grad` is a keyword-like builtin backed by a real reverse-mode autodiff
+  engine. No `requires_grad`, no `.backward()`, no optimizer objects.
+- Shapes are checked statically. `[2,3] @ [4]` is an error you see before the
+  program runs, not a stack trace halfway through training.
 
-Aster starts from the other end — **what if a language were designed around differentiable tensor programs from the first line?**
+The language is deliberately small. The whole implementation is a few thousand
+lines of Go you can read in a sitting.
 
-- **Tensors are the primitive.** Every number is a rank-0 tensor. Vectors and matrices are literals. `@` is matrix multiply.
-- **Differentiation is a keyword.** `grad(f)` and `grads(f)` are language builtins backed by a real reverse-mode autodiff engine. No `requires_grad`, no `.backward()` wiring, no optimizer objects.
-- **Small and readable.** The whole language is a few hundred lines. You can read the interpreter in an afternoon and understand exactly what your program does.
-- **Zero dependencies.** The reference implementation runs on plain Node.js. Nothing to install, nothing to compile, easy to embed.
+## Build and run
 
-## Quick start
-
-Requires **Node.js ≥ 22.6** (uses native TypeScript execution — no build step).
+You need Go 1.23 or newer.
 
 ```bash
 git clone https://github.com/martin-k-m/aster.git
 cd aster
-
-# Run a program
-node src/cli.ts examples/autodiff.ast
-
-# Or start the REPL
-node src/cli.ts
+go build -o aster ./cmd/aster
 ```
 
-```
-aster> let df = grad(fn(x) = sin(x))
-aster> df(0.0)
-1
-```
-
-Run the examples and tests:
+That produces a single `aster` binary.
 
 ```bash
-node src/cli.ts examples/linreg.ast   # linear regression by gradient descent
-node src/cli.ts examples/mlp.ast      # a 2-layer net learning XOR
-node --test                           # the test suite
+./aster examples/autodiff.ast      # run a program
+./aster check examples/shapes.ast  # shape-check without running
+./aster                            # start the REPL
+go test ./...                      # run the test suite
 ```
 
-## A tour of the language
+Without building first, `go run ./cmd/aster <file.ast>` works too.
+
+## The language in a few lines
 
 ```rust
 # Comments start with '#'.
 
-# Scalars, vectors, matrices — all tensors.
 let a = 3.0
-let v = [1.0, 2.0, 3.0]
-let m = [[1.0, 2.0], [3.0, 4.0]]
+let v = [1.0, 2.0, 3.0]           # a vector, shape [3]
+let m = [[1.0, 2.0], [3.0, 4.0]]  # a matrix, shape [2, 2]
 
-# Operators are elementwise; '@' is matrix/vector multiply.
-let dot = v @ v            # 14
-let mv  = m @ [1.0, 1.0]   # [3, 7]
+let d  = v @ v                    # dot product -> 14
+let mv = m @ [1.0, 1.0]           # matrix-vector -> [3, 7]
 
-# Functions: one-liners or blocks. The last expression is the return value.
-fn relu6(x) = if x > 6.0 { 6.0 } else { relu(x) }
+# Functions are one expression or a block; the last expression is returned.
 fn rms(t) {
   let n = len(t)
   sqrt(sum(t * t) / n)
 }
 
-# Control flow for training loops.
+# Loops for training code.
 let total = 0.0
 for i in range(10) { total = total + i }
 
-# Differentiation — the whole point.
+# Differentiation.
 fn energy(w) = sum(relu(w) * relu(w)) / 2.0
 let g = grad(energy)([-1.0, 2.0, -3.0, 4.0])   # [0, 2, 0, 4]
 ```
 
-See [`docs/language-guide.md`](docs/language-guide.md) for the full reference and [`docs/design.md`](docs/design.md) for the design rationale and roadmap.
+The [language guide](docs/language-guide.md) covers everything; the
+[design notes](docs/design.md) explain how it works and what's next.
 
-## Built-in autodiff
+## Differentiation
 
-| Builtin | Meaning |
+`grad`, `grads`, and `value_and_grad` turn a function into its derivative.
+
+| Builtin | Returns |
 | --- | --- |
-| `grad(f)` | Returns a function computing `df/d(arg₀)` (works for scalar and tensor args). |
-| `grads(f)` | Returns a function giving the gradient w.r.t. **every** argument, as a list. |
-| `value_and_grad(f)` | Returns a function giving `[f(x), df/d(arg₀)]` in one pass. |
+| `grad(f)` | a function computing `df/d(arg0)`, for scalar or tensor args |
+| `grads(f)` | a function returning the gradient of every argument, as a list |
+| `value_and_grad(f)` | a function returning `[f(x), df/d(arg0)]` |
 
-The target function must return a scalar (as is standard for a loss). Under the hood, Aster builds a reverse-mode autodiff graph only when a value is being differentiated, so ordinary evaluation stays fast.
+The function being differentiated has to return a scalar, as a loss does. The
+autodiff graph is only built while a value is being differentiated, so ordinary
+evaluation doesn't pay for it. Gradients also follow the structure of their
+argument, so a model held in a list gets a matching list of gradients back —
+see `examples/nn_xor.ast`.
 
-Differentiable operations include `+ - * / @ ^`, and `relu`, `sigmoid`, `tanh`, `exp`, `log`, `sin`, `cos`, `sqrt`, `sum`, `mean`, `abs`, `pow`.
+## Shape checking
 
-## Project layout
+Before running, Aster infers tensor shapes and reports the ones that can't line
+up. It only flags a mismatch when it's certain, so dynamic code (shapes that
+depend on runtime values) is left alone rather than guessed at.
 
 ```
-src/
-  lexer.ts        # source text  -> tokens
-  parser.ts       # tokens       -> AST (Pratt parser)
-  ast.ts          # AST node types
-  tensor.ts       # the differentiable tensor engine (autodiff core)
-  values.ts       # runtime value model + environments
-  interpreter.ts  # tree-walking evaluator
-  builtins.ts     # standard library (grad, math, tensor construction)
-  cli.ts          # `aster` command + REPL
-examples/         # runnable .ast programs
-test/             # node:test suite
-docs/             # language guide + design notes
+$ aster check bad.ast
+bad.ast:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 ```
 
-## Roadmap
+Function parameters can carry optional shape annotations that document and
+enforce a contract:
 
-Aster is intentionally minimal today. Natural next steps:
+```rust
+fn matvec(A: [3, 2], x: [2]) -> [3] {
+  A @ x
+}
+```
 
-- **Static shape checking** — catch shape mismatches before running, using shapes as part of the type system.
-- **A compiled/vectorized backend** — the current interpreter is for clarity, not speed; a bytecode VM or codegen to a numeric backend comes next.
-- **Broadcasting** beyond scalar↔tensor, and named axes.
-- **Higher-order autodiff** (grad of grad) and forward-mode.
-- **Records/structs** for model parameters, and a module system.
+Use `[2]` for a vector, `[3, 2]` for a matrix, `[]` for a scalar, and `_` for a
+dimension you don't want to pin down.
 
-Contributions and design discussion are welcome — see [`docs/design.md`](docs/design.md).
+## A small standard library
+
+`std/nn.ast` is a neural-network toolkit written in Aster itself — dense layers,
+a few activations and losses, and an SGD step built from `map`/`zip`. Import it
+with `import "std/nn.ast"` (adjust the path to your file). `examples/nn_xor.ast`
+trains a network with it.
+
+## Layout
+
+```
+cmd/aster/           the `aster` command (run / check / repl)
+internal/lexer/      source text -> tokens
+internal/parser/     tokens -> AST
+internal/ast/        AST node types
+internal/tensor/     the differentiable tensor engine
+internal/value/      runtime values and environments
+internal/interp/     the tree-walking interpreter + builtins
+internal/checker/    static shape analysis
+std/nn.ast           neural-net library written in Aster
+examples/            runnable programs
+editors/vscode/      syntax highlighting for .ast files
+docs/                language guide and design notes
+```
+
+## What's not done yet
+
+This is a prototype, and some of it is deliberately left for later:
+
+- It's interpreted. Tensor ops loop in Go; there's no vectorized or GPU
+  backend yet. The interpreter is the reference for the semantics.
+- Broadcasting is scalar-to-tensor only, not full NumPy-style broadcasting.
+- Autodiff is reverse-mode and first-order; `grad(grad(f))` isn't supported.
+- There are no records or a module namespace yet; imports drop definitions into
+  the global scope.
+
+The [design notes](docs/design.md) go into the roadmap.
 
 ## License
 
-[MIT](LICENSE) © 2026 Martin (martin-k-m)
+[MIT](LICENSE).

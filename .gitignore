@@ -1,13 +1,12 @@
-# Dependencies
-node_modules/
-
 # Build output
-dist/
-*.tsbuildinfo
+/aster
+/aster.exe
+/dist/
 
-# Logs
-*.log
-npm-debug.log*
+# Go
+*.test
+*.out
+coverage.txt
 
 # Editor / OS
 .DS_Store
@@ -15,7 +14,3 @@ npm-debug.log*
 .vscode/*
 !.vscode/extensions.json
 Thumbs.db
-
-# Env
-.env
-.env.local

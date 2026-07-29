@@ -1,0 +1,46 @@
+# nn_xor.ast — the XOR network again, but built on the nn library.
+#
+# The whole model lives in one list of parameters, so `grads` returns all four
+# gradients at once and `sgd_step` updates the list with map/zip. Compare this
+# to mlp.ast, which threads each parameter through by hand.
+
+import "../std/nn.ast"
+
+let X = [[0.0, 0.0],
+         [0.0, 1.0],
+         [1.0, 0.0],
+         [1.0, 1.0]]
+let Y = [0.0, 1.0, 1.0, 0.0]
+
+# params = [W1, b1, W2, b2]
+fn forward(p, x) {
+  let h = tanh(dense(p[0], p[1], x))
+  sigmoid(dense(p[2], p[3], h))
+}
+
+fn loss(p) {
+  let total = 0.0
+  for i in range(4) {
+    total = total + bce(forward(p, X[i]), Y[i])
+  }
+  total / 4.0
+}
+
+let p = [randn(4, 2), zeros(4), randn(1, 4), zeros(1)]
+let lr = 0.5
+
+# loss takes one argument (the whole param list), so grad(loss) returns a
+# gradient with the same list structure as p.
+for step in range(2000) {
+  let g = grad(loss)(p)
+  p = sgd_step(p, g, lr)
+  if step % 500 == 0 {
+    print("step", step, "loss", loss(p))
+  }
+}
+
+print("")
+print("predictions (want 0, 1, 1, 0):")
+for i in range(4) {
+  print("  input", X[i], "->", forward(p, X[i]))
+}

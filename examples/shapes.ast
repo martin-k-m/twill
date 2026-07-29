@@ -1,0 +1,24 @@
+# shapes.ast — static shape checking.
+#
+# Aster infers tensor shapes and checks them before running. Run
+#   aster check examples/shapes.ast
+# to shape-check without executing. Uncomment a bad line below to see the
+# checker reject the program.
+
+# Parameters can carry optional shape annotations. `[3, 2]` is a 3x2 matrix,
+# `[2]` a length-2 vector, `[]` a scalar, and `_` an unknown dimension.
+fn matvec(A: [3, 2], x: [2]) -> [3] {
+  A @ x
+}
+
+let A = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]   # shape [3, 2]
+let x = [1.0, 1.0]                              # shape [2]
+print("A @ x =", matvec(A, x))
+
+# Inference works without annotations too:
+let y = A @ x + [10.0, 20.0, 30.0]
+print("y =", y)
+
+# --- uncomment either line to see a shape error at check time ---
+# let bad = matvec(A, [1.0, 2.0, 3.0])   # argument [3] != expected [2]
+# let oops = [1.0, 2.0] @ [1.0, 2.0, 3.0]  # inner dims 2 != 3
