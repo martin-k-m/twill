@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.24.1
+
+Internal QA for the second-order engine — no API or behavior change.
+
+- Forward-mode (jet) closures are now wired only while a Hessian is being
+  computed, and the per-node jet state is boxed behind one pointer, so ordinary
+  training and `grad` are back to their pre-v0.24 speed and memory (the v0.24.0
+  release regressed the training hot path ~18% time / ~23% memory).
+- Added finite-difference cross-checks for the Hessian across broadcasting,
+  division, the general broadcast path, transcendentals, and matmul.
+
 ## 0.24.0
 
 Second-order autodiff — exact Hessians.
