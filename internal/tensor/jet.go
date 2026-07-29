@@ -2,6 +2,17 @@ package tensor
 
 import "fmt"
 
+// recordJets controls whether forward ops wire their forward-mode (jvp)
+// closures. It is off during normal training and gradient computation — so
+// there is zero overhead there — and turned on only while the forward graph for
+// a Hessian is being built. The interpreter evaluates sequentially, so a
+// package-level flag is safe.
+var recordJets bool
+
+// SetRecordJets toggles forward-mode (second-order) recording. Turn it on just
+// before building the graph a Hessian will differentiate, and off afterward.
+func SetRecordJets(on bool) { recordJets = on }
+
 // Forward-mode ("jet") automatic differentiation, used for second derivatives.
 //
 // The reverse-mode engine (Grad) is first-order and not re-differentiable. To
@@ -12,21 +23,25 @@ import "fmt"
 // full Hessian follows by polarization over basis directions.
 
 // jetBinary builds the forward-mode closure for an elementwise binary op with
-// broadcasting, given the op's first and second partial derivatives.
+// broadcasting, given the op's first and second partial derivatives. The
+// broadcast strides are computed lazily inside the closure, so wiring it onto a
+// forward op costs nothing until a second derivative is actually taken.
 func jetBinary(res, a, b *Tensor, da, db, daa, dab, dbb func(x, y, o float64) float64) func() {
-	shape := res.Shape
-	n := len(res.Data)
-	rank := len(shape)
-	effA := effStrides(a.Shape, shape)
-	effB := effStrides(b.Shape, shape)
 	return func() {
+		shape := res.Shape
+		n := len(res.Data)
+		rank := len(shape)
+		effA := effStrides(a.Shape, shape)
+		effB := effStrides(b.Shape, shape)
+		rd, rdd := res.jet.d, res.jet.dd
+		ajd, ajdd, bjd, bjdd := a.jet.d, a.jet.dd, b.jet.d, b.jet.dd
 		coord := make([]int, rank)
 		ia, ib := 0, 0
 		for o := 0; o < n; o++ {
 			x, y, ov := a.Data[ia], b.Data[ib], res.Data[o]
-			ax, bx := a.d[ia], b.d[ib]
-			res.d[o] = da(x, y, ov)*ax + db(x, y, ov)*bx
-			res.dd[o] = da(x, y, ov)*a.dd[ia] + db(x, y, ov)*b.dd[ib] +
+			ax, bx := ajd[ia], bjd[ib]
+			rd[o] = da(x, y, ov)*ax + db(x, y, ov)*bx
+			rdd[o] = da(x, y, ov)*ajdd[ia] + db(x, y, ov)*bjdd[ib] +
 				daa(x, y, ov)*ax*ax + 2*dab(x, y, ov)*ax*bx + dbb(x, y, ov)*bx*bx
 			for d := rank - 1; d >= 0; d-- {
 				coord[d]++
@@ -75,33 +90,37 @@ func (t *Tensor) forwardTopo() []*Tensor {
 // without forward-mode support.
 func directional(output, leaf *Tensor, topo []*Tensor, v []float64) ([]float64, []float64, error) {
 	for _, n := range topo {
-		if len(n.d) != len(n.Data) {
-			n.d = make([]float64, len(n.Data))
+		if n.jet == nil {
+			n.jet = &jetState{}
+		}
+		js := n.jet
+		if len(js.d) != len(n.Data) {
+			js.d = make([]float64, len(n.Data))
 		} else {
-			for i := range n.d {
-				n.d[i] = 0
+			for i := range js.d {
+				js.d[i] = 0
 			}
 		}
-		if len(n.dd) != len(n.Data) {
-			n.dd = make([]float64, len(n.Data))
+		if len(js.dd) != len(n.Data) {
+			js.dd = make([]float64, len(n.Data))
 		} else {
-			for i := range n.dd {
-				n.dd[i] = 0
+			for i := range js.dd {
+				js.dd[i] = 0
 			}
 		}
 	}
-	copy(leaf.d, v)
+	copy(leaf.jet.d, v)
 	for _, n := range topo {
 		if n == leaf {
 			continue
 		}
-		if n.jvp != nil {
-			n.jvp()
+		if n.jet.jvp != nil {
+			n.jet.jvp()
 		} else if n.p0 != nil || n.p1 != nil || len(n.pRest) > 0 {
 			return nil, nil, fmt.Errorf("second-order autodiff: the function uses an operation without forward-mode support")
 		}
 	}
-	return output.d, output.dd, nil
+	return output.jet.d, output.jet.dd, nil
 }
 
 // Hessian returns the n×n Hessian of a scalar output with respect to the input
