@@ -637,4 +637,3 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 		}
 	}), nil
 }
-
