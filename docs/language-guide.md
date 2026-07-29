@@ -371,11 +371,11 @@ probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
 
 Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
 initializers, losses), `optim.ra` (SGD, momentum, Adam), and `backtest.ra`
-(returns, moving averages, equity curves, drawdown, Sharpe, volatility, CAGR).
-The optimizers are container-agnostic — the same `sgd_step`/`adam_step` update a
-model held in a positional list or a named record. The backtest Sharpe is
-differentiable in the return series, so a smooth signal can be tuned by gradient
-ascent (`examples/backtest.ra`).
+(returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
+CAGR). The optimizers are container-agnostic — the same `sgd_step`/`adam_step`
+update a model held in a positional list or a named record. The backtest Sharpe
+and Sortino are differentiable in the return series, so a smooth signal can be
+tuned by gradient ascent through the backtest (`examples/signal_opt.ra`).
 
 ## Example
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.18.0
+
+Gradient-optimized trading signals.
+
+- Because the backtest Sharpe is differentiable in the return series and a smooth
+  signal's returns are differentiable in its weights, `grad` gives the gradient
+  of Sharpe with respect to the weights — so a signal can be tuned by gradient
+  ascent, straight through a backtest. This is the kind of end-to-end autodiff a
+  plain Python backtest can't do without JAX.
+- New example `signal_opt.ra`: learns a linear signal's weights on a synthetic
+  market by climbing its annualized Sharpe, recovering the true signal direction
+  and turning a negative-Sharpe asset into a positive-Sharpe strategy.
+- New `sortino(r, periods)` in `std/backtest.ra`: the annualized Sortino ratio
+  (downside-deviation-adjusted, differentiable).
+- Internal: removed dead code and added a CI lint job (`deadcode` + `staticcheck`)
+  so it can't return.
+
 ## 0.17.0
 
 Backtesting toolkit (finance roadmap #6).

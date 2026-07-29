@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.17). The reference implementation is a single Go
+It's an early prototype (v0.18). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -206,9 +206,11 @@ it; fits are deterministic. See `examples/gbm.ra`.
 
 For quant signals, `std/backtest.ra` plus the cumulative builtins
 (`cumsum`/`cumprod`/`cummax`) give a vectorized backtester — returns, moving
-averages, equity curves, drawdown, Sharpe, CAGR. The Sharpe is differentiable in
-the return series, so a signal can be tuned by gradient ascent
-(`examples/backtest.ra`). [docs/finance.md](docs/finance.md) lays out where
+averages, equity curves, drawdown, Sharpe, Sortino, CAGR (`examples/backtest.ra`).
+Because the Sharpe is differentiable in the return series, you can *tune a signal
+by gradient ascent straight through the backtest* — `examples/signal_opt.ra`
+learns a signal's weights by climbing its Sharpe, something a plain Python
+backtest can't do without JAX. [docs/finance.md](docs/finance.md) lays out where
 Raster aims to be better than a Python stack for financial ML, and how.
 
 Parameters can also live in a record with named fields instead of a positional
