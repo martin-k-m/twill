@@ -20,9 +20,15 @@ type Tensor struct {
 	p0, p1   *Tensor
 	pRest    []*Tensor
 	backward func()
-	// Forward-mode (jet) state, used only for second-order derivatives. d and dd
-	// hold the first and second directional derivatives along a seed direction;
-	// jvp recomputes them from the parents. See jet.go.
+	// Forward-mode state, allocated only during a second-derivative computation
+	// (nil in normal training and grad), so the common Tensor stays small.
+	jet *jetState
+}
+
+// jetState holds forward-mode (jet) data for one node: the first and second
+// directional derivatives along a seed direction, and the closure that
+// recomputes them from the node's parents. See jet.go.
+type jetState struct {
 	d, dd []float64
 	jvp   func()
 }
@@ -322,7 +328,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
-		res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
+		if recordJets {
+			res.jet = &jetState{jvp: jetBinary(res, a, b, da, db, daa, dab, dbb)}
+		}
 		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -354,7 +362,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
-		res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
+		if recordJets {
+			res.jet = &jetState{jvp: jetBinary(res, a, b, da, db, daa, dab, dbb)}
+		}
 		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -382,7 +392,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
-		res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
+		if recordJets {
+			res.jet = &jetState{jvp: jetBinary(res, a, b, da, db, daa, dab, dbb)}
+		}
 		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -434,7 +446,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	if !rg {
 		return res, nil
 	}
-	res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
+	if recordJets {
+		res.jet = &jetState{jvp: jetBinary(res, a, b, da, db, daa, dab, dbb)}
+	}
 	return track2(res, a, b, func() {
 		g := res.Grad
 		if a.RequiresGrad {
@@ -465,11 +479,15 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64, 
 	if !a.RequiresGrad {
 		return res
 	}
-	res.jvp = func() {
-		for i := 0; i < n; i++ {
-			d1 := df(ad[i], out[i])
-			res.d[i] = d1 * a.d[i]
-			res.dd[i] = d1*a.dd[i] + ddf(ad[i], out[i])*a.d[i]*a.d[i]
+	if recordJets {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			rd, rdd, ad1, add := res.jet.d, res.jet.dd, a.jet.d, a.jet.dd
+			for i := 0; i < n; i++ {
+				d1 := df(ad[i], out[i])
+				rd[i] = d1 * ad1[i]
+				rdd[i] = d1*add[i] + ddf(ad[i], out[i])*ad1[i]*ad1[i]
+			}
 		}
 	}
 	return track1(res, a, func() {
@@ -571,15 +589,16 @@ func reduceAll(a *Tensor, mean bool) *Tensor {
 		scale = 1.0 / float64(n)
 	}
 	res := Scalar(s * scale)
-	if a.RequiresGrad {
-		res.jvp = func() {
+	if recordJets && a.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
 			var d1, d2 float64
 			for i := 0; i < n; i++ {
-				d1 += a.d[i]
-				d2 += a.dd[i]
+				d1 += a.jet.d[i]
+				d2 += a.jet.dd[i]
 			}
-			res.d[0] = d1 * scale
-			res.dd[0] = d2 * scale
+			res.jet.d[0] = d1 * scale
+			res.jet.dd[0] = d2 * scale
 		}
 	}
 	return track1(res, a, func() {
@@ -661,17 +680,19 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 		outShape = []int{m, n}
 	}
 	res := &Tensor{Data: outData, Shape: outShape}
-	if a.RequiresGrad || b.RequiresGrad {
-		res.jvp = func() {
+	if recordJets && (a.RequiresGrad || b.RequiresGrad) {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
 			// (a@b)' = a'@b + a@b'; (a@b)'' = a''@b + 2 a'@b' + a@b''.
-			ad1 := mm(a.d, m, k, b.Data, n)
-			bd1 := mm(a.Data, m, k, b.d, n)
-			ad2 := mm(a.dd, m, k, b.Data, n)
-			cross := mm(a.d, m, k, b.d, n)
-			bd2 := mm(a.Data, m, k, b.dd, n)
-			for i := range res.d {
-				res.d[i] = ad1[i] + bd1[i]
-				res.dd[i] = ad2[i] + 2*cross[i] + bd2[i]
+			ad1 := mm(a.jet.d, m, k, b.Data, n)
+			bd1 := mm(a.Data, m, k, b.jet.d, n)
+			ad2 := mm(a.jet.dd, m, k, b.Data, n)
+			cross := mm(a.jet.d, m, k, b.jet.d, n)
+			bd2 := mm(a.Data, m, k, b.jet.dd, n)
+			rd, rdd := res.jet.d, res.jet.dd
+			for i := range rd {
+				rd[i] = ad1[i] + bd1[i]
+				rdd[i] = ad2[i] + 2*cross[i] + bd2[i]
 			}
 		}
 	}

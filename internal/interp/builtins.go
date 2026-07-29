@@ -1250,6 +1250,10 @@ func (ip *Interp) hessian(f value.Value, x value.Value) (value.Value, error) {
 		return nil, fmt.Errorf("hessian: the input must be a tensor")
 	}
 	leaf := tensor.Leaf(xt.Data, xt.Shape)
+	// Record forward-mode (jet) closures only while building this graph, so
+	// ordinary training and grad pay nothing for second-order support.
+	tensor.SetRecordJets(true)
+	defer tensor.SetRecordJets(false)
 	out, err := ip.applyToTensor(f, leaf)
 	if err != nil {
 		return nil, err
