@@ -21,7 +21,8 @@ func Maximum(a, b *Tensor) (*Tensor, error) {
 				return 0
 			}
 			return 1
-		})
+		},
+		zero2, zero2, zero2)
 }
 
 func Minimum(a, b *Tensor) (*Tensor, error) {
@@ -38,7 +39,8 @@ func Minimum(a, b *Tensor) (*Tensor, error) {
 				return 0
 			}
 			return 1
-		})
+		},
+		zero2, zero2, zero2)
 }
 
 // compareOp builds a non-differentiable elementwise comparison returning 1/0.
@@ -51,8 +53,7 @@ func compareOp(name string, cmp func(x, y float64) bool) func(a, b *Tensor) (*Te
 				}
 				return 0
 			},
-			func(x, y, o float64) float64 { return 0 },
-			func(x, y, o float64) float64 { return 0 })
+			zero2, zero2, zero2, zero2, zero2)
 	}
 }
 
@@ -65,7 +66,8 @@ var (
 )
 
 func Square(a *Tensor) *Tensor {
-	return unary(a, func(x float64) float64 { return x * x }, func(x, o float64) float64 { return 2 * x })
+	return unary(a, func(x float64) float64 { return x * x }, func(x, o float64) float64 { return 2 * x },
+		func(x, o float64) float64 { return 2 })
 }
 
 // Clip clamps values into [lo, hi]; the gradient passes through only the
@@ -78,7 +80,8 @@ func Clip(a *Tensor, lo, hi float64) *Tensor {
 				return 1
 			}
 			return 0
-		})
+		},
+		zeroU)
 }
 
 // Where selects a where cond is non-zero, else b (with broadcasting). It is
