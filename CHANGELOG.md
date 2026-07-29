@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0
+
+Faster core numerics (finance roadmap #2).
+
+- Full reductions (`sum`/`mean`) run across cores and stay deterministic:
+  fixed-size blocks are summed independently and their partials combined in a
+  fixed order, so the result is the same on any number of cores. ~3.3x on a
+  million-element reduction.
+- The backward passes for same-shape elementwise and unary ops run across cores
+  too (each goroutine writes a disjoint slice of the gradient), so gradient
+  computation on large tensors uses all cores — not just the forward pass.
+- Together with v0.12's parallel forward ops, both the value and the gradient of
+  large-tensor work (Monte Carlo, backtesting) are now multicore. Matmul is
+  already row-parallel and cache-friendly; explicit blocking is left for later.
+
 ## 0.12.0
 
 Multicore tensor ops (finance roadmap #1).

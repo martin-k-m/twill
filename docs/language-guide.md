@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.12. The language is small, so this is short.
+This is the reference for Raster v0.13. The language is small, so this is short.
 
 ## Running programs
 

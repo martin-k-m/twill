@@ -320,15 +320,19 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 			g := res.Grad
 			if a.RequiresGrad {
 				ga := a.ensureGrad()
-				for i := 0; i < n; i++ {
-					ga[i] += da(ad[i], bd[i], out[i]) * g[i]
-				}
+				parallelFor(n, func(lo, hi int) {
+					for i := lo; i < hi; i++ {
+						ga[i] += da(ad[i], bd[i], out[i]) * g[i]
+					}
+				})
 			}
 			if b.RequiresGrad {
 				gb := b.ensureGrad()
-				for i := 0; i < n; i++ {
-					gb[i] += db(ad[i], bd[i], out[i]) * g[i]
-				}
+				parallelFor(n, func(lo, hi int) {
+					for i := lo; i < hi; i++ {
+						gb[i] += db(ad[i], bd[i], out[i]) * g[i]
+					}
+				})
 			}
 		}), nil
 
@@ -453,9 +457,12 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) 
 	}
 	return track1(res, a, func() {
 		ga := a.ensureGrad()
-		for i := 0; i < n; i++ {
-			ga[i] += df(a.Data[i], out[i]) * res.Grad[i]
-		}
+		g := res.Grad
+		parallelFor(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				ga[i] += df(ad[i], out[i]) * g[i]
+			}
+		})
 	})
 }
 
@@ -525,10 +532,7 @@ func Sigmoid(a *Tensor) *Tensor {
 
 func reduceAll(a *Tensor, mean bool) *Tensor {
 	n := len(a.Data)
-	s := 0.0
-	for _, x := range a.Data {
-		s += x
-	}
+	s := parallelSum(a.Data)
 	scale := 1.0
 	if mean {
 		scale = 1.0 / float64(n)
@@ -540,9 +544,11 @@ func reduceAll(a *Tensor, mean bool) *Tensor {
 		}
 		ga := a.ensureGrad()
 		g := res.Grad[0] * scale
-		for i := 0; i < n; i++ {
-			ga[i] += g
-		}
+		parallelFor(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				ga[i] += g
+			}
+		})
 	})
 }
 

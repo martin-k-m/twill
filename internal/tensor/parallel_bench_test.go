@@ -34,3 +34,11 @@ func BenchmarkMatMul256(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkSumLarge(b *testing.B) {
+	x := makeTensor([]int{1000000})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Sum(x)
+	}
+}

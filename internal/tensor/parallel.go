@@ -53,3 +53,43 @@ func workersFor(work int) int {
 	}
 	return runtime.GOMAXPROCS(0)
 }
+
+// sumChunk is the fixed block size for parallelSum. Blocking by a fixed size
+// (not by core count) makes the result deterministic regardless of how many
+// goroutines run, and is slightly more accurate than a naive running sum.
+const sumChunk = 4096
+
+// parallelSum adds a slice deterministically: fixed-size blocks are summed
+// independently, then their partials are combined in order. The result is the
+// same on any number of cores.
+func parallelSum(data []float64) float64 {
+	n := len(data)
+	if n < minParallel {
+		s := 0.0
+		for _, x := range data {
+			s += x
+		}
+		return s
+	}
+	nblocks := (n + sumChunk - 1) / sumChunk
+	partials := make([]float64, nblocks)
+	runChunks(nblocks, workersFor(n), func(lo, hi int) {
+		for blk := lo; blk < hi; blk++ {
+			start := blk * sumChunk
+			end := start + sumChunk
+			if end > n {
+				end = n
+			}
+			s := 0.0
+			for i := start; i < end; i++ {
+				s += data[i]
+			}
+			partials[blk] = s
+		}
+	})
+	total := 0.0
+	for _, p := range partials {
+		total += p
+	}
+	return total
+}

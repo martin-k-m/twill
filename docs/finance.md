@@ -57,9 +57,12 @@ then widens to the other workloads.
    (each goroutine writes disjoint outputs, so results are bit-identical to a
    serial run). Measured ~2–4.5× on large ops; small tensors stay serial. This
    is the single biggest pure-Go speed lever for Monte-Carlo and backtesting.
-2. **Faster core numerics.** Cache-blocked matmul, parallel deterministic
-   reductions, and parallel backward passes; keep the current engine as the
-   reference.
+2. **Faster core numerics.** *(delivered v0.13)* Full reductions (`sum`/`mean`)
+   are parallel and deterministic (fixed-block partials, ~3.3× on large data),
+   and the backward passes for elementwise/unary ops run across cores too — so
+   both the forward and the gradient use all cores on large tensors. (Matmul is
+   already row-parallel and cache-friendly; explicit blocking is a later
+   micro-optimization.)
 3. **Data I/O.** CSV is here (`read_csv`); add Parquet/Arrow and a time-indexed
    frame type. Finance is data-first.
 4. **Dimensioned types.** Optional units on quantities (USD, bps, years) checked
