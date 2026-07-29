@@ -1041,6 +1041,14 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			return tTensor{dims: t.dims}
 		}
 		return tUnknown{}
+	case "conv2d":
+		return convResult(argTypes)
+	case "maxpool2d":
+		// [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
+		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) == 3 {
+			return tTensor{dims: []int{t.dims[0], -1, -1}}
+		}
+		return tTensor{dims: []int{-1, -1, -1}}
 	case "gbm_fit":
 		// An opaque model value.
 		return tUnknown{}
@@ -1090,6 +1098,30 @@ func (c *checker) inferEinsum(ex *ast.Call, argTypes []Type) Type {
 		return tUnknown{}
 	}
 	return tTensor{dims: out}
+}
+
+// convResult infers the output shape of conv2d: input [Cin, H, W] and weight
+// [Cout, Cin, KH, KW] give [Cout, H-KH+1, W-KW+1], with any unknown dimension
+// left as -1.
+func convResult(argTypes []Type) Type {
+	dims := []int{-1, -1, -1}
+	if len(argTypes) != 2 {
+		return tTensor{dims: dims}
+	}
+	in, okIn := argTypes[0].(tTensor)
+	w, okW := argTypes[1].(tTensor)
+	if okW && len(w.dims) == 4 {
+		dims[0] = w.dims[0] // Cout
+		if okIn && len(in.dims) == 3 {
+			if in.dims[1] >= 0 && w.dims[2] >= 0 {
+				dims[1] = in.dims[1] - w.dims[2] + 1
+			}
+			if in.dims[2] >= 0 && w.dims[3] >= 0 {
+				dims[2] = in.dims[2] - w.dims[3] + 1
+			}
+		}
+	}
+	return tTensor{dims: dims}
 }
 
 // reduceResult handles sum/mean/max/min: no axis reduces to a scalar; a
@@ -1358,4 +1390,5 @@ var builtinNames = map[string]bool{
 	"read_frame": true, "write_frame": true, "columns": true, "field": true,
 	"with_field": true, "gbm_fit": true, "gbm_predict": true,
 	"cumsum": true, "cumprod": true, "cummax": true, "cummin": true,
+	"conv2d": true, "maxpool2d": true,
 }

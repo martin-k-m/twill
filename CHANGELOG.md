@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.19.0
+
+Convolutional neural networks — general deep learning, not just MLPs.
+
+- New differentiable builtins `conv2d(input, weight)` and `maxpool2d(input, k)`.
+  `conv2d` is a 2-D cross-correlation (`input` `[Cin, H, W]`, `weight`
+  `[Cout, Cin, KH, KW]` → `[Cout, H-KH+1, W-KW+1]`); `maxpool2d` does
+  non-overlapping `k×k` max pooling per channel. Both have gradient-checked
+  backward passes (input and weight), so `grad` trains a conv net end-to-end.
+- New `std/nn.ra` helpers: `conv` (a conv layer with per-channel bias) and
+  `conv_init` (He-initialized kernel + zero bias).
+- New example `cnn.ra`: a real conv net (conv → relu → max-pool → dense →
+  sigmoid) that learns to tell vertical from horizontal bars in noisy images,
+  trained with Adam over the whole model (the nested conv kernel included).
+- The checker infers conv/pool output shapes where the inputs are known.
+- Positioning: Raster now spans the ML stack — neural nets (incl. CNNs),
+  gradient-boosted trees, and backtesting — in one dependency-free binary.
+
 ## 0.18.0
 
 Gradient-optimized trading signals.
