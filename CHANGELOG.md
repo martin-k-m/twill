@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.24.0
+
+Second-order autodiff — exact Hessians.
+
+- New `hessian(f)(x)` returns the matrix of second partial derivatives of a
+  scalar function, exact (not finite differences). Together with `grad` it
+  enables Newton's method and curvature analysis.
+- Implemented as forward-mode 2-jets: each supported op now propagates a first
+  and second directional derivative alongside its value, and a full Hessian
+  follows by seeding basis directions and polarization. The reverse-mode engine
+  is untouched — every existing gradient check still passes.
+- Supported ops: `+ - * / %`, the unary math (`exp`, `log`, `sin`, `cos`,
+  `tanh`, `sigmoid`, `sqrt`, `square`, `relu`, `abs`, `pow`, `neg`),
+  `matmul`/`@`, `sum`, `mean`, and comparisons. A function using an op outside
+  this set raises a clear error rather than returning a wrong Hessian.
+- New example `hessian.ra`: the Hessian of a quadratic form recovers `A + Aᵀ`,
+  and Newton's method minimizes a function with quadratic convergence.
+
 ## 0.23.0
 
 Full Jacobians — differentiation beyond scalar outputs.

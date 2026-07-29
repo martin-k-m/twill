@@ -174,6 +174,7 @@ grad(f)            # -> function returning df/d(arg0)
 grads(f)           # -> function returning [df/d(arg0), df/d(arg1), ...]
 value_and_grad(f)  # -> function returning [f(args), df/d(arg0)]
 jacobian(f)        # -> function returning the [m, n] Jacobian of a vector output
+hessian(f)         # -> function returning the [n, n] Hessian of a scalar output
 ```
 
 `grad`, `grads`, and `value_and_grad` require the differentiated function to
@@ -195,9 +196,13 @@ g[1]   # [1, 2]   d/db
 Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `log`, `sin`, `cos`, `sqrt`, `sum`, `mean`, `abs`, `pow`.
 
-Note: autodiff is reverse-mode and first-order. Vector outputs are handled by
-`jacobian` (one reverse pass per output), but nested differentiation
-(`grad(grad(f))`, Hessians) is not yet supported.
+`hessian(f)(x)` gives the exact matrix of second partial derivatives of a scalar
+function — second-order autodiff via forward-mode jets (see `examples/hessian.ra`
+for Newton's method). It supports functions built from arithmetic, the unary
+math functions, `matmul`, `sum`, and `mean`; a function using an unsupported op
+raises a clear error. The reverse-mode `grad` remains first-order, so the general
+nested form `grad(grad(f))` is not supported — use `hessian` for second
+derivatives.
 
 ## Shape checking
 

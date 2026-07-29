@@ -332,6 +332,18 @@ func (ip *Interp) installBuiltins() {
 		}}, nil
 	})
 
+	// hessian(f)(x): the matrix of second partial derivatives of a scalar f at
+	// x, by forward-mode 2-jets (exact second-order autodiff).
+	def("hessian", 1, false, func(a []value.Value) (value.Value, error) {
+		f := a[0]
+		return &value.Builtin{Name: "hessian(fn)", Arity: 1, Fn: func(call []value.Value) (value.Value, error) {
+			if len(call) != 1 {
+				return nil, fmt.Errorf("hessian(f) takes exactly one argument")
+			}
+			return ip.hessian(f, call[0])
+		}}, nil
+	})
+
 	// Higher-order list helpers.
 	def("map", 2, false, func(a []value.Value) (value.Value, error) {
 		f := a[0]
@@ -1228,6 +1240,25 @@ func (ip *Interp) jacobian(f value.Value, x value.Value) (value.Value, error) {
 		}
 	}
 	return tensor.New(jac, []int{m, n}), nil
+}
+
+// hessian computes the Hessian of a scalar function f at x by forward-mode
+// second-order autodiff over the graph built from a single input leaf.
+func (ip *Interp) hessian(f value.Value, x value.Value) (value.Value, error) {
+	xt, ok := x.(*tensor.Tensor)
+	if !ok {
+		return nil, fmt.Errorf("hessian: the input must be a tensor")
+	}
+	leaf := tensor.Leaf(xt.Data, xt.Shape)
+	out, err := ip.applyToTensor(f, leaf)
+	if err != nil {
+		return nil, err
+	}
+	h, n, err := tensor.Hessian(out, leaf)
+	if err != nil {
+		return nil, err
+	}
+	return tensor.New(h, []int{n, n}), nil
 }
 
 // applyToTensor calls a one-argument function and requires a tensor result.

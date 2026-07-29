@@ -20,6 +20,11 @@ type Tensor struct {
 	p0, p1   *Tensor
 	pRest    []*Tensor
 	backward func()
+	// Forward-mode (jet) state, used only for second-order derivatives. d and dd
+	// hold the first and second directional derivatives along a seed direction;
+	// jvp recomputes them from the parents. See jet.go.
+	d, dd []float64
+	jvp   func()
 }
 
 func numel(shape []int) int {
@@ -291,7 +296,8 @@ func effStrides(inShape, outShape []int) []int {
 }
 
 func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
-	da func(x, y, o float64) float64, db func(x, y, o float64) float64) (*Tensor, error) {
+	da func(x, y, o float64) float64, db func(x, y, o float64) float64,
+	daa, dab, dbb func(x, y, o float64) float64) (*Tensor, error) {
 	shape, ok := BroadcastShape(a.Shape, b.Shape)
 	if !ok {
 		return nil, fmt.Errorf("shape mismatch: cannot broadcast %v with %v", a.Shape, b.Shape)
@@ -316,6 +322,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
+		res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
 		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -347,6 +354,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
+		res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
 		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -374,6 +382,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		if !rg {
 			return res, nil
 		}
+		res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
 		return track2(res, a, b, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -425,6 +434,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	if !rg {
 		return res, nil
 	}
+	res.jvp = jetBinary(res, a, b, da, db, daa, dab, dbb)
 	return track2(res, a, b, func() {
 		g := res.Grad
 		if a.RequiresGrad {
@@ -442,7 +452,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	}), nil
 }
 
-func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) *Tensor {
+func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64, ddf func(x, o float64) float64) *Tensor {
 	n := len(a.Data)
 	out := make([]float64, n)
 	ad := a.Data
@@ -455,6 +465,13 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) 
 	if !a.RequiresGrad {
 		return res
 	}
+	res.jvp = func() {
+		for i := 0; i < n; i++ {
+			d1 := df(ad[i], out[i])
+			res.d[i] = d1 * a.d[i]
+			res.dd[i] = d1*a.dd[i] + ddf(ad[i], out[i])*a.d[i]*a.d[i]
+		}
+	}
 	return track1(res, a, func() {
 		ga := a.ensureGrad()
 		g := res.Grad
@@ -466,33 +483,48 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) 
 	})
 }
 
+// zero2 is the constant-zero second derivative used by ops that are (locally)
+// linear in an argument.
+func zero2(x, y, o float64) float64 { return 0 }
+
 func Add(a, b *Tensor) (*Tensor, error) {
+	one := func(x, y, o float64) float64 { return 1 }
 	return broadcastBinary(a, b, func(x, y float64) float64 { return x + y },
-		func(x, y, o float64) float64 { return 1 }, func(x, y, o float64) float64 { return 1 })
+		one, one, zero2, zero2, zero2)
 }
 func Sub(a, b *Tensor) (*Tensor, error) {
 	return broadcastBinary(a, b, func(x, y float64) float64 { return x - y },
-		func(x, y, o float64) float64 { return 1 }, func(x, y, o float64) float64 { return -1 })
+		func(x, y, o float64) float64 { return 1 }, func(x, y, o float64) float64 { return -1 },
+		zero2, zero2, zero2)
 }
 func Mul(a, b *Tensor) (*Tensor, error) {
 	return broadcastBinary(a, b, func(x, y float64) float64 { return x * y },
-		func(x, y, o float64) float64 { return y }, func(x, y, o float64) float64 { return x })
+		func(x, y, o float64) float64 { return y }, func(x, y, o float64) float64 { return x },
+		zero2, func(x, y, o float64) float64 { return 1 }, zero2)
 }
 func Div(a, b *Tensor) (*Tensor, error) {
 	return broadcastBinary(a, b, func(x, y float64) float64 { return x / y },
-		func(x, y, o float64) float64 { return 1 / y }, func(x, y, o float64) float64 { return -x / (y * y) })
+		func(x, y, o float64) float64 { return 1 / y }, func(x, y, o float64) float64 { return -x / (y * y) },
+		zero2,
+		func(x, y, o float64) float64 { return -1 / (y * y) },
+		func(x, y, o float64) float64 { return 2 * x / (y * y * y) })
 }
 func Mod(a, b *Tensor) (*Tensor, error) {
 	return broadcastBinary(a, b, func(x, y float64) float64 { return x - math.Floor(x/y)*y },
-		func(x, y, o float64) float64 { return 1 }, func(x, y, o float64) float64 { return -math.Floor(x / y) })
+		func(x, y, o float64) float64 { return 1 }, func(x, y, o float64) float64 { return -math.Floor(x / y) },
+		zero2, zero2, zero2)
 }
+
+// zeroU is the constant-zero second derivative for (locally) linear unary ops.
+func zeroU(x, o float64) float64 { return 0 }
 
 func PowScalar(a *Tensor, p float64) *Tensor {
 	return unary(a, func(x float64) float64 { return math.Pow(x, p) },
-		func(x, o float64) float64 { return p * math.Pow(x, p-1) })
+		func(x, o float64) float64 { return p * math.Pow(x, p-1) },
+		func(x, o float64) float64 { return p * (p - 1) * math.Pow(x, p-2) })
 }
 func Neg(a *Tensor) *Tensor {
-	return unary(a, func(x float64) float64 { return -x }, func(x, o float64) float64 { return -1 })
+	return unary(a, func(x float64) float64 { return -x }, func(x, o float64) float64 { return -1 }, zeroU)
 }
 func Relu(a *Tensor) *Tensor {
 	return unary(a, func(x float64) float64 {
@@ -505,29 +537,30 @@ func Relu(a *Tensor) *Tensor {
 			return 1
 		}
 		return 0
-	})
+	}, zeroU)
 }
 func Exp(a *Tensor) *Tensor {
-	return unary(a, math.Exp, func(x, o float64) float64 { return o })
+	return unary(a, math.Exp, func(x, o float64) float64 { return o }, func(x, o float64) float64 { return o })
 }
 func Log(a *Tensor) *Tensor {
-	return unary(a, math.Log, func(x, o float64) float64 { return 1 / x })
+	return unary(a, math.Log, func(x, o float64) float64 { return 1 / x }, func(x, o float64) float64 { return -1 / (x * x) })
 }
 func Sin(a *Tensor) *Tensor {
-	return unary(a, math.Sin, func(x, o float64) float64 { return math.Cos(x) })
+	return unary(a, math.Sin, func(x, o float64) float64 { return math.Cos(x) }, func(x, o float64) float64 { return -o })
 }
 func Cos(a *Tensor) *Tensor {
-	return unary(a, math.Cos, func(x, o float64) float64 { return -math.Sin(x) })
+	return unary(a, math.Cos, func(x, o float64) float64 { return -math.Sin(x) }, func(x, o float64) float64 { return -o })
 }
 func Sqrt(a *Tensor) *Tensor {
-	return unary(a, math.Sqrt, func(x, o float64) float64 { return 0.5 / o })
+	return unary(a, math.Sqrt, func(x, o float64) float64 { return 0.5 / o }, func(x, o float64) float64 { return -0.25 / (o * o * o) })
 }
 func Tanh(a *Tensor) *Tensor {
-	return unary(a, math.Tanh, func(x, o float64) float64 { return 1 - o*o })
+	return unary(a, math.Tanh, func(x, o float64) float64 { return 1 - o*o }, func(x, o float64) float64 { return -2 * o * (1 - o*o) })
 }
 func Sigmoid(a *Tensor) *Tensor {
 	return unary(a, func(x float64) float64 { return 1 / (1 + math.Exp(-x)) },
-		func(x, o float64) float64 { return o * (1 - o) })
+		func(x, o float64) float64 { return o * (1 - o) },
+		func(x, o float64) float64 { return o * (1 - o) * (1 - 2*o) })
 }
 
 func reduceAll(a *Tensor, mean bool) *Tensor {
@@ -538,6 +571,17 @@ func reduceAll(a *Tensor, mean bool) *Tensor {
 		scale = 1.0 / float64(n)
 	}
 	res := Scalar(s * scale)
+	if a.RequiresGrad {
+		res.jvp = func() {
+			var d1, d2 float64
+			for i := 0; i < n; i++ {
+				d1 += a.d[i]
+				d2 += a.dd[i]
+			}
+			res.d[0] = d1 * scale
+			res.dd[0] = d2 * scale
+		}
+	}
 	return track1(res, a, func() {
 		if !a.RequiresGrad {
 			return
@@ -617,6 +661,20 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 		outShape = []int{m, n}
 	}
 	res := &Tensor{Data: outData, Shape: outShape}
+	if a.RequiresGrad || b.RequiresGrad {
+		res.jvp = func() {
+			// (a@b)' = a'@b + a@b'; (a@b)'' = a''@b + 2 a'@b' + a@b''.
+			ad1 := mm(a.d, m, k, b.Data, n)
+			bd1 := mm(a.Data, m, k, b.d, n)
+			ad2 := mm(a.dd, m, k, b.Data, n)
+			cross := mm(a.d, m, k, b.d, n)
+			bd2 := mm(a.Data, m, k, b.dd, n)
+			for i := range res.d {
+				res.d[i] = ad1[i] + bd1[i]
+				res.dd[i] = ad2[i] + 2*cross[i] + bd2[i]
+			}
+		}
+	}
 	return track2(res, a, b, func() {
 		g := res.Grad // flat length m*n
 		if a.RequiresGrad {
