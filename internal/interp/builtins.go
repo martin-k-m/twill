@@ -370,6 +370,22 @@ func (ip *Interp) installBuiltins() {
 		return &value.List{Items: out}, nil
 	})
 
+	// map_leaves(f, tree): apply f to every tensor leaf of a tree (a tensor, or
+	// a list/record nesting tensors), preserving the structure.
+	def("map_leaves", 2, false, func(a []value.Value) (value.Value, error) {
+		return ip.mapLeaves(a[0], a[1]), nil
+	})
+
+	// zip_leaves(f, trees): given a list of same-shaped trees, call f with the
+	// list of leaves at each position, preserving the structure.
+	def("zip_leaves", 2, false, func(a []value.Value) (value.Value, error) {
+		trees, ok := a[1].(*value.List)
+		if !ok {
+			return nil, fmt.Errorf("zip_leaves expects a list of trees as its second argument")
+		}
+		return ip.zipLeaves(a[0], trees.Items), nil
+	})
+
 	// Tensor construction.
 	def("tensor", 1, false, func(a []value.Value) (value.Value, error) {
 		if t, ok := a[0].(*tensor.Tensor); ok {
@@ -570,6 +586,81 @@ func (ip *Interp) readCSV(path string) (value.Value, error) {
 		flat = append(flat, row...)
 	}
 	return tensor.New(flat, []int{len(rows), cols}), nil
+}
+
+// mapLeaves applies f to each tensor leaf of tree, preserving structure.
+func (ip *Interp) mapLeaves(f, tree value.Value) value.Value {
+	switch t := tree.(type) {
+	case *tensor.Tensor:
+		return ip.Apply(f, []value.Value{t}, 0)
+	case *value.List:
+		out := make([]value.Value, len(t.Items))
+		for i, it := range t.Items {
+			out[i] = ip.mapLeaves(f, it)
+		}
+		return &value.List{Items: out}
+	case *value.Record:
+		rec := value.NewRecord()
+		for _, k := range t.Keys {
+			rec.Set(k, ip.mapLeaves(f, t.Fields[k]))
+		}
+		return rec
+	default:
+		return tree // non-tensor leaves pass through unchanged
+	}
+}
+
+// zipLeaves walks a list of same-shaped trees in parallel, calling f with the
+// list of leaves at each position.
+func (ip *Interp) zipLeaves(f value.Value, trees []value.Value) value.Value {
+	if len(trees) == 0 {
+		ip.panicf(0, "zip_leaves needs at least one tree")
+	}
+	switch first := trees[0].(type) {
+	case *tensor.Tensor:
+		leaves := make([]value.Value, len(trees))
+		for i, tr := range trees {
+			if _, ok := tr.(*tensor.Tensor); !ok {
+				ip.panicf(0, "zip_leaves: trees have different structures")
+			}
+			leaves[i] = tr
+		}
+		return ip.Apply(f, []value.Value{&value.List{Items: leaves}}, 0)
+	case *value.List:
+		out := make([]value.Value, len(first.Items))
+		for i := range first.Items {
+			sub := make([]value.Value, len(trees))
+			for k, tr := range trees {
+				lst, ok := tr.(*value.List)
+				if !ok || i >= len(lst.Items) {
+					ip.panicf(0, "zip_leaves: trees have different structures")
+				}
+				sub[k] = lst.Items[i]
+			}
+			out[i] = ip.zipLeaves(f, sub)
+		}
+		return &value.List{Items: out}
+	case *value.Record:
+		rec := value.NewRecord()
+		for _, key := range first.Keys {
+			sub := make([]value.Value, len(trees))
+			for k, tr := range trees {
+				r, ok := tr.(*value.Record)
+				if !ok {
+					ip.panicf(0, "zip_leaves: trees have different structures")
+				}
+				v, present := r.Get(key)
+				if !present {
+					ip.panicf(0, "zip_leaves: record trees have different fields")
+				}
+				sub[k] = v
+			}
+			rec.Set(key, ip.zipLeaves(f, sub))
+		}
+		return rec
+	default:
+		return trees[0]
+	}
 }
 
 // --- autodiff core ---------------------------------------------------------

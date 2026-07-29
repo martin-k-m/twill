@@ -24,12 +24,18 @@ fn loss(m) {
 
 let model = { w1: nn.he_init(4, 2), b1: zeros(4),
               w2: nn.he_init(1, 4), b2: zeros(1) }
-let lr = 0.5
+# Adam optimizer state, shaped like the model. The optimizer walks the record's
+# fields for us, so there's no per-parameter update to write by hand.
+let m = nn.zeros_like(model)
+let v = nn.zeros_like(model)
+let lr = 0.05
 
 for step in range(2000) {
   let g = grad(loss)(model)
-  model = { w1: model.w1 - g.w1 * lr, b1: model.b1 - g.b1 * lr,
-            w2: model.w2 - g.w2 * lr, b2: model.b2 - g.b2 * lr }
+  let out = nn.adam_step(model, g, m, v, step + 1, lr, 0.9, 0.999, 0.00000001)
+  model = out[0]
+  m = out[1]
+  v = out[2]
   if step % 500 == 0 {
     print("step", step, "loss", loss(model))
   }

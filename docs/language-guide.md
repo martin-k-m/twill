@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.8. The language is small, so this is short.
+This is the reference for Raster v0.9. The language is small, so this is short.
 
 ## Running programs
 
@@ -295,13 +295,20 @@ Construction: `tensor(list)`, `scalar(x)`, `zeros(...shape)`, `ones(...shape)`,
 Lists / higher-order: `range(...)`, `list(...)`, `map(f, xs)`, `zip(...)`,
 `fold(f, init, xs)`, `append(xs, x)`, `enumerate(xs)`, `len(x)`.
 
+Trees (tensors nested in lists/records): `map_leaves(f, tree)` applies `f` to
+every tensor leaf; `zip_leaves(f, trees)` walks a list of same-shaped trees in
+parallel, calling `f` with the list of leaves at each position. Optimizers use
+these, so they work on any model structure.
+
 Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
 
 Data: `read_csv(path)` loads a file of numeric rows (comma- or
 whitespace-separated, `#` lines skipped) into a `[rows, cols]` tensor.
 
 Libraries written in Raster live in `std/`: `nn.ra` (layers, activations,
-initializers, losses) and `optim.ra` (SGD, momentum, Adam).
+initializers, losses) and `optim.ra` (SGD, momentum, Adam). The optimizers are
+container-agnostic — the same `sgd_step`/`adam_step` update a model held in a
+positional list or a named record.
 
 ## Example
 

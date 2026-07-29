@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.8). The reference implementation is a single Go
+It's an early prototype (v0.9). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -159,8 +159,9 @@ lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See th
 The `std/` libraries are written in Raster itself. `std/nn.ra` has dense layers,
 activations (`gelu`, `softplus`, ...), initializers (He, Xavier), and losses
 including softmax cross-entropy. `std/optim.ra` has SGD, momentum, and Adam that
-operate on a model held as a list of tensors. Import with `import "std/nn.ra"`
-(it pulls in the optimizers too).
+work on a model held either as a positional list or a named record (they walk
+the tensor leaves with `map_leaves`/`zip_leaves`). Import with `import
+"std/nn.ra"` (it pulls in the optimizers too).
 
 `examples/classifier.ra` trains a 3-class MLP with softmax cross-entropy and
 Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole

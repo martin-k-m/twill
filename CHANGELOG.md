@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0
+
+Container-agnostic optimizers (pytrees).
+
+- `map_leaves(f, tree)` and `zip_leaves(f, trees)` walk the tensor leaves nested
+  inside lists and records, preserving structure.
+- The standard optimizers (`sgd_step`, `momentum_step`, `adam_step`, and
+  `zeros_like`) are rewritten on top of them, so the same code trains a model
+  whether its parameters are a positional list or a named record.
+- `examples/records.ra` now trains its record-based model with the library's
+  Adam instead of a hand-written update.
+
 ## 0.8.0
 
 Einsum and earlier error detection.
