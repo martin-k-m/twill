@@ -1029,6 +1029,11 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tList{}
 	case "print":
 		return tUnit{}
+	case "save":
+		return tUnit{}
+	case "load":
+		// The loaded value's type depends on the file, so leave it unknown.
+		return tUnknown{}
 	case "str":
 		return tStr{}
 	case "grad", "grads", "value_and_grad", "tensor":
@@ -1390,5 +1395,5 @@ var builtinNames = map[string]bool{
 	"read_frame": true, "write_frame": true, "columns": true, "field": true,
 	"with_field": true, "gbm_fit": true, "gbm_predict": true,
 	"cumsum": true, "cumprod": true, "cummax": true, "cummin": true,
-	"conv2d": true, "maxpool2d": true,
+	"conv2d": true, "maxpool2d": true, "save": true, "load": true,
 }

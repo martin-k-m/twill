@@ -361,6 +361,12 @@ Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
 Data: `read_csv(path)` loads a file of numeric rows (comma- or
 whitespace-separated, `#` lines skipped) into a `[rows, cols]` tensor.
 
+Persistence: `save(value, path)` writes any value — a tensor, a record or list
+of tensors (a model's whole parameter tree), or a fitted `gbm` model — to a file
+in an exact binary format, and `load(path)` reads it back. Paths are relative to
+the running script. This is the deploy path: train once, `save` the model, and
+ship it with the single binary for inference (`examples/save_load.ra`).
+
 Frames: a frame is a record whose fields are named column tensors, so field
 access, slicing, and `grad` all work on it. `read_frame(path)` loads a CSV whose
 first row is a header into such a record; `write_frame(frame, path)` writes one

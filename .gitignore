@@ -8,6 +8,9 @@
 *.out
 coverage.txt
 
+# Model artifacts written by examples (examples/save_load.ra)
+*.bin
+
 # Editor / OS
 .DS_Store
 .idea/

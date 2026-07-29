@@ -591,6 +591,32 @@ func (ip *Interp) installBuiltins() {
 		return value.TheUnit, ip.writeFrame(rec, string(path))
 	})
 
+	// save(value, path): write any value (tensors, records, lists, or a fitted
+	// gbm model) to a file, so a trained model can be persisted and shipped.
+	def("save", 2, false, func(a []value.Value) (value.Value, error) {
+		path, ok := a[1].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("save expects a string path as its second argument")
+		}
+		if err := saveValue(a[0], ip.resolvePath(string(path))); err != nil {
+			return nil, fmt.Errorf("save: %v", err)
+		}
+		return value.TheUnit, nil
+	})
+
+	// load(path): read back a value written by save.
+	def("load", 1, false, func(a []value.Value) (value.Value, error) {
+		path, ok := a[0].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("load expects a string path")
+		}
+		v, err := loadValue(ip.resolvePath(string(path)))
+		if err != nil {
+			return nil, fmt.Errorf("load: %v", err)
+		}
+		return v, nil
+	})
+
 	// columns(record): the field names, in order, as a list of strings.
 	def("columns", 1, false, func(a []value.Value) (value.Value, error) {
 		rec, ok := a[0].(*value.Record)

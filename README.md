@@ -16,7 +16,7 @@ backtester — all sharing the same autodiff engine, static shape checking, and
 reproducible-by-default execution. Finance is one domain it's built out for; it
 is not limited to it.
 
-It's an early prototype (v0.19). The reference implementation is a single Go
+It's an early prototype (v0.20). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -202,6 +202,11 @@ Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
 `read_frame("data.csv")` (a header CSV as a *frame* — a record of named column
 tensors, so `df.close`, slicing, and `grad` all work on it). See
 `examples/frames.ra`, which computes realized volatility from a price series.
+
+Trained models persist with `save(model, "model.bin")` and `load("model.bin")` —
+any value, from a record of network weights to a fitted gradient-boosted forest,
+round-trips exactly. Train once, then ship the model with the single binary for
+inference (`examples/save_load.ra`).
 
 Randomness is **deterministic by default** (seeded), so a program reproduces
 exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.ra`

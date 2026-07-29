@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.20.0
+
+Model persistence — train once, save, and deploy.
+
+- New builtins `save(value, path)` and `load(path)` write and read any value —
+  tensors, records, lists (a model's whole pytree), scalars, strings, bools, and
+  fitted gradient-boosted models — in a compact, exact binary format (float64
+  bit patterns round-trip bit-for-bit).
+- `gbm.Model` now implements `encoding.BinaryMarshaler`/`BinaryUnmarshaler`, so a
+  trained forest can be persisted and reloaded with identical predictions.
+- New example `save_load.ra`: trains a classifier, saves it, loads it back, and
+  confirms the reloaded model predicts identically; a neural net's parameter
+  record round-trips too.
+- Paths resolve relative to the running script (like `read_frame`), via a shared
+  `resolvePath` helper.
+
 ## 0.19.0
 
 Convolutional neural networks — general deep learning, not just MLPs.
