@@ -10,6 +10,8 @@
 package gbm
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"runtime"
@@ -73,6 +75,88 @@ type Model struct {
 	NFeat     int     // number of input features expected
 	Objective Objective
 	trees     []tree
+}
+
+// MarshalBinary serializes the model to a compact, exact binary form, so a
+// trained model can be saved and loaded. It satisfies encoding.BinaryMarshaler.
+func (m *Model) MarshalBinary() ([]byte, error) {
+	var b bytes.Buffer
+	writeAll(&b, m.Base, m.LR, int32(m.NFeat), int32(m.Objective), int32(len(m.trees)))
+	for _, t := range m.trees {
+		writeAll(&b, int32(len(t.feature)),
+			toInt32(t.feature), t.threshold, toInt32(t.left), toInt32(t.right), t.leaf)
+	}
+	return b.Bytes(), nil
+}
+
+// UnmarshalBinary restores a model written by MarshalBinary. It satisfies
+// encoding.BinaryUnmarshaler.
+func (m *Model) UnmarshalBinary(data []byte) error {
+	b := bytes.NewReader(data)
+	var nfeat, obj, ntrees int32
+	if err := readAll(b, &m.Base, &m.LR, &nfeat, &obj, &ntrees); err != nil {
+		return err
+	}
+	if ntrees < 0 {
+		return fmt.Errorf("gbm: corrupt model (tree count %d)", ntrees)
+	}
+	m.NFeat = int(nfeat)
+	m.Objective = Objective(obj)
+	m.trees = make([]tree, ntrees)
+	for i := range m.trees {
+		var nnodes int32
+		if err := binary.Read(b, binary.LittleEndian, &nnodes); err != nil {
+			return err
+		}
+		if nnodes < 0 {
+			return fmt.Errorf("gbm: corrupt model (node count %d)", nnodes)
+		}
+		feat := make([]int32, nnodes)
+		thr := make([]float64, nnodes)
+		left := make([]int32, nnodes)
+		right := make([]int32, nnodes)
+		leaf := make([]float64, nnodes)
+		if err := readAll(b, feat, thr, left, right, leaf); err != nil {
+			return err
+		}
+		m.trees[i] = tree{feature: fromInt32(feat), threshold: thr, left: fromInt32(left), right: fromInt32(right), leaf: leaf}
+	}
+	return nil
+}
+
+// writeAll writes each value to b in little-endian order. Writes to a
+// bytes.Buffer never fail, so errors are dropped.
+func writeAll(b *bytes.Buffer, vs ...any) {
+	for _, v := range vs {
+		binary.Write(b, binary.LittleEndian, v)
+	}
+}
+
+// readAll reads each destination from r in little-endian order, stopping at the
+// first error.
+func readAll(r *bytes.Reader, vs ...any) error {
+	for _, v := range vs {
+		if err := binary.Read(r, binary.LittleEndian, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func toInt32(xs []int) []int32 {
+	out := make([]int32, len(xs))
+	for i, x := range xs {
+		out[i] = int32(x)
+	}
+	return out
+}
+
+func fromInt32(xs []int32) []int {
+	out := make([]int, len(xs))
+	for i, x := range xs {
+		out[i] = int(x)
+	}
+	return out
 }
 
 // String renders a short summary (used when a model is printed).

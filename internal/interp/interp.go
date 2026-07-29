@@ -70,6 +70,15 @@ func (ip *Interp) currentDir() string {
 	return wd
 }
 
+// resolvePath makes a relative path absolute against the running script's
+// directory (so file I/O is relative to the source file, not the process cwd).
+func (ip *Interp) resolvePath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(ip.currentDir(), path)
+}
+
 // Run parses and evaluates source, returning the last value.
 func (ip *Interp) Run(src string) (result value.Value, err error) {
 	prog, perr := parser.Parse(src)
