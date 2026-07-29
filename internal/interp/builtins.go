@@ -320,6 +320,18 @@ func (ip *Interp) installBuiltins() {
 		}}, nil
 	})
 
+	// jacobian(f)(x): the full matrix of partials of a vector output f(x) with
+	// respect to the vector input x — one reverse-mode pass per output element.
+	def("jacobian", 1, false, func(a []value.Value) (value.Value, error) {
+		f := a[0]
+		return &value.Builtin{Name: "jacobian(fn)", Arity: 1, Fn: func(call []value.Value) (value.Value, error) {
+			if len(call) != 1 {
+				return nil, fmt.Errorf("jacobian(f) takes exactly one argument")
+			}
+			return ip.jacobian(f, call[0])
+		}}, nil
+	})
+
 	// Higher-order list helpers.
 	def("map", 2, false, func(a []value.Value) (value.Value, error) {
 		f := a[0]
@@ -1173,6 +1185,59 @@ func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tens
 		all[i] = gradFromNode(n)
 	}
 	return tensor.Scalar(ot.Data[0]), gradFromNode(nodes[0]), all, nil
+}
+
+// jacobian computes the Jacobian of f at x by running one reverse-mode pass per
+// output component: row j is the gradient of the j-th output w.r.t. x. The
+// result is an [m, n] tensor for an m-vector output and an n-element input.
+func (ip *Interp) jacobian(f value.Value, x value.Value) (value.Value, error) {
+	xt, ok := x.(*tensor.Tensor)
+	if !ok {
+		return nil, fmt.Errorf("jacobian: the input must be a tensor")
+	}
+	n := len(xt.Data)
+	// A gradient-free pass to learn the output size.
+	y0, err := ip.applyToTensor(f, tensor.New(xt.Data, xt.Shape))
+	if err != nil {
+		return nil, err
+	}
+	m := len(y0.Data)
+	jac := make([]float64, m*n)
+	for j := 0; j < m; j++ {
+		leaf := tensor.Leaf(xt.Data, xt.Shape)
+		y, err := ip.applyToTensor(f, leaf)
+		if err != nil {
+			return nil, err
+		}
+		if len(y.Data) != m {
+			return nil, fmt.Errorf("jacobian: f returned a different output size on re-evaluation")
+		}
+		// Isolate the j-th output as a scalar and backpropagate it.
+		sel := make([]float64, m)
+		sel[j] = 1
+		picked, err := tensor.Mul(y, tensor.New(sel, append([]int{}, y.Shape...)))
+		if err != nil {
+			return nil, err
+		}
+		s := tensor.Sum(picked)
+		if err := s.Backward(); err != nil {
+			return nil, err
+		}
+		if leaf.Grad != nil {
+			copy(jac[j*n:(j+1)*n], leaf.Grad)
+		}
+	}
+	return tensor.New(jac, []int{m, n}), nil
+}
+
+// applyToTensor calls a one-argument function and requires a tensor result.
+func (ip *Interp) applyToTensor(f value.Value, arg *tensor.Tensor) (*tensor.Tensor, error) {
+	out := ip.Apply(f, []value.Value{arg}, 0)
+	yt, ok := out.(*tensor.Tensor)
+	if !ok {
+		return nil, fmt.Errorf("jacobian: f must return a tensor, got %s", value.Format(out))
+	}
+	return yt, nil
 }
 
 // --- argument coercion -----------------------------------------------------

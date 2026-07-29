@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.23.0
+
+Full Jacobians — differentiation beyond scalar outputs.
+
+- New `jacobian(f)(x)` returns the whole `[m, n]` matrix of partial derivatives
+  of a vector output `f(x)` (length `m`) with respect to a vector input `x`
+  (length `n`) — every output's sensitivity to every input, exact, by one
+  reverse-mode pass per output. This is the reverse-mode Jacobian (`jacrev`).
+- New example `jacobian.ra`: the Jacobian of a linear map recovers its matrix,
+  and a nonlinear map matches its analytic derivatives. Uses include
+  risk/sensitivity matrices, input attribution, and Jacobian regularization.
+- (Second-order autodiff — `grad(grad(f))`, Hessians — remains future work: it
+  needs a re-differentiable reverse pass, a dedicated engine change.)
+
 ## 0.22.0
 
 Sequences and attention — embeddings and a transformer, not just tables and

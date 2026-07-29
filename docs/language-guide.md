@@ -173,10 +173,15 @@ range(10)[2:5]        # works on lists too
 grad(f)            # -> function returning df/d(arg0)
 grads(f)           # -> function returning [df/d(arg0), df/d(arg1), ...]
 value_and_grad(f)  # -> function returning [f(args), df/d(arg0)]
+jacobian(f)        # -> function returning the [m, n] Jacobian of a vector output
 ```
 
-The differentiated function must return a scalar. A gradient has the same shape
-as the argument it corresponds to, including nested lists.
+`grad`, `grads`, and `value_and_grad` require the differentiated function to
+return a scalar; a gradient has the same shape as the argument it corresponds to,
+including nested lists. `jacobian(f)(x)` instead takes a function with a *vector*
+output and returns the full matrix of partials — row `i` is the gradient of
+output `i` — computed by one reverse-mode pass per output. See
+`examples/jacobian.ra`.
 
 ```rust
 grad(fn(x) = x * x)(4.0)                 # 8
@@ -190,8 +195,9 @@ g[1]   # [1, 2]   d/db
 Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `log`, `sin`, `cos`, `sqrt`, `sum`, `mean`, `abs`, `pow`.
 
-Note: autodiff is reverse-mode and first-order, so `grad(grad(f))` is not
-supported.
+Note: autodiff is reverse-mode and first-order. Vector outputs are handled by
+`jacobian` (one reverse pass per output), but nested differentiation
+(`grad(grad(f))`, Hessians) is not yet supported.
 
 ## Shape checking
 
