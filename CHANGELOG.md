@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.16.0
+
+Native gradient-boosted trees (finance roadmap #5).
+
+- A pure-Go gradient boosting engine (`internal/gbm`) using the second-order
+  (Newton) formulation, so squared-error regression and logistic binary
+  classification share one tree builder. No XGBoost, no Python, no native deps —
+  it stays a single static binary.
+- `gbm_fit(X, y)` or `gbm_fit(X, y, opts)` trains on a `[n, d]` feature matrix
+  and an `[n]` target/label vector. `opts` is a record of hyperparameters:
+  `rounds`, `learning_rate`, `max_depth`, `min_leaf`, `lambda`, `gamma`, and
+  `objective` (`"squared"` or `"logistic"`). It returns an opaque model.
+- `gbm_predict(model, X)` scores a `[n, d]` matrix, returning `[n]` raw scores
+  for regression or probabilities for a logistic model.
+- Deterministic: exact-greedy splits with pre-sorted features, and the
+  per-feature split search parallelizes across cores while reducing in fixed
+  order — so fits are bit-identical run to run regardless of scheduling.
+- New example `gbm.ra`: a train/test split on a synthetic loan book, fitting a
+  logistic default classifier and a regression model on the same features.
+
 ## 0.15.0
 
 Units of measure (finance roadmap #4).

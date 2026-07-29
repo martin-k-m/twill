@@ -1037,6 +1037,17 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}
+	case "gbm_fit":
+		// An opaque model value.
+		return tUnknown{}
+	case "gbm_predict":
+		// One score per row of the feature matrix (the second argument).
+		if len(argTypes) == 2 {
+			if t, ok := argTypes[1].(tTensor); ok && len(t.dims) >= 1 {
+				return tTensor{dims: []int{t.dims[0]}}
+			}
+		}
+		return tTensor{dims: []int{-1}}
 	}
 	return tUnknown{}
 }
@@ -1341,5 +1352,5 @@ var builtinNames = map[string]bool{
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
 	"einsum": true, "map_leaves": true, "zip_leaves": true, "seed": true,
 	"read_frame": true, "write_frame": true, "columns": true, "field": true,
-	"with_field": true,
+	"with_field": true, "gbm_fit": true, "gbm_predict": true,
 }

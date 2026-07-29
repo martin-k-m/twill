@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/martin-k-m/raster/internal/gbm"
 	"github.com/martin-k-m/raster/internal/tensor"
 	"github.com/martin-k-m/raster/internal/value"
 )
@@ -623,6 +624,125 @@ func (ip *Interp) installBuiltins() {
 		out.Set(string(name), a[2])
 		return out, nil
 	})
+
+	// gbm_fit(X, y) or gbm_fit(X, y, opts): train gradient-boosted trees on a
+	// [n, d] feature matrix and an [n] target/label vector. opts is an optional
+	// record of hyperparameters (rounds, learning_rate, max_depth, min_leaf,
+	// lambda, gamma, objective). Returns an opaque model.
+	def("gbm_fit", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) != 2 && len(a) != 3 {
+			return nil, fmt.Errorf("gbm_fit expects (X, y) or (X, y, opts)")
+		}
+		X, err := asTensor(a[0], "gbm_fit")
+		if err != nil {
+			return nil, err
+		}
+		if len(X.Shape) != 2 {
+			return nil, fmt.Errorf("gbm_fit: X must be a 2-D [n, d] tensor, got shape %v", X.Shape)
+		}
+		y, err := asTensor(a[1], "gbm_fit")
+		if err != nil {
+			return nil, err
+		}
+		if len(y.Shape) != 1 {
+			return nil, fmt.Errorf("gbm_fit: y must be a 1-D [n] tensor, got shape %v", y.Shape)
+		}
+		n, d := X.Shape[0], X.Shape[1]
+		if y.Shape[0] != n {
+			return nil, fmt.Errorf("gbm_fit: X has %d rows but y has %d", n, y.Shape[0])
+		}
+		p := gbm.DefaultParams()
+		if len(a) == 3 {
+			opts, ok := a[2].(*value.Record)
+			if !ok {
+				return nil, fmt.Errorf("gbm_fit: opts must be a record")
+			}
+			if err := gbmOptsFromRecord(opts, &p); err != nil {
+				return nil, err
+			}
+		}
+		return gbm.Fit(X.Data, y.Data, n, d, p)
+	})
+
+	// gbm_predict(model, X): score a [n, d] feature matrix with a fitted model,
+	// returning an [n] tensor (raw scores for regression, probabilities for a
+	// logistic model).
+	def("gbm_predict", 2, false, func(a []value.Value) (value.Value, error) {
+		m, ok := a[0].(*gbm.Model)
+		if !ok {
+			return nil, fmt.Errorf("gbm_predict: first argument must be a model from gbm_fit")
+		}
+		X, err := asTensor(a[1], "gbm_predict")
+		if err != nil {
+			return nil, err
+		}
+		if len(X.Shape) != 2 {
+			return nil, fmt.Errorf("gbm_predict: X must be a 2-D [n, d] tensor, got shape %v", X.Shape)
+		}
+		out, err := m.Predict(X.Data, X.Shape[0], X.Shape[1])
+		if err != nil {
+			return nil, err
+		}
+		return tensor.New(out, []int{X.Shape[0]}), nil
+	})
+}
+
+// gbmOptsFromRecord overrides GBM parameters from an opts record. Unknown keys
+// are ignored so the option set can grow without breaking callers.
+func gbmOptsFromRecord(opts *value.Record, p *gbm.Params) error {
+	getFloat := func(key string) (float64, bool, error) {
+		v, ok := opts.Get(key)
+		if !ok {
+			return 0, false, nil
+		}
+		f, err := scalarOf(v, "gbm_fit option "+key)
+		return f, true, err
+	}
+	if f, ok, err := getFloat("rounds"); err != nil {
+		return err
+	} else if ok {
+		p.Rounds = int(f)
+	}
+	if f, ok, err := getFloat("max_depth"); err != nil {
+		return err
+	} else if ok {
+		p.MaxDepth = int(f)
+	}
+	if f, ok, err := getFloat("min_leaf"); err != nil {
+		return err
+	} else if ok {
+		p.MinLeaf = int(f)
+	}
+	if f, ok, err := getFloat("learning_rate"); err != nil {
+		return err
+	} else if ok {
+		p.LearningRate = f
+	}
+	if f, ok, err := getFloat("lambda"); err != nil {
+		return err
+	} else if ok {
+		p.Lambda = f
+	}
+	if f, ok, err := getFloat("gamma"); err != nil {
+		return err
+	} else if ok {
+		p.Gamma = f
+	}
+	if v, ok := opts.Get("objective"); ok {
+		s, ok := v.(value.Str)
+		if !ok {
+			return fmt.Errorf("gbm_fit: objective must be a string")
+		}
+		switch string(s) {
+		case "squared":
+			p.Objective = gbm.Squared
+		case "logistic":
+			p.Objective = gbm.Logistic
+		default:
+			return fmt.Errorf("gbm_fit: unknown objective %q (use \"squared\" or \"logistic\")", s)
+		}
+	}
+	return nil
 }
 
 func (ip *Interp) readCSV(path string) (value.Value, error) {
