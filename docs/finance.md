@@ -87,8 +87,20 @@ then widens to the other workloads.
    `examples/gbm.ra`. Boosting-specific extras (early stopping, feature
    importance, categorical splits, missing-value handling) are natural
    follow-ups.
-6. **Backtesting toolkit.** Time model, event loop, and vectorized signal ops in
-   the standard library.
+6. **Backtesting toolkit.** *(delivered v0.17)* Cumulative-scan builtins
+   (`cumsum`/`cumprod`/`cummax`/`cummin`) plus a `std/backtest.ra` library:
+   returns, moving averages, equity curves, drawdown, Sharpe, volatility, and
+   CAGR — all vectorized on tensors, no event loop needed. The Sharpe ratio is
+   differentiable in the return series, so a smooth signal can be *tuned by
+   gradient ascent* — a genuine edge over a Python backtest. See
+   `examples/backtest.ra`.
+
+With #1–#6 delivered, the original roadmap is complete: Raster now covers
+parallel numerics, data frames, dimensioned types, gradient-boosted trees, and
+backtesting — the pure-Go, deterministic, single-binary core of the finance
+pitch. Natural next steps live in each item's notes above (e.g. GBM early
+stopping / feature importance, Parquet I/O, a differentiable-signal optimizer
+built on the backtest metrics).
 
 ## Non-goals
 

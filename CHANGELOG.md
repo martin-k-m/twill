@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.0
+
+Backtesting toolkit (finance roadmap #6).
+
+- New cumulative-scan builtins: `cumsum`, `cumprod`, `cummax`, `cummin` — the
+  vectorized primitives for signals, equity curves, and running peaks.
+- New `std/backtest.ra` library: `returns`/`log_returns`, `sma` (moving average
+  via prefix sums), `equity` (cumulative-product equity curve), `max_drawdown`,
+  `sharpe`, `ann_vol`, `total_return`, and `cagr`. The Sharpe ratio is
+  differentiable in the return series, so a smooth signal can be tuned by
+  gradient ascent.
+- New example `backtest.ra`: a long-only k-day momentum strategy on a synthetic
+  price series, reported against buy-and-hold (total return, CAGR, vol, Sharpe,
+  max drawdown), with the position lagged a day to avoid look-ahead.
+- This completes the finance roadmap in `docs/finance.md` (#1–#6).
+
 ## 0.16.0
 
 Native gradient-boosted trees (finance roadmap #5).

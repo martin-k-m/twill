@@ -1,0 +1,38 @@
+# backtest.ra — a vectorized momentum-strategy backtest.
+#
+# Builds a synthetic daily price series, runs a long-only momentum rule, and
+# reports the standard performance stats — Sharpe, CAGR, max drawdown — beside
+# buy-and-hold. Every step is a tensor operation; see std/backtest.ra.
+
+import "../std/backtest.ra" as bt
+
+seed(1)
+
+# A synthetic price path: a gently drifting geometric random walk.
+let n = 500
+let step = 0.0003 + 0.01 * randn(n)
+let price = 100.0 * exp(cumsum(step))
+
+# A k-day momentum signal: go long when today's price is above k days ago.
+let k = 20
+let up = greater(price[k:n], price[0:n - k])   # 1 if up over k days (length n-k)
+
+# Hold that position into the NEXT day to avoid look-ahead: the position for the
+# return from day t to t+1 is the signal known at day t.
+let pos = up[0:len(up) - 1]
+let fwd = price[k + 1:n] / price[k:n - 1] - 1.0   # next-day returns, aligned to pos
+let strat = pos * fwd
+
+print("days traded:", len(strat))
+
+print("--- momentum strategy ---")
+print("  total return:", bt.total_return(strat))
+print("  CAGR:", bt.cagr(strat, 252.0))
+print("  ann. vol:", bt.ann_vol(strat, 252.0))
+print("  Sharpe:", bt.sharpe(strat, 252.0))
+print("  max drawdown:", bt.max_drawdown(bt.equity(strat)))
+
+print("--- buy & hold ---")
+print("  total return:", bt.total_return(fwd))
+print("  Sharpe:", bt.sharpe(fwd, 252.0))
+print("  max drawdown:", bt.max_drawdown(bt.equity(fwd)))

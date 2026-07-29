@@ -625,6 +625,31 @@ func (ip *Interp) installBuiltins() {
 		return out, nil
 	})
 
+	// Cumulative scans over a sequence (a 1-D tensor's elements in order): each
+	// output element folds in the next input. Used to build signals, equity
+	// curves, and running peaks for backtests. Forward-only (no gradient).
+	cumOp := func(name string, f func(prev, x float64) float64) {
+		def(name, 1, false, func(a []value.Value) (value.Value, error) {
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]float64, len(t.Data))
+			for i, v := range t.Data {
+				if i == 0 {
+					out[i] = v
+				} else {
+					out[i] = f(out[i-1], v)
+				}
+			}
+			return tensor.New(out, append([]int{}, t.Shape...)), nil
+		})
+	}
+	cumOp("cumsum", func(prev, x float64) float64 { return prev + x })
+	cumOp("cumprod", func(prev, x float64) float64 { return prev * x })
+	cumOp("cummax", math.Max)
+	cumOp("cummin", math.Min)
+
 	// gbm_fit(X, y) or gbm_fit(X, y, opts): train gradient-boosted trees on a
 	// [n, d] feature matrix and an [n] target/label vector. opts is an optional
 	// record of hyperparameters (rounds, learning_rate, max_depth, min_leaf,
