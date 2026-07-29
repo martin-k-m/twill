@@ -90,19 +90,20 @@ them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
 `grad`, loops that reshape, or values read at runtime — those are left unknown.
 
-## Known limitations (v0.6)
+## Known limitations (v0.7)
 
 Deliberate, for a prototype:
 
-- Interpreted, not compiled. Tensor ops loop in Go (the elementwise/broadcast
-  hot path avoids per-element division, but there's still no vectorized or
-  native backend). The interpreter is the reference semantics.
+- Interpreted, not compiled. Tensor ops loop in Go; forward-only math skips the
+  backward closure and the hot path avoids per-element division, but each
+  differentiable op still allocates its output and tape node. Real speedups from
+  here need a bigger change (tensor/closure pooling or a bytecode VM). The
+  interpreter is the reference semantics.
 - Reverse-mode, first-order autodiff. No `grad(grad(f))`.
-- Shape checking is stronger than it was — annotations support shape variables
-  that must agree — but it's still best-effort, not a full type system that
-  catches every mismatch.
-- Records are structural (no declared record types the checker verifies across a
-  program), and record fields aren't mutable in place — you rebuild the record.
+- Shape checking is stronger than it was — shape variables, and declared record
+  types the checker verifies — but it's still best-effort: a function body is
+  only checked when it is called, so an unused function's mistakes aren't caught.
+- Record fields aren't mutable in place — you rebuild the record.
 - No named axes; broadcasting and reductions work on positional axes.
 
 ## Roadmap
@@ -115,8 +116,8 @@ Roughly in order of value:
    native library. Keep the interpreter as the reference.
 3. More autodiff: higher-order derivatives, forward mode, batching.
 4. Named axes and general einsum-style contraction.
-5. Declared record types the checker can verify, and record-aware optimizers in
-   the standard library.
+5. Check function bodies at definition (not only at call sites), and add
+   record-aware optimizers to the standard library.
 
 ## Non-goals for now
 

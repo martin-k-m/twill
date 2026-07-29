@@ -65,32 +65,43 @@ var TheUnit = Unit{}
 // --- environments ----------------------------------------------------------
 
 type Env struct {
-	vars   map[string]Value
+	vars   map[string]Value // allocated lazily on first Define
 	parent *Env
 }
 
+// NewEnv creates a scope. The backing map is not allocated until a variable is
+// defined, so scopes that only read outer variables cost nothing extra.
 func NewEnv(parent *Env) *Env {
-	return &Env{vars: map[string]Value{}, parent: parent}
+	return &Env{parent: parent}
 }
 
 func (e *Env) Get(name string) (Value, bool) {
 	for env := e; env != nil; env = env.parent {
-		if v, ok := env.vars[name]; ok {
-			return v, true
+		if env.vars != nil {
+			if v, ok := env.vars[name]; ok {
+				return v, true
+			}
 		}
 	}
 	return nil, false
 }
 
 // Define binds name in this scope.
-func (e *Env) Define(name string, v Value) { e.vars[name] = v }
+func (e *Env) Define(name string, v Value) {
+	if e.vars == nil {
+		e.vars = make(map[string]Value, 4)
+	}
+	e.vars[name] = v
+}
 
 // Assign updates the nearest existing binding, returning false if none exists.
 func (e *Env) Assign(name string, v Value) bool {
 	for env := e; env != nil; env = env.parent {
-		if _, ok := env.vars[name]; ok {
-			env.vars[name] = v
-			return true
+		if env.vars != nil {
+			if _, ok := env.vars[name]; ok {
+				env.vars[name] = v
+				return true
+			}
 		}
 	}
 	return false

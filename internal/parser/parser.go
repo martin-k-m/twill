@@ -117,6 +117,8 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseReturn()
 		case "import":
 			return p.parseImport()
+		case "type":
+			return p.parseTypeDecl()
 		}
 	}
 
@@ -606,13 +608,58 @@ func (p *parser) parseParam() (ast.Param, error) {
 	}
 	param := ast.Param{Name: name}
 	if p.match(":") {
-		shape, err := p.parseShapeAnno()
-		if err != nil {
-			return ast.Param{}, err
+		// A `[` starts a shape annotation; an identifier names a record type.
+		if p.check("[") {
+			shape, err := p.parseShapeAnno()
+			if err != nil {
+				return ast.Param{}, err
+			}
+			param.Shape = shape
+		} else {
+			typeName, err := p.expectIdent()
+			if err != nil {
+				return ast.Param{}, err
+			}
+			param.TypeName = typeName
 		}
-		param.Shape = shape
 	}
 	return param, nil
+}
+
+func (p *parser) parseTypeDecl() (ast.Stmt, error) {
+	line := p.next().Line // 'type'
+	name, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect("="); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect("{"); err != nil {
+		return nil, err
+	}
+	decl := &ast.TypeDecl{Name: name, Line: line}
+	for !p.check("}") && !p.atEnd() {
+		fieldName, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(":"); err != nil {
+			return nil, err
+		}
+		shape, err := p.parseShapeAnno()
+		if err != nil {
+			return nil, err
+		}
+		decl.Fields = append(decl.Fields, ast.TypeField{Name: fieldName, Shape: shape})
+		if !p.match(",") {
+			break
+		}
+	}
+	if _, err := p.expect("}"); err != nil {
+		return nil, err
+	}
+	return decl, nil
 }
 
 // parseShapeAnno parses "[d0, d1, ...]" where each dim is an integer or "_"

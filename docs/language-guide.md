@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.6. The language is small, so this is short.
+This is the reference for Raster v0.7. The language is small, so this is short.
 
 ## Running programs
 
@@ -225,6 +225,21 @@ grad(loss)({ w: [1.0, 2.0], b: 0.5 })   # { w: [1, 1], b: 1 }
 
 This makes a record a natural container for a model's parameters. A `{` starts a
 record only when it is followed by `name:`; otherwise it is a block.
+
+A record type can be declared and used to annotate a parameter. The checker then
+verifies that the record passed in has the declared fields with the declared
+shapes, and that field accesses name real fields:
+
+```rust
+type Model = { w: [3, 2], b: [3] }
+
+fn predict(m: Model, x: [2]) -> [3] {
+  m.w @ x + m.b
+}
+```
+
+Accessing a field a record doesn't have (`m.wieght`) is a checker error, whether
+the record is a literal or a declared type.
 
 ## Imports
 

@@ -259,6 +259,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	}
 	n := numel(shape)
 	out := make([]float64, n)
+	// When no input needs a gradient, skip building the backward closure
+	// entirely (parameter updates and other forward-only math hit this).
+	rg := a.RequiresGrad || b.RequiresGrad
 
 	// Fast paths for the common cases, avoiding index arithmetic entirely:
 	// equal shapes, and a scalar on either side.
@@ -269,6 +272,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 			out[i] = f(ad[i], bd[i])
 		}
 		res := &Tensor{Data: out, Shape: shape}
+		if !rg {
+			return res, nil
+		}
 		return track(res, []*Tensor{a, b}, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -291,6 +297,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 			out[i] = f(ad[i], bs)
 		}
 		res := &Tensor{Data: out, Shape: shape}
+		if !rg {
+			return res, nil
+		}
 		return track(res, []*Tensor{a, b}, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -313,6 +322,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 			out[i] = f(as, bd[i])
 		}
 		res := &Tensor{Data: out, Shape: shape}
+		if !rg {
+			return res, nil
+		}
 		return track(res, []*Tensor{a, b}, func() {
 			g := res.Grad
 			if a.RequiresGrad {
@@ -338,7 +350,6 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	coord := make([]int, rank)
 	ia, ib := 0, 0
 	// Record input offsets for the backward pass only when a gradient is needed.
-	rg := a.RequiresGrad || b.RequiresGrad
 	var iaHist, ibHist []int
 	if rg {
 		iaHist = make([]int, n)
@@ -362,6 +373,9 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 		}
 	}
 	res := &Tensor{Data: out, Shape: shape}
+	if !rg {
+		return res, nil
+	}
 	return track(res, []*Tensor{a, b}, func() {
 		g := res.Grad
 		if a.RequiresGrad {
@@ -386,10 +400,10 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64) 
 		out[i] = f(a.Data[i])
 	}
 	res := &Tensor{Data: out, Shape: append([]int(nil), a.Shape...)}
+	if !a.RequiresGrad {
+		return res
+	}
 	return track(res, []*Tensor{a}, func() {
-		if !a.RequiresGrad {
-			return
-		}
 		ga := a.ensureGrad()
 		for i := 0; i < n; i++ {
 			ga[i] += df(a.Data[i], out[i]) * res.Grad[i]

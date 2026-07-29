@@ -49,10 +49,12 @@ func (s ShapeAnno) ConcreteDims() []int {
 	return out
 }
 
-// Param is a function parameter with an optional shape annotation.
+// Param is a function parameter with an optional annotation: either a shape
+// (`x: [n, 2]`) or the name of a declared record type (`m: Model`).
 type Param struct {
-	Name  string
-	Shape *ShapeAnno // nil when unannotated
+	Name     string
+	Shape    *ShapeAnno // non-nil for a shape annotation
+	TypeName string     // non-empty for a record-type annotation
 }
 
 type Program struct {
@@ -105,6 +107,18 @@ type Import struct {
 	Line  int
 }
 
+// TypeDecl declares a record type: `type Name = { field: shape, ... }`.
+type TypeDecl struct {
+	Name   string
+	Fields []TypeField
+	Line   int
+}
+
+type TypeField struct {
+	Name  string
+	Shape *ShapeAnno
+}
+
 type ExprStmt struct {
 	X    Expr
 	Line int
@@ -117,6 +131,7 @@ func (s *While) Pos() int    { return s.Line }
 func (s *For) Pos() int      { return s.Line }
 func (s *Return) Pos() int   { return s.Line }
 func (s *Import) Pos() int   { return s.Line }
+func (s *TypeDecl) Pos() int { return s.Line }
 func (s *ExprStmt) Pos() int { return s.Line }
 
 func (s *Let) stmt()      {}
@@ -126,6 +141,7 @@ func (s *While) stmt()    {}
 func (s *For) stmt()      {}
 func (s *Return) stmt()   {}
 func (s *Import) stmt()   {}
+func (s *TypeDecl) stmt() {}
 func (s *ExprStmt) stmt() {}
 
 // --- expressions -----------------------------------------------------------

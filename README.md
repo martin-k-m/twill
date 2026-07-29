@@ -10,7 +10,7 @@ Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
 
-It's an early prototype (v0.6). The reference implementation is a single Go
+It's an early prototype (v0.7). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -170,9 +170,16 @@ tensor (comma- or whitespace-separated, `#` lines skipped).
 
 Parameters can also live in a record with named fields instead of a positional
 list. `grad` follows the record structure, so differentiating a loss over a
-record returns a record of gradients — see `examples/records.ra`. Libraries can
-be imported as a namespace with `import "std/nn.ra" as nn` and called as
-`nn.dense(...)`.
+record returns a record of gradients — see `examples/records.ra`. You can declare
+a record type and have the checker verify a model's fields and shapes:
+
+```rust
+type Model = { w: [3, 2], b: [3] }
+fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
+```
+
+Libraries can be imported as a namespace with `import "std/nn.ra" as nn` and
+called as `nn.dense(...)`.
 
 ## Layout
 

@@ -21,7 +21,13 @@ func (d Diagnostic) Error() string { return fmt.Sprintf("line %d: %s", d.Line, d
 
 // Check analyses a program and returns any diagnostics found.
 func Check(prog *ast.Program) []Diagnostic {
-	c := &checker{stack: map[ast.Node]bool{}}
+	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}}
+	// Register declared record types first so forward references resolve.
+	for _, s := range prog.Body {
+		if td, ok := s.(*ast.TypeDecl); ok {
+			c.registerType(td)
+		}
+	}
 	env := newEnv(nil)
 	for name := range builtinNames {
 		env.define(name, tBuiltin{name})
@@ -34,7 +40,16 @@ func Check(prog *ast.Program) []Diagnostic {
 
 type checker struct {
 	diags []Diagnostic
-	stack map[ast.Node]bool // user functions currently being inferred
+	stack map[ast.Node]bool  // user functions currently being inferred
+	types map[string]tRecord // declared record types
+}
+
+func (c *checker) registerType(td *ast.TypeDecl) {
+	fields := map[string]Type{}
+	for _, f := range td.Fields {
+		fields[f.Name] = tTensor{dims: f.Shape.ConcreteDims()}
+	}
+	c.types[td.Name] = tRecord{fields: fields}
 }
 
 func (c *checker) report(line int, format string, args ...any) {
@@ -161,6 +176,8 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		if st.Alias != "" {
 			env.define(st.Alias, tUnknown{})
 		}
+	case *ast.TypeDecl:
+		// Already registered in the pre-pass.
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)
 	case *ast.Block:
@@ -243,6 +260,8 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 			if ft, ok := rec.fields[ex.Name]; ok {
 				return ft
 			}
+			c.report(ex.Line, "record has no field %q", ex.Name)
+			return tUnknown{}
 		}
 		return tUnknown{}
 	case *ast.IfExpr:
@@ -430,14 +449,24 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	subst := map[string]int{}
 	scope := newEnv(fn.env)
 	for i, p := range fn.params {
-		if p.Shape != nil {
+		switch {
+		case p.TypeName != "":
+			expected, ok := c.types[p.TypeName]
+			if !ok {
+				c.report(ex.Line, "unknown type %q on parameter %q", p.TypeName, p.Name)
+				scope.define(p.Name, argTypes[i])
+				continue
+			}
+			c.checkRecordArg(ex.Line, i, p.Name, expected, argTypes[i])
+			scope.define(p.Name, expected) // field access in the body is typed
+		case p.Shape != nil:
 			if got, ok := argTypes[i].(tTensor); ok {
 				c.unify(ex.Line, i, p.Name, p.Shape.Dims, got.dims, subst)
 				scope.define(p.Name, got) // use the concrete arg shape in the body
 			} else {
 				scope.define(p.Name, tTensor{dims: p.Shape.ConcreteDims()})
 			}
-		} else {
+		default:
 			scope.define(p.Name, argTypes[i])
 		}
 	}
@@ -466,6 +495,31 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		return expected
 	}
 	return bodyType
+}
+
+// checkRecordArg verifies a record argument against a declared record type:
+// every declared field must be present with a matching shape.
+func (c *checker) checkRecordArg(line, argIdx int, name string, expected tRecord, arg Type) {
+	rec, ok := arg.(tRecord)
+	if !ok {
+		if _, isUnknown := arg.(tUnknown); !isUnknown {
+			c.report(line, "argument %d (%q) should be a record", argIdx+1, name)
+		}
+		return
+	}
+	for field, ft := range expected.fields {
+		got, present := rec.fields[field]
+		if !present {
+			c.report(line, "argument %d (%q) is missing field %q", argIdx+1, name, field)
+			continue
+		}
+		want, wok := ft.(tTensor)
+		gt, gok := got.(tTensor)
+		if wok && gok && fullyKnown(want) && fullyKnown(gt) && !shapeMatch(want, gt) {
+			c.report(line, "argument %d (%q) field %q is %s but the type declares %s",
+				argIdx+1, name, field, dimsString(gt), dimsString(want))
+		}
+	}
 }
 
 // unify checks an argument's shape against a parameter's annotation, recording

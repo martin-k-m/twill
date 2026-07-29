@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.0
+
+Declared record types and a faster interpreter.
+
+- Declared record types: `type Model = { w: [3, 2], b: [3] }`. A parameter can be
+  typed with it (`fn f(m: Model)`), and the checker verifies the record passed
+  in has the right fields with the right shapes.
+- Field typos are caught: accessing a field a record doesn't have is a checker
+  error (`record has no field "wong"`).
+- Performance: elementwise/unary ops skip building a backward closure when no
+  input needs a gradient (parameter updates and other forward-only math). A
+  100-step linear-regression training loop dropped from ~372us to ~300us per run
+  (~19%) with ~800 fewer allocations; environments also allocate their map
+  lazily. All gradient-check tests still pass.
+- Examples are now run in-process by the test suite, so `go test` covers them
+  end to end (not just the built binary).
+
 ## 0.6.0
 
 Records and modules.
