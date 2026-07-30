@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.25.0
+
+Second-order autodiff through structural ops.
+
+- `hessian` now flows through the linear/structural ops — slicing (`x[a:b]`),
+  `reshape`, `transpose`, `concat`, and `gather` — so component-wise functions
+  and reshaping objectives get exact Hessians too (previously they errored).
+- `examples/hessian.ra` adds a component-wise case: the Hessian of
+  `(x0-x1)² + x1²` computed through slicing is `[[2,-2],[-2,4]]`.
+- Extended the finite-difference cross-checks to cover slice+concat (with cross
+  terms), reshape+transpose, and gather (with a repeated index).
+
 ## 0.24.1
 
 Internal QA for the second-order engine — no API or behavior change.

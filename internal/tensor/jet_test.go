@@ -82,6 +82,36 @@ func TestHessianFDTranscendentals(t *testing.T) {
 	})
 }
 
+// Structural/linear ops (slice, reshape, transpose, concat, gather) must carry
+// forward-mode tangents so a Hessian flows through them.
+func TestHessianFDSliceConcat(t *testing.T) {
+	// f(x) = sum(square( x[0:2] ++ x[2:4] reversed via gather )) with a product
+	// coupling the halves, exercising slice, concat, and cross terms.
+	checkHessianFD(t, "slice-concat", []float64{0.5, -1, 2, 0.3}, []int{4}, func(x *Tensor) *Tensor {
+		lo, _ := SliceAxis0(x, 0, 2)
+		hi, _ := SliceAxis0(x, 2, 4)
+		cat, _ := Concat([]*Tensor{hi, lo}, 0) // [x2,x3,x0,x1]
+		return Sum(mul(x, cat))                // sum x_i * cat_i -> cross terms
+	})
+}
+
+func TestHessianFDReshapeTranspose(t *testing.T) {
+	// f(x) = sum(square(Xᵀ)) with x reshaped to a matrix then transposed.
+	checkHessianFD(t, "reshape-transpose", []float64{0.2, -0.4, 0.6, 0.1, 0.5, -0.3}, []int{6}, func(x *Tensor) *Tensor {
+		m, _ := Reshape(x, []int{2, 3})
+		mt, _ := TransposePerm(m, nil)
+		return Sum(mul(mt, mt))
+	})
+}
+
+func TestHessianFDGather(t *testing.T) {
+	// f(x) = sum(square(gather(x, [2,0,2,1]))) — repeated index couples entries.
+	checkHessianFD(t, "gather", []float64{0.4, -0.7, 1.2}, []int{3}, func(x *Tensor) *Tensor {
+		g, _ := Gather(x, []int{2, 0, 2, 1})
+		return Sum(Square(g))
+	})
+}
+
 // A quadratic through matmul with a nonlinear head.
 func TestHessianFDMatmulNonlinear(t *testing.T) {
 	A := New([]float64{1, 2, 3, 0.5, 1.5, -1, 2, -0.5, 1}, []int{3, 3})
