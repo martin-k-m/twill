@@ -157,7 +157,8 @@ Indexing a tensor along the first axis returns a scalar (rank-1) or a slice
 (higher rank). Lists index directly.
 
 Slicing takes a half-open range along the first axis; either bound may be
-omitted. Slicing a tensor is differentiable.
+omitted. Both indexing (`x[i]`) and slicing (`x[a:b]`) a tensor are
+differentiable — gradient flows to the selected element or rows.
 
 ```rust
 v[1:3]                # tensor([20, 30], shape=[2])
@@ -199,9 +200,9 @@ Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `hessian(f)(x)` gives the exact matrix of second partial derivatives of a scalar
 function — second-order autodiff via forward-mode jets (see `examples/hessian.ra`
 for Newton's method). It supports functions built from arithmetic, the unary
-math functions, `matmul`, `sum`, `mean`, and the structural ops slicing
-(`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a function using an
-op outside this set raises a clear error. The reverse-mode `grad` remains
+math functions, `matmul`, `sum`, `mean`, and the structural ops indexing
+(`x[i]`), slicing (`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a
+function using an op outside this set raises a clear error. The reverse-mode `grad` remains
 first-order, so the general nested form `grad(grad(f))` is not supported — use
 `hessian` for second derivatives.
 
