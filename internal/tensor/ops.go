@@ -400,6 +400,13 @@ func Reshape(t *Tensor, shape []int) (*Tensor, error) {
 	data := make([]float64, len(t.Data))
 	copy(data, t.Data)
 	res := &Tensor{Data: data, Shape: append([]int(nil), shape...)}
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			copy(res.jet.d, t.jet.d)
+			copy(res.jet.dd, t.jet.dd)
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -451,6 +458,16 @@ func TransposePerm(t *Tensor, axes []int) (*Tensor, error) {
 		out[o] = t.Data[inIndex(o)]
 	}
 	res := &Tensor{Data: out, Shape: outShape}
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for o := 0; o < n; o++ {
+				src := inIndex(o)
+				res.jet.d[o] = t.jet.d[src]
+				res.jet.dd[o] = t.jet.dd[src]
+			}
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -487,6 +504,14 @@ func SliceAxis0(t *Tensor, start, end int) (*Tensor, error) {
 	data := make([]float64, (end-start)*rowSize)
 	copy(data, t.Data[start*rowSize:end*rowSize])
 	res := &Tensor{Data: data, Shape: outShape}
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			off := start * rowSize
+			copy(res.jet.d, t.jet.d[off:off+len(data)])
+			copy(res.jet.dd, t.jet.dd[off:off+len(data)])
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -548,6 +573,31 @@ func Concat(tensors []*Tensor, axis int) (*Tensor, error) {
 	prev := make([]*Tensor, len(tensors))
 	copy(prev, tensors)
 	res := &Tensor{Data: out, Shape: outShape}
+	anyRG := false
+	for _, t := range tensors {
+		if t.RequiresGrad {
+			anyRG = true
+			break
+		}
+	}
+	if recordJets && anyRG {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for _, pl := range places {
+				L := pl.t.Shape[axis]
+				for i := 0; i < before; i++ {
+					for k := 0; k < L; k++ {
+						for j := 0; j < after; j++ {
+							dst := i*total*after + (pl.offset+k)*after + j
+							src := i*L*after + k*after + j
+							res.jet.d[dst] = pl.t.jet.d[src]
+							res.jet.dd[dst] = pl.t.jet.dd[src]
+						}
+					}
+				}
+			}
+		}
+	}
 	return trackN(res, prev, func() {
 		for _, pl := range places {
 			if !pl.t.RequiresGrad {

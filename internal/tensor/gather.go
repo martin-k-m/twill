@@ -27,6 +27,16 @@ func Gather(x *Tensor, idx []int) (*Tensor, error) {
 	outShape[0] = len(idx)
 	copy(outShape[1:], x.Shape[1:])
 	res := &Tensor{Data: out, Shape: outShape}
+	if recordJets && x.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for i, ix := range idx {
+				src, dst := ix*rowSize, i*rowSize
+				copy(res.jet.d[dst:dst+rowSize], x.jet.d[src:src+rowSize])
+				copy(res.jet.dd[dst:dst+rowSize], x.jet.dd[src:src+rowSize])
+			}
+		}
+	}
 	return track1(res, x, func() {
 		gx := x.ensureGrad()
 		g := res.Grad

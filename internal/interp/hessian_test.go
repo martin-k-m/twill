@@ -63,11 +63,24 @@ hessian(fn(x) = sum((A @ x) * x))([5.0, -2.0])`
 	})
 }
 
+// The Hessian must flow through slicing (a linear structural op): for
+// f(x) = sum(x[0:2] * x[2:4]) = x0*x2 + x1*x3, the only nonzero second partials
+// are the cross terms d²f/dx0dx2 = d²f/dx1dx3 = 1.
+func TestHessianThroughSlicing(t *testing.T) {
+	got := hessResult(t, `hessian(fn(x) = sum(x[0:2] * x[2:4]))([1.0, 2.0, 3.0, 4.0])`)
+	checkHessian(t, got, 4, []float64{
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+	})
+}
+
 // A function using an op without forward-mode support must error, never return
 // a silently-wrong Hessian.
 func TestHessianUnsupportedOpErrors(t *testing.T) {
 	ip := interp.New(func(string) {})
-	if _, err := ip.Run(`hessian(fn(x) = sum(gather(x, [0, 0])))([1.0, 2.0])`); err == nil {
+	if _, err := ip.Run(`hessian(fn(x) = max(x) + sum(x))([1.0, 2.0])`); err == nil {
 		t.Fatal("expected an error for an op without forward-mode support")
 	}
 }

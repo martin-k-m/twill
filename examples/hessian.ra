@@ -20,3 +20,9 @@ for step in range(6) {
   print("step", step, "  t =", t, "  f'(t) =", grad(f)(t))
 }
 print("converged to a minimum where f'(t) is ~0")
+
+# The Hessian flows through slicing/reshape/concat too, so component-wise
+# functions work: g(x) = (x0 - x1)² + x1²  has Hessian [[2, -2], [-2, 4]].
+fn g(x) = sum(square(x[0:1] - x[1:2])) + sum(square(x[1:2]))
+print("Hessian of (x0-x1)² + x1²:")
+print(hessian(g)([1.0, 2.0]))

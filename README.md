@@ -17,7 +17,7 @@ static shape checking, and reproducible-by-default execution. Tabular, vision,
 and sequences, with the same `grad`. Finance is one domain it's built out for; it
 is not limited to it.
 
-It's an early prototype (v0.24). The reference implementation is a single Go
+It's an early prototype (v0.25). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust

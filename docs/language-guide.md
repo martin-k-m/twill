@@ -199,10 +199,11 @@ Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `hessian(f)(x)` gives the exact matrix of second partial derivatives of a scalar
 function — second-order autodiff via forward-mode jets (see `examples/hessian.ra`
 for Newton's method). It supports functions built from arithmetic, the unary
-math functions, `matmul`, `sum`, and `mean`; a function using an unsupported op
-raises a clear error. The reverse-mode `grad` remains first-order, so the general
-nested form `grad(grad(f))` is not supported — use `hessian` for second
-derivatives.
+math functions, `matmul`, `sum`, `mean`, and the structural ops slicing
+(`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a function using an
+op outside this set raises a clear error. The reverse-mode `grad` remains
+first-order, so the general nested form `grad(grad(f))` is not supported — use
+`hessian` for second derivatives.
 
 ## Shape checking
 
