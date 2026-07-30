@@ -479,6 +479,44 @@ func TransposePerm(t *Tensor, axes []int) (*Tensor, error) {
 	}), nil
 }
 
+// IndexAxis0 selects element/row `idx` along the first axis, dropping that axis:
+// a 1-D tensor yields a scalar, and an N-D tensor yields a row of shape
+// t.Shape[1:]. It is differentiable — gradient flows to the selected row — and
+// carries forward-mode tangents, so both grad and hessian pass through `x[i]`.
+func IndexAxis0(t *Tensor, idx int) (*Tensor, error) {
+	if len(t.Shape) == 0 {
+		return nil, fmt.Errorf("cannot index a scalar")
+	}
+	dim0 := t.Shape[0]
+	if idx < 0 || idx >= dim0 {
+		return nil, fmt.Errorf("index %d out of range [0, %d)", idx, dim0)
+	}
+	rowSize := 1
+	for _, d := range t.Shape[1:] {
+		rowSize *= d
+	}
+	off := idx * rowSize
+	data := make([]float64, rowSize)
+	copy(data, t.Data[off:off+rowSize])
+	res := &Tensor{Data: data, Shape: append([]int(nil), t.Shape[1:]...)}
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			copy(res.jet.d, t.jet.d[off:off+rowSize])
+			copy(res.jet.dd, t.jet.dd[off:off+rowSize])
+		}
+	}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for i := 0; i < rowSize; i++ {
+			gt[off+i] += res.Grad[i]
+		}
+	}), nil
+}
+
 // SliceAxis0 returns rows [start, end) along the first axis, keeping the
 // trailing dimensions. It is differentiable: gradient flows to the selected
 // rows.

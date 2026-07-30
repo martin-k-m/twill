@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.26.0
+
+Differentiable element indexing.
+
+- `x[i]` (indexing a single element or row) is now differentiable — gradient
+  flows to the indexed component, and `hessian` passes through it too. Before,
+  element indexing silently broke the gradient graph (it returned an untracked
+  tensor, so `grad` through `x[i]` was zero); slicing `x[i:i+1]` was the only
+  working form. Both now work.
+- Backed by a new tracked `IndexAxis0` tensor op (with a forward-mode jet);
+  `x[i]` in the interpreter routes through it.
+
 ## 0.25.0
 
 Second-order autodiff through structural ops.

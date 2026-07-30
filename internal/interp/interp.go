@@ -641,26 +641,11 @@ func (ip *Interp) sliceBound(e ast.Expr, env *value.Env, line int) int {
 }
 
 func (ip *Interp) indexTensor(t *tensor.Tensor, idx, line int) *tensor.Tensor {
-	if len(t.Shape) == 0 {
-		ip.panicf(line, "cannot index a scalar")
+	res, err := tensor.IndexAxis0(t, idx)
+	if err != nil {
+		ip.panicf(line, "%s", err.Error())
 	}
-	dim0 := t.Shape[0]
-	if idx < 0 || idx >= dim0 {
-		ip.panicf(line, "tensor index %d out of range [0, %d)", idx, dim0)
-	}
-	if len(t.Shape) == 1 {
-		return tensor.Scalar(t.Data[idx])
-	}
-	rest := t.Shape[1:]
-	stride := 1
-	for _, d := range rest {
-		stride *= d
-	}
-	slice := make([]float64, stride)
-	copy(slice, t.Data[idx*stride:(idx+1)*stride])
-	shape := make([]int, len(rest))
-	copy(shape, rest)
-	return tensor.New(slice, shape)
+	return res
 }
 
 func paramNames(params []ast.Param) []string {
