@@ -84,10 +84,24 @@ func (t *Tensor) forwardTopo() []*Tensor {
 	return topo
 }
 
+// containsTensor reports whether topo holds this exact node. Identity, not
+// value: two tensors can carry equal data and still be different graph nodes.
+func containsTensor(topo []*Tensor, t *Tensor) bool {
+	for _, n := range topo {
+		if n == t {
+			return true
+		}
+	}
+	return false
+}
+
 // directional runs one forward-mode pass over topo, seeding `leaf` with the
 // direction v (all other leaves get zero tangent), and returns the output's
 // first and second directional derivatives. It errors if the graph uses an op
 // without forward-mode support.
+//
+// The leaf must appear in topo. Callers check that first, because a leaf the
+// output does not depend on has no jet state to seed.
 func directional(output, leaf *Tensor, topo []*Tensor, v []float64) ([]float64, []float64, error) {
 	for _, n := range topo {
 		if n.jet == nil {
@@ -132,6 +146,27 @@ func Hessian(output, leaf *Tensor) ([]float64, int, error) {
 	}
 	n := len(leaf.Data)
 	topo := output.forwardTopo()
+
+	// The leaf can be missing from the graph entirely. A forward-only builtin
+	// such as floor or a comparison returns an untracked tensor, which severs
+	// the parent chain, so walking back from the output never reaches the leaf.
+	// The same is true of a function that simply ignores its argument.
+	//
+	// Zeros rather than an error, for two reasons. It is the right answer: a
+	// function the output does not depend on differentiably has an all-zero
+	// second derivative, and floor is piecewise constant so its true Hessian is
+	// zero everywhere it is defined. And it is the answer the rest of the
+	// language already gives, since grad(fn(x) = sum(floor(x))) returns zeros
+	// today rather than failing. Erring here would make hessian stricter than
+	// grad about the same expression.
+	//
+	// This also has to come before directional, which seeds the leaf's tangent
+	// and would dereference jet state that the init loop never allocated,
+	// because that loop only walks topo.
+	if !containsTensor(topo, leaf) {
+		return make([]float64, n*n), n, nil
+	}
+
 	H := make([]float64, n*n)
 	diag := make([]float64, n)
 	e := make([]float64, n)

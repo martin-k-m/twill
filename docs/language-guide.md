@@ -326,9 +326,13 @@ index of the maximum. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
 the last axis.
 
 Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,
-`cummax`, `cummin`. These build signals, equity curves, and running peaks; they
-are forward-only (not differentiable). Elementwise rounding `floor`, `ceil`, and
-`round` are also forward-only (handy for turning random draws into integer ids).
+`cummax`, `cummin`. These build signals, equity curves, and running peaks, and
+they are differentiable: `cumsum` and `cumprod` have exact gradients (`cumprod`
+handles zeros in the series), and `cummax`/`cummin` send each output's gradient
+to the element the running extreme came from, ties going to the earlier one.
+Elementwise rounding `floor`, `ceil`, and `round` are forward-only (their
+derivative is zero wherever it exists), handy for turning random draws into
+integer ids.
 
 Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
 `transpose(t[, ...axes])`, `reshape(t, ...shape)`, `concat(list, axis)`,

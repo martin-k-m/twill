@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.27.0
+
+Differentiable cumulative scans.
+
+- `cumsum`, `cumprod`, `cummax`, and `cummin` are now differentiable. Before,
+  they returned an untracked tensor, so `grad` through a scan silently came back
+  zero, and where a scan was only part of an expression (`max_drawdown`, which
+  divides by a `cummax` peak) the gradient was not zero but wrong. `cumprod`'s
+  backward pass avoids dividing by an input, so a zero in the series is exact.
+  `cummax`/`cummin` route each output's gradient to the element the running
+  extreme came from, ties going to the earlier one, matching `max`/`argmax`.
+- More of `std/backtest.ra` is therefore differentiable end to end: `sma`
+  (prefix sums), `equity` and `total_return` (cumulative product), `cagr`, and
+  `max_drawdown` (running peak) join Sharpe and Sortino.
+- Backed by new tracked `CumSum`/`CumProd`/`CumMax`/`CumMin` tensor ops, each
+  with a forward-mode jet, so `hessian` flows through a scan too (it used to
+  crash on one, because the scan detached the input from the graph entirely).
+
+Also fixed:
+
+- `hessian` no longer panics when the input is not connected to the output at
+  all. Making the scans differentiable removed one way to reach that, but not
+  the cause: any forward-only builtin (`floor`, `ceil`, `round`, the
+  comparisons) returns an untracked tensor, so walking back from the output
+  never reaches the leaf and the jet state it seeded was never allocated. It
+  now returns zeros, which is both the right answer for a function whose output
+  does not depend differentiably on its input and what `grad` already returned
+  for the same expression.
+
 ## 0.26.0
 
 Differentiable element indexing.

@@ -84,3 +84,25 @@ func TestHessianUnsupportedOpErrors(t *testing.T) {
 		t.Fatal("expected an error for an op without forward-mode support")
 	}
 }
+
+// floor is piecewise constant, so its second derivative is zero everywhere it
+// is defined. It also returns an untracked tensor, which detaches the input
+// from the graph, and hessian used to panic on that instead of answering.
+// Zeros keeps it consistent with grad, which already returns zeros here.
+func TestHessianDetachedInput(t *testing.T) {
+	got := hessResult(t, `hessian(fn(x) = sum(floor(x)))([1.5, 2.5])`)
+	checkHessian(t, got, 2, []float64{
+		0, 0,
+		0, 0,
+	})
+}
+
+// A function that ignores its argument entirely reaches the same code path.
+func TestHessianConstantExpression(t *testing.T) {
+	got := hessResult(t, `hessian(fn(x) = 42.0)([1.0, 2.0, 3.0])`)
+	checkHessian(t, got, 3, []float64{
+		0, 0, 0,
+		0, 0, 0,
+		0, 0, 0,
+	})
+}

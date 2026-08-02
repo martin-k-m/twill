@@ -112,10 +112,74 @@ func TestHessianFDGather(t *testing.T) {
 	})
 }
 
+// Cumulative scans: second derivatives must flow through the fold too.
+func TestHessianFDCumulative(t *testing.T) {
+	// sum(square(cumsum(x))) couples every pair i <= j.
+	checkHessianFD(t, "cumsum", []float64{0.5, -1, 2, 0.3}, []int{4}, func(x *Tensor) *Tensor {
+		return Sum(Square(CumSum(x)))
+	})
+	// cumprod is where the product rule has to be carried to second order.
+	checkHessianFD(t, "cumprod", []float64{1.2, -0.6, 1.5}, []int{3}, func(x *Tensor) *Tensor {
+		return Sum(CumProd(x))
+	})
+	// Piecewise linear, so the running extreme only routes tangents through.
+	checkHessianFD(t, "cummax", []float64{1, 3, 2, 5}, []int{4}, func(x *Tensor) *Tensor {
+		return Sum(Square(CumMax(x)))
+	})
+	checkHessianFD(t, "cummin", []float64{5, 3, 4, 1}, []int{4}, func(x *Tensor) *Tensor {
+		return Sum(Square(CumMin(x)))
+	})
+}
+
 // A quadratic through matmul with a nonlinear head.
 func TestHessianFDMatmulNonlinear(t *testing.T) {
 	A := New([]float64{1, 2, 3, 0.5, 1.5, -1, 2, -0.5, 1}, []int{3, 3})
 	checkHessianFD(t, "matmul-nonlinear", []float64{0.3, -0.2, 0.5}, []int{3}, func(x *Tensor) *Tensor {
 		return Sum(Square(matmul(A, x)))
 	})
+}
+
+// A leaf the output does not descend from. The forward-only builtins (floor,
+// ceil, round, the comparisons) return a fresh tensor with no parent edges, so
+// walking back from the output never reaches the input. Hessian used to hand
+// that leaf to directional anyway, which seeds a tangent into jet state the
+// init loop had never allocated, and the copy dereferenced nil.
+func TestHessianLeafNotInGraph(t *testing.T) {
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	leaf := Leaf([]float64{1.5, 2.5}, []int{2})
+	// Stands in for floor(leaf): the same values, none of the edges.
+	detached := New([]float64{1, 2}, []int{2})
+	H, n, err := Hessian(Sum(detached), leaf)
+	if err != nil {
+		t.Fatalf("Hessian: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("n = %d, want 2", n)
+	}
+	for i, v := range H {
+		if v != 0 {
+			t.Fatalf("H[%d] = %v, want 0 (H = %v)", i, v, H)
+		}
+	}
+}
+
+// The same path reached the other way: a function that never mentions its
+// argument. Its second derivative is zero, not an error.
+func TestHessianConstantFunction(t *testing.T) {
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	leaf := Leaf([]float64{3, -1, 0.5}, []int{3})
+	H, n, err := Hessian(Sum(Filled([]int{3}, 7)), leaf)
+	if err != nil {
+		t.Fatalf("Hessian: %v", err)
+	}
+	if n != 3 || len(H) != 9 {
+		t.Fatalf("n = %d, len(H) = %d, want 3 and 9", n, len(H))
+	}
+	for i, v := range H {
+		if v != 0 {
+			t.Fatalf("H[%d] = %v, want 0", i, v)
+		}
+	}
 }

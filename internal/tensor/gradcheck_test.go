@@ -102,6 +102,44 @@ func TestGradCheckMaxAxis(t *testing.T) {
 	})
 }
 
+func TestGradCheckCumSum(t *testing.T) {
+	// Weight the scan so each output carries a different gradient, which
+	// catches a backward pass that reverses the accumulation the wrong way.
+	w := New([]float64{0.5, -1, 2, 0.25}, []int{4})
+	gradCheck(t, "cumsum", []float64{1, -2, 0.5, 3}, []int{4}, func(x *Tensor) *Tensor {
+		p, _ := Mul(CumSum(x), w)
+		return Sum(p)
+	})
+}
+
+func TestGradCheckCumProd(t *testing.T) {
+	w := New([]float64{0.5, -1, 2, 0.25}, []int{4})
+	gradCheck(t, "cumprod", []float64{1.5, -0.7, 2, 0.4}, []int{4}, func(x *Tensor) *Tensor {
+		p, _ := Mul(CumProd(x), w)
+		return Sum(p)
+	})
+	// A zero in the series: the division-free backward pass must still be
+	// exact where out_j / in_i would be 0/0.
+	gradCheck(t, "cumprod-zero", []float64{2, 0, 3, 1.5}, []int{4}, func(x *Tensor) *Tensor {
+		p, _ := Mul(CumProd(x), w)
+		return Sum(p)
+	})
+}
+
+func TestGradCheckCumMaxMin(t *testing.T) {
+	// Values are distinct so the running extreme changes hands several times
+	// and no finite-difference step lands on a tie.
+	w := New([]float64{0.5, -1, 2, 0.25, 1.5}, []int{5})
+	gradCheck(t, "cummax", []float64{1, 3, 2, 5, 4}, []int{5}, func(x *Tensor) *Tensor {
+		p, _ := Mul(CumMax(x), w)
+		return Sum(p)
+	})
+	gradCheck(t, "cummin", []float64{5, 3, 4, 1, 2}, []int{5}, func(x *Tensor) *Tensor {
+		p, _ := Mul(CumMin(x), w)
+		return Sum(p)
+	})
+}
+
 func TestGradCheckSoftmax(t *testing.T) {
 	// Weight softmax outputs so the scalar has a non-trivial gradient.
 	w := New([]float64{0.1, 0.2, 0.3, 0.4, 0.5, 0.6}, []int{2, 3})
