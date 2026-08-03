@@ -190,3 +190,82 @@ func TestStdPlainImportLoadsOnce(t *testing.T) {
 		t.Errorf("got %s", got)
 	}
 }
+
+// A plain import at the top level used to hollow out any namespace that
+// imported the same module. The load-once set was global, so the nested plain
+// import inside the namespaced module was skipped as already loaded and its
+// names never reached the module scope: after `import "std/optim"`, the
+// namespace from `import "std/nn" as nn` came back without any of optim's
+// names. What a namespace contains must not depend on what was imported before
+// it.
+func TestAPlainImportDoesNotHollowOutALaterNamespace(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "base", "let first = 1.0\nlet second = 2.0\n")
+	writeModule(t, dir, "lib", "import \"base.ra\"\nlet third = 3.0\n")
+
+	alone := runFile(t, dir, "import \"lib.ra\" as lib\nprint(columns(lib))\n")
+	after := runFile(t, dir,
+		"import \"base.ra\"\nimport \"lib.ra\" as lib\nprint(columns(lib))\n")
+
+	if len(alone) != 1 || len(after) != 1 {
+		t.Fatalf("expected one line from each run, got %q and %q", alone, after)
+	}
+	if alone[0] != after[0] {
+		t.Fatalf("importing base first changed the namespace:\n  alone = %s\n  after = %s",
+			alone[0], after[0])
+	}
+	if !strings.Contains(after[0], "first") {
+		t.Fatalf("namespace lost the nested module's names: %s", after[0])
+	}
+}
+
+// The same shape against the standard library, which is where it was found.
+func TestAPlainStdImportDoesNotHollowOutALaterNamespace(t *testing.T) {
+	dir := t.TempDir()
+	alone := runFile(t, dir, "import \"std/nn\" as nn\nprint(columns(nn))\n")
+	after := runFile(t, dir, "import \"std/optim\"\nimport \"std/nn\" as nn\nprint(columns(nn))\n")
+
+	if len(alone) != 1 || len(after) != 1 {
+		t.Fatalf("expected one line from each run, got %q and %q", alone, after)
+	}
+	if alone[0] != after[0] {
+		t.Fatalf("importing optim first changed the nn namespace:\n  alone = %s\n  after = %s",
+			alone[0], after[0])
+	}
+}
+
+// The fresh load-once set per module scope must not lose the cycle guard: two
+// files that plain-import each other, reached through a namespace, have to
+// terminate rather than recurse until the stack goes.
+func TestAPlainImportCycleInsideANamespaceTerminates(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "x", "import \"y.ra\"\nlet a = 1.0\n")
+	writeModule(t, dir, "y", "import \"x.ra\"\nlet b = 2.0\n")
+
+	out := runFile(t, dir, "import \"x.ra\" as m\nprint(columns(m))\n")
+	if len(out) != 1 {
+		t.Fatalf("expected one line, got %q", out)
+	}
+	for _, name := range []string{"a", "b"} {
+		if !strings.Contains(out[0], name) {
+			t.Fatalf("cycle lost %q: %s", name, out[0])
+		}
+	}
+}
+
+// Two namespaces over the same module are separate bindings, so the second must
+// not come back empty because the first already loaded it.
+func TestTwoNamespacesOverOneModuleAreIndependent(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "base", "let first = 1.0\n")
+	writeModule(t, dir, "lib", "import \"base.ra\"\nlet third = 3.0\n")
+
+	out := runFile(t, dir,
+		"import \"lib.ra\" as p\nimport \"lib.ra\" as q\nprint(columns(p))\nprint(columns(q))\n")
+	if len(out) != 2 {
+		t.Fatalf("expected two lines, got %q", out)
+	}
+	if out[0] != out[1] {
+		t.Fatalf("the two namespaces differ:\n  p = %s\n  q = %s", out[0], out[1])
+	}
+}

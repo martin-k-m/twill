@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **A plain import no longer hollows out a namespace imported after it.** The
+  load-once set was global, but "already loaded" means "already loaded into
+  this scope", and a namespaced module's scope is new. So after
+  `import "std/optim"`, the nested plain import inside nn was skipped as
+  already loaded and its names never reached the module scope:
+  `import "std/nn" as nn` came back missing `zeros_like`, `sgd_step`,
+  `momentum_step` and `adam_step`, purely because of what had been imported
+  before it. The same bug made a second namespace over one module come back
+  empty. Each namespaced module gets its own load-once set now, which still
+  guards cycles within that module.
+
 ## [1.0.0] - 2026-08-03
 
 Cumulative scans are differentiable, equality is structural, imports are deterministic, and the standard library ships inside the binary.

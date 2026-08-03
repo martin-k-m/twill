@@ -254,6 +254,18 @@ func (ip *Interp) doImport(st *ast.Import, env *value.Env) {
 		}
 		ip.loading[mod.key] = true
 		defer delete(ip.loading, mod.key)
+
+		// A namespaced module gets its own load-once set, because "already
+		// loaded" means "already loaded into this scope" and this scope is new.
+		// Sharing the outer one meant a plain import at the top level silently
+		// hollowed out any namespace that imported the same module: after
+		// `import "std/optim"`, the nested plain import inside nn was skipped as
+		// already loaded, so `import "std/nn" as nn` came back without any of
+		// optim's names. The fresh map still guards cycles within this module.
+		outerLoaded := ip.loaded
+		ip.loaded = map[string]bool{}
+		defer func() { ip.loaded = outerLoaded }()
+
 		// A module scope tracks definition order, so the namespace record's
 		// fields come out in declaration order instead of Go map order.
 		modEnv := value.NewModuleEnv(ip.Global)
