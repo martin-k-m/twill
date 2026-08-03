@@ -4,7 +4,7 @@
 # reports the standard performance stats — Sharpe, CAGR, max drawdown — beside
 # buy-and-hold. Every step is a tensor operation; see std/backtest.ra.
 
-import "../std/backtest.ra" as bt
+import "std/backtest" as bt
 
 seed(1)
 

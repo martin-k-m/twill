@@ -67,12 +67,25 @@ var TheUnit = Unit{}
 type Env struct {
 	vars   map[string]Value // allocated lazily on first Define
 	parent *Env
+	order  []string // definition order, kept only when ordered is set
+	// ordered is off for ordinary scopes: a call frame or loop body defines
+	// names on every iteration, and paying for a slice append there would show
+	// up in a training loop.
+	ordered bool
 }
 
 // NewEnv creates a scope. The backing map is not allocated until a variable is
 // defined, so scopes that only read outer variables cost nothing extra.
 func NewEnv(parent *Env) *Env {
 	return &Env{parent: parent}
+}
+
+// NewModuleEnv creates a scope that remembers the order its names were first
+// defined in. A namespaced import snapshots such a scope into a record, and
+// that record's field order has to be declaration order rather than Go map
+// order for a program to be reproducible run to run.
+func NewModuleEnv(parent *Env) *Env {
+	return &Env{parent: parent, ordered: true}
 }
 
 func (e *Env) Get(name string) (Value, bool) {
@@ -90,6 +103,11 @@ func (e *Env) Get(name string) (Value, bool) {
 func (e *Env) Define(name string, v Value) {
 	if e.vars == nil {
 		e.vars = make(map[string]Value, 4)
+	}
+	if e.ordered {
+		if _, redefined := e.vars[name]; !redefined {
+			e.order = append(e.order, name)
+		}
 	}
 	e.vars[name] = v
 }
@@ -110,6 +128,10 @@ func (e *Env) Assign(name string, v Value) bool {
 // Locals returns this scope's own bindings (not parents'). Used to snapshot a
 // module's definitions into a namespace record.
 func (e *Env) Locals() map[string]Value { return e.vars }
+
+// LocalNames returns this scope's own bindings in the order they were first
+// defined. It is populated only for a scope made by NewModuleEnv.
+func (e *Env) LocalNames() []string { return e.order }
 
 // --- helpers ---------------------------------------------------------------
 

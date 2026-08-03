@@ -5,7 +5,7 @@
 # `grad` differentiates the whole thing at once, convolution included. Same
 # autodiff, static shapes, and single binary as the rest of Raster.
 
-import "../std/nn.ra" as nn
+import "std/nn" as nn
 
 seed(0)
 

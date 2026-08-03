@@ -5,8 +5,8 @@
 # and `permutation` (a seeded shuffle) make that a few array ops — and it stays
 # reproducible, so the same seed gives the same run every time.
 
-import "../std/nn.ra" as nn
-import "../std/data.ra" as data
+import "std/nn" as nn
+import "std/data" as data
 
 seed(1)
 

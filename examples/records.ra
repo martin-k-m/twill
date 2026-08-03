@@ -4,7 +4,7 @@
 # `grad` flows through the record, so grad(loss)(model) returns a record with
 # the same fields holding each parameter's gradient.
 
-import "../std/nn.ra" as nn
+import "std/nn" as nn
 
 let X = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
 let Y = [0.0, 1.0, 1.0, 0.0]

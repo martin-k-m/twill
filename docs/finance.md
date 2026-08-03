@@ -88,7 +88,7 @@ then widens to the other workloads.
    importance, categorical splits, missing-value handling) are natural
    follow-ups.
 6. **Backtesting toolkit.** *(delivered v0.17)* Cumulative-scan builtins
-   (`cumsum`/`cumprod`/`cummax`/`cummin`) plus a `std/backtest.ra` library:
+   (`cumsum`/`cumprod`/`cummax`/`cummin`) plus a `std/backtest` library:
    returns, moving averages, equity curves, drawdown, Sharpe, volatility, and
    CAGR — all vectorized on tensors, no event loop needed. The Sharpe ratio is
    differentiable in the return series, so a smooth signal can be *tuned by

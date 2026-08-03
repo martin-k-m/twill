@@ -19,5 +19,5 @@ func TestCallingRecordIsError(t *testing.T) {
 
 func TestNamespacedImportNoFalsePositive(t *testing.T) {
 	// The alias is unknown to the checker, so field access stays quiet.
-	wantNone(t, "import \"std/nn.ra\" as nn\nlet y = nn.dense([[1.0]], [0.0], [1.0])")
+	wantNone(t, "import \"std/nn\" as nn\nlet y = nn.dense([[1.0]], [0.0], [1.0])")
 }

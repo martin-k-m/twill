@@ -4,7 +4,7 @@
 # gradients at once and `sgd_step` updates the list with map/zip. Compare this
 # to mlp.ra, which threads each parameter through by hand.
 
-import "../std/nn.ra"
+import "std/nn"
 
 let X = [[0.0, 0.0],
          [0.0, 1.0],

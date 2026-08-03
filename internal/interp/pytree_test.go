@@ -38,7 +38,7 @@ func TestRecordModelTrainsWithLibraryAdam(t *testing.T) {
 	// Train a record-structured model with the library's generic Adam, which
 	// walks the record via map_leaves/zip_leaves. Loss should converge to ~0.
 	src := `
-		import "../../std/optim.ra"
+		import "std/optim"
 		fn loss(model) = sum(model.w * model.w) + model.b * model.b
 		let model = { w: [3.0, -4.0], b: 2.0 }
 		let m = zeros_like(model)

@@ -17,7 +17,7 @@ static shape checking, and reproducible-by-default execution. Tabular, vision,
 and sequences, with the same `grad`. Finance is one domain it's built out for; it
 is not limited to it.
 
-It's an early prototype (v0.25). The reference implementation is a single Go
+It's an early prototype (v0.28). The reference implementation is a single Go
 binary with no dependencies, so it's easy to build and easy to read.
 
 ```rust
@@ -190,12 +190,14 @@ lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See th
 
 ## A small standard library
 
-The `std/` libraries are written in Raster itself. `std/nn.ra` has dense layers,
-activations (`gelu`, `softplus`, ...), initializers (He, Xavier), and losses
-including softmax cross-entropy. `std/optim.ra` has SGD, momentum, and Adam that
-work on a model held either as a positional list or a named record (they walk
-the tensor leaves with `map_leaves`/`zip_leaves`). Import with `import
-"std/nn.ra"` (it pulls in the optimizers too).
+The `std/` libraries are written in Raster itself and are compiled into the
+`raster` binary, so `import "std/nn"` works from any directory with nothing to
+install alongside it. `std/nn` has dense layers, activations (`gelu`,
+`softplus`, ...), initializers (He, Xavier), and losses including softmax
+cross-entropy. `std/optim` has SGD, momentum, and Adam that work on a model held
+either as a positional list or a named record (they walk the tensor leaves with
+`map_leaves`/`zip_leaves`). Import with `import "std/nn"` (it pulls in the
+optimizers too).
 
 `examples/classifier.ra` trains a 3-class MLP with softmax cross-entropy and
 Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
@@ -204,7 +206,7 @@ parameter list. For deep learning there are differentiable `conv2d` and
 convolutional net — conv → relu → max-pool → dense — end-to-end with `grad`,
 the kernel included. `examples/minibatch.ra` shows a full training loop —
 standardize, train/test split, and reshuffled minibatches each epoch — using the
-differentiable `gather` op and `std/data.ra`. And `examples/attention.ra` trains
+differentiable `gather` op and `std/data`. And `examples/attention.ra` trains
 a **self-attention** sequence classifier (embed → attention → pool → dense):
 `grad` differentiates the attention softmax and the learned embeddings together.
 
@@ -228,7 +230,7 @@ credit, fraud, and default modeling — in pure Go, no XGBoost. `gbm_fit(X, y,
 opts)` trains a regression or logistic model and `gbm_predict(model, X)` scores
 it; fits are deterministic. See `examples/gbm.ra`.
 
-For quant signals, `std/backtest.ra` plus the cumulative builtins
+For quant signals, `std/backtest` plus the cumulative builtins
 (`cumsum`/`cumprod`/`cummax`) give a vectorized backtester — returns, moving
 averages, equity curves, drawdown, Sharpe, Sortino, CAGR (`examples/backtest.ra`).
 Because the Sharpe is differentiable in the return series, you can *tune a signal
@@ -247,8 +249,9 @@ type Model = { w: [3, 2], b: [3] }
 fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
 ```
 
-Libraries can be imported as a namespace with `import "std/nn.ra" as nn` and
-called as `nn.dense(...)`.
+Libraries can be imported as a namespace with `import "std/nn" as nn` and
+called as `nn.dense(...)`. The namespace's fields come out in the library's
+declaration order, so the same program prints the same thing every run.
 
 ## Layout
 
@@ -263,7 +266,8 @@ internal/value/      runtime values and environments
 internal/interp/     the tree-walking interpreter + builtins
 internal/checker/    static shape (and unit) analysis
 internal/format/     the source formatter (raster fmt)
-std/                 libraries written in Raster (nn.ra, optim.ra, backtest.ra)
+std/                 the standard library, written in Raster and embedded in
+                     the binary (nn, optim, data, backtest)
 examples/            runnable .ra programs
 editors/vscode/      syntax highlighting for .ra files
 docs/                language guide and design notes
@@ -278,8 +282,8 @@ This is a prototype, and some of it is deliberately left for later:
 - Autodiff is reverse-mode and first-order; `grad(grad(f))` isn't supported.
 - The shape checker is best-effort, not a full type system — it catches
   mismatches when shapes are statically knowable and stays quiet otherwise.
-- There are no records or a module namespace yet; imports drop definitions into
-  the global scope.
+- Imports are files and `std/` modules; there is no package manager and no
+  versioning of third-party libraries.
 
 The [design notes](docs/design.md) go into the roadmap.
 

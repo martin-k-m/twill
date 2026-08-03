@@ -1,6 +1,6 @@
 # Raster language guide
 
-This is the reference for Raster v0.14. The language is small, so this is short.
+This is the reference for Raster v0.28. The language is small, so this is short.
 
 ## Running programs
 
@@ -60,7 +60,7 @@ Lowest to highest precedence:
 | Operators | Meaning |
 | --- | --- |
 | `or` / `\|\|`, `and` / `&&` | short-circuiting logic |
-| `==` `!=` `<` `<=` `>` `>=` | comparison (returns Bool) |
+| `==` `!=` `<` `<=` `>` `>=` | comparison (returns Bool); see [Equality](#equality) |
 | `+` `-` | add / subtract (elementwise) |
 | `*` `/` `%` `@` | multiply / divide / modulo (elementwise), matmul (`@`) |
 | `^` | power (right-associative, scalar exponent) |
@@ -71,6 +71,38 @@ vector across a matrix, a column vector down its rows, and so on. Two shapes
 combine when, aligned from the right, each pair of dimensions is equal or one of
 them is 1. `@` covers vector·vector (dot), matrix·vector, vector·matrix, and
 matrix·matrix.
+
+## Equality
+
+`==` and `!=` are **deep structural comparison**. Two values are equal when they
+have the same type and the same contents, all the way down:
+
+```rust
+[1.0, 2.0] == [1.0, 2.0]                       # true (tensors)
+[1.0, "x"] == [1.0, "x"]                       # true (lists, element by element)
+{ w: [1.0], b: 0.5 } == { w: [1.0], b: 0.5 }   # true (records, field by field)
+```
+
+The details:
+
+- A tensor's **shape is part of its value**: `[[1.0, 2.0], [3.0, 4.0]]` and
+  `[1.0, 2.0, 3.0, 4.0]` hold the same numbers but are not equal. Numbers compare
+  by IEEE rules, so a tensor holding a `NaN` is not equal to itself.
+- Lists compare elementwise, and must be the same length.
+- Records compare field by field, **matched by name**, so declaration order
+  doesn't change the answer: `{ a: 1.0, b: 2.0 } == { b: 2.0, a: 1.0 }`. A record
+  with an extra field is not equal.
+- Values of different types are never equal — `[1.0] == 1.0` is false, not an
+  error.
+- Functions have no structure worth walking, so they compare by **identity**: a
+  function equals itself, and two separately written `fn(x) = x` do not.
+- `!=` is exactly the negation of `==`.
+
+The ordering operators (`<`, `<=`, `>`, `>=`) are only defined on scalars;
+applying one to a list, record, string, or non-scalar tensor is an error.
+
+For elementwise comparison of two tensors into a tensor of 1s and 0s, use the
+`equal` builtin — `==` on tensors gives one Bool for the whole value.
 
 ## Bindings and assignment
 
@@ -300,16 +332,40 @@ the record is a literal or a declared type.
 
 ## Imports
 
+There are two kinds of import path, and the spelling tells you which is which.
+
 ```rust
-import "std/nn.ra"          # drops the file's definitions into this scope
-import "std/nn.ra" as nn    # binds them as a namespace record instead
+import "std/nn"             # a standard-library module (ships inside the binary)
+import "helpers.ra"         # a file, relative to the importing file
 ```
 
-A plain import evaluates another file and adds its top-level definitions to the
-importing scope; each file loads once, so re-imports and cycles are fine. An
-`as name` import instead evaluates the file into its own scope and binds a record
-of its definitions under `name`, so you call `nn.dense(...)`. Paths are resolved
-relative to the importing file first, then the working directory.
+A path beginning with `std/` names a **module** of the standard library, not a
+file: no extension, no directory, and it means the same thing from anywhere,
+because the library is compiled into the `raster` binary. `std/` is reserved — a
+directory called `std` next to your program does not shadow it. Every other path
+is a **file**, resolved relative to the importing file first, then the working
+directory; `import "./std/local.ra"` reaches a real directory named `std`.
+
+Either kind can be namespaced:
+
+```rust
+import "std/nn"             # drops the module's definitions into this scope
+import "std/nn" as nn       # binds them as a namespace record instead
+```
+
+A plain import evaluates the module and adds its top-level definitions to the
+importing scope; each module loads once, so re-imports and cycles are fine. An
+`as name` import instead evaluates it into its own scope and binds a record of
+its definitions under `name`, so you call `nn.dense(...)`. That record's fields
+are in the module's declaration order, so printing or iterating a namespace gives
+the same result on every run.
+
+A standard-library module may only import other `std/` modules — it has no
+directory of its own to resolve a relative path against.
+
+To work on the library itself without rebuilding, set `RASTER_STD` to a directory
+of `.ra` files; it replaces the embedded library wholesale, so `import "std/nn"`
+reads `$RASTER_STD/nn.ra`. Unset it and you are back to the copy in the binary.
 
 ## Standard library
 
@@ -406,13 +462,14 @@ target/label vector, and `gbm_predict(model, X)` scores a `[n, d]` matrix into a
 regression, `"logistic"` for binary classification, where predictions are
 probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
 
-Libraries written in Raster live in `std/`: `nn.ra` (layers including `dense`,
-`conv`, `embed`, and `self_attention`; activations, initializers, losses),
-`optim.ra` (SGD, momentum, Adam), `data.ra` (`standardize`, `train_test_split`,
-`shuffle` for real training loops — see `examples/minibatch.ra`), and
-`backtest.ra`
+Libraries written in Raster ship inside the binary and are imported as
+`std/<module>`: `std/nn` (layers including `dense`, `conv`, `embed`, and
+`self_attention`; activations, initializers, losses), `std/optim` (SGD,
+momentum, Adam), `std/data` (`standardize`, `train_test_split`, `shuffle` for
+real training loops — see `examples/minibatch.ra`), and `std/backtest`
 (returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
-CAGR). The optimizers are container-agnostic — the same `sgd_step`/`adam_step`
+CAGR). Their sources are the `.ra` files in `std/` in the repository. The
+optimizers are container-agnostic — the same `sgd_step`/`adam_step`
 update a model held in a positional list or a named record. The backtest Sharpe
 and Sortino are differentiable in the return series, so a smooth signal can be
 tuned by gradient ascent through the backtest (`examples/signal_opt.ra`).

@@ -6,17 +6,30 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 
 	"github.com/martin-k-m/raster/internal/ast"
 	"github.com/martin-k-m/raster/internal/parser"
 	"github.com/martin-k-m/raster/internal/tensor"
 	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/raster/std"
 )
 
 // defaultSeed makes randomness reproducible by default — a run gives the same
 // result every time unless seed(...) changes it. Determinism matters for model
 // governance and audit.
 const defaultSeed = 1
+
+// stdPrefix reserves a leading "std/" for the standard library that ships
+// inside the binary. What follows it is a module name, not a file path, so
+// `import "std/nn"` means the same thing from any directory and never reaches
+// the filesystem. Every other import path is a file, relative to the importer.
+const stdPrefix = "std/"
+
+// stdOverrideEnv points stdPrefix at a directory of .ra files instead of the
+// embedded copy, for working on the library itself without rebuilding.
+const stdOverrideEnv = "RASTER_STD"
 
 // RuntimeError carries a source line for errors raised during evaluation.
 type RuntimeError struct {
@@ -29,11 +42,19 @@ func (e *RuntimeError) Error() string { return fmt.Sprintf("line %d: %s", e.Line
 // returnSignal unwinds the stack for a Raster `return`.
 type returnSignal struct{ value value.Value }
 
+// srcFrame says where the file currently executing came from. dir is what its
+// relative paths resolve against; std marks a standard-library module, which
+// lives in the binary and so has no directory of its own.
+type srcFrame struct {
+	dir string
+	std bool
+}
+
 // Interp holds global state for a running program.
 type Interp struct {
 	Global   *value.Env
 	out      func(string)
-	dirStack []string
+	srcStack []srcFrame
 	loaded   map[string]bool // plain imports already loaded
 	loading  map[string]bool // namespaced imports currently loading (cycle guard)
 	rng      *rand.Rand      // deterministic RNG for randn/rand/seed
@@ -60,14 +81,21 @@ func (ip *Interp) panicf(line int, format string, args ...any) {
 }
 
 func (ip *Interp) currentDir() string {
-	if len(ip.dirStack) > 0 {
-		return ip.dirStack[len(ip.dirStack)-1]
+	if n := len(ip.srcStack); n > 0 && ip.srcStack[n-1].dir != "" {
+		return ip.srcStack[n-1].dir
 	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return "."
 	}
 	return wd
+}
+
+// inStd reports whether the file currently executing is a standard-library
+// module.
+func (ip *Interp) inStd() bool {
+	n := len(ip.srcStack)
+	return n > 0 && ip.srcStack[n-1].std
 }
 
 // resolvePath makes a relative path absolute against the running script's
@@ -111,11 +139,15 @@ func (ip *Interp) RunFile(path string) error {
 		return fmt.Errorf("cannot read file %q", path)
 	}
 	abs, _ := filepath.Abs(path)
-	ip.dirStack = append(ip.dirStack, filepath.Dir(abs))
-	defer func() { ip.dirStack = ip.dirStack[:len(ip.dirStack)-1] }()
+	ip.pushSrc(srcFrame{dir: filepath.Dir(abs)})
+	defer ip.popSrc()
 	_, runErr := ip.Run(string(src))
 	return runErr
 }
+
+func (ip *Interp) pushSrc(f srcFrame) { ip.srcStack = append(ip.srcStack, f) }
+
+func (ip *Interp) popSrc() { ip.srcStack = ip.srcStack[:len(ip.srcStack)-1] }
 
 // --- statement execution ---------------------------------------------------
 
@@ -203,50 +235,122 @@ func (ip *Interp) iterate(v value.Value, line int) []value.Value {
 }
 
 func (ip *Interp) doImport(st *ast.Import, env *value.Env) {
-	abs, err := ip.resolveImport(st.Path)
+	mod, err := ip.loadModule(st.Path)
 	if err != nil {
-		ip.panicf(st.Line, "cannot read import %q", st.Path)
+		ip.panicf(st.Line, "%s", err.Error())
 	}
-	src, err := os.ReadFile(abs)
-	if err != nil {
-		ip.panicf(st.Line, "cannot read import %q", st.Path)
-	}
-	prog, perr := parser.Parse(string(src))
+	prog, perr := parser.Parse(mod.src)
 	if perr != nil {
 		ip.panicf(st.Line, "in import %q: %s", st.Path, perr.Error())
 	}
-	ip.dirStack = append(ip.dirStack, filepath.Dir(abs))
-	defer func() { ip.dirStack = ip.dirStack[:len(ip.dirStack)-1] }()
+	ip.pushSrc(mod.frame)
+	defer ip.popSrc()
 
 	if st.Alias != "" {
 		// Namespaced import: evaluate into a fresh module scope and bind its
 		// definitions as a record under the alias. Guard against cycles.
-		if ip.loading[abs] {
+		if ip.loading[mod.key] {
 			return
 		}
-		ip.loading[abs] = true
-		defer delete(ip.loading, abs)
-		modEnv := value.NewEnv(ip.Global)
+		ip.loading[mod.key] = true
+		defer delete(ip.loading, mod.key)
+		// A module scope tracks definition order, so the namespace record's
+		// fields come out in declaration order instead of Go map order.
+		modEnv := value.NewModuleEnv(ip.Global)
 		for _, s := range prog.Body {
 			ip.execStmt(s, modEnv)
 		}
 		rec := value.NewRecord()
-		for name, v := range modEnv.Locals() {
-			rec.Set(name, v)
+		locals := modEnv.Locals()
+		for _, name := range modEnv.LocalNames() {
+			rec.Set(name, locals[name])
 		}
 		env.Define(st.Alias, rec)
 		return
 	}
 
-	// Plain import: definitions land in the importing scope. Load each file
+	// Plain import: definitions land in the importing scope. Load each module
 	// once to keep re-imports and cycles cheap.
-	if ip.loaded[abs] {
+	if ip.loaded[mod.key] {
 		return
 	}
-	ip.loaded[abs] = true
+	ip.loaded[mod.key] = true
 	for _, s := range prog.Body {
 		ip.execStmt(s, env)
 	}
+}
+
+// module is an import that has been located and read: its source, the key that
+// identifies it for the load-once and cycle caches, and the frame to run it in.
+type module struct {
+	key   string
+	src   string
+	frame srcFrame
+}
+
+// loadModule reads an import. A "std/" path names a module of the embedded
+// standard library; anything else is a file path.
+func (ip *Interp) loadModule(path string) (module, error) {
+	if name, ok := strings.CutPrefix(path, stdPrefix); ok {
+		return loadStd(name)
+	}
+	if ip.inStd() {
+		// A std module is embedded, so it has no directory to resolve a
+		// relative path against, and an override directory must not be able to
+		// pull in code from outside itself.
+		return module{}, fmt.Errorf("a standard-library module may only import other std modules, not %q", path)
+	}
+	abs, err := ip.resolveImport(path)
+	if err != nil {
+		return module{}, fmt.Errorf("cannot read import %q", path)
+	}
+	src, err := os.ReadFile(abs)
+	if err != nil {
+		return module{}, fmt.Errorf("cannot read import %q", path)
+	}
+	return module{key: abs, src: string(src), frame: srcFrame{dir: filepath.Dir(abs)}}, nil
+}
+
+// loadStd reads a standard-library module by name, from the override directory
+// if one is configured and from the embedded copy otherwise.
+func loadStd(name string) (module, error) {
+	if rest, ok := strings.CutSuffix(name, ".ra"); ok {
+		return module{}, fmt.Errorf("a standard-library import names a module, not a file: write %q, not %q", stdPrefix+rest, stdPrefix+name)
+	}
+	if !validStdName(name) {
+		return module{}, fmt.Errorf("%q is not a standard-library module name", stdPrefix+name)
+	}
+	mod := module{key: stdPrefix + name, frame: srcFrame{std: true}}
+	if dir := os.Getenv(stdOverrideEnv); dir != "" {
+		src, err := os.ReadFile(filepath.Join(dir, name+".ra"))
+		if err != nil {
+			return module{}, fmt.Errorf("%s is set to %q, which has no module %q", stdOverrideEnv, dir, name)
+		}
+		mod.src = string(src)
+		return mod, nil
+	}
+	src, ok := std.Read(name)
+	if !ok {
+		return module{}, fmt.Errorf("no standard-library module %q (the library has %s)", name, strings.Join(std.Names(), ", "))
+	}
+	mod.src = src
+	return mod, nil
+}
+
+// validStdName keeps a module name a plain identifier, so it cannot walk out of
+// the library into the rest of the filesystem via the override directory.
+func validStdName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // resolveImport looks for an imported file first relative to the importing
@@ -476,29 +580,85 @@ func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
 	return false
 }
 
+// deepEqual is `==` for everything the scalar fast path above does not cover.
+// It compares structurally: two separately built lists or records are equal
+// when their contents are, which is what makes `a == a` hold for a model's
+// parameter tree. Values of different types are never equal, and functions,
+// which have no structure worth walking, compare by identity.
 func deepEqual(l, r value.Value) bool {
-	lt, lok := l.(*tensor.Tensor)
-	rt, rok := r.(*tensor.Tensor)
-	if lok && rok {
-		if len(lt.Data) != len(rt.Data) {
+	switch lv := l.(type) {
+	case *tensor.Tensor:
+		rv, ok := r.(*tensor.Tensor)
+		if !ok || !intsEqual(lv.Shape, rv.Shape) || len(lv.Data) != len(rv.Data) {
 			return false
 		}
-		for i := range lt.Data {
-			if lt.Data[i] != rt.Data[i] {
+		for i := range lv.Data {
+			if lv.Data[i] != rv.Data[i] {
 				return false
 			}
 		}
 		return true
-	}
-	switch lv := l.(type) {
 	case value.Bool:
 		rv, ok := r.(value.Bool)
 		return ok && lv == rv
 	case value.Str:
 		rv, ok := r.(value.Str)
 		return ok && lv == rv
+	case value.Unit:
+		_, ok := r.(value.Unit)
+		return ok
+	case *value.List:
+		rv, ok := r.(*value.List)
+		if !ok || len(lv.Items) != len(rv.Items) {
+			return false
+		}
+		for i := range lv.Items {
+			if !deepEqual(lv.Items[i], rv.Items[i]) {
+				return false
+			}
+		}
+		return true
+	case *value.Record:
+		rv, ok := r.(*value.Record)
+		if !ok || len(lv.Keys) != len(rv.Keys) {
+			return false
+		}
+		// Fields are matched by name, so the order they were declared in does
+		// not change the answer.
+		for _, k := range lv.Keys {
+			other, has := rv.Get(k)
+			if !has || !deepEqual(lv.Fields[k], other) {
+				return false
+			}
+		}
+		return true
+	case *value.Closure:
+		rv, ok := r.(*value.Closure)
+		return ok && lv == rv
+	case *value.Builtin:
+		rv, ok := r.(*value.Builtin)
+		return ok && lv == rv
 	}
-	return false
+	// A native opaque value (a fitted gbm model) also compares by identity.
+	// Comparing interfaces whose dynamic type is uncomparable panics, so check
+	// the type before trusting ==.
+	lt, rt := reflect.TypeOf(l), reflect.TypeOf(r)
+	if lt != rt {
+		return false
+	}
+	return lt == nil || (lt.Comparable() && l == r)
+}
+
+func intsEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {

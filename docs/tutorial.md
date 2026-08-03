@@ -108,12 +108,13 @@ print("w =", w, " b =", b)
 
 ## Using the library
 
-`std/nn.ra` and `std/optim.ra` are written in Raster. Importing `nn` also pulls
-in the optimizers. A model is just a list of tensors, so `grad` differentiates
-the whole thing at once and an optimizer updates it.
+`std/nn` and `std/optim` are written in Raster and ship inside the `raster`
+binary, so the import works from any directory. Importing `nn` also pulls in the
+optimizers. A model is just a list of tensors, so `grad` differentiates the whole
+thing at once and an optimizer updates it.
 
 ```rust
-import "std/nn.ra"
+import "std/nn"
 
 let p = [he_init(8, 2), zeros(8), he_init(3, 8), zeros(3)]
 

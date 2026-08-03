@@ -4,7 +4,7 @@
 # The data is three clusters in 2-D. The model is a 2-layer MLP producing
 # class logits; training minimizes mean cross-entropy.
 
-import "../std/nn.ra"
+import "std/nn"
 
 # 18 points, 6 per class, around (0,0), (3,0), (0,3).
 let X = [[0.1, 0.0], [-0.2, 0.3], [0.2, -0.1], [0.0, 0.2], [-0.1, -0.2], [0.3, 0.1],

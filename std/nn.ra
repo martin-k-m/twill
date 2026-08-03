@@ -1,10 +1,11 @@
 # nn.ra — a small neural-network toolkit written in Raster.
 #
-# Import it with:  import "std/nn.ra"  (adjust the path to your file). It pulls
-# in the optimizers from optim.ra as well. Parameters are held in plain lists,
-# so `grad` differentiates a whole model at once and the optimizers update it.
+# Import it with:  import "std/nn"  — the library ships inside the binary, so
+# the path is the same from any directory. It pulls in the optimizers from
+# std/optim as well. Parameters are held in plain lists, so `grad`
+# differentiates a whole model at once and the optimizers update it.
 
-import "optim.ra"
+import "std/optim"
 
 # ---- layers --------------------------------------------------------------
 

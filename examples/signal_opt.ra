@@ -6,7 +6,7 @@
 # No Python, no JAX: this is reverse-mode autodiff straight through a backtest,
 # which is exactly what a vanilla Python backtest can't give you.
 
-import "../std/backtest.ra" as bt
+import "std/backtest" as bt
 
 seed(3)
 

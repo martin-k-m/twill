@@ -6,8 +6,8 @@
 # end-to-end. Same autodiff and single binary as everything else; now it does
 # sequences, not just tables and images.
 
-import "../std/nn.ra" as nn
-import "../std/data.ra" as data
+import "std/nn" as nn
+import "std/data" as data
 
 seed(2)
 

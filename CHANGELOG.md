@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.28.0
+
+Breaking. Three semantics that would be expensive to correct after a 1.0
+stability promise, fixed now.
+
+**The standard library ships inside the binary, and `std/` is its own namespace.**
+
+- `import "std/nn"` — no extension, no directory. A path starting with `std/`
+  names a module of the standard library, which is compiled into the `raster`
+  binary with `go:embed`, so the import means the same thing from any working
+  directory and an installed binary can find it. Before, `std/` was read off the
+  disk relative to the importing file or the process cwd, so a `raster` on your
+  `PATH` could not import the library it was built with. Every other import path
+  is still a file.
+- `std/` is reserved: a directory named `std` next to your program does not
+  shadow the library. A real local file is still reachable as
+  `import "./std/local.ra"`.
+- A standard-library module may only import other `std/` modules. Embedded
+  sources have no directory of their own to resolve a relative path against.
+- `RASTER_STD=<dir>` is the escape hatch: it replaces the embedded library
+  wholesale, so `import "std/nn"` reads `$RASTER_STD/nn.ra`. Meant for working
+  on the library itself without rebuilding.
+- **Migration.** `import "std/nn.ra"` and `import "../std/nn.ra"` become
+  `import "std/nn"`; likewise for `optim`, `data`, and `backtest`. The old
+  extension spelling is rejected with an error naming the new one
+  (`a standard-library import names a module, not a file: write "std/nn"`), so
+  the fix is mechanical:
+  `sed -i -E 's|"(\.\./)*std/([a-z_]+)\.ra"|"std/\2"|g' *.ra`. Imports of your
+  own files are unaffected.
+
+**`==` and `!=` are deep structural comparison.**
+
+- They used to answer `false` for every list and every record, including
+  `a == a`, because the comparison fell through for those types and silently
+  reported "not equal" rather than failing. Lists now compare elementwise,
+  records field by field matched by name (so declaration order does not change
+  the answer), and both recurse.
+- A tensor's shape is now part of its value: `[[1.0, 2.0], [3.0, 4.0]]` and
+  `[1.0, 2.0, 3.0, 4.0]` hold the same numbers and are no longer equal. This is
+  the one change here that can flip a `true` to a `false`.
+- `()` equals `()`. Functions compare by identity — a function equals itself,
+  two separately written `fn(x) = x` do not. Values of different types are
+  never equal, which is an answer rather than an error. `!=` is the negation of
+  `==` in every case.
+- Ordering (`<`, `<=`, `>`, `>=`) is unchanged: still scalars only, still an
+  error on anything else.
+
+**A namespaced import's field order is now declaration order.**
+
+- `import "std/nn" as nn` built its namespace record by ranging over a Go map,
+  so `columns(nn)` and `print(nn)` came out in a different order on every run.
+  Reproducibility is the point of this language; a record whose field order is
+  random is not that. A module scope now records the order its names were first
+  defined in, including names it picked up from its own plain imports, and the
+  namespace record follows it.
+
 ## 0.27.0
 
 Differentiable cumulative scans.

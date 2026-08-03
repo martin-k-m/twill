@@ -83,7 +83,7 @@ func TestCumulativeGradients(t *testing.T) {
 // gradient was not merely zero but wrong: the peak term dropped out and only
 // the trough term survived.
 func TestCumulativeGradientThroughDrawdown(t *testing.T) {
-	src := `import "../../std/backtest.ra" as bt
+	src := `import "std/backtest" as bt
 grad(fn(eq) = bt.max_drawdown(eq))([1.0, 1.2, 0.9, 1.5, 1.1])`
 	v, _ := run(t, src)
 	tv, ok := v.(*tensor.Tensor)
