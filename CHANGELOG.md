@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.0] - 2026-08-03
+
+Cumulative scans are differentiable, equality is structural, imports are deterministic, and the standard library ships inside the binary.
+
 ## 0.28.0
 
 Breaking. Three semantics that would be expensive to correct after a 1.0
