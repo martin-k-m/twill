@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`std/shapes` no longer works around a restriction that does not exist.**
+  `numel` was recursive, and the comment above it said `fold` does not take the
+  value `shape` returns. It does: a shape is an ordinary list, and `fold`, `len`
+  and indexing all work on one. `numel` is a fold now, and `prod_dims` keeps its
+  recursion for the reason that is actually true, which is that `flatten_from`
+  needs the product of a tail of the shape and `fold` cannot skip a prefix.
+
 ## [1.1.0] - 2026-08-04
 
 ### Added

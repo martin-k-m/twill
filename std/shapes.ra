@@ -13,15 +13,22 @@
 # not a list, so a computed shape has to be built with `list(...)`. Passing a
 # tensor where a shape is wanted fails with "expects a scalar", which is a
 # confusing way to be told you used the wrong brackets.
+#
+# What `shape` returns is an ordinary list, so `fold`, `len` and indexing all
+# work on it. An earlier version of this file claimed otherwise and worked
+# around a restriction that does not exist.
 
 # ── Shape arithmetic ────────────────────────────────────────────────────────
 
-# Number of elements: the product of the dimensions.
+# The product of the dimensions from index `i` onward.
 #
-# Recursive because Raster's `fold` does not take the value `shape` returns.
+# Recursive rather than a fold because of the starting index: `flatten_from`
+# needs the product of a tail of the shape, and fold has no way to skip a
+# prefix. `numel` below, which wants all of it, is a fold.
 fn prod_dims(dims, i) = if i >= len(dims) { 1 } else { dims[i] * prod_dims(dims, i + 1) }
 
-fn numel(x) = prod_dims(shape(x), 0)
+# Number of elements: the product of every dimension.
+fn numel(x) = fold(fn(a, b) = a * b, 1, shape(x))
 
 # Rank — how many axes a tensor has. A scalar is rank 0, a vector rank 1.
 fn rank(x) = len(shape(x))
