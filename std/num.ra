@@ -1,0 +1,99 @@
+# num.ra — the numerics the built-ins leave out.
+#
+# `sum`, `mean`, `max`, `min` and `argmax` are interpreter built-ins because
+# they need a gradient rule each. Everything here is composed from those, which
+# is the point: a function written in Raster out of differentiable pieces is
+# differentiable, so `grad(std)` works without anyone writing a backward pass
+# for it.
+#
+# Every reduction takes an optional axis and follows the built-ins' convention:
+# one argument reduces the whole tensor to a scalar, two reduce along an axis.
+
+# ── Spread ──────────────────────────────────────────────────────────────────
+
+# Population variance: the mean squared deviation from the mean.
+#
+# Population rather than sample, matching the built-in `mean` it is built on and
+# what a loss function wants.
+fn var(x) {
+  let mu = mean(x)
+  mean(square(x - mu))
+}
+
+# Variance along an axis. The subtraction relies on `mean(x, axis)` broadcasting
+# back against `x`, which is the same thing `standardize` in data.ra does.
+fn var_axis(x, axis) {
+  let mu = mean(x, axis)
+  mean(square(x - mu), axis)
+}
+
+# Standard deviation: the square root of the variance, so in the same units as
+# the data.
+#
+# The epsilon is not decoration. `sqrt` has an infinite derivative at zero, so a
+# constant tensor — variance exactly zero — makes `grad(std)` return NaN rather
+# than the zero it should. Adding a tiny floor before the root keeps the
+# gradient finite, which is why every standardization in data.ra does the same.
+fn std(x) = sqrt(var(x) + 0.00000001)
+
+fn std_axis(x, axis) = sqrt(var_axis(x, axis) + 0.00000001)
+
+# ── Position ────────────────────────────────────────────────────────────────
+
+# Index of the smallest element along an axis.
+#
+# `argmax` of the negation: the largest element of -x is the smallest of x, and
+# it saves a second implementation that could disagree with the first about
+# ties.
+fn argmin(x) = argmax(-x)
+
+fn argmin_axis(x, axis) = argmax(-x, axis)
+
+# ── Magnitude ───────────────────────────────────────────────────────────────
+
+# Euclidean (L2) norm. The same epsilon reasoning as `std`: the derivative of
+# `sqrt` at zero is infinite, and a zero vector is exactly what a freshly
+# initialized parameter looks like.
+fn norm(x) = sqrt(sum(square(x)) + 0.00000001)
+
+fn norm_axis(x, axis) = sqrt(sum(square(x), axis) + 0.00000001)
+
+# Manhattan (L1) norm — the sum of magnitudes. No epsilon needed: `abs` is not
+# differentiable at zero either, but it is bounded there rather than infinite.
+fn norm1(x) = sum(abs(x))
+
+# Root mean square.
+fn rms(x) = sqrt(mean(square(x)) + 0.00000001)
+
+# ── Rescaling ───────────────────────────────────────────────────────────────
+
+# Z-score the whole tensor to mean 0 and unit variance.
+#
+# data.ra has `standardize` for the per-column case, which is what a feature
+# matrix wants. This is the whole-tensor version, for a single signal.
+fn zscore(x) = (x - mean(x)) / std(x)
+
+# Rescale to [0, 1]. Flat input would divide by zero, so the range is floored;
+# a constant tensor comes out as zeros rather than NaN.
+fn minmax(x) {
+  let lo = min(x)
+  (x - lo) / (max(x) - lo + 0.00000001)
+}
+
+# ── Two-sample statistics ───────────────────────────────────────────────────
+
+# Mean squared error, the same quantity `nn.ra` uses as a loss, exposed here as
+# a plain statistic.
+fn mse(a, b) = mean(square(a - b))
+
+# Mean absolute error. Less sensitive to outliers than `mse`, because the error
+# is not squared before averaging.
+fn mae(a, b) = mean(abs(a - b))
+
+# Population covariance between two tensors of the same shape.
+fn cov(a, b) = mean((a - mean(a)) * (b - mean(b)))
+
+# Pearson correlation, in [-1, 1]. Covariance divided by both standard
+# deviations, which is what makes it scale-free: correlation does not change
+# when either input is multiplied by a constant.
+fn corr(a, b) = cov(a, b) / (std(a) * std(b))
