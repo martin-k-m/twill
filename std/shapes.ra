@@ -1,0 +1,108 @@
+# shapes.ra — rearranging a tensor without changing its numbers.
+#
+# `reshape`, `concat` and `transpose` are built-ins. What they lack is the
+# arithmetic on the shape itself: inserting an axis, dropping one, or working
+# out how many elements a tensor holds. That arithmetic is list manipulation
+# rather than tensor work, so it belongs here rather than in the interpreter.
+#
+# Everything routes through `reshape` or `concat`, which are differentiable, so
+# these are too — `grad` through a `stack` or an `unsqueeze` works with no
+# backward pass written for any of it.
+#
+# One thing to know about the syntax: `[3, 2]` is a tensor literal in Raster,
+# not a list, so a computed shape has to be built with `list(...)`. Passing a
+# tensor where a shape is wanted fails with "expects a scalar", which is a
+# confusing way to be told you used the wrong brackets.
+
+# ── Shape arithmetic ────────────────────────────────────────────────────────
+
+# Number of elements: the product of the dimensions.
+#
+# Recursive because Raster's `fold` does not take the value `shape` returns.
+fn prod_dims(dims, i) = if i >= len(dims) { 1 } else { dims[i] * prod_dims(dims, i + 1) }
+
+fn numel(x) = prod_dims(shape(x), 0)
+
+# Rank — how many axes a tensor has. A scalar is rank 0, a vector rank 1.
+fn rank(x) = len(shape(x))
+
+# Resolve a negative axis against a rank, the way numpy does: -1 is the last
+# axis, -2 the one before it. `extra` is 1 when the axis names a position in a
+# list one longer than the current rank, which is the case when inserting.
+fn axis_of(axis, n, extra) = if axis < 0 { axis + n + extra } else { axis }
+
+# `dims` with `v` inserted so that it ends up at index `axis`.
+fn insert_dim(dims, axis, v) = insert_go(dims, axis_of(axis, len(dims), 1), v, 0, list())
+
+fn insert_go(dims, axis, v, i, acc) {
+  if i == len(dims) {
+    # Inserting at the very end is the one case the loop below cannot reach,
+    # because there is no element left to append after the new one.
+    if axis == i { append(acc, v) } else { acc }
+  } else {
+    let acc2 = if i == axis { append(acc, v) } else { acc }
+    insert_go(dims, axis, v, i + 1, append(acc2, dims[i]))
+  }
+}
+
+# `dims` with the entry at `axis` removed.
+fn drop_dim(dims, axis) = drop_go(dims, axis_of(axis, len(dims), 0), 0, list())
+
+fn drop_go(dims, axis, i, acc) {
+  if i == len(dims) {
+    acc
+  } else {
+    drop_go(dims, axis, i + 1, if i == axis { acc } else { append(acc, dims[i]) })
+  }
+}
+
+# ── Adding and removing axes ────────────────────────────────────────────────
+
+# Add an axis of length 1 at `axis`. The tensor's data is untouched; only how
+# it is indexed changes.
+#
+# This is what turns a [n] vector into a [1, n] row or an [n, 1] column, which
+# is how you make a broadcast line up the way you meant.
+fn unsqueeze(x, axis) = reshape(x, insert_dim(shape(x), axis, 1))
+
+# Drop an axis of length 1. Nothing checks that the axis really is 1 — reshape
+# refuses a shape that does not hold the same number of elements, so a wrong
+# axis is an error there rather than silent corruption here.
+fn squeeze_at(x, axis) = reshape(x, drop_dim(shape(x), axis))
+
+# Collapse to a single axis.
+fn flatten(x) = reshape(x, list(numel(x)))
+
+# Collapse every axis from `k` onward into one, keeping the leading axes as they
+# are. The usual reason is going from a batch of feature maps to a batch of
+# vectors: [batch, h, w] becomes [batch, h * w] with `flatten_from(x, 1)`.
+fn flatten_from(x, k) {
+  let s = shape(x)
+  let cut = axis_of(k, len(s), 0)
+  reshape(x, flatten_go(s, cut, 0, list()))
+}
+
+fn flatten_go(dims, cut, i, acc) {
+  if i == cut {
+    append(acc, prod_dims(dims, cut))
+  } else {
+    flatten_go(dims, cut, i + 1, append(acc, dims[i]))
+  }
+}
+
+# A [n] vector as a [1, n] row, and as an [n, 1] column. Both are `unsqueeze`
+# with the axis spelled out, and both are common enough to name.
+fn as_row(x) = unsqueeze(x, 0)
+fn as_col(x) = unsqueeze(x, -1)
+
+# ── Joining ─────────────────────────────────────────────────────────────────
+
+# Join tensors along a *new* axis, so stacking three [n] vectors on axis 0 gives
+# [3, n]. `concat` joins along an axis that already exists; this is the other
+# one people reach for and reliably confuse it with.
+fn stack(items, axis) = concat(map(fn(t) = unsqueeze(t, axis), items), axis)
+
+# The two everyday cases, named so the axis is not a thing to remember.
+fn stack_rows(items) = stack(items, 0)
+fn stack_cols(items) = stack(items, -1)
+
