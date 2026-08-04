@@ -391,6 +391,15 @@ zeros flatten the gradient entirely, because every product of the others still
 contains a zero. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
 the last axis.
 
+`split(t, n | sizes[, axis])` is the inverse of `concat`, returning a list of
+pieces. A number means that many equal pieces (`split(x, 2, 1)` halves the
+columns) and a list means those exact lengths (`split(x, list(1, 3), 1)`). The
+axis defaults to 0. The sizes must account for the axis exactly and an equal
+split must divide evenly; both are errors rather than ragged output, because a
+split that quietly loses a row shows up later as a wrong loss rather than as a
+crash. Each piece keeps its own gradient path, so
+`concat(split(t, 2, 1), 1)` is `t` in both directions.
+
 `broadcast_to(t, ...shape)` expands a tensor to a given shape under the usual
 right-aligned rules, where every axis must already match or be 1. It is what
 you need after a reduction: reducing axis 1 of a `[2, 3]` gives a `[2]`, and

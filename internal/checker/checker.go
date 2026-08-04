@@ -941,7 +941,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return c.inferEinsum(ex, argTypes)
 	case "concat", "fold":
 		return tUnknown{}
-	case "append", "enumerate", "columns":
+	case "append", "enumerate", "columns", "split":
 		return tList{}
 	case "write_frame":
 		return tUnit{}

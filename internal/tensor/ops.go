@@ -889,3 +889,97 @@ func BroadcastTo(t *Tensor, shape []int) (*Tensor, error) {
 		}
 	}), nil
 }
+
+// Split cuts a tensor into consecutive pieces along one axis. It is the inverse
+// of Concat: splitting with the sizes the pieces had and concatenating the
+// result on the same axis gives the original back.
+//
+// `sizes` are the lengths of the pieces along `axis` and must add up to that
+// axis exactly. A short or long list is an error rather than a silent drop,
+// because a split that quietly loses a row is the kind of thing that shows up
+// later as a wrong loss rather than as a crash.
+//
+// Each piece carries its own gradient path back into the parent's slice, so
+// splitting a parameter, using the halves differently, and differentiating
+// through both accumulates into one gradient.
+func Split(t *Tensor, sizes []int, axis int) ([]*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	if len(sizes) == 0 {
+		return nil, fmt.Errorf("split: need at least one piece")
+	}
+	total := 0
+	for _, s := range sizes {
+		if s < 0 {
+			return nil, fmt.Errorf("split: negative size %d", s)
+		}
+		total += s
+	}
+	if total != t.Shape[axis] {
+		return nil, fmt.Errorf("split: sizes sum to %d but axis %d has length %d",
+			total, axis, t.Shape[axis])
+	}
+
+	before, L, after := axisSpans(t.Shape, axis)
+	out := make([]*Tensor, len(sizes))
+	offset := 0
+	for p, size := range sizes {
+		shape := append([]int(nil), t.Shape...)
+		shape[axis] = size
+		data := make([]float64, before*size*after)
+		// Copied rather than aliased. A view sharing the parent's backing array
+		// would make a later in-place write to one piece silently change the
+		// others' idea of the parent, and nothing else in this package hands
+		// out aliases.
+		for i := 0; i < before; i++ {
+			for k := 0; k < size; k++ {
+				for j := 0; j < after; j++ {
+					data[i*size*after+k*after+j] = t.Data[i*L*after+(offset+k)*after+j]
+				}
+			}
+		}
+		piece := &Tensor{Data: data, Shape: shape}
+		// `offset` and `size` are captured per iteration; the closure below runs
+		// long after this loop has moved on.
+		off, sz := offset, size
+		out[p] = track1(piece, t, func() {
+			gt := t.ensureGrad()
+			for i := 0; i < before; i++ {
+				for k := 0; k < sz; k++ {
+					for j := 0; j < after; j++ {
+						gt[i*L*after+(off+k)*after+j] += piece.Grad[i*sz*after+k*after+j]
+					}
+				}
+			}
+		})
+		offset += size
+	}
+	return out, nil
+}
+
+// SplitEqual cuts a tensor into `n` equally sized pieces along `axis`, which is
+// the common case and the one where spelling out the sizes is just arithmetic
+// the caller should not have to do. The axis must divide evenly; numpy's
+// `array_split` tolerates a remainder, and that leniency turns a wrong `n` into
+// ragged output rather than an error, so it is not copied here.
+func SplitEqual(t *Tensor, n, axis int) ([]*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 {
+		return nil, fmt.Errorf("split: piece count must be positive, got %d", n)
+	}
+	L := t.Shape[axis]
+	if L%n != 0 {
+		return nil, fmt.Errorf("split: axis %d has length %d, which %d does not divide evenly",
+			axis, L, n)
+	}
+	sizes := make([]int, n)
+	for i := range sizes {
+		sizes[i] = L / n
+	}
+	return Split(t, sizes, axis)
+}

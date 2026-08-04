@@ -349,3 +349,94 @@ func TestGradCheckBroadcastTo(t *testing.T) {
 		return Sum(p)
 	})
 }
+
+func TestSplitRoundTrip(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4, 5, 6, 7, 8}, []int{2, 4})
+	parts, err := Split(x, []int{1, 3}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("got %d pieces, want 2", len(parts))
+	}
+	if parts[0].Shape[1] != 1 || parts[1].Shape[1] != 3 {
+		t.Errorf("piece shapes = %v %v", parts[0].Shape, parts[1].Shape)
+	}
+	if parts[1].Data[0] != 2 || parts[1].Data[3] != 6 {
+		t.Errorf("second piece = %v", parts[1].Data)
+	}
+
+	// Concatenating on the same axis must give back exactly what went in.
+	back, err := Concat(parts, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range x.Data {
+		if back.Data[i] != x.Data[i] {
+			t.Fatalf("round trip: got %v, want %v", back.Data, x.Data)
+		}
+	}
+}
+
+func TestSplitIsACopy(t *testing.T) {
+	// Writing into a piece must not reach back into the parent.
+	x := New([]float64{1, 2, 3, 4}, []int{4})
+	parts, err := SplitEqual(x, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts[0].Data[0] = 99
+	if x.Data[0] != 1 {
+		t.Errorf("parent aliased: x.Data[0] = %v, want 1", x.Data[0])
+	}
+}
+
+func TestSplitRejects(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	if _, err := Split(x, []int{1, 1}, 1); err == nil {
+		t.Error("sizes summing short should error")
+	}
+	if _, err := Split(x, []int{2, 2}, 1); err == nil {
+		t.Error("sizes summing long should error")
+	}
+	if _, err := Split(x, []int{-1, 4}, 1); err == nil {
+		t.Error("a negative size should error")
+	}
+	if _, err := Split(x, nil, 1); err == nil {
+		t.Error("no pieces should error")
+	}
+	// 3 does not divide by 2, and a ragged result is worse than an error.
+	if _, err := SplitEqual(x, 2, 1); err == nil {
+		t.Error("uneven equal split should error")
+	}
+	if _, err := SplitEqual(x, 0, 1); err == nil {
+		t.Error("zero pieces should error")
+	}
+	if _, err := SplitEqual(x, 2, 7); err == nil {
+		t.Error("out-of-range axis should error")
+	}
+}
+
+func TestGradCheckSplit(t *testing.T) {
+	// Both halves are used, with different weights, so a gradient that went to
+	// the wrong piece or was dropped would show up.
+	gradCheck(t, "split", []float64{1, 2, 3, 4}, []int{4}, func(x *Tensor) *Tensor {
+		parts, err := SplitEqual(x, 2, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := Mul(parts[0], New([]float64{10}, []int{1}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := Mul(parts[1], New([]float64{-3}, []int{1}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := Add(Sum(a), Sum(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	})
+}

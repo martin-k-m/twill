@@ -306,6 +306,56 @@ func (ip *Interp) installBuiltins() {
 		return tensor.Concat(tensors, axis)
 	})
 
+	// split(t, n | sizes[, axis]): the inverse of concat, returning a list.
+	// A scalar second argument means that many equal pieces; a list or 1-D
+	// tensor means those exact lengths. The axis defaults to 0, matching the
+	// axis a bare `concat` result is usually built along.
+	def("split", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 2 || len(a) > 3 {
+			return nil, fmt.Errorf("split expects (tensor, n | sizes[, axis])")
+		}
+		t, err := asTensor(a[0], "split")
+		if err != nil {
+			return nil, err
+		}
+		axis := 0
+		if len(a) == 3 {
+			if axis, err = intOf(a[2], "split"); err != nil {
+				return nil, err
+			}
+		}
+
+		var pieces []*tensor.Tensor
+		// A scalar and a one-element list mean different things — 2 pieces
+		// versus one piece of length 2 — so the scalar case is tested first
+		// and explicitly, rather than falling through to indicesOf.
+		if _, isList := a[1].(*value.List); !isList && isScalarValue(a[1]) {
+			n, err := intOf(a[1], "split")
+			if err != nil {
+				return nil, err
+			}
+			pieces, err = tensor.SplitEqual(t, n, axis)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			sizes, err := indicesOf(a[1], "split")
+			if err != nil {
+				return nil, err
+			}
+			pieces, err = tensor.Split(t, sizes, axis)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		items := make([]value.Value, len(pieces))
+		for i, p := range pieces {
+			items[i] = p
+		}
+		return &value.List{Items: items}, nil
+	})
+
 	// Automatic differentiation.
 	def("grad", 1, false, func(a []value.Value) (value.Value, error) {
 		f := a[0]
@@ -1294,6 +1344,14 @@ func scalarOf(v value.Value, who string) (float64, error) {
 		return 0, fmt.Errorf("%s expects a scalar", who)
 	}
 	return t.Data[0], nil
+}
+
+// isScalarValue reports whether v is a single number, as opposed to a sequence
+// of them. Used where a scalar and a one-element sequence have to mean
+// different things.
+func isScalarValue(v value.Value) bool {
+	t, ok := v.(*tensor.Tensor)
+	return ok && t.Size() == 1
 }
 
 func intOf(v value.Value, who string) (int, error) {

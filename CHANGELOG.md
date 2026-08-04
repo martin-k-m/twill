@@ -18,6 +18,13 @@
   operands — the case being a reduction result you want to subtract from what
   you reduced. The gradient sums over each broadcast axis.
 
+- **`split(t, n | sizes[, axis])`**, differentiable, the inverse of `concat`.
+  A number gives that many equal pieces, a list gives those exact lengths, and
+  each piece routes its gradient back into its own slice of the parent. Sizes
+  that do not account for the axis exactly, and equal splits that do not divide
+  evenly, are errors rather than ragged output. Pieces are copies, not views,
+  matching the rest of the package.
+
 - **Sample statistics in `std/num`**: `var_s`, `var_s_axis`, `std_s`,
   `std_s_axis`, `cov_s` and `corr_s`, dividing by n - 1. The population versions
   divide by n, which understates the spread when the tensor is a sample rather

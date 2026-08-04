@@ -184,7 +184,7 @@ correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
 `logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
 reductions `sum`, `mean`, `max`, `min`, `prod`, `median`, and `argmax` (with
 an optional axis);
-and shape ops `reshape`, `broadcast_to`, `transpose`, and `concat`. There's a differentiable
+and shape ops `reshape`, `broadcast_to`, `transpose`, `concat`, and `split`. There's a differentiable
 `einsum` for general contractions (`einsum("ij,jk->ik", A, B)`). Tensors and
 lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See the
 [language guide](docs/language-guide.md) for the full list.
