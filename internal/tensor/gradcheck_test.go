@@ -285,3 +285,67 @@ func TestReduceAxisBounds(t *testing.T) {
 		t.Errorf("MedianAxis(-1) = %v, want [1.5 3.5]", r.Data)
 	}
 }
+
+func TestBroadcastToValues(t *testing.T) {
+	// A missing leading axis is prepended.
+	r, err := BroadcastTo(New([]float64{1, 2}, []int{2}), []int{3, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 2, 1, 2, 1, 2}
+	for i := range want {
+		if r.Data[i] != want[i] {
+			t.Fatalf("prepend: got %v, want %v", r.Data, want)
+		}
+	}
+
+	// A length-1 axis is stretched in place, which is the keepdims case.
+	c, err := BroadcastTo(New([]float64{1, 2}, []int{2, 1}), []int{2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCol := []float64{1, 1, 1, 2, 2, 2}
+	for i := range wantCol {
+		if c.Data[i] != wantCol[i] {
+			t.Fatalf("column: got %v, want %v", c.Data, wantCol)
+		}
+	}
+
+	// An already-matching shape is a copy, not an error.
+	if _, err := BroadcastTo(New([]float64{1, 2}, []int{2}), []int{2}); err != nil {
+		t.Errorf("identity broadcast: %v", err)
+	}
+}
+
+func TestBroadcastToRejects(t *testing.T) {
+	// A 3 cannot become a 4: only a 1 stretches.
+	if _, err := BroadcastTo(New([]float64{1, 2, 3}, []int{3}), []int{4}); err == nil {
+		t.Error("3 -> 4 should error")
+	}
+	// Broadcasting is one-way. [2,3] and [2,1] are compatible as operands, but
+	// expanding [2,3] *to* [2,1] would have to shrink, so it is refused.
+	if _, err := BroadcastTo(New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3}), []int{2, 1}); err == nil {
+		t.Error("[2,3] -> [2,1] should error")
+	}
+	// The target cannot have fewer axes than the input.
+	if _, err := BroadcastTo(New([]float64{1, 2}, []int{1, 2}), []int{2}); err == nil {
+		t.Error("dropping an axis should error")
+	}
+}
+
+func TestGradCheckBroadcastTo(t *testing.T) {
+	// Each input element is read three times, so its gradient is the sum over
+	// the three outputs that used it.
+	w := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	gradCheck(t, "broadcast-to", []float64{1, 2}, []int{2, 1}, func(x *Tensor) *Tensor {
+		b, err := BroadcastTo(x, []int{2, 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := Mul(b, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Sum(p)
+	})
+}

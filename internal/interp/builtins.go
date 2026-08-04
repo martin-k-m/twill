@@ -234,6 +234,21 @@ func (ip *Interp) installBuiltins() {
 		return tensor.Reshape(t, shape)
 	})
 
+	def("broadcast_to", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 2 {
+			return nil, fmt.Errorf("broadcast_to expects (tensor, ...shape)")
+		}
+		t, err := asTensor(a[0], "broadcast_to")
+		if err != nil {
+			return nil, err
+		}
+		shape, err := shapeFromArgs(a[1:], "broadcast_to")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.BroadcastTo(t, shape)
+	})
+
 	def("transpose", -1, true, func(a []value.Value) (value.Value, error) {
 		if len(a) < 1 {
 			return nil, fmt.Errorf("transpose expects a tensor")

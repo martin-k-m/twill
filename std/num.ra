@@ -9,6 +9,13 @@
 # Every reduction takes an optional axis and follows the built-ins' convention:
 # one argument reduces the whole tensor to a scalar, two reduce along an axis.
 
+import "std/shapes" as sh
+
+# Re-exported so `num.numel(x)` works without a second import for the one thing
+# every count-based statistic here needs.
+fn numel(x) = sh.numel(x)
+fn rank(x) = sh.rank(x)
+
 # ── Spread ──────────────────────────────────────────────────────────────────
 
 # Population variance: the mean squared deviation from the mean.
@@ -20,12 +27,61 @@ fn var(x) {
   mean(square(x - mu))
 }
 
-# Variance along an axis. The subtraction relies on `mean(x, axis)` broadcasting
-# back against `x`, which is the same thing `standardize` in data.ra does.
+# Variance along an axis.
+#
+# The mean has to be put back before it can be subtracted, and that is not
+# optional bookkeeping. A reduction drops the axis it reduced, so `mean(x, 1)`
+# of a [2, 3] is a [2] — and broadcasting aligns from the right, so [2] against
+# [2, 3] is a shape error rather than the per-row mean anyone intended. Only a
+# reduction over axis 0 happens to line back up by accident.
+#
+# `keep` restores the axis at length 1 and expands it back to the original
+# shape, which is what other array libraries spell as `keepdims=True`.
 fn var_axis(x, axis) {
-  let mu = mean(x, axis)
+  let mu = keep(mean(x, axis), x, axis)
   mean(square(x - mu), axis)
 }
+
+# A reduction result re-expanded to the shape it was reduced from.
+fn keep(r, x, axis) = broadcast_to(sh.unsqueeze(r, axis), shape(x))
+
+# ── Sample statistics ───────────────────────────────────────────────────────
+
+# Sample variance, dividing by n - 1 rather than n.
+#
+# The population versions above divide by n, which is right when the tensor is
+# the whole population and is what a loss function wants. When it is a sample
+# and the variance is an estimate of something wider, dividing by n understates
+# it, because the mean being subtracted was measured from the same sample and
+# therefore sits closer to it than the true mean does. Bessel's correction is
+# the n / (n - 1) rescale that removes that bias, and it is why numpy's `var`
+# has a `ddof` argument and why the two answers differ on small samples.
+#
+# A single element has no spread to estimate; the correction would divide by
+# zero, so it is left alone.
+fn var_s(x) {
+  let n = numel(x)
+  if n < 2 { var(x) } else { var(x) * n / (n - 1) }
+}
+
+fn var_s_axis(x, axis) {
+  let n = shape(x)[sh.axis_of(axis, rank(x), 0)]
+  if n < 2 { var_axis(x, axis) } else { var_axis(x, axis) * n / (n - 1) }
+}
+
+fn std_s(x) = sqrt(var_s(x) + 0.00000001)
+
+fn std_s_axis(x, axis) = sqrt(var_s_axis(x, axis) + 0.00000001)
+
+# Sample covariance and correlation, same correction. Correlation is unchanged
+# by it in exact arithmetic — the factor appears once on top and once under the
+# root below — but it is here so a set of sample statistics is not missing one.
+fn cov_s(a, b) {
+  let n = numel(a)
+  if n < 2 { cov(a, b) } else { cov(a, b) * n / (n - 1) }
+}
+
+fn corr_s(a, b) = cov_s(a, b) / (std_s(a) * std_s(b))
 
 # Standard deviation: the square root of the variance, so in the same units as
 # the data.

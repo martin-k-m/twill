@@ -391,6 +391,14 @@ zeros flatten the gradient entirely, because every product of the others still
 contains a zero. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
 the last axis.
 
+`broadcast_to(t, ...shape)` expands a tensor to a given shape under the usual
+right-aligned rules, where every axis must already match or be 1. It is what
+you need after a reduction: reducing axis 1 of a `[2, 3]` gives a `[2]`, and
+`[2]` will not broadcast back against `[2, 3]`, because alignment is from the
+right. `broadcast_to(reshape(mu, list(2, 1)), list(2, 3))` puts it back. Other
+array libraries spell this as `keepdims=True` on the reduction itself; here it
+is an operation, and `num.keep` wraps the two steps.
+
 Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,
 `cummax`, `cummin`. These build signals, equity curves, and running peaks, and
 they are differentiable: `cumsum` and `cumprod` have exact gradients (`cumprod`

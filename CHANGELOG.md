@@ -12,6 +12,27 @@
   of dividing by them, and `median` sorts indices rather than values so the
   backward pass knows which element it picked.
 
+- **`broadcast_to(t, ...shape)`**, differentiable, expanding a tensor to a named
+  shape. Broadcasting was already implicit inside every binary op, which covers
+  everything until the shape you need to expand against is not one of the
+  operands — the case being a reduction result you want to subtract from what
+  you reduced. The gradient sums over each broadcast axis.
+
+- **Sample statistics in `std/num`**: `var_s`, `var_s_axis`, `std_s`,
+  `std_s_axis`, `cov_s` and `corr_s`, dividing by n - 1. The population versions
+  divide by n, which understates the spread when the tensor is a sample rather
+  than the whole population, because the mean subtracted was measured from that
+  same sample. A single element is left uncorrected instead of dividing by zero.
+
+### Fixed
+
+- **`num.var_axis` and `num.std_axis` no longer fail on any axis but the first.**
+  They subtracted the mean straight back from the input, and a reduction drops
+  the axis it reduced, so `var_axis(x, 1)` on a [2, 3] tried to broadcast a [2]
+  against a [2, 3] and raised a shape error. Broadcasting aligns from the right,
+  so only a reduction over axis 0 lined back up, and it did so by luck. The mean
+  is restored to the reduced shape with `broadcast_to` now.
+
 ## [1.0.1] - 2026-08-03
 
 ### Fixed

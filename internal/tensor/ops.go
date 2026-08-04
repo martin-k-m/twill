@@ -821,3 +821,71 @@ func medianOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 		}
 	})
 }
+
+// BroadcastTo expands a tensor to `shape` under the usual right-aligned rules:
+// every axis of the input must already match the target or be 1, and the input
+// may have fewer axes than the target, which are prepended.
+//
+// Broadcasting normally happens implicitly inside a binary op, and that is
+// enough right up until the shape you need to broadcast against is not one of
+// the operands. The case that forces this is a reduction result: reducing axis
+// 1 of a [2, 3] gives a [2], and [2] does not line up against [2, 3] because
+// alignment is from the right. Naming the target shape is the way out, and it
+// is also what "keepdims" is doing in other array libraries, only spelled as an
+// operation rather than a flag on every reduction.
+//
+// The gradient is the reverse of the expansion: every output that read a given
+// input element sends its gradient back to it, so a broadcast axis sums.
+func BroadcastTo(t *Tensor, shape []int) (*Tensor, error) {
+	if len(shape) < len(t.Shape) {
+		return nil, fmt.Errorf("cannot broadcast %v to %v: fewer axes in target", t.Shape, shape)
+	}
+	// Checking against BroadcastShape rather than reimplementing the rule keeps
+	// one definition of what is compatible. The result must be the target
+	// exactly: a shape that broadcasts *with* the target but is not equal to it
+	// (a 5 against a 1, say) is an expansion of the target too, which is not
+	// what was asked for.
+	got, ok := BroadcastShape(t.Shape, shape)
+	if !ok || !shapeEqual(got, shape) {
+		return nil, fmt.Errorf("cannot broadcast %v to %v", t.Shape, shape)
+	}
+
+	n := numel(shape)
+	out := make([]float64, n)
+	rank := len(shape)
+	eff := effStrides(t.Shape, shape)
+
+	// The source offset per output, kept because the backward pass needs the
+	// same mapping and recomputing it there would mean walking the odometer
+	// twice. Only kept when a gradient is actually wanted.
+	var src []int
+	if t.RequiresGrad {
+		src = make([]int, n)
+	}
+
+	coord := make([]int, rank)
+	idx := 0
+	for o := 0; o < n; o++ {
+		if src != nil {
+			src[o] = idx
+		}
+		out[o] = t.Data[idx]
+		for d := rank - 1; d >= 0; d-- {
+			coord[d]++
+			idx += eff[d]
+			if coord[d] < shape[d] {
+				break
+			}
+			coord[d] = 0
+			idx -= eff[d] * shape[d]
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int(nil), shape...)}
+	return track1(res, t, func() {
+		gt := t.ensureGrad()
+		for o := 0; o < n; o++ {
+			gt[src[o]] += res.Grad[o]
+		}
+	}), nil
+}
