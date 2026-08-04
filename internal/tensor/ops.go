@@ -3,6 +3,7 @@ package tensor
 import (
 	"fmt"
 	"math"
+	"sort"
 )
 
 // --- extra elementwise ops -------------------------------------------------
@@ -652,4 +653,171 @@ func Concat(tensors []*Tensor, axis int) (*Tensor, error) {
 			}
 		}
 	}), nil
+}
+
+// --- product and median ----------------------------------------------------
+
+// Prod multiplies every element together.
+func Prod(t *Tensor) *Tensor { return prodOver(t, len(t.Data), 1, 1, []int{}) }
+
+// ProdAxis multiplies along one axis, dropping it from the shape.
+func ProdAxis(t *Tensor, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+	return prodOver(t, L, before, after, removeAxis(t.Shape, axis)), nil
+}
+
+// prodOver is the shared body: `before * after` independent runs of length L,
+// strided by `after`. Passing before=after=1 and L=len(Data) reduces the whole
+// tensor, so the two entry points above are the same code.
+//
+// The derivative of a product with respect to one factor is the product of the
+// others, which is the whole product divided by that factor — except that the
+// division is invalid exactly when the factor is zero, and that is not a rare
+// case for a tensor. So the zeros are counted instead:
+//
+//	no zeros    every factor gets total/x
+//	one zero    that factor gets the product of the rest; everything else 0
+//	two or more every derivative is 0, because every product of the others
+//	            still contains a zero
+func prodOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
+	outN := before * after
+	out := make([]float64, outN)
+	// Product of the non-zero factors, and how many zeros, per run. Both are
+	// needed by the backward pass and are free to keep while multiplying.
+	nzProd := make([]float64, outN)
+	zeros := make([]int, outN)
+
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			p := 1.0
+			nz := 1.0
+			z := 0
+			for k := 0; k < L; k++ {
+				v := t.Data[base+k*after]
+				p *= v
+				if v == 0 {
+					z++
+				} else {
+					nz *= v
+				}
+			}
+			idx := i*after + j
+			out[idx] = p
+			nzProd[idx] = nz
+			zeros[idx] = z
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: outShape}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for i := 0; i < before; i++ {
+			for j := 0; j < after; j++ {
+				idx := i*after + j
+				g := res.Grad[idx]
+				if g == 0 {
+					continue
+				}
+				base := i*L*after + j
+				switch zeros[idx] {
+				case 0:
+					for k := 0; k < L; k++ {
+						p := base + k*after
+						gt[p] += g * out[idx] / t.Data[p]
+					}
+				case 1:
+					// Only the zero factor has a non-zero derivative: every
+					// other one's "product of the rest" still contains it.
+					for k := 0; k < L; k++ {
+						p := base + k*after
+						if t.Data[p] == 0 {
+							gt[p] += g * nzProd[idx]
+						}
+					}
+				}
+			}
+		}
+	})
+}
+
+// Median returns the median of every element.
+func Median(t *Tensor) *Tensor { return medianOver(t, len(t.Data), 1, 1, []int{}) }
+
+// MedianAxis takes the median along one axis, dropping it from the shape.
+func MedianAxis(t *Tensor, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+	return medianOver(t, L, before, after, removeAxis(t.Shape, axis)), nil
+}
+
+// medianOver mirrors prodOver's layout.
+//
+// The gradient routes to whichever element was selected, the same way max and
+// min do: the median of a run is one of its values, so moving any other value
+// a little does not move the answer at all. An even-length run averages the two
+// middle values, so each of those takes half.
+//
+// Selection is by sorting indices rather than values, because the backward pass
+// needs to know *which* element was chosen, not just what it held.
+func medianOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
+	outN := before * after
+	out := make([]float64, outN)
+	// One or two source offsets per output, and the weight each carries back.
+	lo := make([]int, outN)
+	hi := make([]int, outN)
+
+	idxBuf := make([]int, L)
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for k := 0; k < L; k++ {
+				idxBuf[k] = base + k*after
+			}
+			sort.Slice(idxBuf, func(a, b int) bool {
+				return t.Data[idxBuf[a]] < t.Data[idxBuf[b]]
+			})
+			idx := i*after + j
+			mid := L / 2
+			if L%2 == 1 {
+				lo[idx] = idxBuf[mid]
+				hi[idx] = idxBuf[mid]
+				out[idx] = t.Data[idxBuf[mid]]
+			} else {
+				lo[idx] = idxBuf[mid-1]
+				hi[idx] = idxBuf[mid]
+				out[idx] = (t.Data[idxBuf[mid-1]] + t.Data[idxBuf[mid]]) / 2
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: outShape}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for idx := 0; idx < outN; idx++ {
+			g := res.Grad[idx]
+			if g == 0 {
+				continue
+			}
+			if lo[idx] == hi[idx] {
+				gt[lo[idx]] += g
+			} else {
+				gt[lo[idx]] += g / 2
+				gt[hi[idx]] += g / 2
+			}
+		}
+	})
 }

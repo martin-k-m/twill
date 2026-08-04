@@ -376,9 +376,19 @@ Elementwise combine: `maximum(a, b)`, `minimum(a, b)`, `where(cond, a, b)`, and
 the comparisons `greater`, `less`, `greater_equal`, `less_equal`, `equal`
 (each returns a tensor of 1s and 0s).
 
-Reductions: `sum`, `mean`, `max`, `min` reduce the whole tensor to a scalar, or
-one axis with a second argument (`sum(t, 0)`). `argmax(t[, axis])` gives the
-index of the maximum. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
+Reductions: `sum`, `mean`, `max`, `min`, `prod` and `median` reduce the whole
+tensor to a scalar, or one axis with a second argument (`sum(t, 0)`).
+`argmax(t[, axis])` gives the index of the maximum.
+
+All of them are differentiable, including the two order-based ones, though what
+that means is worth being clear about. `median` routes the whole gradient to
+whichever element was selected, the way `max` does, and splits it in half
+between the middle two when the run has even length. `prod` gives each factor
+the product of the others, which is the total divided by that factor — except
+where a factor is zero and the division is not available. There, a single zero
+takes the product of the rest and everything else gets nothing, and two or more
+zeros flatten the gradient entirely, because every product of the others still
+contains a zero. `softmax(t[, axis])` and `logsumexp(t[, axis])` default to
 the last axis.
 
 Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,

@@ -186,3 +186,102 @@ func TestGradCheckMatMul(t *testing.T) {
 		return Sum(Square(m))
 	})
 }
+
+func TestGradCheckProd(t *testing.T) {
+	// Values kept away from zero: the derivative is continuous everywhere, but
+	// a factor near zero makes the product's scale collapse and the central
+	// difference lose all its significant digits.
+	gradCheck(t, "prod", []float64{1.5, -2, 0.5, 3}, []int{4}, func(x *Tensor) *Tensor {
+		return Prod(x)
+	})
+}
+
+func TestGradCheckProdAxis(t *testing.T) {
+	gradCheck(t, "prod-axis", []float64{1.5, -2, 0.5, 3, 2, -1}, []int{3, 2}, func(x *Tensor) *Tensor {
+		r, _ := ProdAxis(x, 1)
+		return Sum(r)
+	})
+}
+
+// The zero cases are the ones the numeric check cannot reach, because a
+// difference quotient at a zero factor still sees a product of zero on both
+// sides for every *other* index. They are asserted directly instead.
+func TestProdGradWithZeros(t *testing.T) {
+	one := Leaf([]float64{0, 2, 3}, []int{3})
+	if err := Prod(one).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	// Only the zero moves the product; the others are each multiplied by it.
+	if got := one.Grad; got[0] != 6 || got[1] != 0 || got[2] != 0 {
+		t.Errorf("one zero: grad = %v, want [6 0 0]", got)
+	}
+
+	two := Leaf([]float64{0, 0, 3}, []int{3})
+	if err := Prod(two).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	for i, g := range two.Grad {
+		if g != 0 {
+			t.Errorf("two zeros: grad[%d] = %v, want 0", i, g)
+		}
+	}
+}
+
+func TestMedianValues(t *testing.T) {
+	// Odd length picks the middle element; even averages the middle two.
+	if got := Median(New([]float64{5, 1, 3}, []int{3})).Data[0]; got != 3 {
+		t.Errorf("odd median = %v, want 3", got)
+	}
+	if got := Median(New([]float64{4, 1, 3, 2}, []int{4})).Data[0]; got != 2.5 {
+		t.Errorf("even median = %v, want 2.5", got)
+	}
+
+	rows, err := MedianAxis(New([]float64{1, 2, 3, 4}, []int{2, 2}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows.Data[0] != 1.5 || rows.Data[1] != 3.5 {
+		t.Errorf("median axis 1 = %v, want [1.5 3.5]", rows.Data)
+	}
+	if len(rows.Shape) != 1 || rows.Shape[0] != 2 {
+		t.Errorf("median axis 1 shape = %v, want [2]", rows.Shape)
+	}
+}
+
+func TestMedianGrad(t *testing.T) {
+	// Odd: all of it goes to the element that was selected.
+	odd := Leaf([]float64{5, 1, 3}, []int{3})
+	if err := Median(odd).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	if odd.Grad[0] != 0 || odd.Grad[1] != 0 || odd.Grad[2] != 1 {
+		t.Errorf("odd grad = %v, want [0 0 1]", odd.Grad)
+	}
+
+	// Even: the two middle values share it, because the output is their mean.
+	even := Leaf([]float64{4, 1, 3, 2}, []int{4})
+	if err := Median(even).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	if even.Grad[0] != 0 || even.Grad[1] != 0 || even.Grad[2] != 0.5 || even.Grad[3] != 0.5 {
+		t.Errorf("even grad = %v, want [0 0 0.5 0.5]", even.Grad)
+	}
+}
+
+func TestReduceAxisBounds(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4}, []int{2, 2})
+	if _, err := ProdAxis(x, 5); err == nil {
+		t.Error("ProdAxis: out-of-range axis should error")
+	}
+	if _, err := MedianAxis(x, -5); err == nil {
+		t.Error("MedianAxis: out-of-range axis should error")
+	}
+	// Negative axes resolve from the end, the same as every other reduction.
+	r, err := MedianAxis(x, -1)
+	if err != nil {
+		t.Fatalf("MedianAxis(-1): %v", err)
+	}
+	if r.Data[0] != 1.5 || r.Data[1] != 3.5 {
+		t.Errorf("MedianAxis(-1) = %v, want [1.5 3.5]", r.Data)
+	}
+}

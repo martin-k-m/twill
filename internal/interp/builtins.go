@@ -181,6 +181,8 @@ func (ip *Interp) installBuiltins() {
 	reduce("mean", tensor.Mean, tensor.MeanAxis)
 	reduce("max", tensor.MaxAll, tensor.MaxAxis)
 	reduce("min", tensor.MinAll, tensor.MinAxis)
+	reduce("prod", tensor.Prod, tensor.ProdAxis)
+	reduce("median", tensor.Median, tensor.MedianAxis)
 
 	def("argmax", -1, true, func(a []value.Value) (value.Value, error) {
 		t, err := asTensor(a[0], "argmax")

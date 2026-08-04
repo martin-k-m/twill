@@ -915,7 +915,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tTensor{dims: []int{}}
 	case "item", "len":
 		return scalar()
-	case "sum", "mean", "max", "min":
+	case "sum", "mean", "max", "min", "prod", "median":
 		return c.reduceResult(ex, argTypes)
 	case "argmax", "logsumexp":
 		return c.axisReduceResult(ex, argTypes)
@@ -1391,7 +1391,7 @@ func constShape(args []ast.Expr) ([]int, bool) {
 
 var builtinNames = map[string]bool{
 	"print": true, "relu": true, "exp": true, "log": true, "sin": true,
-	"cos": true, "tanh": true, "sigmoid": true, "sqrt": true, "sum": true,
+	"cos": true, "tanh": true, "sigmoid": true, "sqrt": true, "sum": true, "prod": true, "median": true,
 	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true,
 	"grad": true, "grads": true, "value_and_grad": true, "map": true, "zip": true,
 	"tensor": true, "scalar": true, "zeros": true, "ones": true, "fill": true,

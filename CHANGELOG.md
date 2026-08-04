@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`prod` and `median` reductions**, both axis-aware and both differentiable,
+  bringing the built-in set to `sum`, `mean`, `max`, `min`, `prod`, `median`.
+  They exist as built-ins rather than as `std` functions for the same reason
+  the others do: neither can be composed out of what already existed without a
+  gradient rule written by hand. `prod` handles zero factors explicitly instead
+  of dividing by them, and `median` sorts indices rather than values so the
+  backward pass knows which element it picked.
+
 ## [1.0.1] - 2026-08-03
 
 ### Fixed

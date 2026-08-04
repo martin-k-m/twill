@@ -182,7 +182,8 @@ against rows, a scalar against anything), and the gradients broadcast back
 correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
 `sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip`; `softmax` and
 `logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
-reductions `sum`, `mean`, `max`, `min`, and `argmax` (with an optional axis);
+reductions `sum`, `mean`, `max`, `min`, `prod`, `median`, and `argmax` (with
+an optional axis);
 and shape ops `reshape`, `transpose`, and `concat`. There's a differentiable
 `einsum` for general contractions (`einsum("ij,jk->ik", A, B)`). Tensors and
 lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See the
