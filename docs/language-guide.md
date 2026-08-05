@@ -408,6 +408,23 @@ right. `broadcast_to(reshape(mu, list(2, 1)), list(2, 3))` puts it back. Other
 array libraries spell this as `keepdims=True` on the reduction itself; here it
 is an operation, and `num.keep` wraps the two steps.
 
+Sorting: `sort(t[, axis[, descending]])` and `argsort` give the values and the
+positions; `topk(t, k[, axis[, smallest]])` and `argtopk` keep the k largest,
+largest first, shrinking that axis to k. All four default to the last axis,
+because sorting a matrix almost always means sorting each row. The flags are
+numbers, since a comparison in Raster already yields 1 and 0.
+
+`sort` and `topk` are differentiable and exactly so. Sorting is a permutation
+and the derivative of a permutation is its inverse: whatever gradient arrives at
+the element now in a position belongs to whichever element started there. A
+value outside the top k does not move the output at all, so its gradient is
+zero, which is correct rather than a simplification. The sort is stable, so ties
+keep their original order and therefore their own gradients.
+
+`argsort` and `argtopk` are not differentiable, and not by omission: an index
+does not move when an input moves slightly, then jumps when two values cross.
+The derivative is zero almost everywhere and undefined on the boundaries.
+
 Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,
 `cummax`, `cummin`. These build signals, equity curves, and running peaks, and
 they are differentiable: `cumsum` and `cumprod` have exact gradients (`cumprod`

@@ -183,7 +183,7 @@ correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
 `sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip`; `softmax` and
 `logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
 reductions `sum`, `mean`, `max`, `min`, `prod`, `median`, and `argmax` (with
-an optional axis);
+an optional axis); sorting with `sort`, `argsort`, `topk` and `argtopk`;
 and shape ops `reshape`, `broadcast_to`, `transpose`, `concat`, and `split`. There's a differentiable
 `einsum` for general contractions (`einsum("ij,jk->ik", A, B)`). Tensors and
 lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See the

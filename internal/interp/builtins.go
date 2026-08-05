@@ -184,6 +184,74 @@ func (ip *Interp) installBuiltins() {
 	reduce("prod", tensor.Prod, tensor.ProdAxis)
 	reduce("median", tensor.Median, tensor.MedianAxis)
 
+	// sort/argsort take an optional axis and an optional "desc" flag, so
+	// `sort(t)`, `sort(t, 0)` and `sort(t, 0, true)` all read the way they look.
+	sorting := func(name string, run func(*tensor.Tensor, int, bool) (*tensor.Tensor, error)) {
+		def(name, -1, true, func(a []value.Value) (value.Value, error) {
+			if len(a) == 0 || len(a) > 3 {
+				return nil, fmt.Errorf("%s expects (tensor[, axis[, descending]])", name)
+			}
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			// Default to the last axis, matching softmax and argmax rather than
+			// reducing over everything: sorting a matrix almost always means
+			// sorting each row.
+			axis := len(t.Shape) - 1
+			if len(a) >= 2 {
+				if axis, err = intOf(a[1], name); err != nil {
+					return nil, err
+				}
+			}
+			descending := false
+			if len(a) == 3 {
+				d, err := scalarOf(a[2], name)
+				if err != nil {
+					return nil, err
+				}
+				descending = d != 0
+			}
+			return run(t, axis, descending)
+		})
+	}
+	sorting("sort", tensor.SortAxis)
+	sorting("argsort", tensor.ArgsortAxis)
+
+	// topk/argtopk need k, so they take (tensor, k[, axis[, smallest]]).
+	topping := func(name string, run func(*tensor.Tensor, int, int, bool) (*tensor.Tensor, error)) {
+		def(name, -1, true, func(a []value.Value) (value.Value, error) {
+			if len(a) < 2 || len(a) > 4 {
+				return nil, fmt.Errorf("%s expects (tensor, k[, axis[, smallest]])", name)
+			}
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			k, err := intOf(a[1], name)
+			if err != nil {
+				return nil, err
+			}
+			axis := len(t.Shape) - 1
+			if len(a) >= 3 {
+				if axis, err = intOf(a[2], name); err != nil {
+					return nil, err
+				}
+			}
+			largest := true
+			if len(a) == 4 {
+				s, err := scalarOf(a[3], name)
+				if err != nil {
+					return nil, err
+				}
+				largest = s == 0
+			}
+			return run(t, k, axis, largest)
+		})
+	}
+	topping("topk", tensor.TopKAxis)
+	topping("argtopk", tensor.ArgTopKAxis)
+
 	def("argmax", -1, true, func(a []value.Value) (value.Value, error) {
 		t, err := asTensor(a[0], "argmax")
 		if err != nil {

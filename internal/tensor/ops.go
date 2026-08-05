@@ -983,3 +983,224 @@ func SplitEqual(t *Tensor, n, axis int) ([]*Tensor, error) {
 	}
 	return Split(t, sizes, axis)
 }
+
+// --- sorting ---------------------------------------------------------------
+
+// Sort orders each run along an axis, ascending or descending.
+//
+// Differentiable, and exactly so: sorting is a permutation, and the derivative
+// of a permutation is the inverse permutation. Whatever gradient arrives at the
+// element now in position 3 belongs to whichever element started there, so the
+// backward pass sends each one home. No approximation is involved, which is why
+// this is worth having rather than something a caller fakes with argsort and a
+// gather.
+//
+// Ties keep their original relative order, which is what makes the result
+// reproducible between runs over the same data. An unstable sort would return
+// the same values in a different arrangement and, because the gradient follows
+// the arrangement, a different gradient.
+func SortAxis(t *Tensor, axis int, descending bool) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+
+	out := make([]float64, len(t.Data))
+	// Where each output element came from, which is the permutation the
+	// backward pass has to invert.
+	origin := make([]int, len(t.Data))
+
+	idx := make([]int, L)
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for k := range idx {
+				idx[k] = k
+			}
+			sort.SliceStable(idx, func(a, b int) bool {
+				x := t.Data[base+idx[a]*after]
+				y := t.Data[base+idx[b]*after]
+				if descending {
+					return x > y
+				}
+				return x < y
+			})
+			for k, from := range idx {
+				dst := base + k*after
+				src := base + from*after
+				out[dst] = t.Data[src]
+				origin[dst] = src
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	return track1(res, t, func() {
+		gt := t.ensureGrad()
+		for dst, src := range origin {
+			gt[src] += res.Grad[dst]
+		}
+	}), nil
+}
+
+// Sort over the flattened tensor.
+func SortAll(t *Tensor, descending bool) (*Tensor, error) {
+	flat := &Tensor{Data: t.Data, Shape: []int{len(t.Data)}, RequiresGrad: t.RequiresGrad}
+	// The flat view shares the backing array, so a gradient reaching it has to
+	// be forwarded to the tensor the caller actually holds.
+	sorted, err := SortAxis(flat, 0, descending)
+	if err != nil {
+		return nil, err
+	}
+	if !t.RequiresGrad {
+		return sorted, nil
+	}
+	return track1(sorted, t, func() {
+		gt := t.ensureGrad()
+		gf := flat.ensureGrad()
+		for i := range gf {
+			gt[i] += gf[i]
+		}
+	}), nil
+}
+
+// ArgsortAxis gives the indices that would sort each run along an axis.
+//
+// Not differentiable, and not because it was left out: the output is a set of
+// positions, and moving an input value by an infinitesimal amount does not move
+// an index at all until it crosses a neighbour, at which point it jumps. The
+// derivative is zero almost everywhere and undefined on the boundaries, so
+// there is nothing useful to propagate.
+func ArgsortAxis(t *Tensor, axis int, descending bool) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+	out := make([]float64, len(t.Data))
+
+	idx := make([]int, L)
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for k := range idx {
+				idx[k] = k
+			}
+			sort.SliceStable(idx, func(a, b int) bool {
+				x := t.Data[base+idx[a]*after]
+				y := t.Data[base+idx[b]*after]
+				if descending {
+					return x > y
+				}
+				return x < y
+			})
+			for k, from := range idx {
+				out[base+k*after] = float64(from)
+			}
+		}
+	}
+	return &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}, nil
+}
+
+// TopKAxis keeps the k largest values along an axis, largest first.
+//
+// The axis shrinks to k. This is the shape a caller wants for "the five most
+// likely classes": the values, in order, with everything else dropped.
+//
+// Differentiable through the values that survive. A value outside the top k
+// contributes nothing to the output, so its gradient is zero, which is correct
+// rather than a simplification: change it a little and the output does not move.
+func TopKAxis(t *Tensor, k, axis int, largest bool) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+	if k <= 0 {
+		return nil, fmt.Errorf("topk: k must be positive, got %d", k)
+	}
+	if k > L {
+		return nil, fmt.Errorf("topk: k is %d but axis %d has length %d", k, axis, L)
+	}
+
+	shape := append([]int(nil), t.Shape...)
+	shape[axis] = k
+	out := make([]float64, before*k*after)
+	origin := make([]int, before*k*after)
+
+	idx := make([]int, L)
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for n := range idx {
+				idx[n] = n
+			}
+			sort.SliceStable(idx, func(a, b int) bool {
+				x := t.Data[base+idx[a]*after]
+				y := t.Data[base+idx[b]*after]
+				if largest {
+					return x > y
+				}
+				return x < y
+			})
+			for n := 0; n < k; n++ {
+				dst := i*k*after + n*after + j
+				src := base + idx[n]*after
+				out[dst] = t.Data[src]
+				origin[dst] = src
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: shape}
+	return track1(res, t, func() {
+		gt := t.ensureGrad()
+		for dst, src := range origin {
+			gt[src] += res.Grad[dst]
+		}
+	}), nil
+}
+
+// ArgTopKAxis gives the indices of the k largest values along an axis.
+//
+// Indices, so not differentiable, for the same reason as ArgsortAxis.
+func ArgTopKAxis(t *Tensor, k, axis int, largest bool) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+	if k <= 0 {
+		return nil, fmt.Errorf("argtopk: k must be positive, got %d", k)
+	}
+	if k > L {
+		return nil, fmt.Errorf("argtopk: k is %d but axis %d has length %d", k, axis, L)
+	}
+
+	shape := append([]int(nil), t.Shape...)
+	shape[axis] = k
+	out := make([]float64, before*k*after)
+
+	idx := make([]int, L)
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for n := range idx {
+				idx[n] = n
+			}
+			sort.SliceStable(idx, func(a, b int) bool {
+				x := t.Data[base+idx[a]*after]
+				y := t.Data[base+idx[b]*after]
+				if largest {
+					return x > y
+				}
+				return x < y
+			})
+			for n := 0; n < k; n++ {
+				out[i*k*after+n*after+j] = float64(idx[n])
+			}
+		}
+	}
+	return &Tensor{Data: out, Shape: shape}, nil
+}

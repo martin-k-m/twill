@@ -440,3 +440,238 @@ func TestGradCheckSplit(t *testing.T) {
 		return s
 	})
 }
+
+// --- sorting ---------------------------------------------------------------
+
+func TestSortValues(t *testing.T) {
+	x := New([]float64{3, 1, 2}, []int{3})
+	up, err := SortAxis(x, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Data[0] != 1 || up.Data[1] != 2 || up.Data[2] != 3 {
+		t.Errorf("ascending = %v", up.Data)
+	}
+	down, err := SortAxis(x, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if down.Data[0] != 3 || down.Data[2] != 1 {
+		t.Errorf("descending = %v", down.Data)
+	}
+}
+
+func TestSortIsPerRunAlongTheAxis(t *testing.T) {
+	// A matrix sorted on the last axis sorts each row, not the whole thing.
+	x := New([]float64{3, 1, 2, 9, 7, 8}, []int{2, 3})
+	rows, err := SortAxis(x, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 2, 3, 7, 8, 9}
+	for i := range want {
+		if rows.Data[i] != want[i] {
+			t.Fatalf("rows = %v, want %v", rows.Data, want)
+		}
+	}
+
+	cols, err := SortAxis(x, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Columns are already ordered, so this is the identity, which is the point:
+	// the axis has to be respected rather than the buffer flattened.
+	for i := range x.Data {
+		if cols.Data[i] != x.Data[i] {
+			t.Fatalf("columns = %v, want unchanged", cols.Data)
+		}
+	}
+}
+
+func TestSortGradientFollowsThePermutation(t *testing.T) {
+	// The whole reason sort is differentiable: whatever gradient arrives at the
+	// element now in a position belongs to whichever element started there.
+	x := Leaf([]float64{3, 1, 2}, []int{3})
+	sorted, err := SortAxis(x, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weights := New([]float64{1, 10, 100}, []int{3})
+	scaled, err := Mul(sorted, weights)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Sum(scaled).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	// 3 sorts last so it takes 100; 1 sorts first so it takes 1; 2 takes 10.
+	want := []float64{100, 1, 10}
+	for i, w := range want {
+		if x.Grad[i] != w {
+			t.Fatalf("grad = %v, want %v", x.Grad, want)
+		}
+	}
+}
+
+func TestSortIsStableOnTies(t *testing.T) {
+	// An unstable sort returns the same values in a different arrangement, and
+	// since the gradient follows the arrangement, a different gradient.
+	x := Leaf([]float64{5, 5, 5}, []int{3})
+	sorted, err := SortAxis(x, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weights := New([]float64{1, 2, 4}, []int{3})
+	scaled, err := Mul(sorted, weights)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Sum(scaled).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range []float64{1, 2, 4} {
+		if x.Grad[i] != w {
+			t.Fatalf("tie grad = %v, want each element to keep its own weight", x.Grad)
+		}
+	}
+}
+
+func TestGradCheckSort(t *testing.T) {
+	// Values kept distinct: the derivative is a step function across a tie, so
+	// a numeric check straddling one is comparing two different permutations.
+	weights := New([]float64{1, 3, 7, 2}, []int{4})
+	gradCheck(t, "sort", []float64{3, 1, 4, 2}, []int{4}, func(x *Tensor) *Tensor {
+		sorted, err := SortAxis(x, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scaled, err := Mul(sorted, weights)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Sum(scaled)
+	})
+}
+
+func TestArgsortGivesPositions(t *testing.T) {
+	x := New([]float64{3, 1, 2}, []int{3})
+	got, err := ArgsortAxis(x, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 2, 0}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("argsort = %v, want %v", got.Data, want)
+		}
+	}
+}
+
+func TestTopKKeepsTheLargestInOrder(t *testing.T) {
+	x := New([]float64{3, 1, 4, 2}, []int{4})
+	got, err := TopKAxis(x, 2, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 2 || got.Data[0] != 4 || got.Data[1] != 3 {
+		t.Errorf("topk = %v, want [4 3]", got.Data)
+	}
+	if len(got.Shape) != 1 || got.Shape[0] != 2 {
+		t.Errorf("shape = %v, want [2]", got.Shape)
+	}
+}
+
+func TestTopKSmallest(t *testing.T) {
+	x := New([]float64{3, 1, 4, 2}, []int{4})
+	got, err := TopKAxis(x, 2, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Data[0] != 1 || got.Data[1] != 2 {
+		t.Errorf("smallest = %v, want [1 2]", got.Data)
+	}
+}
+
+func TestTopKShrinksOnlyItsAxis(t *testing.T) {
+	x := New([]float64{3, 1, 2, 9, 7, 8}, []int{2, 3})
+	got, err := TopKAxis(x, 2, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Shape) != 2 || got.Shape[0] != 2 || got.Shape[1] != 2 {
+		t.Fatalf("shape = %v, want [2 2]", got.Shape)
+	}
+	want := []float64{3, 2, 9, 8}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("topk rows = %v, want %v", got.Data, want)
+		}
+	}
+}
+
+func TestTopKGradientSkipsWhatItDropped(t *testing.T) {
+	// A value outside the top k does not move the output, so its gradient is
+	// zero. That is correct rather than a simplification.
+	x := Leaf([]float64{3, 1, 4, 2}, []int{4})
+	top, err := TopKAxis(x, 2, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Sum(top).Backward(); err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 0, 1, 0}
+	for i := range want {
+		if x.Grad[i] != want[i] {
+			t.Fatalf("grad = %v, want %v", x.Grad, want)
+		}
+	}
+}
+
+func TestTopKRejectsAnImpossibleK(t *testing.T) {
+	x := New([]float64{1, 2}, []int{2})
+	if _, err := TopKAxis(x, 0, 0, true); err == nil {
+		t.Error("k of zero should error")
+	}
+	if _, err := TopKAxis(x, 5, 0, true); err == nil {
+		t.Error("k larger than the axis should error")
+	}
+	if _, err := ArgTopKAxis(x, 5, 0, true); err == nil {
+		t.Error("argtopk should reject it too")
+	}
+}
+
+func TestArgTopKGivesPositions(t *testing.T) {
+	x := New([]float64{3, 1, 4, 2}, []int{4})
+	got, err := ArgTopKAxis(x, 2, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Data[0] != 2 || got.Data[1] != 0 {
+		t.Errorf("argtopk = %v, want [2 0]", got.Data)
+	}
+}
+
+func TestSortAllFlattens(t *testing.T) {
+	x := New([]float64{3, 1, 2, 9, 7, 8}, []int{2, 3})
+	got, err := SortAll(x, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 2, 3, 7, 8, 9}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("sort all = %v, want %v", got.Data, want)
+		}
+	}
+}
+
+func TestSortRejectsABadAxis(t *testing.T) {
+	x := New([]float64{1, 2}, []int{2})
+	if _, err := SortAxis(x, 3, false); err == nil {
+		t.Error("out-of-range axis should error")
+	}
+	if _, err := ArgsortAxis(x, -5, false); err == nil {
+		t.Error("out-of-range axis should error")
+	}
+}

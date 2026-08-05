@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Sorting**: `sort`, `argsort`, `topk` and `argtopk`, axis-aware, defaulting
+  to the last axis. `sort` and `topk` are differentiable exactly: a sort is a
+  permutation, so the backward pass is its inverse, and a value outside the top
+  k contributes nothing so its gradient is zero. The sort is stable, which
+  matters more than it looks: an unstable one returns the same values in a
+  different arrangement, and the gradient follows the arrangement.
+
+## [Unreleased]
+
 ### Fixed
 
 - **`std/shapes` no longer works around a restriction that does not exist.**
