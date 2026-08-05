@@ -425,11 +425,17 @@ keep their original order and therefore their own gradients.
 does not move when an input moves slightly, then jumps when two values cross.
 The derivative is zero almost everywhere and undefined on the boundaries.
 
-Cumulative scans (over a sequence, preserving length): `cumsum`, `cumprod`,
-`cummax`, `cummin`. These build signals, equity curves, and running peaks, and
-they are differentiable: `cumsum` and `cumprod` have exact gradients (`cumprod`
-handles zeros in the series), and `cummax`/`cummin` send each output's gradient
-to the element the running extreme came from, ties going to the earlier one.
+Cumulative scans (preserving length): `cumsum`, `cumprod`, `cummax`, `cummin`.
+These build signals, equity curves, and running peaks, and they are
+differentiable: `cumsum` and `cumprod` have exact gradients (`cumprod` handles
+zeros in the series), and `cummax`/`cummin` send each output's gradient to the
+element the running extreme came from, ties going to the earlier one.
+
+Each takes an optional axis: `cumsum(t)` scans the tensor's elements in order
+and `cumsum(t, 1)` scans along axis 1, one run per row, keeping the shape. The
+split follows the reductions, where `sum(t)` covers everything and `sum(t, 0)`
+works per axis. On a 1-D tensor, which is what a sequence is, the two forms are
+the same thing, so the axis is a widening rather than a second meaning.
 Elementwise rounding `floor`, `ceil`, and `round` are forward-only (their
 derivative is zero wherever it exists), handy for turning random draws into
 integer ids.

@@ -143,3 +143,167 @@ func cumExtreme(t *Tensor, wantMax bool) *Tensor {
 
 func CumMax(t *Tensor) *Tensor { return cumExtreme(t, true) }
 func CumMin(t *Tensor) *Tensor { return cumExtreme(t, false) }
+
+// --- running totals --------------------------------------------------------
+
+// CumsumAxis is the running sum along one axis. The shape is unchanged, since
+// every element gets an output rather than the axis collapsing.
+func CumsumAxis(t *Tensor, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+
+	out := make([]float64, len(t.Data))
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			run := 0.0
+			for k := 0; k < L; k++ {
+				run += t.Data[base+k*after]
+				out[base+k*after] = run
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		// Element k feeds every output from k onwards, so its gradient is the
+		// sum of those outputs' gradients. That is the running sum again, taken
+		// backwards, which is why this is a second pass and not a nested loop.
+		for i := 0; i < before; i++ {
+			for j := 0; j < after; j++ {
+				base := i*L*after + j
+				run := 0.0
+				for k := L - 1; k >= 0; k-- {
+					run += res.Grad[base+k*after]
+					gt[base+k*after] += run
+				}
+			}
+		}
+	}), nil
+}
+
+// CumprodAxis is the running product along one axis, with the shape unchanged.
+func CumprodAxis(t *Tensor, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+
+	out := make([]float64, len(t.Data))
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			run := 1.0
+			for k := 0; k < L; k++ {
+				run *= t.Data[base+k*after]
+				out[base+k*after] = run
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		// out[n] is the product of x[0..n], so d out[n] / d x[k] is the product
+		// of that run with x[k] left out, for every n at or after k.
+		//
+		// The tempting shortcut is out[n]/x[k], and it is wrong exactly when
+		// x[k] is zero, which is not a rare value for a tensor. Rebuilding the
+		// product instead costs a factor of L and is always right. The runs are
+		// one axis long, not the whole tensor, so this stays cheap in the shapes
+		// anybody actually writes.
+		for i := 0; i < before; i++ {
+			for j := 0; j < after; j++ {
+				base := i*L*after + j
+				for k := 0; k < L; k++ {
+					total := 0.0
+					// The product of x[0..n] without x[k], built forwards so it
+					// carries over from one n to the next.
+					without := 1.0
+					for m := 0; m < k; m++ {
+						without *= t.Data[base+m*after]
+					}
+					for n := k; n < L; n++ {
+						if n > k {
+							without *= t.Data[base+n*after]
+						}
+						total += res.Grad[base+n*after] * without
+					}
+					gt[base+k*after] += total
+				}
+			}
+		}
+	}), nil
+}
+
+// --- axis-aware scans ------------------------------------------------------
+//
+// The scans above run over the tensor's elements in order, which is what a
+// sequence wants and is all a 1-D tensor can mean. On anything with more than
+// one axis a caller usually means one scan per row, so these take the axis and
+// keep the shape.
+
+// CumMaxAxis is the running maximum along one axis, with the shape unchanged.
+func CumMaxAxis(t *Tensor, axis int) (*Tensor, error) { return cumExtremeAxis(t, axis, true) }
+
+// CumMinAxis is the running minimum along one axis, with the shape unchanged.
+func CumMinAxis(t *Tensor, axis int) (*Tensor, error) { return cumExtremeAxis(t, axis, false) }
+
+func cumExtremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+
+	out := make([]float64, len(t.Data))
+	// arg[p] is the input position the running extreme at p came from, which is
+	// where the gradient of that output belongs.
+	arg := make([]int, len(t.Data))
+
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for k := 0; k < L; k++ {
+				p := base + k*after
+				if k == 0 {
+					out[p], arg[p] = t.Data[p], p
+					continue
+				}
+				prev := out[p-after]
+				v := t.Data[p]
+				// A tie keeps the earlier element, matching the flat scan and
+				// matching sort's stability: whichever rule is chosen has to be
+				// the same one everywhere, or a gradient moves when a value is
+				// merely repeated.
+				if (wantMax && v > prev) || (!wantMax && v < prev) {
+					out[p], arg[p] = v, p
+				} else {
+					out[p], arg[p] = prev, arg[p-after]
+				}
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for p := range out {
+			gt[arg[p]] += res.Grad[p]
+		}
+	}), nil
+}

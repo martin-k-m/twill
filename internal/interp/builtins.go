@@ -867,10 +867,36 @@ func (ip *Interp) installBuiltins() {
 	// output element folds in the next input. Used to build signals, equity
 	// curves, and running peaks for backtests. Differentiable: the scan is a
 	// chain of adds, multiplies, or selections, so reverse mode unrolls it.
-	unaryOp("cumsum", tensor.CumSum)
-	unaryOp("cumprod", tensor.CumProd)
-	unaryOp("cummax", tensor.CumMax)
-	unaryOp("cummin", tensor.CumMin)
+	// With an axis they scan along it instead, keeping the shape. The split
+	// follows the reductions: `sum(t)` covers everything and `sum(t, 0)` works
+	// per axis, so `cumsum(t)` and `cumsum(t, 0)` should mean the matching pair.
+	// On a 1-D tensor, which is what a sequence is, the two are the same thing.
+	scan := func(name string,
+		flat func(*tensor.Tensor) *tensor.Tensor,
+		along func(*tensor.Tensor, int) (*tensor.Tensor, error),
+	) {
+		def(name, -1, true, func(a []value.Value) (value.Value, error) {
+			if len(a) == 0 || len(a) > 2 {
+				return nil, fmt.Errorf("%s expects (tensor[, axis])", name)
+			}
+			t, err := asTensor(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			if len(a) == 1 {
+				return flat(t), nil
+			}
+			axis, err := intOf(a[1], name)
+			if err != nil {
+				return nil, err
+			}
+			return along(t, axis)
+		})
+	}
+	scan("cumsum", tensor.CumSum, tensor.CumsumAxis)
+	scan("cumprod", tensor.CumProd, tensor.CumprodAxis)
+	scan("cummax", tensor.CumMax, tensor.CumMaxAxis)
+	scan("cummin", tensor.CumMin, tensor.CumMinAxis)
 
 	// Elementwise rounding (forward-only), handy for turning random draws into
 	// integer indices/tokens.

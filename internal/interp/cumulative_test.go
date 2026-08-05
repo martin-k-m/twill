@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/martin-k-m/raster/internal/interp"
+
 	"github.com/martin-k-m/raster/internal/tensor"
 	"github.com/martin-k-m/raster/internal/value"
 )
@@ -97,5 +99,78 @@ grad(fn(eq) = bt.max_drawdown(eq))([1.0, 1.2, 0.9, 1.5, 1.1])`
 		if math.Abs(tv.Data[i]-want[i]) > 1e-9 {
 			t.Errorf("max_drawdown grad at index %d got %v, want %v", i, tv.Data[i], want[i])
 		}
+	}
+}
+
+// With an axis the scan runs along it and the shape survives, which is what a
+// caller means on anything wider than a sequence.
+func TestCumulativeAlongAnAxis(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []float64
+	}{
+		{"cumsum(tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), 1)", []float64{1, 3, 6, 4, 9, 15}},
+		{"cumsum(tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), 0)", []float64{1, 2, 3, 5, 7, 9}},
+		{"cumprod(tensor([[1.0, 2.0, 3.0], [2.0, 2.0, 2.0]]), 1)", []float64{1, 2, 6, 2, 4, 8}},
+		{"cummax(tensor([[1.0, 3.0, 2.0], [5.0, 4.0, 6.0]]), 1)", []float64{1, 3, 3, 5, 5, 6}},
+		{"cummin(tensor([[3.0, 1.0, 2.0], [5.0, 4.0, 6.0]]), 1)", []float64{3, 1, 1, 5, 4, 4}},
+		// -1 is the last axis here as everywhere else.
+		{"cumsum(tensor([[1.0, 2.0], [3.0, 4.0]]), -1)", []float64{1, 3, 3, 7}},
+	}
+	for _, c := range cases {
+		v, _ := run(t, c.src)
+		tv, ok := v.(*tensor.Tensor)
+		if !ok {
+			t.Fatalf("%s: expected a tensor, got %s", c.src, value.Format(v))
+		}
+		for i := range c.want {
+			if tv.Data[i] != c.want[i] {
+				t.Fatalf("%s: got %v, want %v", c.src, tv.Data, c.want)
+			}
+		}
+		if len(tv.Shape) != 2 {
+			t.Errorf("%s: shape = %v, want a matrix back", c.src, tv.Shape)
+		}
+	}
+}
+
+// On a sequence, which is all a 1-D tensor can be, the two forms agree. That is
+// what makes adding the axis a widening rather than a second meaning.
+func TestCumulativeAxisMatchesFlatOnASequence(t *testing.T) {
+	for _, name := range []string{"cumsum", "cumprod", "cummax", "cummin"} {
+		flat, _ := run(t, name+"([1.0, 3.0, 2.0, 5.0])")
+		along, _ := run(t, name+"([1.0, 3.0, 2.0, 5.0], 0)")
+		f := flat.(*tensor.Tensor)
+		a := along.(*tensor.Tensor)
+		for i := range f.Data {
+			if f.Data[i] != a.Data[i] {
+				t.Fatalf("%s: flat %v, axis %v", name, f.Data, a.Data)
+			}
+		}
+	}
+}
+
+func TestCumulativeAxisGradientStaysPerRow(t *testing.T) {
+	// The gradient must not leak between rows: row 0's outputs do not depend on
+	// row 1 at all, so a scan that ran over the flat buffer would be caught here.
+	v, _ := run(t, `
+let f = fn(x) { sum(cumsum(x, 1) * tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])) }
+grad(f)(tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+`)
+	g := v.(*tensor.Tensor)
+	// Only x[0][0] feeds the first weighted output; the whole second row feeds
+	// the other.
+	want := []float64{1, 0, 0, 1, 1, 1}
+	for i := range want {
+		if math.Abs(g.Data[i]-want[i]) > 1e-9 {
+			t.Fatalf("grad = %v, want %v", g.Data, want)
+		}
+	}
+}
+
+func TestCumulativeAxisIsChecked(t *testing.T) {
+	ip := interp.New(func(string) {})
+	if _, err := ip.Run("cumsum(tensor([[1.0, 2.0]]), 5)"); err == nil {
+		t.Error("an out-of-range axis was accepted")
 	}
 }

@@ -661,3 +661,119 @@ func TestSortRejectsABadAxis(t *testing.T) {
 		t.Error("out-of-range axis should error")
 	}
 }
+
+// --- running totals --------------------------------------------------------
+
+func TestCumsumValues(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	got, err := CumsumAxis(x, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 3, 6, 4, 9, 15}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("cumsum along rows = %v, want %v", got.Data, want)
+		}
+	}
+	// The axis stays, unlike every reduction: each element gets an answer.
+	if len(got.Shape) != 2 || got.Shape[0] != 2 || got.Shape[1] != 3 {
+		t.Errorf("shape = %v, want [2 3]", got.Shape)
+	}
+
+	down, err := CumsumAxis(x, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDown := []float64{1, 2, 3, 5, 7, 9}
+	for i := range wantDown {
+		if down.Data[i] != wantDown[i] {
+			t.Fatalf("cumsum down columns = %v, want %v", down.Data, wantDown)
+		}
+	}
+}
+
+func TestCumprodValues(t *testing.T) {
+	x := New([]float64{1, 2, 3, 2, 2, 2}, []int{2, 3})
+	got, err := CumprodAxis(x, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{1, 2, 6, 2, 4, 8}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("cumprod = %v, want %v", got.Data, want)
+		}
+	}
+}
+
+func TestCumulativeAxisIsNormalized(t *testing.T) {
+	// -1 is the last axis, the way it is everywhere else.
+	x := New([]float64{1, 2, 3, 4}, []int{2, 2})
+	last, err := CumsumAxis(x, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit, _ := CumsumAxis(x, 1)
+	for i := range last.Data {
+		if last.Data[i] != explicit.Data[i] {
+			t.Fatalf("axis -1 = %v, axis 1 = %v", last.Data, explicit.Data)
+		}
+	}
+	if _, err := CumsumAxis(x, 2); err == nil {
+		t.Error("an out-of-range axis was accepted")
+	}
+}
+
+func TestGradCheckCumsum(t *testing.T) {
+	// Weighted so the gradients differ per position: summing the running sums
+	// unweighted gives every element the same gradient, which would pass even
+	// if the backward pass were reversed.
+	w := New([]float64{1, 2, 4, 8, 16, 32}, []int{2, 3})
+	gradCheck(t, "cumsum", []float64{1, -2, 3, 0.5, -1.5, 2}, []int{2, 3}, func(x *Tensor) *Tensor {
+		c, _ := CumsumAxis(x, 1)
+		p, _ := Mul(c, w)
+		return Sum(p)
+	})
+}
+
+func TestGradCheckCumsumDownColumns(t *testing.T) {
+	w := New([]float64{1, 2, 4, 8, 16, 32}, []int{2, 3})
+	gradCheck(t, "cumsum-axis0", []float64{1, -2, 3, 0.5, -1.5, 2}, []int{2, 3}, func(x *Tensor) *Tensor {
+		c, _ := CumsumAxis(x, 0)
+		p, _ := Mul(c, w)
+		return Sum(p)
+	})
+}
+
+func TestGradCheckCumprod(t *testing.T) {
+	w := New([]float64{1, 2, 4, 8, 16, 32}, []int{2, 3})
+	gradCheck(t, "cumprod", []float64{1.5, -2, 3, 0.5, -1.5, 2}, []int{2, 3}, func(x *Tensor) *Tensor {
+		c, _ := CumprodAxis(x, 1)
+		p, _ := Mul(c, w)
+		return Sum(p)
+	})
+}
+
+// A zero anywhere in the run is where the obvious implementation of the
+// cumprod gradient goes wrong: out[n]/x[k] is the product of the others only
+// when x[k] is not zero, and zero is not a rare value for a tensor. The
+// difference quotient reaches this one, since a zero factor still moves the
+// products that come after it.
+func TestGradCheckCumprodWithAZero(t *testing.T) {
+	w := New([]float64{1, 2, 4, 8}, []int{4})
+	gradCheck(t, "cumprod-zero", []float64{2, 0, 3, 4}, []int{4}, func(x *Tensor) *Tensor {
+		c, _ := CumprodAxis(x, 0)
+		p, _ := Mul(c, w)
+		return Sum(p)
+	})
+}
+
+func TestGradCheckCumprodWithTwoZeros(t *testing.T) {
+	w := New([]float64{1, 2, 4, 8}, []int{4})
+	gradCheck(t, "cumprod-two-zeros", []float64{2, 0, 0, 4}, []int{4}, func(x *Tensor) *Tensor {
+		c, _ := CumprodAxis(x, 0)
+		p, _ := Mul(c, w)
+		return Sum(p)
+	})
+}

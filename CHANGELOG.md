@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Axis-aware cumulative scans**: `cumsum`, `cumprod`, `cummax` and `cummin`
+  now take an optional axis and scan along it, keeping the shape. Without one
+  they scan the elements in order as before, so nothing that worked changes.
+
+  `cumprod`'s gradient rebuilds the product with the element left out rather
+  than dividing the running product by it. The division is the obvious form and
+  is wrong exactly when the element is zero, which is not a rare value for a
+  tensor. `cummax`/`cummin` send each output's gradient to the element the
+  running extreme came from, with ties going to the earlier one, matching the
+  flat scans and matching sort's stability.
+
 - **Sorting**: `sort`, `argsort`, `topk` and `argtopk`, axis-aware, defaulting
   to the last axis. `sort` and `topk` are differentiable exactly: a sort is a
   permutation, so the backward pass is its inverse, and a value outside the top
