@@ -1044,27 +1044,6 @@ func SortAxis(t *Tensor, axis int, descending bool) (*Tensor, error) {
 	}), nil
 }
 
-// Sort over the flattened tensor.
-func SortAll(t *Tensor, descending bool) (*Tensor, error) {
-	flat := &Tensor{Data: t.Data, Shape: []int{len(t.Data)}, RequiresGrad: t.RequiresGrad}
-	// The flat view shares the backing array, so a gradient reaching it has to
-	// be forwarded to the tensor the caller actually holds.
-	sorted, err := SortAxis(flat, 0, descending)
-	if err != nil {
-		return nil, err
-	}
-	if !t.RequiresGrad {
-		return sorted, nil
-	}
-	return track1(sorted, t, func() {
-		gt := t.ensureGrad()
-		gf := flat.ensureGrad()
-		for i := range gf {
-			gt[i] += gf[i]
-		}
-	}), nil
-}
-
 // ArgsortAxis gives the indices that would sort each run along an axis.
 //
 // Not differentiable, and not because it was left out: the output is a set of

@@ -652,20 +652,6 @@ func TestArgTopKGivesPositions(t *testing.T) {
 	}
 }
 
-func TestSortAllFlattens(t *testing.T) {
-	x := New([]float64{3, 1, 2, 9, 7, 8}, []int{2, 3})
-	got, err := SortAll(x, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []float64{1, 2, 3, 7, 8, 9}
-	for i := range want {
-		if got.Data[i] != want[i] {
-			t.Fatalf("sort all = %v, want %v", got.Data, want)
-		}
-	}
-}
-
 func TestSortRejectsABadAxis(t *testing.T) {
 	x := New([]float64{1, 2}, []int{2})
 	if _, err := SortAxis(x, 3, false); err == nil {
