@@ -421,6 +421,12 @@ value outside the top k does not move the output at all, so its gradient is
 zero, which is correct rather than a simplification. The sort is stable, so ties
 keep their original order and therefore their own gradients.
 
+`argmin(t[, axis])` is `argmax`'s counterpart, and `flip(t[, axis])` reverses
+along an axis. `flip` is differentiable and exactly so, since a reversal is a
+permutation and is its own inverse, which makes the backward pass the same
+reversal. All three default to the last axis. Ties in `argmax` and `argmin` go to
+the first occurrence, the same rule the cumulative extremes and the sort use.
+
 `argsort` and `argtopk` are not differentiable, and not by omission: an index
 does not move when an input moves slightly, then jumps when two values cross.
 The derivative is zero almost everywhere and undefined on the boundaries.

@@ -777,3 +777,83 @@ func TestGradCheckCumprodWithTwoZeros(t *testing.T) {
 		return Sum(p)
 	})
 }
+
+// --- argmin and flip -------------------------------------------------------
+
+func TestArgminAndArgmax(t *testing.T) {
+	x := New([]float64{3, 1, 2, 5, 9, 4}, []int{2, 3})
+	mins, err := ArgminAxis(x, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rows are [3 1 2] and [5 9 4]: the smallest sits at 1 and at 2.
+	if mins.Data[0] != 1 || mins.Data[1] != 2 {
+		t.Errorf("argmin = %v, want [1 2]", mins.Data)
+	}
+	maxes, _ := ArgmaxAxis(x, 1)
+	if maxes.Data[0] != 0 || maxes.Data[1] != 1 {
+		t.Errorf("argmax = %v, want [0 1]", maxes.Data)
+	}
+	// The axis is dropped, like every other reduction.
+	if len(mins.Shape) != 1 || mins.Shape[0] != 2 {
+		t.Errorf("shape = %v, want [2]", mins.Shape)
+	}
+}
+
+func TestArgExtremeTiesGoToTheFirst(t *testing.T) {
+	// The same rule as sort's stability and the cumulative scans. A tie rule
+	// that differs between two operations moves an answer when a value is
+	// merely repeated.
+	x := New([]float64{2, 2, 1, 1}, []int{4})
+	maxes, _ := ArgmaxAxis(x, 0)
+	mins, _ := ArgminAxis(x, 0)
+	if maxes.Data[0] != 0 {
+		t.Errorf("argmax tie = %v, want 0", maxes.Data[0])
+	}
+	if mins.Data[0] != 2 {
+		t.Errorf("argmin tie = %v, want 2", mins.Data[0])
+	}
+}
+
+func TestFlipValues(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	rows, err := FlipAxis(x, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{3, 2, 1, 6, 5, 4}
+	for i := range want {
+		if rows.Data[i] != want[i] {
+			t.Fatalf("flip rows = %v, want %v", rows.Data, want)
+		}
+	}
+	cols, _ := FlipAxis(x, 0)
+	wantCols := []float64{4, 5, 6, 1, 2, 3}
+	for i := range wantCols {
+		if cols.Data[i] != wantCols[i] {
+			t.Fatalf("flip columns = %v, want %v", cols.Data, wantCols)
+		}
+	}
+}
+
+func TestFlipIsItsOwnInverse(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	once, _ := FlipAxis(x, 1)
+	twice, _ := FlipAxis(once, 1)
+	for i := range x.Data {
+		if twice.Data[i] != x.Data[i] {
+			t.Fatalf("flip twice = %v, want %v", twice.Data, x.Data)
+		}
+	}
+}
+
+func TestGradCheckFlip(t *testing.T) {
+	// Weighted, so each position has a different gradient: an unweighted sum
+	// would pass even if the backward pass forgot to reverse.
+	w := New([]float64{1, 2, 4, 8, 16, 32}, []int{2, 3})
+	gradCheck(t, "flip", []float64{1, -2, 3, 0.5, -1.5, 2}, []int{2, 3}, func(x *Tensor) *Tensor {
+		f, _ := FlipAxis(x, 1)
+		p, _ := Mul(f, w)
+		return Sum(p)
+	})
+}

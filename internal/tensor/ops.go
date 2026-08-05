@@ -249,7 +249,16 @@ func MaxAxis(t *Tensor, axis int) (*Tensor, error) { return extremeAxis(t, axis,
 func MinAxis(t *Tensor, axis int) (*Tensor, error) { return extremeAxis(t, axis, false) }
 
 // ArgmaxAxis returns the index of the maximum along an axis (not differentiable).
-func ArgmaxAxis(t *Tensor, axis int) (*Tensor, error) {
+func ArgmaxAxis(t *Tensor, axis int) (*Tensor, error) { return argExtremeAxis(t, axis, true) }
+
+// ArgminAxis returns the index of the minimum along an axis (not differentiable).
+func ArgminAxis(t *Tensor, axis int) (*Tensor, error) { return argExtremeAxis(t, axis, false) }
+
+// argExtremeAxis is the shared body. Ties go to the first occurrence, because
+// the comparison is strict, and that has to match sort's stability and the
+// cumulative scans: a rule about ties that differs between two operations moves
+// an answer when a value is merely repeated.
+func argExtremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
 	axis, err := normalizeAxis(axis, len(t.Shape))
 	if err != nil {
 		return nil, err
@@ -261,7 +270,8 @@ func ArgmaxAxis(t *Tensor, axis int) (*Tensor, error) {
 			base := i*L*after + j
 			best, bestK := t.Data[base], 0
 			for k := 1; k < L; k++ {
-				if v := t.Data[base+k*after]; v > best {
+				v := t.Data[base+k*after]
+				if (wantMax && v > best) || (!wantMax && v < best) {
 					best, bestK = v, k
 				}
 			}
@@ -269,6 +279,45 @@ func ArgmaxAxis(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 	return &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}, nil
+}
+
+// FlipAxis reverses the order along one axis, keeping the shape.
+//
+// Differentiable, and exactly: reversing is a permutation, so the backward pass
+// is the same reversal. It is its own inverse, which is worth stating because it
+// makes the gradient obvious rather than something to derive.
+func FlipAxis(t *Tensor, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+
+	out := make([]float64, len(t.Data))
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for k := 0; k < L; k++ {
+				out[base+k*after] = t.Data[base+(L-1-k)*after]
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for i := 0; i < before; i++ {
+			for j := 0; j < after; j++ {
+				base := i*L*after + j
+				for k := 0; k < L; k++ {
+					gt[base+(L-1-k)*after] += res.Grad[base+k*after]
+				}
+			}
+		}
+	}), nil
 }
 
 // MaxAll / MinAll reduce to a scalar.

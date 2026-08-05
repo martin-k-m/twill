@@ -174,3 +174,37 @@ func TestCumulativeAxisIsChecked(t *testing.T) {
 		t.Error("an out-of-range axis was accepted")
 	}
 }
+
+func TestArgminAndFlipFromTheLanguage(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []float64
+	}{
+		{"argmin(tensor([[3.0, 1.0, 2.0], [5.0, 9.0, 4.0]]))", []float64{1, 2}},
+		{"argmin(tensor([[3.0, 1.0], [5.0, 9.0]]), 0)", []float64{0, 0}},
+		{"flip([1.0, 2.0, 3.0])", []float64{3, 2, 1}},
+		{"flip(tensor([[1.0, 2.0], [3.0, 4.0]]), 0)", []float64{3, 4, 1, 2}},
+	}
+	for _, c := range cases {
+		v, _ := run(t, c.src)
+		got := v.(*tensor.Tensor)
+		for i := range c.want {
+			if got.Data[i] != c.want[i] {
+				t.Fatalf("%s: got %v, want %v", c.src, got.Data, c.want)
+			}
+		}
+	}
+}
+
+func TestFlipIsDifferentiableFromTheLanguage(t *testing.T) {
+	// Reversing is a permutation, so the gradient is the same reversal. The
+	// weights make a forgotten reversal visible.
+	v, _ := run(t, `grad(fn(x) { sum(flip(x) * [1.0, 2.0, 4.0]) })([1.0, 2.0, 3.0])`)
+	g := v.(*tensor.Tensor)
+	want := []float64{4, 2, 1}
+	for i := range want {
+		if math.Abs(g.Data[i]-want[i]) > 1e-9 {
+			t.Fatalf("grad = %v, want %v", g.Data, want)
+		}
+	}
+}

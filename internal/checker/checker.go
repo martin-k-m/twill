@@ -917,7 +917,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return scalar()
 	case "sum", "mean", "max", "min", "prod", "median":
 		return c.reduceResult(ex, argTypes)
-	case "argmax", "logsumexp":
+	case "argmax", "argmin", "logsumexp":
 		return c.axisReduceResult(ex, argTypes)
 	case "maximum", "minimum", "greater", "less", "greater_equal", "less_equal", "equal":
 		return c.broadcastTwo(ex, argTypes)
@@ -1042,8 +1042,9 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}
-	case "cumsum", "cumprod", "cummax", "cummin", "floor", "ceil", "round":
-		// A cumulative scan or elementwise rounding preserves the input's shape.
+	case "cumsum", "cumprod", "cummax", "cummin", "floor", "ceil", "round", "flip":
+		// A cumulative scan, a reversal, or elementwise rounding all preserve
+		// the input's shape.
 		if t, ok := argTypes[0].(tTensor); ok {
 			return tTensor{dims: t.dims}
 		}
@@ -1399,7 +1400,7 @@ var builtinNames = map[string]bool{
 	"len": true, "item": true, "range": true, "list": true, "str": true,
 	"square": true, "maximum": true, "minimum": true, "greater": true,
 	"less": true, "greater_equal": true, "less_equal": true, "equal": true,
-	"where": true, "clip": true, "max": true, "min": true, "argmax": true,
+	"where": true, "clip": true, "max": true, "min": true, "argmax": true, "argmin": true, "flip": true,
 	"softmax": true, "logsumexp": true, "sort": true, "topk": true, "reshape": true, "broadcast_to": true, "concat": true,
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
 	"einsum": true, "map_leaves": true, "zip_leaves": true, "seed": true,

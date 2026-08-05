@@ -182,8 +182,8 @@ against rows, a scalar against anything), and the gradients broadcast back
 correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
 `sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip`; `softmax` and
 `logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
-reductions `sum`, `mean`, `max`, `min`, `prod`, `median`, and `argmax` (with
-an optional axis); sorting with `sort`, `argsort`, `topk` and `argtopk`;
+reductions `sum`, `mean`, `max`, `min`, `prod`, `median`, and `argmax`/`argmin` (with
+an optional axis); `flip`; sorting with `sort`, `argsort`, `topk` and `argtopk`;
 the cumulative scans `cumsum`, `cumprod`, `cummax` and `cummin` (also with an
 optional axis);
 and shape ops `reshape`, `broadcast_to`, `transpose`, `concat`, and `split`. There's a differentiable

@@ -252,20 +252,28 @@ func (ip *Interp) installBuiltins() {
 	topping("topk", tensor.TopKAxis)
 	topping("argtopk", tensor.ArgTopKAxis)
 
-	def("argmax", -1, true, func(a []value.Value) (value.Value, error) {
-		t, err := asTensor(a[0], "argmax")
-		if err != nil {
-			return nil, err
-		}
-		axis := len(t.Shape) - 1
-		if len(a) == 2 {
-			axis, err = intOf(a[1], "argmax")
+	// argmax/argmin/flip all take an optional axis and default to the last one.
+	lastAxis := func(name string, run func(*tensor.Tensor, int) (*tensor.Tensor, error)) {
+		def(name, -1, true, func(a []value.Value) (value.Value, error) {
+			if len(a) == 0 || len(a) > 2 {
+				return nil, fmt.Errorf("%s expects (tensor[, axis])", name)
+			}
+			t, err := asTensor(a[0], name)
 			if err != nil {
 				return nil, err
 			}
-		}
-		return tensor.ArgmaxAxis(t, axis)
-	})
+			axis := len(t.Shape) - 1
+			if len(a) == 2 {
+				if axis, err = intOf(a[1], name); err != nil {
+					return nil, err
+				}
+			}
+			return run(t, axis)
+		})
+	}
+	lastAxis("argmax", tensor.ArgmaxAxis)
+	lastAxis("argmin", tensor.ArgminAxis)
+	lastAxis("flip", tensor.FlipAxis)
 
 	// Axis-aware ops that default to the last axis.
 	lastAxisOp := func(name string, f func(*tensor.Tensor, int) (*tensor.Tensor, error)) {

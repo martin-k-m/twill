@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`argmin` and `flip`**: `argmin` was missing while `argmax` was not, which is
+  a gap rather than a decision. `flip` reverses along an axis and is
+  differentiable exactly, a reversal being a permutation that is its own
+  inverse. Ties in `argmax` and `argmin` go to the first occurrence, matching
+  `cummax`/`cummin` and the stable sort.
+
 - **Axis-aware cumulative scans**: `cumsum`, `cumprod`, `cummax` and `cummin`
   now take an optional axis and scan along it, keeping the shape. Without one
   they scan the elements in order as before, so nothing that worked changes.
