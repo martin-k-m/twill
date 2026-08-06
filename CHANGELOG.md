@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`roll` and `diff`**: a wrapping shift along an axis, and the difference
+  between neighbours. Both differentiable. `diff` shortens the axis rather than
+  padding it, since a zero first difference is a claim about data that is not
+  there.
+
 - **`argmin` and `flip`**: `argmin` was missing while `argmax` was not, which is
   a gap rather than a decision. `flip` reverses along an axis and is
   differentiable exactly, a reversal being a permutation that is its own

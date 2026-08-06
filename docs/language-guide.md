@@ -427,6 +427,15 @@ permutation and is its own inverse, which makes the backward pass the same
 reversal. All three default to the last axis. Ties in `argmax` and `argmin` go to
 the first occurrence, the same rule the cumulative extremes and the sort use.
 
+`roll(t, shift[, axis])` shifts along an axis and wraps what falls off the end
+back to the start; `diff(t[, axis])` is the difference between neighbours,
+shortening that axis by one. Both are differentiable. A positive shift moves
+elements towards the end, so `roll(x, 1)` is the previous value and
+`x - roll(x, 1)` compares a series with its own past. `diff` shortens rather than
+pads, because there is no honest first difference: a zero there claims "no
+change" about data that does not exist, and it is exactly the claim whatever
+consumes the series next will believe.
+
 `argsort` and `argtopk` are not differentiable, and not by omission: an index
 does not move when an input moves slightly, then jumps when two values cross.
 The derivative is zero almost everywhere and undefined on the boundaries.

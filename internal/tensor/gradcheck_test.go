@@ -857,3 +857,133 @@ func TestGradCheckFlip(t *testing.T) {
 		return Sum(p)
 	})
 }
+
+// --- roll and diff ---------------------------------------------------------
+
+func TestRollValues(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4}, []int{4})
+	// A positive shift moves elements towards the end, so roll(x, 1)[k] is the
+	// previous value and `x - roll(x, 1)` compares a series with its own past.
+	forward, err := RollAxis(x, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{4, 1, 2, 3}
+	for i := range want {
+		if forward.Data[i] != want[i] {
+			t.Fatalf("roll 1 = %v, want %v", forward.Data, want)
+		}
+	}
+
+	back, _ := RollAxis(x, -1, 0)
+	wantBack := []float64{2, 3, 4, 1}
+	for i := range wantBack {
+		if back.Data[i] != wantBack[i] {
+			t.Fatalf("roll -1 = %v, want %v", back.Data, wantBack)
+		}
+	}
+}
+
+func TestRollWrapsShiftsLargerThanTheAxis(t *testing.T) {
+	// Go's % keeps the sign of the dividend, so a negative shift used as an
+	// index is a panic rather than a wrap.
+	x := New([]float64{1, 2, 3}, []int{3})
+	for _, shift := range []int{0, 3, 6, -3, 300, -300} {
+		got, err := RollAxis(x, shift, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range x.Data {
+			if got.Data[i] != x.Data[i] {
+				t.Fatalf("roll %d = %v, want unchanged", shift, got.Data)
+			}
+		}
+	}
+	if _, err := RollAxis(x, -1, 0); err != nil {
+		t.Fatalf("a negative shift errored: %v", err)
+	}
+}
+
+func TestRollPerRow(t *testing.T) {
+	x := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	got, _ := RollAxis(x, 1, 1)
+	want := []float64{3, 1, 2, 6, 4, 5}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("roll per row = %v, want %v", got.Data, want)
+		}
+	}
+}
+
+func TestGradCheckRoll(t *testing.T) {
+	w := New([]float64{1, 2, 4, 8}, []int{4})
+	gradCheck(t, "roll", []float64{1, -2, 3, 0.5}, []int{4}, func(x *Tensor) *Tensor {
+		r, _ := RollAxis(x, 1, 0)
+		p, _ := Mul(r, w)
+		return Sum(p)
+	})
+}
+
+func TestDiffValues(t *testing.T) {
+	x := New([]float64{1, 3, 6, 10}, []int{4})
+	got, err := DiffAxis(x, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{2, 3, 4}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("diff = %v, want %v", got.Data, want)
+		}
+	}
+	// Shortened rather than padded: there is no honest first difference, and a
+	// zero there is a claim about data that does not exist.
+	if len(got.Shape) != 1 || got.Shape[0] != 3 {
+		t.Errorf("shape = %v, want [3]", got.Shape)
+	}
+}
+
+func TestDiffPerRow(t *testing.T) {
+	x := New([]float64{1, 2, 4, 10, 20, 40}, []int{2, 3})
+	got, _ := DiffAxis(x, 1)
+	want := []float64{1, 2, 10, 20}
+	for i := range want {
+		if got.Data[i] != want[i] {
+			t.Fatalf("diff per row = %v, want %v", got.Data, want)
+		}
+	}
+	if got.Shape[0] != 2 || got.Shape[1] != 2 {
+		t.Errorf("shape = %v, want [2 2]", got.Shape)
+	}
+}
+
+func TestDiffRefusesAnAxisTooShortToHaveOne(t *testing.T) {
+	x := New([]float64{1}, []int{1})
+	if _, err := DiffAxis(x, 0); err == nil {
+		t.Error("diff of a single element was accepted")
+	}
+}
+
+func TestDiffUndoesCumsum(t *testing.T) {
+	// The relationship worth having a test for: they are inverses apart from
+	// the first element, which cumsum invents and diff cannot recover.
+	x := New([]float64{1, -2, 3, 0.5}, []int{4})
+	c, _ := CumsumAxis(x, 0)
+	d, _ := DiffAxis(c, 0)
+	for i := 0; i < 3; i++ {
+		if math.Abs(d.Data[i]-x.Data[i+1]) > 1e-12 {
+			t.Fatalf("diff(cumsum(x)) = %v, want the tail of %v", d.Data, x.Data)
+		}
+	}
+}
+
+func TestGradCheckDiff(t *testing.T) {
+	// Interior elements appear in two differences and collect both gradients,
+	// which is the part an unweighted sum would hide: it telescopes to zero.
+	w := New([]float64{1, 2, 4}, []int{3})
+	gradCheck(t, "diff", []float64{1, -2, 3, 0.5}, []int{4}, func(x *Tensor) *Tensor {
+		d, _ := DiffAxis(x, 0)
+		p, _ := Mul(d, w)
+		return Sum(p)
+	})
+}

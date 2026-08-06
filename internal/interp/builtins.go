@@ -274,6 +274,29 @@ func (ip *Interp) installBuiltins() {
 	lastAxis("argmax", tensor.ArgmaxAxis)
 	lastAxis("argmin", tensor.ArgminAxis)
 	lastAxis("flip", tensor.FlipAxis)
+	lastAxis("diff", tensor.DiffAxis)
+
+	// roll takes the shift first, since that is the argument nobody omits.
+	def("roll", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 2 || len(a) > 3 {
+			return nil, fmt.Errorf("roll expects (tensor, shift[, axis])")
+		}
+		t, err := asTensor(a[0], "roll")
+		if err != nil {
+			return nil, err
+		}
+		shift, err := intOf(a[1], "roll")
+		if err != nil {
+			return nil, err
+		}
+		axis := len(t.Shape) - 1
+		if len(a) == 3 {
+			if axis, err = intOf(a[2], "roll"); err != nil {
+				return nil, err
+			}
+		}
+		return tensor.RollAxis(t, shift, axis)
+	})
 
 	// Axis-aware ops that default to the last axis.
 	lastAxisOp := func(name string, f func(*tensor.Tensor, int) (*tensor.Tensor, error)) {

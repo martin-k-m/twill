@@ -1,6 +1,9 @@
 package tensor
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // Cumulative scans. Each runs over the tensor's elements in flat (row-major)
 // order and keeps its shape. Unlike an elementwise op, output j depends on
@@ -304,6 +307,110 @@ func cumExtremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
 		gt := t.ensureGrad()
 		for p := range out {
 			gt[arg[p]] += res.Grad[p]
+		}
+	}), nil
+}
+
+// RollAxis shifts elements along an axis, wrapping the ones that fall off the
+// end back to the start. The shape is unchanged.
+//
+// A shift is a permutation, so the gradient is the shift undone. What makes it
+// worth having is what it lets you write: comparing a series with its own past
+// is `x - roll(x, 1)`, and lagging a signal to line it up with a later outcome
+// is a roll rather than a slice and a pad.
+func RollAxis(t *Tensor, shift, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+
+	// Go's % keeps the sign of the dividend, so a negative shift needs bringing
+	// back into range rather than being used as an index.
+	s := 0
+	if L > 0 {
+		s = ((shift % L) + L) % L
+	}
+
+	out := make([]float64, len(t.Data))
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			base := i*L*after + j
+			for k := 0; k < L; k++ {
+				// Positive shifts move elements towards the end, which is the
+				// direction that makes roll(x, 1) the previous value.
+				out[base+((k+s)%L)*after] = t.Data[base+k*after]
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for i := 0; i < before; i++ {
+			for j := 0; j < after; j++ {
+				base := i*L*after + j
+				for k := 0; k < L; k++ {
+					gt[base+k*after] += res.Grad[base+((k+s)%L)*after]
+				}
+			}
+		}
+	}), nil
+}
+
+// DiffAxis is the difference between neighbours along an axis, shortening that
+// axis by one.
+//
+// Shortening rather than padding, because there is no honest value for the first
+// difference. A zero says "no change", which is a claim about data that does not
+// exist, and it is the claim most likely to be believed by whatever consumes the
+// series next.
+func DiffAxis(t *Tensor, axis int) (*Tensor, error) {
+	axis, err := normalizeAxis(axis, len(t.Shape))
+	if err != nil {
+		return nil, err
+	}
+	before, L, after := axisSpans(t.Shape, axis)
+	if L < 2 {
+		return nil, fmt.Errorf("diff needs at least 2 elements along axis %d, got %d", axis, L)
+	}
+
+	outShape := append([]int{}, t.Shape...)
+	outShape[axis] = L - 1
+	out := make([]float64, before*(L-1)*after)
+
+	for i := 0; i < before; i++ {
+		for j := 0; j < after; j++ {
+			in := i*L*after + j
+			dst := i*(L-1)*after + j
+			for k := 0; k < L-1; k++ {
+				out[dst+k*after] = t.Data[in+(k+1)*after] - t.Data[in+k*after]
+			}
+		}
+	}
+
+	res := &Tensor{Data: out, Shape: outShape}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		// Each difference sends its gradient forward to the later element and
+		// backward, negated, to the earlier one. Interior elements appear in two
+		// differences and collect both.
+		for i := 0; i < before; i++ {
+			for j := 0; j < after; j++ {
+				in := i*L*after + j
+				dst := i*(L-1)*after + j
+				for k := 0; k < L-1; k++ {
+					g := res.Grad[dst+k*after]
+					gt[in+(k+1)*after] += g
+					gt[in+k*after] -= g
+				}
+			}
 		}
 	}), nil
 }

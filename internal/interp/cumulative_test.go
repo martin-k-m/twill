@@ -208,3 +208,29 @@ func TestFlipIsDifferentiableFromTheLanguage(t *testing.T) {
 		}
 	}
 }
+
+func TestRollAndDiffFromTheLanguage(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []float64
+	}{
+		{"roll([1.0, 2.0, 3.0, 4.0], 1)", []float64{4, 1, 2, 3}},
+		{"roll([1.0, 2.0, 3.0, 4.0], -1)", []float64{2, 3, 4, 1}},
+		{"roll(tensor([[1.0, 2.0], [3.0, 4.0]]), 1, 0)", []float64{3, 4, 1, 2}},
+		{"diff([1.0, 3.0, 6.0, 10.0])", []float64{2, 3, 4}},
+		// The idiom the pair exists for: a series against its own past.
+		{"let x = [1.0, 3.0, 6.0]\nx - roll(x, 1)", []float64{-5, 2, 3}},
+	}
+	for _, c := range cases {
+		v, _ := run(t, c.src)
+		got := v.(*tensor.Tensor)
+		if len(got.Data) != len(c.want) {
+			t.Fatalf("%s: got %v, want %v", c.src, got.Data, c.want)
+		}
+		for i := range c.want {
+			if math.Abs(got.Data[i]-c.want[i]) > 1e-9 {
+				t.Fatalf("%s: got %v, want %v", c.src, got.Data, c.want)
+			}
+		}
+	}
+}
