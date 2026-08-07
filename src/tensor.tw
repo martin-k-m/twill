@@ -58,6 +58,20 @@ mode systems
 #   flip_axis(t, axis), sort_axis(t, axis, desc), argsort_axis(t, axis, desc),
 #   topk_axis(t, k, axis, largest), argtopk_axis(t, k, axis, largest)
 #
+# Sequences, convolution and pooling:
+#   cumsum, cumprod, cummax, cummin (t)              -> Tensor
+#   cumsum_axis, cumprod_axis, cummax_axis,
+#   cummin_axis, diff_axis (t, axis)                 -> Res[Tensor, Str]
+#   roll_axis(t, shift, axis)                        -> Res[Tensor, Str]
+#   conv2d(input, weight), maxpool2d(t, k)           -> Res[Tensor, Str]
+#
+# Literals:
+#   Nested { NLeaf(F64), NList(Arr[Nested]) }
+#   from_nested(n) -> Res[Tensor, Str], to_nested(t) -> Nested
+#
+# Second order:
+#   set_record_jets(on), hessian(tp, root, leaf) -> Res[Tensor, Str]
+#
 # Autodiff. The tape is built by the caller; every op above has a taped twin
 # named `t_<op>` that takes node indices and returns a node index:
 #   new_tape(), leaf(tp, t), value_of(tp, node),
@@ -287,6 +301,15 @@ enum Op {
   OpSort,
   OpTopK,
 
+  OpConv2D,
+  OpMaxPool2D,
+  OpDiff,
+  OpRoll,
+  OpCumSum,
+  OpCumProd,
+  OpCumMax,
+  OpCumMin,
+
   OpLeaf,
   OpConst,
 }
@@ -309,6 +332,10 @@ fn op_name(op: Op) -> Str {
     OpBroadcastTo => "broadcast_to", OpConcat => "concat", OpSplit => "split",
     OpIndex0 => "index0", OpSlice0 => "slice0", OpGather => "gather",
     OpFlip => "flip", OpSort => "sort", OpTopK => "topk",
+    OpConv2D => "conv2d", OpMaxPool2D => "maxpool2d",
+    OpDiff => "diff", OpRoll => "roll",
+    OpCumSum => "cumsum", OpCumProd => "cumprod",
+    OpCumMax => "cummax", OpCumMin => "cummin",
     OpLeaf => "leaf", OpConst => "const",
   }
 }
@@ -2725,6 +2752,15 @@ fn vjp(tp: Tape, i: I64, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] 
     return vjp_rows(tp, e, g, cot, touched)
   }
   if is_same_op(e.op, OpGather) { return vjp_gather(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpConv2D) { return vjp_conv2d(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpMaxPool2D) { return vjp_maxpool2d(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpCumSum) { return vjp_cumsum(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpCumProd) { return vjp_cumprod(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpCumMax) or is_same_op(e.op, OpCumMin) {
+    return vjp_cumextreme(tp, e, g, cot, touched)
+  }
+  if is_same_op(e.op, OpDiff) { return vjp_diff(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpRoll) { return vjp_roll(tp, e, g, cot, touched) }
 
   Err(bytes.concat("backward: no gradient rule for ", op_name(e.op)))
 }
@@ -3279,4 +3315,1296 @@ fn vjp_gather(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   }
   accumulate(cot, touched, e.inputs[0], ga)
   Ok(0)
+}
+
+# ---- convolution and pooling -----------------------------------------------
+#
+# NEEDS-54's first two entries, and the two whose gradients are easiest to get
+# wrong, so both are spelled out rather than left to the reader.
+
+# conv2d is a cross-correlation, which is what machine learning calls a
+# convolution: the kernel is not flipped. input is [Cin, H, W], weight is
+# [Cout, Cin, KH, KW], output is [Cout, H-KH+1, W-KW+1]. Valid padding, unit
+# stride, no dilation and no groups, exactly as internal/tensor/conv.go.
+#
+# OPTIMISATION, not taken: the standard im2col reshape turns the six nested
+# loops below into one matmul and is several times faster. It is not written
+# because the loop nest is the definition of the operation, and the gradient
+# rule below is read against it.
+fn conv2d(input: Tensor, weight: Tensor) -> Res[Tensor, Str] {
+  if len(input.shape) != 3 {
+    return Err(bytes.concat("conv2d: input must be [channels, height, width], got ",
+      shape_string(input.shape)))
+  }
+  if len(weight.shape) != 4 {
+    return Err(bytes.concat("conv2d: weight must be [out, in, kh, kw], got ",
+      shape_string(weight.shape)))
+  }
+  let cin: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let cout: I64 = weight.shape[0]
+  let wcin: I64 = weight.shape[1]
+  let kh: I64 = weight.shape[2]
+  let kw: I64 = weight.shape[3]
+  if wcin != cin {
+    return Err(bytes.concat("conv2d: input has ", bytes.concat(str(cin),
+      bytes.concat(" channels but weight expects ", str(wcin)))))
+  }
+  if kh > h or kw > w {
+    return Err(bytes.concat("conv2d: kernel ", bytes.concat(str(kh),
+      bytes.concat("x", bytes.concat(str(kw),
+      bytes.concat(" is larger than input ", bytes.concat(str(h),
+      bytes.concat("x", str(w)))))))))
+  }
+  let oh: I64 = h - kh + 1
+  let ow: I64 = w - kw + 1
+  let hw: I64 = h * w
+  let khw: I64 = kh * kw
+  let cinkhw: I64 = cin * khw
+  let ohw: I64 = oh * ow
+  let out: Arr[F64] = alloc(cout * ohw)
+  let co: I64 = 0
+  while co < cout {
+    let i: I64 = 0
+    while i < oh {
+      let j: I64 = 0
+      while j < ow {
+        let sum: F64 = 0.0
+        let ci: I64 = 0
+        while ci < cin {
+          let a: I64 = 0
+          while a < kh {
+            let b: I64 = 0
+            while b < kw {
+              sum = sum + input.data[ci * hw + (i + a) * w + (j + b)]
+                * weight.data[co * cinkhw + ci * khw + a * kw + b]
+              b = b + 1
+            }
+            a = a + 1
+          }
+          ci = ci + 1
+        }
+        out[co * ohw + i * ow + j] = sum
+        j = j + 1
+      }
+      i = i + 1
+    }
+    co = co + 1
+  }
+  let shape: Arr[I64] = arr_new()
+  push(shape, cout)
+  push(shape, oh)
+  push(shape, ow)
+  Ok(Tensor { shape: shape, data: out })
+}
+
+# maxpool2d: non-overlapping k by k max pooling per channel of a [C, H, W],
+# giving [C, H/k, W/k]. A ragged remainder along either spatial axis is dropped
+# rather than padded, because padding with anything finite would let an invented
+# value win a max.
+#
+# The winner of each window is computed here and recorded on the tape rather
+# than recomputed in the backward pass. Recomputing would be correct only if the
+# tie-break were reproduced exactly, and the rule is `>` and not `>=`, so the
+# *first* maximum in scan order wins. That one character is the difference
+# between a gradient that matches the bootstrap and one that is wrong on
+# repeated values, which is every pooled relu output with a flat region in it.
+fn maxpool_argmax(input: Tensor, k: I64) -> Arr[I64] {
+  let c: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let oh: I64 = h / k
+  let ow: I64 = w / k
+  let hw: I64 = h * w
+  let arg: Arr[I64] = arr_new()
+  let ch: I64 = 0
+  while ch < c {
+    let i: I64 = 0
+    while i < oh {
+      let j: I64 = 0
+      while j < ow {
+        let best_idx: I64 = ch * hw + (i * k) * w + (j * k)
+        let best: F64 = input.data[best_idx]
+        let a: I64 = 0
+        while a < k {
+          let b: I64 = 0
+          while b < k {
+            let idx: I64 = ch * hw + (i * k + a) * w + (j * k + b)
+            if input.data[idx] > best {
+              best = input.data[idx]
+              best_idx = idx
+            }
+            b = b + 1
+          }
+          a = a + 1
+        }
+        push(arg, best_idx)
+        j = j + 1
+      }
+      i = i + 1
+    }
+    ch = ch + 1
+  }
+  arg
+}
+
+fn maxpool2d(input: Tensor, k: I64) -> Res[Tensor, Str] {
+  if len(input.shape) != 3 {
+    return Err(bytes.concat("maxpool2d: input must be [channels, height, width], got ",
+      shape_string(input.shape)))
+  }
+  if k < 1 {
+    return Err(bytes.concat("maxpool2d: window must be >= 1, got ", str(k)))
+  }
+  let c: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let oh: I64 = h / k
+  let ow: I64 = w / k
+  if oh == 0 or ow == 0 {
+    return Err(bytes.concat("maxpool2d: window ", bytes.concat(str(k),
+      bytes.concat(" is larger than input ", bytes.concat(str(h),
+      bytes.concat("x", str(w)))))))
+  }
+  let arg: Arr[I64] = maxpool_argmax(input, k)
+  let out: Arr[F64] = alloc(len(arg))
+  let o: I64 = 0
+  while o < len(arg) {
+    out[o] = input.data[arg[o]]
+    o = o + 1
+  }
+  let shape: Arr[I64] = arr_new()
+  push(shape, c)
+  push(shape, oh)
+  push(shape, ow)
+  Ok(Tensor { shape: shape, data: out })
+}
+
+# ---- scans, differences and shifts -----------------------------------------
+#
+# A scan keeps the shape: output j depends on every input at or before j, so
+# unlike an elementwise op the backward pass walks the chain in reverse rather
+# than pairing element with element.
+#
+# The flat forms run over the buffer in row-major order, which is what a
+# sequence means and is all a 1-D tensor can mean. The axis forms scan along one
+# axis instead. Both share one implementation over `Spans`, so the flat form is
+# the axis form with before = after = 1. That is the trick `spans_for` already
+# plays in the backward pass, and sharing it is what keeps the two from
+# drifting apart on a tie-break or an edge.
+
+fn alloc_ints(n: I64) -> Arr[I64] {
+  let v: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(v, 0)
+    i = i + 1
+  }
+  v
+}
+
+fn is_scan_op(op: Op) -> Bool {
+  if is_same_op(op, OpCumSum) or is_same_op(op, OpCumProd) { return true }
+  is_same_op(op, OpCumMax) or is_same_op(op, OpCumMin)
+}
+
+# The running sum, product, max or min over each run of `sp`. `arg` is filled
+# for the two extremes with the input position each output came from, which is
+# the whole of what their gradient needs, and is left at zero for the other two.
+fn scan_run(op: Op, t: Tensor, sp: Spans, out: Arr[F64], arg: Arr[I64]) {
+  let want_extreme: Bool = is_same_op(op, OpCumMax) or is_same_op(op, OpCumMin)
+  let want_max: Bool = is_same_op(op, OpCumMax)
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let run: F64 = 0.0
+      if is_same_op(op, OpCumProd) { run = 1.0 }
+      let k: I64 = 0
+      while k < sp.length {
+        let p: I64 = base + k * sp.after
+        if is_same_op(op, OpCumSum) {
+          run = run + t.data[p]
+          out[p] = run
+        }
+        if is_same_op(op, OpCumProd) {
+          run = run * t.data[p]
+          out[p] = run
+        }
+        if want_extreme {
+          if k == 0 {
+            out[p] = t.data[p]
+            arg[p] = p
+          } else {
+            let prev: F64 = out[p - sp.after]
+            let v: F64 = t.data[p]
+            # A tie keeps the earlier element. Whichever rule is chosen has to
+            # be the one sort and argmax use as well, or a gradient moves when a
+            # value is merely repeated.
+            let takes: Bool = false
+            if want_max { takes = v > prev } else { takes = v < prev }
+            if takes {
+              out[p] = v
+              arg[p] = p
+            } else {
+              out[p] = prev
+              arg[p] = arg[p - sp.after]
+            }
+          }
+        }
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+}
+
+fn scan_all_by(t: Tensor, op: Op) -> Res[Tensor, Str] {
+  if not is_scan_op(op) {
+    return Err(bytes.concat("scan_all_by: not a scan: ", op_name(op)))
+  }
+  let sp: Spans = Spans { before: 1, length: len(t.data), after: 1 }
+  let out: Arr[F64] = alloc(len(t.data))
+  scan_run(op, t, sp, out, alloc_ints(len(t.data)))
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
+
+fn scan_axis_by(t: Tensor, axis_in: I64, op: Op) -> Res[Tensor, Str] {
+  if not is_scan_op(op) {
+    return Err(bytes.concat("scan_axis_by: not a scan: ", op_name(op)))
+  }
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(len(t.data))
+  scan_run(op, t, sp, out, alloc_ints(len(t.data)))
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
+
+# The four flat names are total, so they take the Tensor form rather than a Res.
+# The op is one of the four literals below and cannot be wrong, so unwrapping
+# here hides no error a caller could have seen.
+fn scan_all_unchecked(t: Tensor, op: Op) -> Tensor {
+  match scan_all_by(t, op) {
+    Ok(v) => v,
+    Err(m) => abort(m),
+  }
+}
+
+fn cumsum(t: Tensor) -> Tensor = scan_all_unchecked(t, OpCumSum)
+fn cumprod(t: Tensor) -> Tensor = scan_all_unchecked(t, OpCumProd)
+fn cummax(t: Tensor) -> Tensor = scan_all_unchecked(t, OpCumMax)
+fn cummin(t: Tensor) -> Tensor = scan_all_unchecked(t, OpCumMin)
+
+fn cumsum_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = scan_axis_by(t, axis, OpCumSum)
+fn cumprod_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = scan_axis_by(t, axis, OpCumProd)
+fn cummax_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = scan_axis_by(t, axis, OpCumMax)
+fn cummin_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = scan_axis_by(t, axis, OpCumMin)
+
+# diff_axis: the difference between neighbours along an axis, shortening that
+# axis by one. Shortening rather than padding, because there is no honest value
+# for the first difference: a zero says "no change", which is a claim about data
+# that does not exist and the one most likely to be believed downstream.
+fn diff_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  if sp.length < 2 {
+    return Err(bytes.concat("diff needs at least 2 elements along axis ",
+      bytes.concat(str(axis), bytes.concat(", got ", str(sp.length)))))
+  }
+  let out_shape: Arr[I64] = copy_shape(t.shape)
+  out_shape[axis] = sp.length - 1
+  let out: Arr[F64] = alloc(sp.before * (sp.length - 1) * sp.after)
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let src: I64 = i * sp.length * sp.after + j
+      let dst: I64 = i * (sp.length - 1) * sp.after + j
+      let k: I64 = 0
+      while k < sp.length - 1 {
+        out[dst + k * sp.after] = t.data[src + (k + 1) * sp.after] - t.data[src + k * sp.after]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: out_shape, data: out })
+}
+
+# roll_axis: shift along an axis, wrapping what falls off the end back to the
+# start. A positive shift moves elements towards the end, so roll(x, 1) puts the
+# previous value where the current one was, which is what makes `x - roll(x, 1)`
+# the comparison of a series with its own past.
+fn roll_axis(t: Tensor, shift: I64, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let s: I64 = roll_amount(shift, sp.length)
+  let out: Arr[F64] = alloc(len(t.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        out[base + ((k + s) % sp.length) * sp.after] = t.data[base + k * sp.after]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
+
+# `%` keeps the sign of the dividend, here as in Go, so a negative shift has to
+# be brought back into range before it can be used as an index.
+fn roll_amount(shift: I64, length: I64) -> I64 {
+  if length == 0 { return 0 }
+  ((shift % length) + length) % length
+}
+
+# ---- nested literals -------------------------------------------------------
+#
+# NEEDS-62 said this type would move here when the tensor engine owned the
+# constructor. It does now, so it has.
+
+enum Nested {
+  NLeaf(F64),
+  NList(Arr[Nested]),
+}
+
+# The shape is read off the first element at each depth, and every other element
+# is then checked against it. Reading and checking in one pass would accept
+# `[[1, 2], [3]]` as a rank-1 shape with a stray list inside it, which is the
+# ragged case the bootstrap rejects by name.
+fn nested_shape(n: Nested) -> Arr[I64] {
+  let shape: Arr[I64] = arr_new()
+  let probe: Nested = n
+  let going: Bool = true
+  while going {
+    match probe {
+      NList(items) => {
+        push(shape, len(items))
+        if len(items) == 0 {
+          going = false
+        } else {
+          probe = items[0]
+        }
+      },
+      NLeaf(_) => going = false,
+    }
+  }
+  shape
+}
+
+fn nested_walk(n: Nested, depth: I64, shape: Arr[I64], flat: Arr[F64]) -> Res[I64, Str] {
+  match n {
+    NList(items) => {
+      if depth >= len(shape) or len(items) != shape[depth] {
+        return Err("ragged tensor literal: inconsistent row lengths")
+      }
+      let i: I64 = 0
+      while i < len(items) {
+        nested_walk(items[i], depth + 1, shape, flat)?
+        i = i + 1
+      }
+      Ok(0)
+    },
+    NLeaf(x) => {
+      push(flat, x)
+      Ok(0)
+    },
+  }
+}
+
+fn from_nested(n: Nested) -> Res[Tensor, Str] {
+  let shape: Arr[I64] = nested_shape(n)
+  let flat: Arr[F64] = arr_new()
+  nested_walk(n, 0, shape, flat)?
+  Ok(Tensor { shape: shape, data: flat })
+}
+
+struct NestedAt {
+  value: Nested,
+  next: I64,
+}
+
+fn to_nested(t: Tensor) -> Nested {
+  if is_scalar(t) { return NLeaf(t.data[0]) }
+  to_nested_at(t, 0, 0).value
+}
+
+fn to_nested_at(t: Tensor, offset: I64, dim: I64) -> NestedAt {
+  if dim == len(t.shape) - 1 {
+    let row: Arr[Nested] = arr_new()
+    let i: I64 = 0
+    while i < t.shape[dim] {
+      push(row, NLeaf(t.data[offset + i]))
+      i = i + 1
+    }
+    return NestedAt { value: NList(row), next: offset + t.shape[dim] }
+  }
+  let rows: Arr[Nested] = arr_new()
+  let off: I64 = offset
+  let i: I64 = 0
+  while i < t.shape[dim] {
+    let r: NestedAt = to_nested_at(t, off, dim + 1)
+    push(rows, r.value)
+    off = r.next
+    i = i + 1
+  }
+  NestedAt { value: NList(rows), next: off }
+}
+
+# ---- the taped twins for the kernels above ---------------------------------
+
+fn t_conv2d(tp: Tape, input: I64, weight: I64) -> Res[I64, Str] {
+  let out: Tensor = conv2d(value_of(tp, input), value_of(tp, weight))?
+  Ok(record(tp, OpConv2D, two_inputs(input, weight), out, no_ints(), no_floats(), ""))
+}
+
+# iattr is [k, then the flat input index of every window's winner]. The winners
+# are recorded rather than recomputed for the tie-break reason on maxpool_argmax.
+fn t_maxpool2d(tp: Tape, a: I64, k: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let out: Tensor = maxpool2d(v, k)?
+  let iattr: Arr[I64] = arr_new()
+  push(iattr, k)
+  let arg: Arr[I64] = maxpool_argmax(v, k)
+  let i: I64 = 0
+  while i < len(arg) {
+    push(iattr, arg[i])
+    i = i + 1
+  }
+  Ok(record(tp, OpMaxPool2D, one_input(a), out, iattr, no_floats(), ""))
+}
+
+fn t_diff_axis(tp: Tape, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = diff_axis(v, axis)?
+  Ok(record(tp, OpDiff, one_input(a), out, one_int(axis), no_floats(), ""))
+}
+
+# The normalized shift is recorded next to the axis, so the backward pass never
+# redoes the sign correction against a length it would have to look up again.
+fn t_roll_axis(tp: Tape, a: I64, shift: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = roll_axis(v, shift, axis)?
+  let sp: Spans = axis_spans(v.shape, axis)
+  Ok(record(tp, OpRoll, one_input(a), out,
+    two_ints(axis, roll_amount(shift, sp.length)), no_floats(), ""))
+}
+
+# An axis of -1 means the flat scan, which is the convention `spans_for` already
+# reads, so the two scan forms share one gradient rule between them.
+fn t_scan_all(tp: Tape, op: Op, a: I64) -> Res[I64, Str] {
+  let out: Tensor = scan_all_by(value_of(tp, a), op)?
+  Ok(record(tp, op, one_input(a), out, one_int(0 - 1), no_floats(), ""))
+}
+
+fn t_scan_axis(tp: Tape, op: Op, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = scan_axis_by(v, axis, op)?
+  Ok(record(tp, op, one_input(a), out, one_int(axis), no_floats(), ""))
+}
+
+fn t_logsumexp_axis(tp: Tape, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = logsumexp_axis(v, axis)?
+  Ok(record(tp, OpLogSumExp, one_input(a), out, one_int(axis), no_floats(), ""))
+}
+
+# split_equal is split with the sizes worked out first. They are worked out here
+# too, and the kernel is called first for its side effect of reporting the
+# divisibility error, so that the message is the same one whether or not a tape
+# is installed.
+fn t_split_equal(tp: Tape, a: I64, parts: I64, axis_in: I64) -> Res[Arr[I64], Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  split_equal(v, parts, axis)?
+  let each: I64 = v.shape[axis] / parts
+  let sizes: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < parts {
+    push(sizes, each)
+    i = i + 1
+  }
+  t_split(tp, a, sizes, axis)
+}
+
+# ---- gradient rules for the kernels above ----------------------------------
+
+# conv2d. The forward pass is
+#
+#   out[co, i, j] = sum over ci, a, b of  in[ci, i+a, j+b] * wt[co, ci, a, b]
+#
+# and it is linear in each of its two inputs separately, so each gradient is the
+# same sum with the other factor in place of the output:
+#
+#   d in[ci, i+a, j+b] += g[co, i, j] * wt[co, ci, a, b]
+#   d wt[co, ci, a, b] += g[co, i, j] * in[ci, i+a, j+b]
+#
+# Written as one loop nest over exactly the index quadruples the forward pass
+# visited, which is the part that is easy to get wrong. The two textbook
+# spellings of the input gradient, a full convolution of g with the flipped
+# kernel and a transposed convolution, are the same numbers arrived at by
+# re-deriving the index arithmetic, and each is one off-by-one away from a
+# gradient that is wrong only at the borders. Reusing the forward loops cannot
+# make that mistake, because the bounds are the forward bounds.
+#
+# The skip on a zero incoming gradient is the bootstrap's and it is a cost
+# property only: adding zero changes nothing.
+fn vjp_conv2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let input: Tensor = value_of(tp, e.inputs[0])
+  let weight: Tensor = value_of(tp, e.inputs[1])
+  let cin: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let cout: I64 = weight.shape[0]
+  let kh: I64 = weight.shape[2]
+  let kw: I64 = weight.shape[3]
+  let oh: I64 = h - kh + 1
+  let ow: I64 = w - kw + 1
+  let hw: I64 = h * w
+  let khw: I64 = kh * kw
+  let cinkhw: I64 = cin * khw
+  let ohw: I64 = oh * ow
+  let gi: Arr[F64] = alloc(len(input.data))
+  let gw: Arr[F64] = alloc(len(weight.data))
+  let co: I64 = 0
+  while co < cout {
+    let i: I64 = 0
+    while i < oh {
+      let j: I64 = 0
+      while j < ow {
+        let gv: F64 = g.data[co * ohw + i * ow + j]
+        if gv != 0.0 {
+          let ci: I64 = 0
+          while ci < cin {
+            let a: I64 = 0
+            while a < kh {
+              let b: I64 = 0
+              while b < kw {
+                let in_idx: I64 = ci * hw + (i + a) * w + (j + b)
+                let w_idx: I64 = co * cinkhw + ci * khw + a * kw + b
+                gi[in_idx] = gi[in_idx] + gv * weight.data[w_idx]
+                gw[w_idx] = gw[w_idx] + gv * input.data[in_idx]
+                b = b + 1
+              }
+              a = a + 1
+            }
+            ci = ci + 1
+          }
+        }
+        j = j + 1
+      }
+      i = i + 1
+    }
+    co = co + 1
+  }
+  accumulate(cot, touched, e.inputs[0], gi)
+  accumulate(cot, touched, e.inputs[1], gw)
+  Ok(0)
+}
+
+# maxpool2d. Each output is one input element, so its gradient goes to that one
+# element and nowhere else: no averaging over the window, no spreading, nothing
+# to the losers. The window's winner is read from the tape rather than found
+# again, so the backward pass cannot disagree with the forward pass about a tie.
+#
+# The add rather than the assign matters here even though the windows do not
+# overlap, because the same node can be pooled twice in one graph and each use
+# has to contribute.
+fn vjp_maxpool2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let input: Tensor = value_of(tp, e.inputs[0])
+  let gi: Arr[F64] = alloc(len(input.data))
+  let o: I64 = 0
+  while o < len(g.data) {
+    # iattr[0] is the window, so the winners start at 1.
+    let src: I64 = e.iattr[o + 1]
+    gi[src] = gi[src] + g.data[o]
+    o = o + 1
+  }
+  accumulate(cot, touched, e.inputs[0], gi)
+  Ok(0)
+}
+
+# cumsum. Every d(out_j)/d(in_i) with i <= j is 1, so the gradient of in_i is
+# the sum of the incoming gradients from i onward. That is the running sum
+# again, taken from the end, which is why this is one reverse pass and not a
+# nested loop.
+fn vjp_cumsum(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let run: F64 = 0.0
+      let k: I64 = sp.length - 1
+      while k >= 0 {
+        run = run + g.data[base + k * sp.after]
+        ga[base + k * sp.after] = ga[base + k * sp.after] + run
+        k = k - 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# cumprod. out[n] is the product of x[0..n], so d(out[n])/d(x[k]) for n >= k is
+# that product with x[k] left out of it, and the gradient of x[k] is the sum of
+# those over every n at or after k.
+#
+# The tempting shortcut is out[n] / x[k], and it is wrong exactly when x[k] is
+# zero, which is not a rare value for a tensor: it turns a finite gradient into
+# a NaN. Rebuilding the product without x[k] costs a factor of the run length
+# and is always right. The runs are one axis long, not the whole tensor, so this
+# stays cheap in the shapes anybody writes.
+#
+# OPTIMISATION, not taken: the prefix-and-suffix form in internal/tensor's
+# CumProd does it in two linear passes. It is a different derivation, and the
+# quadratic form here is the one that can be checked against the definition
+# above line by line.
+fn vjp_cumprod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        let total: F64 = 0.0
+        # The product of x[0..n] with x[k] left out, built forwards so it
+        # carries from one n to the next.
+        let without: F64 = 1.0
+        let m: I64 = 0
+        while m < k {
+          without = without * a.data[base + m * sp.after]
+          m = m + 1
+        }
+        let n: I64 = k
+        while n < sp.length {
+          if n > k { without = without * a.data[base + n * sp.after] }
+          total = total + g.data[base + n * sp.after] * without
+          n = n + 1
+        }
+        ga[base + k * sp.after] = ga[base + k * sp.after] + total
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# cummax and cummin. Each output *is* one of the inputs, the best seen so far,
+# so the gradient goes straight to that element and nowhere else. The winner is
+# recovered by re-running the forward scan rather than being recorded, which is
+# safe here and not in maxpool2d for one reason: the scan is deterministic in
+# the input alone and the tie-break lives in a single shared function, so a
+# re-run cannot disagree with the original.
+fn vjp_cumextreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let out: Arr[F64] = alloc(len(a.data))
+  let arg: Arr[I64] = alloc_ints(len(a.data))
+  scan_run(e.op, a, sp, out, arg)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let p: I64 = 0
+  while p < len(a.data) {
+    ga[arg[p]] = ga[arg[p]] + g.data[p]
+    p = p + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# diff. Each difference is out[k] = x[k+1] - x[k], so its gradient goes forward
+# to the later element and backward, negated, to the earlier one. An interior
+# element appears in two differences and collects both, which is what makes the
+# add rather than the assign load-bearing here.
+fn vjp_diff(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let axis: I64 = e.iattr[0]
+  let sp: Spans = axis_spans(a.shape, axis)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let src: I64 = i * sp.length * sp.after + j
+      let dst: I64 = i * (sp.length - 1) * sp.after + j
+      let k: I64 = 0
+      while k < sp.length - 1 {
+        let gv: F64 = g.data[dst + k * sp.after]
+        ga[src + (k + 1) * sp.after] = ga[src + (k + 1) * sp.after] + gv
+        ga[src + k * sp.after] = ga[src + k * sp.after] - gv
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# roll. A shift is a permutation, so the gradient is the shift undone: whatever
+# went to position (k + s) mod L comes back from there. Reading the recorded
+# normalized shift rather than re-deriving it is what keeps the inverse exact
+# for a negative argument.
+fn vjp_roll(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let axis: I64 = e.iattr[0]
+  let s: I64 = e.iattr[1]
+  let sp: Spans = axis_spans(a.shape, axis)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        ga[base + k * sp.after] = ga[base + k * sp.after]
+          + g.data[base + ((k + s) % sp.length) * sp.after]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# ---- forward mode, for hessian ---------------------------------------------
+#
+# The reverse-mode pass above is first order and not re-differentiable. Second
+# derivatives come from forward-mode 2-jets instead: each node carries a first
+# and a second directional derivative (d, dd) alongside its value, seeding the
+# leaf with a direction v and walking the tape *forwards* gives the output's
+# derivatives along v, and the full Hessian follows by polarization.
+#
+# internal/tensor/jet.go wires a `jvp` closure onto each forward op while
+# `recordJets` is set, because there a graph is parent pointers and closures and
+# the walk order has to be recovered by a topological sort. Here the tape is
+# already in topological order and already holds every input value, so the
+# forward walk is a loop over the entries and there is nothing to wire.
+#
+# That is why set_record_jets below does nothing. It is kept because
+# src/eval.tw's do_hessian calls it around the graph build, mirroring
+# internal/interp/builtins.go, and because the shape of that call site is the
+# thing to preserve if the tape ever stops carrying the inputs. The cost the Go
+# flag exists to avoid is not paid here at all: an ordinary tape is a jet-ready
+# tape.
+fn set_record_jets(on: Bool) {
+  let ignored: Bool = on
+}
+
+# The (d, dd) state of every node, indexed by node.
+struct Jets {
+  d: Arr[Arr[F64]],
+  dd: Arr[Arr[F64]],
+}
+
+fn jets_new(tp: Tape) -> Jets {
+  let d: Arr[Arr[F64]] = arr_new()
+  let dd: Arr[Arr[F64]] = arr_new()
+  let i: I64 = 0
+  while i < len(tp.entries) {
+    push(d, alloc(len(tp.entries[i].out.data)))
+    push(dd, alloc(len(tp.entries[i].out.data)))
+    i = i + 1
+  }
+  Jets { d: d, dd: dd }
+}
+
+# The second partial derivatives of a binary op, the terms jetBinary needs that
+# d_binary_a and d_binary_b do not supply. Everything piecewise linear is zero,
+# which is most of the table.
+# Zero for every op in the table: add, sub, mod, maximum, minimum and the
+# comparisons are piecewise linear in a, mul is linear in a, and so is div. The
+# function exists so jet_binary reads as the full second-order chain rule rather
+# than as a version of it with a term quietly missing.
+fn d2_binary_aa(op: Op, x: F64, y: F64, o: F64) -> F64 = 0.0
+
+fn d2_binary_ab(op: Op, x: F64, y: F64, o: F64) -> F64 {
+  match op {
+    OpMul => 1.0,
+    OpDiv => 0.0 - 1.0 / (y * y),
+    _ => 0.0,
+  }
+}
+
+fn d2_binary_bb(op: Op, x: F64, y: F64, o: F64) -> F64 {
+  match op {
+    OpDiv => 2.0 * x / (y * y * y),
+    _ => 0.0,
+  }
+}
+
+# The second derivative of a unary op, written in terms of the forward result
+# where that is both cheaper and better conditioned, exactly as d_unary is.
+fn d2_unary(op: Op, x: F64, o: F64, p0: F64, p1: F64) -> F64 {
+  match op {
+    OpExp => o,
+    OpLog => 0.0 - 1.0 / (x * x),
+    # o is sin(x) and cos(x) respectively, and both are their own negated
+    # second derivative.
+    OpSin => 0.0 - o,
+    OpCos => 0.0 - o,
+    # f = x^(1/2), f'' = -1/4 x^(-3/2), and x^(3/2) is o^3.
+    OpSqrt => (0.0 - 0.25) / (o * o * o),
+    OpTanh => (0.0 - 2.0) * o * (1.0 - o * o),
+    OpSigmoid => o * (1.0 - o) * (1.0 - 2.0 * o),
+    OpSquare => 2.0,
+    OpPow => p0 * (p0 - 1.0) * f64_pow(x, p0 - 2.0),
+    # neg and relu are linear where they are differentiable at all, and clip is
+    # constant off the interior and linear on it.
+    _ => 0.0,
+  }
+}
+
+# One forward-mode pass: seed `leaf` with direction v and propagate (d, dd)
+# through every entry up to and including `root`.
+#
+# The chain rule at second order is where this earns its comments. For a unary
+# op o = f(x) with the input carrying (dx, ddx):
+#
+#   d  = f'(x) dx
+#   dd = f'(x) ddx + f''(x) dx^2
+#
+# The second term is the one a first-order implementation drops, and dropping it
+# gives a Hessian that is right only where f is linear, which is exactly where
+# nobody checks it. For a binary op o = f(x, y):
+#
+#   dd = fa ddx + fb ddy + faa dx^2 + 2 fab dx dy + fbb dy^2
+#
+# and the factor of 2 on the cross term is the other place this goes quietly
+# wrong.
+fn jet_forward(tp: Tape, root: I64, leaf: I64, v: Arr[F64]) -> Res[Jets, Str] {
+  let js: Jets = jets_new(tp)
+  let i: I64 = 0
+  while i < len(v) {
+    js.d[leaf][i] = v[i]
+    i = i + 1
+  }
+  let n: I64 = 0
+  while n <= root {
+    if n != leaf {
+      jet_node(tp, n, js)?
+    }
+    n = n + 1
+  }
+  Ok(js)
+}
+
+# The ops without a forward-mode rule report rather than silently propagating a
+# zero tangent, because a zero tangent is a plausible Hessian and an error is
+# not. The message is internal/tensor/jet.go's, byte for byte.
+fn jet_unsupported(op: Op) -> Str =
+  "second-order autodiff: the function uses an operation without forward-mode support"
+
+fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
+  let e: TapeEntry = tp.entries[n]
+  # A leaf other than the seeded one, and a constant, both have a zero tangent,
+  # which is what jets_new already left there.
+  if len(e.inputs) == 0 { return Ok(0) }
+  # A comparison, an argmax and the ordering ops are piecewise constant in the
+  # values they select on, so their tangent is zero rather than unsupported.
+  if is_comparison(e.op) { return Ok(0) }
+  if is_same_op(e.op, OpArgmax) or is_same_op(e.op, OpArgmin) { return Ok(0) }
+
+  if is_binary_op(e.op) { return jet_binary(tp, n, e, js) }
+  if is_unary_op(e.op) { return jet_unary(tp, n, e, js) }
+  if is_same_op(e.op, OpSum) or is_same_op(e.op, OpMean) { return jet_sum_mean(tp, n, e, js) }
+  if is_same_op(e.op, OpMatMul) { return jet_matmul(tp, n, e, js) }
+  if is_same_op(e.op, OpCumSum) { return jet_cumsum(tp, n, e, js) }
+  if is_same_op(e.op, OpCumProd) { return jet_cumprod(tp, n, e, js) }
+  if is_same_op(e.op, OpCumMax) or is_same_op(e.op, OpCumMin) {
+    return jet_select_by_value(tp, n, e, js)
+  }
+  if is_same_op(e.op, OpWhere) { return jet_where(tp, n, e, js) }
+  # Reshape, broadcast, transpose, flip, gather, index, slice and split move
+  # numbers without changing them, so their jet is the same rearrangement
+  # applied to the tangents. That is one rule, and it is expressed by replaying
+  # the forward kernel on the tangent buffers rather than by writing the index
+  # arithmetic out a second time per op, which is the part a hand-written
+  # version gets wrong.
+  if is_rearrangement(e.op) { return jet_rearrangement(tp, n, e, js) }
+  Err(jet_unsupported(e.op))
+}
+
+# Sort, topk, concat, prod, median, softmax, logsumexp, conv2d and maxpool2d
+# are deliberately absent. Each is either a selection made by comparing values,
+# which the replay below must not be given, or an op internal/tensor never wired
+# a jvp onto either. They report through jet_unsupported rather than propagating
+# a zero tangent, so a hessian over one of them says so instead of returning a
+# plausible matrix of zeros.
+fn is_rearrangement(op: Op) -> Bool {
+  if is_same_op(op, OpReshape) or is_same_op(op, OpBroadcastTo) { return true }
+  if is_same_op(op, OpTranspose) or is_same_op(op, OpFlip) { return true }
+  if is_same_op(op, OpGather) or is_same_op(op, OpIndex0) { return true }
+  if is_same_op(op, OpSlice0) or is_same_op(op, OpSplit) { return true }
+  false
+}
+
+# A rearrangement carries tangents by the same map it carried values by. It is
+# obtained by running the op's own vjp *transposed*: for a permutation or a
+# selection the forward map and the reverse map are transposes of each other, so
+# the tangent of the output at position p is the tangent of whichever input
+# position fed it. Rather than invert the vjp, this replays the forward kernel
+# on a tensor whose data is the tangent buffer, which is the same numbers by
+# construction and cannot drift from the value path.
+fn jet_rearrangement(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let src_d: Tensor = Tensor { shape: copy_shape(value_of(tp, a).shape), data: js.d[a] }
+  let src_dd: Tensor = Tensor { shape: copy_shape(value_of(tp, a).shape), data: js.dd[a] }
+  let out_d: Tensor = replay_rearrangement(tp, e, src_d)?
+  let out_dd: Tensor = replay_rearrangement(tp, e, src_dd)?
+  let i: I64 = 0
+  while i < len(e.out.data) {
+    js.d[n][i] = out_d.data[i]
+    js.dd[n][i] = out_dd.data[i]
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# The forward kernel of a rearrangement, applied to a buffer that is not the
+# value. Every case reads its parameters from the tape entry rather than
+# recomputing them, so a normalized axis stays normalized.
+fn replay_rearrangement(tp: Tape, e: TapeEntry, src: Tensor) -> Res[Tensor, Str] {
+  if is_same_op(e.op, OpReshape) { return reshape(src, copy_shape(e.out.shape)) }
+  if is_same_op(e.op, OpBroadcastTo) { return broadcast_to(src, copy_shape(e.out.shape)) }
+  if is_same_op(e.op, OpTranspose) { return transpose(src, e.iattr) }
+  if is_same_op(e.op, OpFlip) { return flip_axis(src, e.iattr[0]) }
+  if is_same_op(e.op, OpGather) { return gather(src, e.iattr) }
+  if is_same_op(e.op, OpIndex0) { return index_axis0(src, e.iattr[0]) }
+  if is_same_op(e.op, OpSlice0) { return slice_axis0(src, e.iattr[0], e.iattr[1]) }
+  if is_same_op(e.op, OpSplit) {
+    return split_piece(src, e.iattr[0], e.iattr[1], e.iattr[2])
+  }
+  Err(jet_unsupported(e.op))
+}
+
+# cummax and cummin select by comparing *values*, so the selection is taken from
+# the values and only then applied to the tangents. Replaying the kernel on the
+# tangent buffer instead would scan the tangents, which is a different and wrong
+# answer, and it is the mistake routing these through jet_rearrangement would
+# make silently.
+fn jet_select_by_value(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let sp: Spans = spans_for(x, e.iattr[0])
+  let out: Arr[F64] = alloc(len(x.data))
+  let arg: Arr[I64] = alloc_ints(len(x.data))
+  scan_run(e.op, x, sp, out, arg)
+  let p: I64 = 0
+  while p < len(x.data) {
+    js.d[n][p] = js.d[a][arg[p]]
+    js.dd[n][p] = js.dd[a][arg[p]]
+    p = p + 1
+  }
+  Ok(0)
+}
+
+# where picks from its second or third input by the truth of its first, and
+# never differentiates through the condition: a selector changes nothing until
+# it crosses, and at the crossing it is not differentiable at all. So the
+# tangent is whichever branch's tangent the value itself came from.
+fn jet_where(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let cond: Tensor = value_of(tp, e.inputs[0])
+  let i: I64 = 0
+  while i < len(e.out.data) {
+    let idx: Arr[I64] = unravel(e.out.shape, i)
+    let src: I64 = e.inputs[1]
+    if cond.data[broadcast_offset(cond.shape, idx)] == 0.0 { src = e.inputs[2] }
+    let off: I64 = broadcast_offset(value_of(tp, src).shape, idx)
+    js.d[n][i] = js.d[src][off]
+    js.dd[n][i] = js.dd[src][off]
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# The multi-dimensional index of a flat offset, needed only by the where case
+# above, which has to broadcast three shapes against each other.
+fn unravel(shape: Arr[I64], flat: I64) -> Arr[I64] {
+  let st: Arr[I64] = strides_of(shape)
+  let idx: Arr[I64] = arr_new()
+  let rem: I64 = flat
+  let i: I64 = 0
+  while i < len(shape) {
+    push(idx, rem / st[i])
+    rem = rem % st[i]
+    i = i + 1
+  }
+  idx
+}
+
+fn jet_unary(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let p0: F64 = 0.0
+  let p1: F64 = 0.0
+  if len(e.fattr) > 0 { p0 = e.fattr[0] }
+  if len(e.fattr) > 1 { p1 = e.fattr[1] }
+  let i: I64 = 0
+  while i < len(e.out.data) {
+    let xv: F64 = x.data[i]
+    let ov: F64 = e.out.data[i]
+    let f1: F64 = d_unary(e.op, xv, ov, p0, p1)
+    let f2: F64 = d2_unary(e.op, xv, ov, p0, p1)
+    let dx: F64 = js.d[a][i]
+    js.d[n][i] = f1 * dx
+    js.dd[n][i] = f1 * js.dd[a][i] + f2 * dx * dx
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# The broadcast offsets are recomputed per element rather than carried in an
+# odometer, which is the slow and obviously correct choice. OPTIMISATION, not
+# taken: jetBinary in the bootstrap walks the two inputs with effective strides
+# and no division at all.
+fn jet_binary(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let ai: I64 = e.inputs[0]
+  let bi: I64 = e.inputs[1]
+  let a: Tensor = value_of(tp, ai)
+  let b: Tensor = value_of(tp, bi)
+  let i: I64 = 0
+  while i < len(e.out.data) {
+    let idx: Arr[I64] = unravel(e.out.shape, i)
+    let oa: I64 = broadcast_offset(a.shape, idx)
+    let ob: I64 = broadcast_offset(b.shape, idx)
+    let x: F64 = a.data[oa]
+    let y: F64 = b.data[ob]
+    let ov: F64 = e.out.data[i]
+    let dx: F64 = js.d[ai][oa]
+    let dy: F64 = js.d[bi][ob]
+    let fa: F64 = d_binary_a(e.op, x, y, ov)
+    let fb: F64 = d_binary_b(e.op, x, y, ov)
+    js.d[n][i] = fa * dx + fb * dy
+    js.dd[n][i] = fa * js.dd[ai][oa] + fb * js.dd[bi][ob]
+      + d2_binary_aa(e.op, x, y, ov) * dx * dx
+      + 2.0 * d2_binary_ab(e.op, x, y, ov) * dx * dy
+      + d2_binary_bb(e.op, x, y, ov) * dy * dy
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# A sum is linear, so the tangent of the sum is the sum of the tangents, at both
+# orders and with no second-order term at all. Mean is the same divided by the
+# run length.
+fn jet_sum_mean(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let sp: Spans = spans_for(x, e.iattr[0])
+  let scale: F64 = 1.0
+  if is_same_op(e.op, OpMean) { scale = 1.0 / f64_of_i64(sp.length) }
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let o: I64 = i * sp.after + j
+      let sd: F64 = 0.0
+      let sdd: F64 = 0.0
+      let k: I64 = 0
+      while k < sp.length {
+        sd = sd + js.d[a][base + k * sp.after]
+        sdd = sdd + js.dd[a][base + k * sp.after]
+        k = k + 1
+      }
+      js.d[n][o] = sd * scale
+      js.dd[n][o] = sdd * scale
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# A matmul is bilinear: d(AB) = dA B + A dB, and differentiating that once more
+# leaves only the cross term, dd(AB) = ddA B + 2 dA dB + A ddB. The 2 is the
+# same factor jet_binary carries on its cross term and for the same reason.
+fn jet_matmul(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let ai: I64 = e.inputs[0]
+  let bi: I64 = e.inputs[1]
+  let a: Tensor = value_of(tp, ai)
+  let b: Tensor = value_of(tp, bi)
+  let da: Tensor = Tensor { shape: copy_shape(a.shape), data: js.d[ai] }
+  let db: Tensor = Tensor { shape: copy_shape(b.shape), data: js.d[bi] }
+  let dda: Tensor = Tensor { shape: copy_shape(a.shape), data: js.dd[ai] }
+  let ddb: Tensor = Tensor { shape: copy_shape(b.shape), data: js.dd[bi] }
+  let t1: Tensor = matmul(da, b)?
+  let t2: Tensor = matmul(a, db)?
+  let s1: Tensor = matmul(dda, b)?
+  let s2: Tensor = matmul(da, db)?
+  let s3: Tensor = matmul(a, ddb)?
+  let i: I64 = 0
+  while i < len(e.out.data) {
+    js.d[n][i] = t1.data[i] + t2.data[i]
+    js.dd[n][i] = s1.data[i] + 2.0 * s2.data[i] + s3.data[i]
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# cumsum is linear, so its jet is cumsum of the tangents at both orders.
+fn jet_cumsum(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let sp: Spans = spans_for(x, e.iattr[0])
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let rd: F64 = 0.0
+      let rdd: F64 = 0.0
+      let k: I64 = 0
+      while k < sp.length {
+        rd = rd + js.d[a][base + k * sp.after]
+        rdd = rdd + js.dd[a][base + k * sp.after]
+        js.d[n][base + k * sp.after] = rd
+        js.dd[n][base + k * sp.after] = rdd
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# cumprod is out[j] = out[j-1] * in[j], so its jet is the product rule carried
+# along the run: d = d(prev)*x + prev*dx, and dd by differentiating that again,
+# dd = dd(prev)*x + 2 d(prev) dx + prev*ddx. The same factor of 2 on the cross
+# term as everywhere else in this section, and the same one to lose.
+fn jet_cumprod(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let sp: Spans = spans_for(x, e.iattr[0])
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let prev: F64 = 1.0
+      let d_prev: F64 = 0.0
+      let dd_prev: F64 = 0.0
+      let k: I64 = 0
+      while k < sp.length {
+        let p: I64 = base + k * sp.after
+        let xv: F64 = x.data[p]
+        let dx: F64 = js.d[a][p]
+        let ddx: F64 = js.dd[a][p]
+        let d: F64 = d_prev * xv + prev * dx
+        let dd: F64 = dd_prev * xv + 2.0 * d_prev * dx + prev * ddx
+        js.d[n][p] = d
+        js.dd[n][p] = dd
+        prev = e.out.data[p]
+        d_prev = d
+        dd_prev = dd
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# hessian: the n by n second derivative of a scalar output with respect to the
+# leaf, by forward-mode 2-jets.
+#
+# The diagonal comes straight out: seeding direction e_i gives dd = e_i' H e_i,
+# which is H[i][i]. The off-diagonals come by polarization, seeding e_i + e_j:
+#
+#   dd = (e_i + e_j)' H (e_i + e_j) = H[i][i] + 2 H[i][j] + H[j][j]
+#
+# so H[i][j] is that minus the two diagonal entries, halved. The result is
+# symmetrised by construction rather than by averaging two computed halves,
+# which is what makes a Hessian that is exactly symmetric rather than symmetric
+# to within rounding.
+#
+# OPTIMISATION, not taken: this is n(n+1)/2 forward passes. Reverse-over-forward
+# would need n, and is a different engine.
+fn hessian(tp: Tape, root: I64, leaf: I64) -> Res[Tensor, Str] {
+  let n: I64 = len(value_of(tp, leaf).data)
+  let shape: Arr[I64] = arr_new()
+  push(shape, n)
+  push(shape, n)
+  # A root of -1 is f ignoring its argument, and a root before the leaf cannot
+  # depend on it. Zeros rather than an error, for the reason
+  # internal/tensor/jet.go gives: a function the output does not depend on
+  # differentiably has an all-zero second derivative, floor is piecewise
+  # constant so its true Hessian is zero, and grad already answers zeros for the
+  # same expression. Erring here would make hessian stricter than grad.
+  if root < 0 or root < leaf {
+    return Ok(Tensor { shape: shape, data: alloc(n * n) })
+  }
+  if not is_scalar(tp.entries[root].out) {
+    return Err("hessian: the function must return a scalar")
+  }
+  let h: Arr[F64] = alloc(n * n)
+  let diag: Arr[F64] = alloc(n)
+  let e: Arr[F64] = alloc(n)
+  let i: I64 = 0
+  while i < n {
+    let z: I64 = 0
+    while z < n {
+      e[z] = 0.0
+      z = z + 1
+    }
+    e[i] = 1.0
+    let js: Jets = jet_forward(tp, root, leaf, e)?
+    diag[i] = js.dd[root][0]
+    h[i * n + i] = js.dd[root][0]
+    i = i + 1
+  }
+  i = 0
+  while i < n {
+    let j: I64 = i + 1
+    while j < n {
+      let z: I64 = 0
+      while z < n {
+        e[z] = 0.0
+        z = z + 1
+      }
+      e[i] = 1.0
+      e[j] = 1.0
+      let js: Jets = jet_forward(tp, root, leaf, e)?
+      let v: F64 = (js.dd[root][0] - diag[i] - diag[j]) / 2.0
+      h[i * n + j] = v
+      h[j * n + i] = v
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: shape, data: h })
 }

@@ -891,7 +891,9 @@ Both are places where a port silently drifts.
 
 ## NEEDS-54: the kernels `src/tensor.tw` does not have yet
 
-**Status:** blocking for `src/eval.tw`. Named by the builtins that call them.
+**Status:** done. Every row of the table below is written, each with its `vjp_`
+gradient rule, and `src/eval.tw` routes to them. The table is kept because it is
+the checklist the port was done against.
 
 `src/tensor.tw` implements the kernels in twill and declares its interface at
 the head of the file. The builtins in `src/eval.tw` call that interface, and
@@ -1038,7 +1040,9 @@ predicate the twill loop can call.
 
 ## NEEDS-62: `Nested`, and where it belongs
 
-**Status:** open. `src/eval.tw` `value_to_nested`, `tensor` builtin.
+**Status:** done. `Nested` is declared in `src/tensor.tw` next to `from_nested`
+and `to_nested`, and `src/eval.tw` `value_to_nested` builds a `tensor.Nested`.
+The stopgap copy in `src/eval.tw` is gone.
 
 `tensor([[1, 2], [3, 4]])` goes through an intermediate that is a number or a
 list of them nested to any depth, and `tensor.FromNested` reads the shape off it
@@ -1265,7 +1269,15 @@ harness's first complaint is not a surprise.
 
 ## NEEDS-75: a tape the interpreted code records on
 
-**Status:** blocking for `src/eval.tw`. `grad`, `grads`, `value_and_grad`,
+**Status:** done. `src/eval.tw` has `tape_push`, `tape_pop` and `tape_node_of`
+over a stack of tapes with dynamic extent, and one `tr_` shim per differentiable
+kernel routing to the taped twin while a tape is installed. What is left of this
+entry is the two costs it exposed, NEEDS-81 and NEEDS-82.
+
+The original text follows, because the two design decisions in it are the ones
+the implementation was made to satisfy and are worth checking it against.
+
+**Was:** blocking for `src/eval.tw`. `grad`, `grads`, `value_and_grad`,
 `jacobian`, `hessian`. It is the one hole in `src/eval.tw` that is in the middle
 of something rather than at its edge.
 
@@ -1440,3 +1452,39 @@ the `grad` would then carry no tape and record nothing.
 cleared by `internal/interp/builtins.go` around the graph build. Same lifetime,
 same single-threaded assumption; a stack rather than a bool because grad nests
 and `SetRecordJets` does not have to.
+
+## NEEDS-83: the ops with no forward-mode rule
+
+**Status:** open, and it is a gap in `hessian` rather than in the language.
+`src/tensor.tw` `jet_node`, `is_rearrangement`.
+
+Forward-mode 2-jets are written for the elementwise binary and unary ops,
+matmul, sum, mean, cumsum, cumprod, cummax, cummin, where, and the pure
+rearrangements: reshape, broadcast_to, transpose, flip, gather, index0, slice0
+and split. Everything else reports
+
+    second-order autodiff: the function uses an operation without forward-mode
+    support
+
+which is `internal/tensor/jet.go`'s message, byte for byte. The ops that hit it
+are sort, topk, concat, prod, median, softmax, logsumexp, conv2d and maxpool2d.
+
+Two different reasons are hiding in that list and they want different work.
+
+Concat, sort and topk are rearrangements whose jet is a permutation of the
+tangents, and the permutation is either recorded already or derivable. They are
+missing because the shared replay path applies the forward kernel to the tangent
+buffer, and doing that to a sort would sort the *tangents*, which is a plausible
+wrong answer rather than a loud one. Each needs its own selection-then-apply
+rule, in the shape of `jet_select_by_value`.
+
+Softmax, logsumexp, prod, median, conv2d and maxpool2d have no jvp in
+`internal/tensor` either, so a `hessian` over them fails on the Go side with the
+same message. Adding them here first would make the two implementations disagree
+about which programs are second-order differentiable, which the differential
+harness would report as a divergence rather than as the improvement it is. Both
+sides at once, as with NEEDS-77.
+
+*Go bootstrap:* `internal/tensor/jet.go`, and the `recordJets` guards in
+`ops.go`, `scan.go`, `gather.go` and `tensor.go` that show exactly which ops
+have a rule there.

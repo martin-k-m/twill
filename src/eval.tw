@@ -2687,29 +2687,20 @@ fn bi_make(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   Ok(VTensor(tensor.Tensor { shape: shape, data: d }))
 }
 
-# The shape-free intermediate `tensor(...)` builds from: a number, or a list of
-# them, nested to any depth. It is declared here rather than in src/tensor.tw
-# because that file does not have it and is another file's to change; when the
-# tensor engine owns the constructor this moves there. NEEDS-62.
-enum Nested {
-  NLeaf(F64),
-  NList(Arr[Nested]),
-}
-
 # Nested arrays for `tensor([[1, 2], [3, 4]])`. Only numbers, tensors and lists
 # convert; a record has no shape and says so.
-fn value_to_nested(v: Value, line: I64) -> Res[Nested, RuntimeError] {
+fn value_to_nested(v: Value, line: I64) -> Res[tensor.Nested, RuntimeError] {
   match v {
-    VNum(x) => Ok(NLeaf(x)),
+    VNum(x) => Ok(tensor.NLeaf(x)),
     VTensor(t) => Ok(tensor.to_nested(t)),
     VList(l) => {
-      let out: Arr[Nested] = arr_new()
+      let out: Arr[tensor.Nested] = arr_new()
       let i: I64 = 0
       while i < len(l.items) {
         push(out, value_to_nested(l.items[i], line)?)
         i = i + 1
       }
-      Ok(NList(out))
+      Ok(tensor.NList(out))
     },
     _ => Err(runtime_error(line, "cannot convert value to a tensor")),
   }
