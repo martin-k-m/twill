@@ -4,6 +4,16 @@
 
 ### Changed
 
+- **A scope holds its first four bindings inline.** Every scope allocated a map
+  on its first binding, and an interpreted loop makes a scope per iteration, so
+  the map was 36% of the allocations in a scalar loop while holding one name.
+  Four inline slots with a linear scan cover almost every scope; beyond that the
+  map takes over and nothing else changes.
+
+  Measured on the same loop: 883 ms to 675 ms, 24% faster, 576 MB and six million
+  allocations fewer. With the range change below, the loop is 45% faster than it
+  was.
+
 - **`for i in range(n)` counts instead of building a list.** The loop used to
   materialise every element first: `range(3000000)` allocated a 48 MB slice and
   three million scalars before the first iteration ran, and the collector then

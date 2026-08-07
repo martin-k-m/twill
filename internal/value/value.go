@@ -64,8 +64,23 @@ var TheUnit = Unit{}
 
 // --- environments ----------------------------------------------------------
 
+// envInline is how many bindings a scope holds before it needs a map.
+//
+// Most scopes hold one or two: a loop variable, a couple of parameters. A map
+// for that allocates far more than it stores, and an interpreted loop makes a
+// scope per iteration, so the map was 36% of the allocations in a scalar loop.
+// Four covers the overwhelming majority; beyond it the map takes over and
+// nothing else changes.
+const envInline = 4
+
 type Env struct {
-	vars   map[string]Value // allocated lazily on first Define
+	// Inline bindings, searched before the map. A linear scan of at most four
+	// strings beats a hash for these sizes and costs no allocation at all.
+	names  [envInline]string
+	values [envInline]Value
+	n      int
+
+	vars   map[string]Value // spillover, and every binding in an ordered scope
 	parent *Env
 	order  []string // definition order, kept only when ordered is set
 	// ordered is off for ordinary scopes: a call frame or loop body defines
@@ -90,6 +105,11 @@ func NewModuleEnv(parent *Env) *Env {
 
 func (e *Env) Get(name string) (Value, bool) {
 	for env := e; env != nil; env = env.parent {
+		for i := 0; i < env.n; i++ {
+			if env.names[i] == name {
+				return env.values[i], true
+			}
+		}
 		if env.vars != nil {
 			if v, ok := env.vars[name]; ok {
 				return v, true
@@ -101,13 +121,42 @@ func (e *Env) Get(name string) (Value, bool) {
 
 // Define binds name in this scope.
 func (e *Env) Define(name string, v Value) {
-	if e.vars == nil {
-		e.vars = make(map[string]Value, 4)
-	}
+	// An ordered scope keeps every binding in the map, because Locals and
+	// LocalNames hand that map and its order to the module snapshot.
 	if e.ordered {
+		if e.vars == nil {
+			e.vars = make(map[string]Value, 4)
+		}
 		if _, redefined := e.vars[name]; !redefined {
 			e.order = append(e.order, name)
 		}
+		e.vars[name] = v
+		return
+	}
+
+	// Redefinition has to land where the name already is, or Get would find the
+	// stale copy first and the new value would never be seen.
+	for i := 0; i < e.n; i++ {
+		if e.names[i] == name {
+			e.values[i] = v
+			return
+		}
+	}
+	if e.vars != nil {
+		if _, exists := e.vars[name]; exists {
+			e.vars[name] = v
+			return
+		}
+	}
+
+	if e.n < envInline {
+		e.names[e.n] = name
+		e.values[e.n] = v
+		e.n++
+		return
+	}
+	if e.vars == nil {
+		e.vars = make(map[string]Value, 4)
 	}
 	e.vars[name] = v
 }
@@ -115,6 +164,12 @@ func (e *Env) Define(name string, v Value) {
 // Assign updates the nearest existing binding, returning false if none exists.
 func (e *Env) Assign(name string, v Value) bool {
 	for env := e; env != nil; env = env.parent {
+		for i := 0; i < env.n; i++ {
+			if env.names[i] == name {
+				env.values[i] = v
+				return true
+			}
+		}
 		if env.vars != nil {
 			if _, ok := env.vars[name]; ok {
 				env.vars[name] = v
@@ -127,7 +182,23 @@ func (e *Env) Assign(name string, v Value) bool {
 
 // Locals returns this scope's own bindings (not parents'). Used to snapshot a
 // module's definitions into a namespace record.
-func (e *Env) Locals() map[string]Value { return e.vars }
+//
+// Inline bindings are folded in, so a caller sees one scope rather than the two
+// halves it happens to be stored in. Only a module scope is snapshotted and
+// those keep everything in the map, so this copies nothing in practice.
+func (e *Env) Locals() map[string]Value {
+	if e.n == 0 {
+		return e.vars
+	}
+	out := make(map[string]Value, e.n+len(e.vars))
+	for k, v := range e.vars {
+		out[k] = v
+	}
+	for i := 0; i < e.n; i++ {
+		out[e.names[i]] = e.values[i]
+	}
+	return out
+}
 
 // LocalNames returns this scope's own bindings in the order they were first
 // defined. It is populated only for a scope made by NewModuleEnv.
