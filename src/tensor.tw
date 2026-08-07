@@ -26,10 +26,17 @@ mode systems
 # message the bootstrap produces for the same mistake.
 #
 # Values and shapes:
-#   Tensor { shape: Arr[I64], data: Arr[F64] }
+#   Tensor { shape: Arr[I64], data: Arr[F64], dtype: I64 }
 #   rank, is_scalar, element_count, strides_of, shape_string, shape_equal
 #   scalar(x), filled(shape, v), zeros_like(t), clone(t)
 #   broadcast_shape(a, b), matmul_shape(a, b)
+#
+# Dtypes. docs/dtypes.md is the design and this is its surface:
+#   DT_BOOL DT_I8 DT_I32 DT_F16 DT_BF16 DT_F32 DT_F64
+#   dtype_name(dt), dtype_of_name(s), dtype_bits(dt)
+#   scalar_of(x, dt), filled_of(shape, v, dt), zeros_dt(shape, dt)
+#   cast(t, dt)
+#   promote(a, b), acc_dtype(dt), grad_dtype(dt), dt_round(dt, x)
 #
 # Elementwise, on the Op enum below:
 #   binary(op, a, b)        -> Res[Tensor, Str]   add sub mul div mod
@@ -86,19 +93,228 @@ mode systems
 # two entry points, because twill has no mutable flag on a value type.
 
 import "bytes.tw" as bytes
+import "float.tw" as flt
 
 # ---- the value ------------------------------------------------------------
 
-# A tensor is a flat float64 buffer plus a shape. Row-major, always dense, never
-# strided: internal/tensor/tensor.go made that choice and every kernel below
-# depends on it, so a view type would be a lie about what the kernels accept.
+# A tensor is a flat buffer, a shape, and a dtype. Row-major, always dense,
+# never strided: internal/tensor/tensor.go made that choice and every kernel
+# below depends on it, so a view type would be a lie about what the kernels
+# accept.
 #
 # Rank 0 is a scalar and is a real tensor rather than a special case. That is
 # what lets `x + 1` broadcast with no rule for scalars, and it is why `shape` of
 # a number is `[]` rather than an error.
+#
+# WHY `data` IS STILL Arr[F64] WHEN THE POINT WAS TO STOP STORING F64
+#
+# The dtype is the *semantics* of the element: which values exist, what a store
+# rounds to, and what an operation accumulates in. The buffer is the *physical
+# layout*. This change lands the first and leaves the second to NEEDS-101,
+# because they are separable and the semantics is the part that can be specified
+# and checked without a byte-addressable buffer primitive to write into.
+#
+# The invariant that makes them separable: every element of `data` is exactly
+# the F64 widening of a value representable in `dtype`. Nothing writes into a
+# buffer except through `mk`, which enforces it, or `mk_raw`, whose callers copy
+# elements that already satisfy it. So a bf16 tensor holds bf16 values today and
+# will hold them in sixteen bits each when NEEDS-101 lands, and no kernel above
+# this line changes when it does.
+#
+# What that does not buy, and it should be said plainly rather than discovered:
+# no memory is saved yet. `martin-k-m/shuttle` reports that quantisation shrinks
+# nothing, and it stays right about the bytes until NEEDS-101. What it stops
+# being right about is that quantisation does nothing at all: an int8 or bf16
+# tensor now holds the values int8 or bf16 can hold, and the error that
+# introduces is measurable from twill.
 struct Tensor {
   shape: Arr[I64],
   data: Arr[F64],
+  dtype: I64,
+}
+
+# ---- dtypes ----------------------------------------------------------------
+#
+# docs/dtypes.md is the design; this is the part of it that executes. Read that
+# first for why the set is these seven and not more, and for the accumulation
+# rule, which is the one that decides whether a bf16 matmul is a number or a
+# rumour.
+#
+# Codes are I64 rather than an enum because an enum with no payload still cannot
+# be compared with `==` (NEEDS-70), and `is_same_op` above shows what that costs:
+# a string comparison per dispatch. A dtype is compared on every store.
+#
+# The order is deliberate and two of the comparisons below depend on it: the
+# integer kinds are below the float kinds, and within the floats the order is by
+# how much of F64 the format retains. It is NOT a promotion lattice on its own,
+# because f16 and bf16 are incomparable: f16 has three more mantissa bits, bf16
+# has five more exponent bits, and neither contains the other.
+
+let DT_BOOL: I64 = 0
+let DT_I8: I64 = 1
+let DT_I32: I64 = 2
+let DT_F16: I64 = 3
+let DT_BF16: I64 = 4
+let DT_F32: I64 = 5
+let DT_F64: I64 = 6
+
+fn dtype_name(dt: I64) -> Str {
+  if dt == DT_BOOL { return "bool" }
+  if dt == DT_I8 { return "i8" }
+  if dt == DT_I32 { return "i32" }
+  if dt == DT_F16 { return "f16" }
+  if dt == DT_BF16 { return "bf16" }
+  if dt == DT_F32 { return "f32" }
+  if dt == DT_F64 { return "f64" }
+  "?"
+}
+
+fn dtype_of_name(s: Str) -> Opt[I64] {
+  if bytes.equal(s, "bool") { return Some(DT_BOOL) }
+  if bytes.equal(s, "i8") { return Some(DT_I8) }
+  if bytes.equal(s, "i32") { return Some(DT_I32) }
+  if bytes.equal(s, "f16") { return Some(DT_F16) }
+  if bytes.equal(s, "bf16") { return Some(DT_BF16) }
+  if bytes.equal(s, "f32") { return Some(DT_F32) }
+  if bytes.equal(s, "f64") { return Some(DT_F64) }
+  None
+}
+
+# Storage width per element. Nothing reads this yet except a diagnostic; it is
+# here because NEEDS-101's packed buffer needs exactly this table and a second
+# copy of it elsewhere is a second thing to get wrong.
+fn dtype_bits(dt: I64) -> I64 {
+  if dt == DT_BOOL { return 8 }
+  if dt == DT_I8 { return 8 }
+  if dt == DT_I32 { return 32 }
+  if dt == DT_F16 { return 16 }
+  if dt == DT_BF16 { return 16 }
+  if dt == DT_F32 { return 32 }
+  64
+}
+
+fn is_float_dtype(dt: I64) -> Bool = dt >= DT_F16
+fn is_int_dtype(dt: I64) -> Bool = dt <= DT_I32
+
+# Toward zero, which is what a float-to-integer cast means in Go, in C, and in
+# every array library. Not toward negative infinity: `i32(-0.5)` is 0.
+fn trunc_toward_zero(x: F64) -> F64 {
+  if x < 0.0 { return 0.0 - f64_floor(0.0 - x) }
+  f64_floor(x)
+}
+
+# The value `x` takes when it is stored in `dt` and read back. This is the whole
+# observable content of a dtype, and every write into a buffer goes through it.
+#
+# Integer overflow clamps rather than wraps. Wrapping is what C does and it is
+# the wrong default here: a weight that saturates at 127 is visibly wrong in a
+# plot, and one that wraps to -128 looks like a plausible negative weight.
+fn dt_round(dt: I64, x: F64) -> F64 {
+  if dt == DT_F64 { return x }
+  if dt == DT_F32 { return flt.round_f32(x) }
+  if dt == DT_BF16 { return flt.round_bf16(x) }
+  if dt == DT_F16 { return flt.round_f16(x) }
+  if dt == DT_BOOL {
+    # NaN is not zero, so it is true. That matches Go's `x != 0` and it is the
+    # only reading under which `bool(x)` and `x != 0` agree.
+    if x == 0.0 { return 0.0 }
+    return 1.0
+  }
+  # NaN has no integer image at all; zero is the answer every library gives and
+  # the only one that does not propagate a NaN into an index.
+  if x != x { return 0.0 }
+  let lo: F64 = 0.0 - 128.0
+  let hi: F64 = 127.0
+  if dt == DT_I32 {
+    lo = 0.0 - 2147483648.0
+    hi = 2147483647.0
+  }
+  let v: F64 = trunc_toward_zero(x)
+  if v < lo { return lo }
+  if v > hi { return hi }
+  v
+}
+
+# The dtype a mixed-dtype operation produces.
+#
+# Two rules do the work. An integer kind meeting a float kind yields the float
+# kind unchanged, so `bf16_tensor * 2` stays bf16 rather than being widened by
+# an integer that fits in it easily. And f16 meeting bf16 yields f32, because
+# neither is a superset of the other and picking either would silently discard
+# the range or the precision the other operand was chosen for.
+fn promote(a: I64, b: I64) -> I64 {
+  if a == b { return a }
+  if is_int_dtype(a) and is_int_dtype(b) {
+    if a > b { return a }
+    return b
+  }
+  if is_int_dtype(a) { return b }
+  if is_int_dtype(b) { return a }
+  if (a == DT_F16 and b == DT_BF16) or (a == DT_BF16 and b == DT_F16) {
+    return DT_F32
+  }
+  if a > b { return a }
+  b
+}
+
+fn promote3(a: I64, b: I64, c: I64) -> I64 = promote(promote(a, b), c)
+
+# The dtype an operation accumulates in, given the dtype it stores.
+#
+# THIS IS THE RULE THAT MATTERS. A bf16 matmul over an inner dimension of 1024
+# adds a thousand products; bf16 carries eight significand bits, so once the
+# running sum is a few hundred times the size of the next term, the term is
+# rounded away entirely and the sum stops growing. The answer is not imprecise,
+# it is wrong, and it is wrong in the direction that makes a model appear to
+# train and then plateau. Accumulating in f32 and rounding once on store fixes
+# it, and costs nothing that matters, because the accumulator is a register and
+# not the thing that fills memory or crosses a bus.
+#
+# So: anything narrower than f32 accumulates in f32, f32 accumulates in f32,
+# f64 accumulates in f64. Integers accumulate in i32, which is what saves an
+# int8 dot product from overflowing on its fourth term.
+#
+# It is stated per operation *class*, not per tensor: a tensor has one dtype and
+# never an accumulation dtype, and asking a tensor what it accumulates in is
+# already the wrong question.
+fn acc_dtype(dt: I64) -> I64 {
+  if dt == DT_F64 { return DT_F64 }
+  if is_float_dtype(dt) { return DT_F32 }
+  DT_I32
+}
+
+# One step of an accumulation, at the accumulation dtype.
+#
+# Adding in F64 and rounding to the accumulation dtype gives exactly the result
+# the accumulation dtype's own addition would give. That is not an
+# approximation and not luck: a double rounding is harmless when the wide format
+# carries at least 2p+2 bits of the narrow one's p, and 53 clears that bar for
+# f32's 24, for bf16's 8 and for f16's 11. The same theorem is why every
+# elementwise kernel below can compute in F64 and round once on store and still
+# be bit-exact against real f32 hardware.
+fn acc_add(dt: I64, acc: F64, x: F64) -> F64 = dt_round(dt, acc + x)
+
+fn acc_mul(dt: I64, acc: F64, x: F64) -> F64 = dt_round(dt, acc * x)
+
+# The dtype a gradient carries.
+#
+# Gradients want more precision than the forward pass, for a reason that is
+# about dynamic range rather than about accuracy: a cotangent is a sum over
+# every use of a value, so it accumulates across a batch and across broadcast
+# axes, and it is routinely several orders of magnitude smaller than the
+# activation it belongs to. f16's smallest normal is 2^-14, which real gradients
+# reach and go under, and a gradient that underflows to zero is a parameter that
+# stops learning with nothing reported.
+#
+# So a gradient is never narrower than f32. It is f64 for an f64 forward, f32
+# for every other float, and f32 for an integer or boolean leaf, which cannot
+# carry one at all and gets a zero of that dtype so the shapes still line up.
+# This is the master-weights arrangement mixed-precision training already uses,
+# and stating it here rather than at each rule is what stops one vjp_ from
+# quietly narrowing.
+fn grad_dtype(dt: I64) -> I64 {
+  if dt == DT_F64 { return DT_F64 }
+  DT_F32
 }
 
 fn rank(t: Tensor) -> I64 = len(t.shape)
@@ -178,24 +394,66 @@ fn alloc(n: I64) -> Arr[F64] {
   d
 }
 
-fn scalar(x: F64) -> Tensor {
-  let d: Arr[F64] = arr_new()
-  push(d, x)
-  Tensor { shape: arr_new(), data: d }
+# The two ways a tensor is built, and the reason there are two.
+#
+# `mk` is for a buffer a kernel computed: the values came out of an accumulator
+# that is wider than the dtype, so every one of them is rounded on the way in.
+# This is the single enforcement point for the storage invariant, and it is why
+# no kernel below has to remember to round.
+#
+# `mk_raw` is for a buffer whose every element was copied from a tensor of the
+# same dtype. Transposing, gathering, concatenating and sorting move values
+# without computing any, so rounding them again would be a full pass over the
+# buffer to change nothing. The cost is that `mk_raw` is a promise rather than a
+# check, so it takes the dtype it is being told and the call sites that use it
+# are exactly the rearrangements.
+fn mk(shape: Arr[I64], data: Arr[F64], dt: I64) -> Tensor {
+  if dt != DT_F64 {
+    let i: I64 = 0
+    while i < len(data) {
+      data[i] = dt_round(dt, data[i])
+      i = i + 1
+    }
+  }
+  Tensor { shape: shape, data: data, dtype: dt }
 }
 
-fn filled(shape: Arr[I64], v: F64) -> Tensor {
+fn mk_raw(shape: Arr[I64], data: Arr[F64], dt: I64) -> Tensor =
+  Tensor { shape: shape, data: data, dtype: dt }
+
+fn scalar_of(x: F64, dt: I64) -> Tensor {
+  let d: Arr[F64] = arr_new()
+  push(d, dt_round(dt, x))
+  Tensor { shape: arr_new(), data: d, dtype: dt }
+}
+
+# A bare F64 scalar. The default dtype for a literal is f64, and
+# docs/dtypes.md says why at length: the differential harness compares printed
+# numbers byte for byte against a bootstrap that computes in float64, so a
+# default of f32 changes every golden in `testdata/` before it changes anything
+# about a model. Narrow dtypes are asked for, never inferred.
+fn scalar(x: F64) -> Tensor = scalar_of(x, DT_F64)
+
+fn filled_of(shape: Arr[I64], v: F64, dt: I64) -> Tensor {
   let n: I64 = element_count(shape)
+  let r: F64 = dt_round(dt, v)
   let d: Arr[F64] = arr_new()
   let i: I64 = 0
   while i < n {
-    push(d, v)
+    push(d, r)
     i = i + 1
   }
-  Tensor { shape: copy_shape(shape), data: d }
+  Tensor { shape: copy_shape(shape), data: d, dtype: dt }
 }
 
-fn zeros_like(t: Tensor) -> Tensor = filled(t.shape, 0.0)
+fn filled(shape: Arr[I64], v: F64) -> Tensor = filled_of(shape, v, DT_F64)
+
+# Zero is representable in every dtype, so this needs no rounding and keeps the
+# dtype it was given rather than promoting to f64. A zeros_like that changed the
+# dtype would silently widen every gradient buffer seeded from one.
+fn zeros_like(t: Tensor) -> Tensor = filled_of(t.shape, 0.0, t.dtype)
+
+fn zeros_dt(shape: Arr[I64], dt: I64) -> Tensor = filled_of(shape, 0.0, dt)
 
 fn clone(t: Tensor) -> Tensor {
   let d: Arr[F64] = arr_new()
@@ -204,7 +462,26 @@ fn clone(t: Tensor) -> Tensor {
     push(d, t.data[i])
     i = i + 1
   }
-  Tensor { shape: copy_shape(t.shape), data: d }
+  mk_raw(copy_shape(t.shape), d, t.dtype)
+}
+
+# The explicit cast. `docs/dtypes.md` spells it `x.to(f32)` in surface syntax;
+# this is what that lowers to.
+#
+# It converts from the source *value*, never from the source's own narrower
+# encoding through an intermediate. Casting bf16 to f16 by way of f32 would
+# round twice, and two roundings disagree with one on exactly the values that
+# land halfway after the first, which is the class of bug that shows up as a
+# handful of wrong elements in a tensor and nothing else.
+fn cast(t: Tensor, dt: I64) -> Tensor {
+  if t.dtype == dt { return clone(t) }
+  let d: Arr[F64] = alloc(len(t.data))
+  let i: I64 = 0
+  while i < len(t.data) {
+    d[i] = dt_round(dt, t.data[i])
+    i = i + 1
+  }
+  mk_raw(copy_shape(t.shape), d, dt)
 }
 
 # ---- float helpers --------------------------------------------------------
@@ -581,8 +858,15 @@ fn d_binary_b(op: Op, x: F64, y: F64, o: F64) -> F64 {
 # general path returns the same tensor. So none of the four is reproduced. If
 # this ever needs to be fast, the equal-shape path is the one worth having,
 # because it is the one training loops spend their time in.
+#
+# Dtype: the promotion of the two operands, except for a comparison, which
+# yields bool whatever it was handed. The arithmetic itself runs in F64 and is
+# rounded once on store, which for a single operation is exactly the answer the
+# result dtype's own arithmetic gives; `acc_add` above carries the argument.
 fn binary(op: Op, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
   let shape: Arr[I64] = broadcast_shape(a.shape, b.shape)?
+  let dt: I64 = promote(a.dtype, b.dtype)
+  if is_comparison(op) { dt = DT_BOOL }
   let n: I64 = element_count(shape)
   let out: Arr[F64] = alloc(n)
 
@@ -597,7 +881,7 @@ fn binary(op: Op, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
     odo_step(odo)
     o = o + 1
   }
-  Ok(Tensor { shape: shape, data: out })
+  Ok(mk(shape, out, dt))
 }
 
 fn apply_unary(op: Op, x: F64, p0: F64, p1: F64) -> F64 {
@@ -645,7 +929,20 @@ fn d_unary(op: Op, x: F64, o: F64, p0: F64, p1: F64) -> F64 {
   }
 }
 
+# A unary op keeps its operand's dtype, with one exception: `exp` of an integer
+# is not an integer, and truncating it back would turn `exp(i32_tensor)` into a
+# staircase without saying so. The ops that do preserve integrality keep it, and
+# the rest promote to f32, which is the same rule numpy applies and the same one
+# a reader expects.
+fn unary_result_dtype(op: Op, dt: I64) -> I64 {
+  if is_float_dtype(dt) { return dt }
+  if is_same_op(op, OpNeg) or is_same_op(op, OpRelu) { return dt }
+  if is_same_op(op, OpSquare) or is_same_op(op, OpClip) { return dt }
+  DT_F32
+}
+
 fn unary_p(op: Op, a: Tensor, p0: F64, p1: F64) -> Tensor {
+  let dt: I64 = unary_result_dtype(op, a.dtype)
   let n: I64 = len(a.data)
   let out: Arr[F64] = alloc(n)
   let i: I64 = 0
@@ -653,7 +950,7 @@ fn unary_p(op: Op, a: Tensor, p0: F64, p1: F64) -> Tensor {
     out[i] = apply_unary(op, a.data[i], p0, p1)
     i = i + 1
   }
-  Tensor { shape: copy_shape(a.shape), data: out }
+  mk(copy_shape(a.shape), out, dt)
 }
 
 fn unary(op: Op, a: Tensor) -> Tensor = unary_p(op, a, 0.0, 0.0)
@@ -679,6 +976,10 @@ fn where3(cond: Tensor, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
   # through, because the bootstrap does and the two texts differ.
   let s1: Arr[I64] = where_broadcast(cond.shape, a.shape)?
   let shape: Arr[I64] = where_broadcast(s1, b.shape)?
+  # The condition's dtype does not enter the promotion. It is read for its
+  # truthiness and never for its value, so a bool selector must not drag the
+  # result down to bool.
+  let dt: I64 = promote(a.dtype, b.dtype)
   let n: I64 = element_count(shape)
   let out: Arr[F64] = alloc(n)
 
@@ -698,7 +999,11 @@ fn where3(cond: Tensor, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
     odo_step(odo)
     o = o + 1
   }
-  Ok(Tensor { shape: shape, data: out })
+  # `mk` and not `mk_raw`: an operand of a wider dtype than the result is
+  # possible only through promotion, which never narrows, so every element is
+  # already representable. Rounding anyway costs one pass and removes the need
+  # for the reader to have just checked that.
+  Ok(mk(shape, out, dt))
 }
 
 # ---- matmul ----------------------------------------------------------------
@@ -764,7 +1069,14 @@ fn matmul_promote(s: Arr[I64], is_left: Bool) -> Arr[I64] {
 # loop so the innermost access is contiguous in both b and c. Nothing else about
 # it is tuned: no blocking, no transposed copy, no parallel split. Those go here
 # and only here, because every other use of matmul below goes through this.
-fn mm(a: Arr[F64], m: I64, k: I64, b: Arr[F64], n: I64) -> Arr[F64] {
+#
+# `acc` is the accumulation dtype and the whole reason this function takes a
+# dtype at all. `c` is the accumulator, not the output: it is held at `acc`
+# throughout and rounded to the output dtype exactly once, by `mk` at the call
+# site. Rounding to the output dtype inside the k loop instead is the mistake
+# `acc_dtype` exists to prevent, and for bf16 over a long inner dimension it
+# does not merely lose accuracy, it stops the sum growing altogether.
+fn mm(a: Arr[F64], m: I64, k: I64, b: Arr[F64], n: I64, acc: I64) -> Arr[F64] {
   let c: Arr[F64] = alloc(m * n)
   let i: I64 = 0
   while i < m {
@@ -780,7 +1092,11 @@ fn mm(a: Arr[F64], m: I64, k: I64, b: Arr[F64], n: I64) -> Arr[F64] {
         let c_row: I64 = i * n
         let j: I64 = 0
         while j < n {
-          c[c_row + j] = c[c_row + j] + aip * b[b_row + j]
+          # The product is formed in F64 and the sum is rounded to `acc`, which
+          # is exactly an `acc`-precision fused step: the product of two values
+          # of a format at most as wide as f32 is exact in F64, so the only
+          # rounding is the one written here.
+          c[c_row + j] = acc_add(acc, c[c_row + j], aip * b[b_row + j])
           j = j + 1
         }
       }
@@ -809,11 +1125,12 @@ fn matmul(a: Tensor, b: Tensor) -> Res[Tensor, Str] {
   let out_shape: Arr[I64] = matmul_shape(a.shape, b.shape)?
   let a2: Arr[I64] = matmul_promote(a.shape, true)
   let b2: Arr[I64] = matmul_promote(b.shape, false)
-  let data: Arr[F64] = mm(a.data, a2[0], a2[1], b.data, b2[1])
+  let dt: I64 = promote(a.dtype, b.dtype)
+  let data: Arr[F64] = mm(a.data, a2[0], a2[1], b.data, b2[1], acc_dtype(dt))
   # The buffer is m*n either way; only the shape records that a promoted axis
   # was dropped. That is why the backward pass can treat the incoming cotangent
   # as flat regardless of the result's rank.
-  Ok(Tensor { shape: out_shape, data: data })
+  Ok(mk(out_shape, data, dt))
 }
 
 # ---- axis helpers ----------------------------------------------------------
@@ -891,16 +1208,30 @@ fn normalize_axis(axis: I64, rank: I64) -> Res[I64, Str] {
 # whole upstream scalar; for mean each gets it divided by n. There is no
 # summing-back to do here because the output is a scalar, which is the one case
 # where the broadcast trap cannot bite.
+# The result dtype of a sum is the input's; of a mean it is the input's if that
+# is a float and f32 otherwise, because the mean of a set of integers is not one.
+fn reduce_result_dtype(dt: I64, mean: Bool) -> I64 {
+  if mean and is_int_dtype(dt) { return DT_F32 }
+  dt
+}
+
 fn reduce_all(a: Tensor, mean: Bool) -> Tensor {
+  let dt: I64 = reduce_result_dtype(a.dtype, mean)
+  # The running sum is held at the accumulation dtype for the length of the
+  # reduction and rounded to the result dtype once, by `scalar_of`. Over a
+  # million-element bf16 tensor the difference between this and a bf16 running
+  # sum is not in the last bits: a bf16 accumulator stops moving once the sum
+  # exceeds 256 times a typical term.
+  let acc: I64 = acc_dtype(dt)
   let n: I64 = len(a.data)
   let s: F64 = 0.0
   let i: I64 = 0
   while i < n {
-    s = s + a.data[i]
+    s = acc_add(acc, s, a.data[i])
     i = i + 1
   }
-  if mean { return scalar(s / f64_of_i64(n)) }
-  scalar(s)
+  if mean { return scalar_of(s / f64_of_i64(n), dt) }
+  scalar_of(s, dt)
 }
 
 fn sum_all(a: Tensor) -> Tensor = reduce_all(a, false)
@@ -915,6 +1246,8 @@ fn mean_all(a: Tensor) -> Tensor = reduce_all(a, true)
 # other's gradient.
 fn reduce_axis(t: Tensor, axis_in: I64, mean: Bool) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let dt: I64 = reduce_result_dtype(t.dtype, mean)
+  let acc: I64 = acc_dtype(dt)
   let sp: Spans = axis_spans(t.shape, axis)
   let out: Arr[F64] = alloc(sp.before * sp.after)
   let scale: F64 = 1.0
@@ -927,7 +1260,8 @@ fn reduce_axis(t: Tensor, axis_in: I64, mean: Bool) -> Res[Tensor, Str] {
       let base: I64 = i * sp.length * sp.after + j
       let k: I64 = 0
       while k < sp.length {
-        s = s + t.data[base + k * sp.after]
+        # Accumulated wider than it is stored. See `acc_dtype`.
+        s = acc_add(acc, s, t.data[base + k * sp.after])
         k = k + 1
       }
       out[i * sp.after + j] = s * scale
@@ -935,7 +1269,7 @@ fn reduce_axis(t: Tensor, axis_in: I64, mean: Bool) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+  Ok(mk(remove_axis(t.shape, axis), out, dt))
 }
 
 fn sum_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = reduce_axis(t, axis, false)
@@ -999,7 +1333,9 @@ fn extreme_axis(t: Tensor, axis_in: I64, want_max: Bool) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+  # A selection, not a computation: every output element is an input element, so
+  # it is already representable and `mk_raw` is honest rather than lazy.
+  Ok(mk_raw(remove_axis(t.shape, axis), out, t.dtype))
 }
 
 fn max_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = extreme_axis(t, axis, true)
@@ -1072,7 +1408,9 @@ fn arg_extreme_axis(t: Tensor, axis_in: I64, want_max: Bool) -> Res[Tensor, Str]
     }
     i = i + 1
   }
-  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+  # An index, so i32 whatever the input was. An argmax that came back as bf16
+  # would round to the nearest 2^k above 256 and start naming the wrong element.
+  Ok(mk(remove_axis(t.shape, axis), out, DT_I32))
 }
 
 fn argmax_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = arg_extreme_axis(t, axis, true)
@@ -1081,7 +1419,7 @@ fn argmin_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = arg_extreme_axis(t, a
 # max or min over every element. Same gradient argument as the axis form: the
 # whole upstream scalar goes to the one offset that was selected.
 fn extreme_all(t: Tensor, want_max: Bool) -> Tensor {
-  scalar(t.data[extreme_all_origin(t, want_max)])
+  scalar_of(t.data[extreme_all_origin(t, want_max)], t.dtype)
 }
 
 fn extreme_all_origin(t: Tensor, want_max: Bool) -> I64 {
@@ -1118,6 +1456,14 @@ fn min_all(t: Tensor) -> Tensor = extreme_all(t, false)
 # out here rather than derived at the call site.
 fn softmax(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  # An integer softmax is not an integer, so it comes back as f32.
+  let dt: I64 = t.dtype
+  if is_int_dtype(dt) { dt = DT_F32 }
+  # The exponentials and their total are held at the accumulation dtype and only
+  # the quotient is stored. This is the op where a narrow accumulator does the
+  # most damage: the terms span orders of magnitude by construction, so a bf16
+  # total is the largest term and nothing else.
+  let acc: I64 = acc_dtype(dt)
   let sp: Spans = axis_spans(t.shape, axis)
   let out: Arr[F64] = alloc(len(t.data))
   let i: I64 = 0
@@ -1135,9 +1481,9 @@ fn softmax(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
       let total: F64 = 0.0
       k = 0
       while k < sp.length {
-        let e: F64 = f64_exp(t.data[base + k * sp.after] - m)
+        let e: F64 = dt_round(acc, f64_exp(t.data[base + k * sp.after] - m))
         out[base + k * sp.after] = e
-        total = total + e
+        total = acc_add(acc, total, e)
         k = k + 1
       }
       k = 0
@@ -1149,7 +1495,7 @@ fn softmax(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  Ok(mk(copy_shape(t.shape), out, dt))
 }
 
 # logsumexp along an axis, dropping it. Same maximum shift, and the added
@@ -1162,6 +1508,9 @@ fn softmax(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
 # to `softmax - onehot`.
 fn logsumexp_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let dt: I64 = t.dtype
+  if is_int_dtype(dt) { dt = DT_F32 }
+  let acc: I64 = acc_dtype(dt)
   let sp: Spans = axis_spans(t.shape, axis)
   let out: Arr[F64] = alloc(sp.before * sp.after)
   let i: I64 = 0
@@ -1179,7 +1528,9 @@ fn logsumexp_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
       let total: F64 = 0.0
       k = 0
       while k < sp.length {
-        total = total + f64_exp(t.data[base + k * sp.after] - m)
+        # Accumulated wider than it is stored, as in `softmax`, and for the same
+        # reason: the terms differ by orders of magnitude on purpose.
+        total = acc_add(acc, total, f64_exp(t.data[base + k * sp.after] - m))
         k = k + 1
       }
       out[i * sp.after + j] = m + f64_log(total)
@@ -1187,7 +1538,7 @@ fn logsumexp_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+  Ok(mk(remove_axis(t.shape, axis), out, dt))
 }
 
 # ---- product ---------------------------------------------------------------
@@ -1215,7 +1566,12 @@ struct ProdAux {
   zeros: Arr[I64],
 }
 
-fn prod_over(t: Tensor, l: I64, before: I64, after: I64) -> ProdAux {
+# `acc` is the accumulation dtype, as for a sum. A product needs it more than a
+# sum does, not less: the running product's exponent is the sum of the terms'
+# exponents, so a bf16 product of a hundred terms leaves bf16's range long
+# before it leaves f32's, and an accumulator that overflows returns an infinity
+# rather than a number that is merely off.
+fn prod_over(t: Tensor, l: I64, before: I64, after: I64, acc: I64) -> ProdAux {
   let out_n: I64 = before * after
   let out: Arr[F64] = alloc(out_n)
   let nz_prod: Arr[F64] = alloc(out_n)
@@ -1236,11 +1592,11 @@ fn prod_over(t: Tensor, l: I64, before: I64, after: I64) -> ProdAux {
       let k: I64 = 0
       while k < l {
         let v: F64 = t.data[base + k * after]
-        p = p * v
+        p = acc_mul(acc, p, v)
         if v == 0.0 {
           nzeros = nzeros + 1
         } else {
-          nz = nz * v
+          nz = acc_mul(acc, nz, v)
         }
         k = k + 1
       }
@@ -1256,15 +1612,15 @@ fn prod_over(t: Tensor, l: I64, before: I64, after: I64) -> ProdAux {
 }
 
 fn prod_all(t: Tensor) -> Tensor {
-  let aux: ProdAux = prod_over(t, len(t.data), 1, 1)
-  Tensor { shape: arr_new(), data: aux.out }
+  let aux: ProdAux = prod_over(t, len(t.data), 1, 1, acc_dtype(t.dtype))
+  mk(arr_new(), aux.out, t.dtype)
 }
 
 fn prod_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
-  let aux: ProdAux = prod_over(t, sp.length, sp.before, sp.after)
-  Ok(Tensor { shape: remove_axis(t.shape, axis), data: aux.out })
+  let aux: ProdAux = prod_over(t, sp.length, sp.before, sp.after, acc_dtype(t.dtype))
+  Ok(mk(remove_axis(t.shape, axis), aux.out, t.dtype))
 }
 
 # ---- median ----------------------------------------------------------------
@@ -1327,14 +1683,16 @@ fn median_over(t: Tensor, l: I64, before: I64, after: I64) -> MedianAux {
 
 fn median_all(t: Tensor) -> Tensor {
   let aux: MedianAux = median_over(t, len(t.data), 1, 1)
-  Tensor { shape: arr_new(), data: aux.out }
+  # An even-length run averages its two middle values, so a median is a mean in
+  # the one respect that decides the dtype: it need not be an integer.
+  mk(arr_new(), aux.out, reduce_result_dtype(t.dtype, true))
 }
 
 fn median_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
   let aux: MedianAux = median_over(t, sp.length, sp.before, sp.after)
-  Ok(Tensor { shape: remove_axis(t.shape, axis), data: aux.out })
+  Ok(mk(remove_axis(t.shape, axis), aux.out, reduce_result_dtype(t.dtype, true)))
 }
 
 # ---- sorting ---------------------------------------------------------------
@@ -1388,7 +1746,7 @@ fn sort_axis(t: Tensor, axis_in: I64, descending: Bool) -> Res[Tensor, Str] {
     out[i] = t.data[origin[i]]
     i = i + 1
   }
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  Ok(mk_raw(copy_shape(t.shape), out, t.dtype))
 }
 
 fn sp_length(t: Tensor, axis: I64) -> I64 = t.shape[axis]
@@ -1455,7 +1813,8 @@ fn argsort_axis(t: Tensor, axis_in: I64, descending: Bool) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  # Indices, so i32. Same argument as argmax.
+  Ok(mk(copy_shape(t.shape), out, DT_I32))
 }
 
 # The k largest (or smallest) values along an axis, in order, with the axis
@@ -1486,7 +1845,7 @@ fn topk_axis(t: Tensor, k: I64, axis_in: I64, largest: Bool) -> Res[Tensor, Str]
   }
   let shape: Arr[I64] = copy_shape(t.shape)
   shape[axis] = k
-  Ok(Tensor { shape: shape, data: out })
+  Ok(mk_raw(shape, out, t.dtype))
 }
 
 # The indices of the k largest. Indices, so not differentiable.
@@ -1520,7 +1879,7 @@ fn argtopk_axis(t: Tensor, k: I64, axis_in: I64, largest: Bool) -> Res[Tensor, S
   }
   let shape: Arr[I64] = copy_shape(t.shape)
   shape[axis] = k
-  Ok(Tensor { shape: shape, data: out })
+  Ok(mk(shape, out, DT_I32))
 }
 
 # Reverse the order along one axis, keeping the shape.
@@ -1546,7 +1905,7 @@ fn flip_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  Ok(mk_raw(copy_shape(t.shape), out, t.dtype))
 }
 
 # ---- shape ops -------------------------------------------------------------
@@ -1562,7 +1921,7 @@ fn reshape(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
       bytes.concat(" elements into shape ", shape_string(shape)))))
   }
   let c: Tensor = clone(t)
-  Ok(Tensor { shape: copy_shape(shape), data: c.data })
+  Ok(mk_raw(copy_shape(shape), c.data, t.dtype))
 }
 
 # Resolve a permutation argument. An empty `axes` reverses them, which is the
@@ -1651,7 +2010,7 @@ fn transpose(t: Tensor, axes: Arr[I64]) -> Res[Tensor, Str] {
     out[o] = t.data[origin[o]]
     o = o + 1
   }
-  Ok(Tensor { shape: out_shape, data: out })
+  Ok(mk_raw(out_shape, out, t.dtype))
 }
 
 # Expand a tensor to `shape` under the usual right-aligned rules: every axis of
@@ -1701,7 +2060,7 @@ fn broadcast_to(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
     odo_step(odo)
     o = o + 1
   }
-  Ok(Tensor { shape: copy_shape(shape), data: out })
+  Ok(mk_raw(copy_shape(shape), out, t.dtype))
 }
 
 # sum_to_shape reduces `g` down to `target` by summing every axis that `target`
@@ -1717,17 +2076,20 @@ fn broadcast_to(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
 # every output that read it, which is what summing the broadcast axes computes.
 fn sum_to_shape(g: Tensor, target: Arr[I64]) -> Res[Tensor, Str] {
   if shape_equal(g.shape, target) { return Ok(clone(g)) }
+  let acc: I64 = acc_dtype(g.dtype)
   let out: Arr[F64] = alloc(element_count(target))
   let contrib: Arr[Arr[I64]] = arr_new()
   push(contrib, eff_strides(target, g.shape))
   let odo: Odometer = odo_new(g.shape, contrib)
   let o: I64 = 0
   while o < len(g.data) {
-    out[odo.offs[0]] = out[odo.offs[0]] + g.data[o]
+    # A reduction, so the running total is held at the accumulation dtype and
+    # rounded once by `mk`, exactly as `reduce_axis` does it.
+    out[odo.offs[0]] = acc_add(acc, out[odo.offs[0]], g.data[o])
     odo_step(odo)
     o = o + 1
   }
-  Ok(Tensor { shape: copy_shape(target), data: out })
+  Ok(mk(copy_shape(target), out, g.dtype))
 }
 
 # Join tensors along an axis. Shapes must match on every other axis.
@@ -1752,6 +2114,14 @@ fn concat(ts: Arr[Tensor], axis_in: I64) -> Res[Tensor, Str] {
       d = d + 1
     }
     total = total + ts[p].shape[axis]
+    p = p + 1
+  }
+  # The promotion of every piece. Promotion never narrows, so each piece's
+  # elements are already representable in it and the copy below stays a copy.
+  let dt: I64 = ts[0].dtype
+  p = 1
+  while p < len(ts) {
+    dt = promote(dt, ts[p].dtype)
     p = p + 1
   }
   let out_shape: Arr[I64] = copy_shape(ts[0].shape)
@@ -1780,7 +2150,7 @@ fn concat(ts: Arr[Tensor], axis_in: I64) -> Res[Tensor, Str] {
     offset = offset + l
     p = p + 1
   }
-  Ok(Tensor { shape: out_shape, data: out })
+  Ok(mk_raw(out_shape, out, dt))
 }
 
 # The offset along `axis` at which piece `p` of a concat starts. The backward
@@ -1858,7 +2228,7 @@ fn split_piece(t: Tensor, axis: I64, offset: I64, size: I64) -> Res[Tensor, Str]
     }
     i = i + 1
   }
-  Ok(Tensor { shape: shape, data: data })
+  Ok(mk_raw(shape, data, t.dtype))
 }
 
 # Cut into `n` equal pieces. The axis must divide evenly; numpy's array_split
@@ -1916,7 +2286,7 @@ fn index_axis0(t: Tensor, idx: I64) -> Res[Tensor, Str] {
     data[i] = t.data[off + i]
     i = i + 1
   }
-  Ok(Tensor { shape: remove_axis(t.shape, 0), data: data })
+  Ok(mk_raw(remove_axis(t.shape, 0), data, t.dtype))
 }
 
 # Rows [start, end) along the first axis, keeping the trailing dimensions. A
@@ -1945,7 +2315,7 @@ fn slice_axis0(t: Tensor, start_in: I64, end_in: I64) -> Res[Tensor, Str] {
   }
   let shape: Arr[I64] = copy_shape(t.shape)
   shape[0] = end - start
-  Ok(Tensor { shape: shape, data: data })
+  Ok(mk_raw(shape, data, t.dtype))
 }
 
 # Select rows from x along its first axis by a list of indices. The primitive
@@ -1977,7 +2347,7 @@ fn gather(x: Tensor, idx: Arr[I64]) -> Res[Tensor, Str] {
   }
   let shape: Arr[I64] = copy_shape(x.shape)
   shape[0] = len(idx)
-  Ok(Tensor { shape: shape, data: out })
+  Ok(mk_raw(shape, out, x.dtype))
 }
 # ---- einsum ----------------------------------------------------------------
 #
@@ -2272,6 +2642,17 @@ fn einsum_plan(in_subs: Arr[Str], out_sub: Str, inputs: Arr[Tensor]) -> Res[Eins
 
 fn einsum_raw(in_subs: Arr[Str], out_sub: Str, inputs: Arr[Tensor]) -> Res[Tensor, Str] {
   let plan: EinsumPlan = einsum_plan(in_subs, out_sub, inputs)?
+  # An einsum is a contraction, so it is in the same operation class as matmul
+  # and takes the same accumulation rule: the summed axes run at the
+  # accumulation dtype and the store rounds once. The product of the operands is
+  # formed in F64 and is exact for every dtype at most as wide as f32.
+  let dt: I64 = inputs[0].dtype
+  let d: I64 = 1
+  while d < len(inputs) {
+    dt = promote(dt, inputs[d].dtype)
+    d = d + 1
+  }
+  let acc: I64 = acc_dtype(dt)
   let out: Arr[F64] = alloc(element_count(plan.out_shape))
   let total: I64 = element_count(plan.dims)
   let odo: Odometer = odo_new(plan.dims, plan.contrib)
@@ -2284,11 +2665,11 @@ fn einsum_raw(in_subs: Arr[Str], out_sub: Str, inputs: Arr[Tensor]) -> Res[Tenso
       prod = prod * inputs[k].data[odo.offs[k]]
       k = k + 1
     }
-    out[odo.offs[out_slot]] = out[odo.offs[out_slot]] + prod
+    out[odo.offs[out_slot]] = acc_add(acc, out[odo.offs[out_slot]], prod)
     odo_step(odo)
     step = step + 1
   }
-  Ok(Tensor { shape: plan.out_shape, data: out })
+  Ok(mk(plan.out_shape, out, dt))
 }
 
 # einsum parses the spec and contracts.
@@ -2635,11 +3016,19 @@ fn int_to_bool(i: I64) -> Bool = i != 0
 # Cotangent accumulation. Add, never assign: a value used twice receives a
 # contribution from each use, and assigning would silently drop one of them.
 # This is the single most important line in the file.
+#
+# It is also the only place a gradient is stored, which is what makes the
+# gradient dtype rule enforceable in one function instead of in forty. Every
+# vjp_ below hands this a plain F64 buffer it computed at full width; the
+# rounding to the gradient's own dtype happens here, once per contribution, at
+# the dtype `backward` chose. A rule that wanted to round earlier would be
+# rounding an intermediate, which is the thing `acc_dtype` exists to forbid.
 fn accumulate(cot: Arr[Tensor], touched: Arr[Bool], node: I64, buf: Arr[F64]) {
   let dst: Arr[F64] = cot[node].data
+  let dt: I64 = cot[node].dtype
   let i: I64 = 0
   while i < len(buf) {
-    dst[i] = dst[i] + buf[i]
+    dst[i] = acc_add(dt, dst[i], buf[i])
     i = i + 1
   }
   touched[node] = true
@@ -2680,7 +3069,11 @@ fn backward(tp: Tape, root: I64, seed: Tensor) -> Res[Arr[Tensor], Str] {
     # A zero cotangent per node, allocated up front. The bootstrap allocates one
     # only when a node is first reached; doing that here needs an Opt per slot
     # and buys memory, not correctness, so it is the optimisation that goes here.
-    push(cot, zeros_like(tp.entries[i].out))
+    #
+    # `grad_dtype` and not `zeros_like`: the cotangent of a bf16 value is f32.
+    # Deciding it here, once, is what keeps every rule below from having to
+    # decide it and is why none of them mention a dtype at all.
+    push(cot, zeros_dt(tp.entries[i].out.shape, grad_dtype(tp.entries[i].out.dtype)))
     push(touched, false)
     i = i + 1
   }
@@ -2910,11 +3303,17 @@ fn vjp_matmul(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   let k: I64 = a2[1]
   let n: I64 = b2[1]
 
+  # Both products accumulate at the cotangent's accumulation dtype, not the
+  # forward operands'. A bf16 forward has an f32 cotangent, and reducing the
+  # backward accumulator to bf16 because the weights are bf16 would undo exactly
+  # what the wider gradient was for.
+  let gacc: I64 = acc_dtype(g.dtype)
+
   let bt: Arr[F64] = transpose2d(b.data, k, n)
-  accumulate(cot, touched, e.inputs[0], mm(g.data, m, n, bt, k))
+  accumulate(cot, touched, e.inputs[0], mm(g.data, m, n, bt, k, gacc))
 
   let at: Arr[F64] = transpose2d(a.data, m, k)
-  accumulate(cot, touched, e.inputs[1], mm(at, k, m, g.data, n))
+  accumulate(cot, touched, e.inputs[1], mm(at, k, m, g.data, n, gacc))
   Ok(0)
 }
 
@@ -2995,7 +3394,9 @@ fn vjp_extreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr
 fn vjp_prod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
-  let aux: ProdAux = prod_over(a, sp.length, sp.before, sp.after)
+  # The same accumulation dtype the forward pass used, so the recomputed
+  # products are the ones it produced rather than merely close to them.
+  let aux: ProdAux = prod_over(a, sp.length, sp.before, sp.after, acc_dtype(a.dtype))
   let ga: Arr[F64] = alloc(len(a.data))
   let i: I64 = 0
   while i < sp.before {
@@ -3363,6 +3764,10 @@ fn conv2d(input: Tensor, weight: Tensor) -> Res[Tensor, Str] {
   let khw: I64 = kh * kw
   let cinkhw: I64 = cin * khw
   let ohw: I64 = oh * ow
+  # A convolution is a contraction over cin, kh and kw, so it is in matmul's
+  # operation class and takes matmul's accumulation rule.
+  let dt: I64 = promote(input.dtype, weight.dtype)
+  let acc: I64 = acc_dtype(dt)
   let out: Arr[F64] = alloc(cout * ohw)
   let co: I64 = 0
   while co < cout {
@@ -3377,8 +3782,8 @@ fn conv2d(input: Tensor, weight: Tensor) -> Res[Tensor, Str] {
           while a < kh {
             let b: I64 = 0
             while b < kw {
-              sum = sum + input.data[ci * hw + (i + a) * w + (j + b)]
-                * weight.data[co * cinkhw + ci * khw + a * kw + b]
+              sum = acc_add(acc, sum, input.data[ci * hw + (i + a) * w + (j + b)]
+                * weight.data[co * cinkhw + ci * khw + a * kw + b])
               b = b + 1
             }
             a = a + 1
@@ -3396,7 +3801,7 @@ fn conv2d(input: Tensor, weight: Tensor) -> Res[Tensor, Str] {
   push(shape, cout)
   push(shape, oh)
   push(shape, ow)
-  Ok(Tensor { shape: shape, data: out })
+  Ok(mk(shape, out, dt))
 }
 
 # maxpool2d: non-overlapping k by k max pooling per channel of a [C, H, W],
@@ -3478,7 +3883,8 @@ fn maxpool2d(input: Tensor, k: I64) -> Res[Tensor, Str] {
   push(shape, c)
   push(shape, oh)
   push(shape, ow)
-  Ok(Tensor { shape: shape, data: out })
+  # A max pool selects; it does not compute. Nothing to round.
+  Ok(mk_raw(shape, out, input.dtype))
 }
 
 # ---- scans, differences and shifts -----------------------------------------
@@ -3512,7 +3918,14 @@ fn is_scan_op(op: Op) -> Bool {
 # The running sum, product, max or min over each run of `sp`. `arg` is filled
 # for the two extremes with the input position each output came from, which is
 # the whole of what their gradient needs, and is left at zero for the other two.
-fn scan_run(op: Op, t: Tensor, sp: Spans, out: Arr[F64], arg: Arr[I64]) {
+#
+# `acc` is the accumulation dtype. A scan is a reduction that stores every
+# partial result, so the two dtypes are both live at once: the running value is
+# carried at `acc` from one element to the next, and each partial result is
+# rounded to the tensor's dtype as it is stored. Carrying the rounded value
+# forward instead would compound the store rounding over the length of the run,
+# which is the same failure a narrow reduction accumulator has, spread out.
+fn scan_run(op: Op, t: Tensor, sp: Spans, out: Arr[F64], arg: Arr[I64], acc: I64) {
   let want_extreme: Bool = is_same_op(op, OpCumMax) or is_same_op(op, OpCumMin)
   let want_max: Bool = is_same_op(op, OpCumMax)
   let i: I64 = 0
@@ -3526,11 +3939,11 @@ fn scan_run(op: Op, t: Tensor, sp: Spans, out: Arr[F64], arg: Arr[I64]) {
       while k < sp.length {
         let p: I64 = base + k * sp.after
         if is_same_op(op, OpCumSum) {
-          run = run + t.data[p]
+          run = acc_add(acc, run, t.data[p])
           out[p] = run
         }
         if is_same_op(op, OpCumProd) {
-          run = run * t.data[p]
+          run = acc_mul(acc, run, t.data[p])
           out[p] = run
         }
         if want_extreme {
@@ -3568,8 +3981,8 @@ fn scan_all_by(t: Tensor, op: Op) -> Res[Tensor, Str] {
   }
   let sp: Spans = Spans { before: 1, length: len(t.data), after: 1 }
   let out: Arr[F64] = alloc(len(t.data))
-  scan_run(op, t, sp, out, alloc_ints(len(t.data)))
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  scan_run(op, t, sp, out, alloc_ints(len(t.data)), acc_dtype(t.dtype))
+  Ok(mk(copy_shape(t.shape), out, t.dtype))
 }
 
 fn scan_axis_by(t: Tensor, axis_in: I64, op: Op) -> Res[Tensor, Str] {
@@ -3579,8 +3992,8 @@ fn scan_axis_by(t: Tensor, axis_in: I64, op: Op) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
   let out: Arr[F64] = alloc(len(t.data))
-  scan_run(op, t, sp, out, alloc_ints(len(t.data)))
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  scan_run(op, t, sp, out, alloc_ints(len(t.data)), acc_dtype(t.dtype))
+  Ok(mk(copy_shape(t.shape), out, t.dtype))
 }
 
 # The four flat names are total, so they take the Tensor form rather than a Res.
@@ -3632,7 +4045,9 @@ fn diff_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: out_shape, data: out })
+  # A single subtraction per element, so F64 and one rounding on store is the
+  # dtype's own subtraction exactly. No accumulator is live here.
+  Ok(mk(out_shape, out, t.dtype))
 }
 
 # roll_axis: shift along an axis, wrapping what falls off the end back to the
@@ -3658,7 +4073,7 @@ fn roll_axis(t: Tensor, shift: I64, axis_in: I64) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+  Ok(mk_raw(copy_shape(t.shape), out, t.dtype))
 }
 
 # `%` keeps the sign of the dividend, here as in Go, so a negative shift has to
@@ -3722,11 +4137,16 @@ fn nested_walk(n: Nested, depth: I64, shape: Arr[I64], flat: Arr[F64]) -> Res[I6
   }
 }
 
+# A literal is f64. docs/dtypes.md argues the default at length; the short form
+# is that the differential harness compares printed numbers against a bootstrap
+# that computes in float64, so a narrower default changes every golden in
+# `testdata/` before it changes anything about a model. A narrow tensor is asked
+# for with a cast, never arrived at by inference.
 fn from_nested(n: Nested) -> Res[Tensor, Str] {
   let shape: Arr[I64] = nested_shape(n)
   let flat: Arr[F64] = arr_new()
   nested_walk(n, 0, shape, flat)?
-  Ok(Tensor { shape: shape, data: flat })
+  Ok(mk_raw(shape, flat, DT_F64))
 }
 
 struct NestedAt {
@@ -4028,7 +4448,9 @@ fn vjp_cumextreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: 
   let sp: Spans = spans_for(a, e.iattr[0])
   let out: Arr[F64] = alloc(len(a.data))
   let arg: Arr[I64] = alloc_ints(len(a.data))
-  scan_run(e.op, a, sp, out, arg)
+  # The forward pass's accumulation dtype, so the replay reproduces it rather
+  # than approximating it.
+  scan_run(e.op, a, sp, out, arg, acc_dtype(a.dtype))
   let ga: Arr[F64] = alloc(len(a.data))
   let p: I64 = 0
   while p < len(a.data) {
@@ -4279,8 +4701,12 @@ fn is_rearrangement(op: Op) -> Bool {
 # construction and cannot drift from the value path.
 fn jet_rearrangement(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let a: I64 = e.inputs[0]
-  let src_d: Tensor = Tensor { shape: copy_shape(value_of(tp, a).shape), data: js.d[a] }
-  let src_dd: Tensor = Tensor { shape: copy_shape(value_of(tp, a).shape), data: js.dd[a] }
+  # A tangent is a derivative, so it carries the gradient dtype rather than the
+  # value's, by the rule `grad_dtype` states. The rearrangement replayed on it
+  # only moves elements, so the dtype it is wrapped in is the dtype it keeps.
+  let jdt: I64 = grad_dtype(value_of(tp, a).dtype)
+  let src_d: Tensor = mk_raw(copy_shape(value_of(tp, a).shape), js.d[a], jdt)
+  let src_dd: Tensor = mk_raw(copy_shape(value_of(tp, a).shape), js.dd[a], jdt)
   let out_d: Tensor = replay_rearrangement(tp, e, src_d)?
   let out_dd: Tensor = replay_rearrangement(tp, e, src_dd)?
   let i: I64 = 0
@@ -4320,7 +4746,7 @@ fn jet_select_by_value(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str
   let sp: Spans = spans_for(x, e.iattr[0])
   let out: Arr[F64] = alloc(len(x.data))
   let arg: Arr[I64] = alloc_ints(len(x.data))
-  scan_run(e.op, x, sp, out, arg)
+  scan_run(e.op, x, sp, out, arg, acc_dtype(x.dtype))
   let p: I64 = 0
   while p < len(x.data) {
     js.d[n][p] = js.d[a][arg[p]]
@@ -4456,10 +4882,14 @@ fn jet_matmul(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let bi: I64 = e.inputs[1]
   let a: Tensor = value_of(tp, ai)
   let b: Tensor = value_of(tp, bi)
-  let da: Tensor = Tensor { shape: copy_shape(a.shape), data: js.d[ai] }
-  let db: Tensor = Tensor { shape: copy_shape(b.shape), data: js.d[bi] }
-  let dda: Tensor = Tensor { shape: copy_shape(a.shape), data: js.dd[ai] }
-  let ddb: Tensor = Tensor { shape: copy_shape(b.shape), data: js.dd[bi] }
+  # Tangents at the gradient dtype, so the matmuls below accumulate at f32 for a
+  # bf16 forward instead of inheriting bf16 from the values.
+  let adt: I64 = grad_dtype(a.dtype)
+  let bdt: I64 = grad_dtype(b.dtype)
+  let da: Tensor = mk_raw(copy_shape(a.shape), js.d[ai], adt)
+  let db: Tensor = mk_raw(copy_shape(b.shape), js.d[bi], bdt)
+  let dda: Tensor = mk_raw(copy_shape(a.shape), js.dd[ai], adt)
+  let ddb: Tensor = mk_raw(copy_shape(b.shape), js.dd[bi], bdt)
   let t1: Tensor = matmul(da, b)?
   let t2: Tensor = matmul(a, db)?
   let s1: Tensor = matmul(dda, b)?
@@ -4565,8 +4995,9 @@ fn hessian(tp: Tape, root: I64, leaf: I64) -> Res[Tensor, Str] {
   # differentiably has an all-zero second derivative, floor is piecewise
   # constant so its true Hessian is zero, and grad already answers zeros for the
   # same expression. Erring here would make hessian stricter than grad.
+  let hdt: I64 = grad_dtype(value_of(tp, leaf).dtype)
   if root < 0 or root < leaf {
-    return Ok(Tensor { shape: shape, data: alloc(n * n) })
+    return Ok(mk_raw(shape, alloc(n * n), hdt))
   }
   if not is_scalar(tp.entries[root].out) {
     return Err("hessian: the function must return a scalar")
@@ -4606,5 +5037,8 @@ fn hessian(tp: Tape, root: I64, leaf: I64) -> Res[Tensor, Str] {
     }
     i = i + 1
   }
-  Ok(Tensor { shape: shape, data: h })
+  # A Hessian is a second derivative and takes the gradient dtype for the same
+  # reason a gradient does, with more of it: the divided difference above
+  # subtracts two nearly equal numbers, which is where precision is lost fastest.
+  Ok(mk(shape, h, hdt))
 }

@@ -132,7 +132,7 @@ fn as_tensor(v: Value) -> Opt[tensor.Tensor] {
     VNum(x) => {
       let data: Arr[F64] = arr_new()
       push(data, x)
-      Some(tensor.Tensor { shape: arr_new(), data: data })
+      Some(tensor.mk_raw(arr_new(), data, tensor.DT_F64))
     },
     _ => None,
   }
@@ -479,7 +479,7 @@ fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
     if len(row_shape) == 0 {
       push(out, VNum(data[0]))
     } else {
-      push(out, VTensor(tensor.Tensor { shape: row_shape, data: data }))
+      push(out, VTensor(tensor.mk_raw(row_shape, data, t.dtype)))
     }
     k = k + 1
   }
@@ -590,7 +590,7 @@ fn eval_tensor_lit(x: ast.TensorLit, env: Env) -> Res[Value, RuntimeError] {
   let shape: Arr[I64] = arr_new()
   let data: Arr[F64] = arr_new()
   flatten_tensor_lit(x.elements, 0, shape, data, env, x.line)?
-  Ok(VTensor(tensor.Tensor { shape: shape, data: data }))
+  Ok(VTensor(tensor.mk_raw(shape, data, tensor.DT_F64)))
 }
 
 fn flatten_tensor_lit(elems: Arr[ast.Expr], depth: I64, shape: Arr[I64],
@@ -926,7 +926,7 @@ fn eval_slice(x: ast.Slice, env: Env) -> Res[Value, RuntimeError] {
         push(data, t.data[k])
         k = k + 1
       }
-      Ok(VTensor(tensor.Tensor { shape: shape, data: data }))
+      Ok(VTensor(tensor.mk_raw(shape, data, t.dtype)))
     },
     _ => Err(runtime_error(x.line, "unreachable: slice target was validated above")),
   }
@@ -1582,7 +1582,7 @@ fn bi_elem_round(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
     if bytes.equal(name, "round") { push(out, f64_round(t.data[i])) }
     i = i + 1
   }
-  Ok(VTensor(tensor.Tensor { shape: tensor.copy_shape(t.shape), data: out }))
+  Ok(VTensor(tensor.mk(tensor.copy_shape(t.shape), out, t.dtype)))
 }
 
 fn rest(args: Arr[Value], from: I64) -> Arr[Value] {
@@ -2340,7 +2340,7 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
       if k == j { push(sel, 1.0) } else { push(sel, 0.0) }
       k = k + 1
     }
-    let seed: tensor.Tensor = tensor.Tensor { shape: tensor.copy_shape(y.shape), data: sel }
+    let seed: tensor.Tensor = tensor.mk_raw(tensor.copy_shape(y.shape), sel, y.dtype)
     match tensor.backward(tp, ran.node, seed) {
       Ok(g) => {
         if leaf < len(g) {
@@ -2358,7 +2358,8 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
   let shape: Arr[I64] = arr_new()
   push(shape, m)
   push(shape, n)
-  Ok(VTensor(tensor.Tensor { shape: shape, data: jac }))
+  # A jacobian is a derivative and takes the gradient dtype.
+  Ok(VTensor(tensor.mk(shape, jac, tensor.grad_dtype(y.dtype))))
 }
 
 # hessian(f)(x): the matrix of second partial derivatives of a scalar f at x, by
@@ -2684,7 +2685,7 @@ fn bi_make(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let shape: Arr[I64] = arr_new()
   push(shape, n)
   push(shape, n)
-  Ok(VTensor(tensor.Tensor { shape: shape, data: d }))
+  Ok(VTensor(tensor.mk_raw(shape, d, tensor.DT_F64)))
 }
 
 # Nested arrays for `tensor([[1, 2], [3, 4]])`. Only numbers, tensors and lists
@@ -2714,7 +2715,7 @@ fn random_tensor(shape: Arr[I64], normal: Bool) -> tensor.Tensor {
     if normal { push(data, rng_normal()) } else { push(data, rng_uniform()) }
     i = i + 1
   }
-  tensor.Tensor { shape: shape, data: data }
+  tensor.mk_raw(shape, data, tensor.DT_F64)
 }
 
 # ---- inspection and utilities ----------------------------------------------
@@ -2962,7 +2963,7 @@ fn read_csv(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
   let shape: Arr[I64] = arr_new()
   push(shape, len(rows))
   push(shape, cols)
-  Ok(VTensor(tensor.Tensor { shape: shape, data: flat }))
+  Ok(VTensor(tensor.mk_raw(shape, flat, tensor.DT_F64)))
 }
 
 # read_frame(path): a CSV whose first row is a header, returned as a record
@@ -3021,7 +3022,7 @@ fn read_frame(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
     }
     let shape: Arr[I64] = arr_new()
     push(shape, len(rows))
-    dict_set(fields, header[c], VTensor(tensor.Tensor { shape: shape, data: col }))
+    dict_set(fields, header[c], VTensor(tensor.mk_raw(shape, col, tensor.DT_F64)))
     c = c + 1
   }
   Ok(VRecord(RecordVal { fields: fields }))
@@ -3187,7 +3188,7 @@ fn bi_gbm(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
     Ok(out) => {
       let shape: Arr[I64] = arr_new()
       push(shape, x.shape[0])
-      Ok(VTensor(tensor.Tensor { shape: shape, data: out }))
+      Ok(VTensor(tensor.mk_raw(shape, out, tensor.DT_F64)))
     },
     Err(m) => Err(runtime_error(line, m)),
   }
