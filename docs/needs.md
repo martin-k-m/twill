@@ -2092,3 +2092,324 @@ already).
 
 *Go bootstrap:* Go strings concatenate with `+`. `internal/interp` already
 formats numbers for `print`.
+
+## NEEDS-100: enumerating and opening a GPU device
+
+**Status:** open, and blocking for `src/gpu/` in its entirety. `src/gpu/device.tw`
+`available`, `device_count`, `open`, `close`.
+
+Read NEEDS-108 first. It says that none of NEEDS-100 through NEEDS-107 can be
+implemented at all under the current rules, and that the entries exist so that
+the requirement is a named list rather than an open question. Every entry in
+this block is a signature, not a plan.
+
+    gpu_available() -> Bool
+    gpu_device_count() -> I64
+    gpu_device_open(index: I64) -> Res[I64, Str]
+    gpu_device_info(dev: I64, key: Str) -> Str
+    gpu_device_info_i64(dev: I64, key: Str) -> I64
+    gpu_device_close(dev: I64)
+
+`gpu_available` must not fail and must not be an error condition. A machine with
+no GPU driver is the normal case, and the whole graceful-degradation story is
+that `available()` is false, every tensor stays on the host, and every answer is
+unchanged. It is false when the driver library is absent, when it is present and
+exports nothing usable, and when it reports zero devices.
+
+The two `_info` forms exist because twill has no sum type at a primitive
+boundary and a single accessor would have to return a string for `name` and an
+integer for `compute_units`. The keys `src/gpu/device.tw` asks for are `name`,
+`driver`, `compute_units`, `max_group`, `has_f64` and `local_bytes`. The last
+three are not diagnostics: `max_group` and `local_bytes` decide whether the
+tiled matmul can be launched at all, and a kernel that exceeds either does not
+run slowly, it fails to launch.
+
+Against OpenCL this is `clGetPlatformIDs`, `clGetDeviceIDs`, `clCreateContext`,
+`clCreateCommandQueue` and `clGetDeviceInfo`, flattened so twill sees one list
+of devices rather than a list of platforms each holding a list of devices. The
+nesting buys nothing: `docs/gpu-feasibility.md` found two platforms with one
+device each on the development machine, and code wanting the fastest device
+would flatten it anyway.
+
+*Go bootstrap:* none. `internal/tensor` is `[]float64` and goroutines and has no
+concept of a device.
+
+## NEEDS-101: allocating and freeing device memory
+
+**Status:** open. `src/gpu/device.tw` `alloc`, `free`; `src/gpu/buffer.tw`
+`alloc_with_eviction`.
+
+    gpu_alloc(dev: I64, elements: I64) -> Res[I64, Str]
+    gpu_free(buf: I64)
+
+Sized in F64 elements and not bytes, because every caller in `src/gpu/` counts
+in elements and a units mismatch at this boundary reads as a wrong answer rather
+than as a crash.
+
+`gpu_alloc` must return `Err` on an out-of-memory rather than abort, and this is
+the one primitive whose failure mode is designed around. The card in the
+development machine has 8GB shared with the display, so a long run exhausting it
+is expected rather than exceptional. `src/gpu/buffer.tw` catches the `Err`,
+evicts device copies whose host copy is still valid, retries once, and then
+falls back to the CPU with an identical answer. A primitive that aborted would
+turn memory pressure into a failed program.
+
+`gpu_free` returns nothing. A failure to free is not something a caller can act
+on, and a `Res` here would put a `?` on every cleanup path to serve no decision.
+
+Against OpenCL: `clCreateBuffer` with `CL_MEM_READ_WRITE`, and
+`clReleaseMemObject`.
+
+*Go bootstrap:* none.
+
+## NEEDS-102: moving numbers to and from a device
+
+**Status:** open. `src/gpu/device.tw` `write`, `read`, `copy`.
+
+    gpu_write(buf: I64, dst_off: I64, src: Arr[F64]) -> Res[Unit, Str]
+    gpu_read(buf: I64, src_off: I64, n: I64)         -> Res[Arr[F64], Str]
+    gpu_copy(dst: I64, dst_off: I64, src: I64, src_off: I64, n: I64)
+                                                     -> Res[Unit, Str]
+
+All three blocking, in the first version. `docs/gpu.md` section 3 argues that a
+non-blocking queue reports an error at a point unrelated to the op that caused
+it, and that debugging a numerical difference is hard enough with the error
+attached to the right line.
+
+`gpu_read` allocates and returns a fresh `Arr[F64]` rather than filling one the
+caller supplies, because twill has no way to hand out a writable window into an
+existing `Arr` and pretending otherwise would put an aliasing rule into the one
+place in the codebase that cannot check it.
+
+`gpu_copy` is device to device and is not a convenience. Without it, taking a
+row out of a device tensor means reading it down and writing it back up, which
+is two of the boundary crossings `docs/gpu-feasibility.md` measured at roughly
+80us each, to move data that never needed to leave. It is what keeps slice,
+concat, index and split resident.
+
+Note what is deliberately *not* here: an integer transfer. The elementwise
+kernels need shapes and strides on the device, and those ride as `F64` and are
+cast back in the kernel. A shape cannot exceed 2^53 without the tensor exceeding
+any device this will run on, so the round trip is exact, and the ugliness buys
+one fewer entry on this list. See `src/gpu/buffer.tw` `meta_buffer`.
+
+Against OpenCL: `clEnqueueWriteBuffer` and `clEnqueueReadBuffer` with
+`blocking = CL_TRUE`, and `clEnqueueCopyBuffer`.
+
+*Go bootstrap:* none. A slice is already where the CPU wants it.
+
+## NEEDS-103: compiling a kernel from source at run time
+
+**Status:** open. `src/gpu/device.tw` `build`, `kernel`.
+
+    gpu_program_build(dev: I64, source: Str, options: Str) -> Res[I64, Str]
+    gpu_kernel(program: I64, name: Str)                    -> Res[I64, Str]
+
+Run-time compilation from source text is the property that made OpenCL the
+recommendation in `docs/gpu.md` over Vulkan, which consumes SPIR-V and would
+mean either shipping precompiled binary blobs built by a toolchain that is not
+present, or writing a SPIR-V emitter. Compiling from source means the kernels
+are readable text in the repository, there is no build step, nothing is added to
+the release matrix, and a kernel can be specialised on the shapes it is about to
+run. `src/gpu/matmul.tw` uses that last property to bake its tile size in as a
+compile-time constant, which is what lets the compiler unroll the inner loop and
+size the local arrays statically.
+
+The `Err` of `gpu_program_build` is the most important error message in the
+backend and it must carry the driver's build log verbatim. A kernel that fails
+to build fails on somebody else's driver, on hardware nobody developing twill
+owns, and the log is the only evidence that will ever exist.
+
+`options` is the compile options string, and what is absent from it is the
+subject of `docs/gpu.md` section 5 rule 3. It is built in `src/gpu/source.tw` so
+there is exactly one of it.
+
+Against OpenCL: `clCreateProgramWithSource`, `clBuildProgram`,
+`clGetProgramBuildInfo` for the log, and `clCreateKernel`.
+
+*Go bootstrap:* none.
+
+## NEEDS-104: binding kernel arguments
+
+**Status:** open. `src/gpu/device.tw` `arg_buffer`, `arg_i64`, `arg_f64`,
+`arg_local`.
+
+    gpu_set_arg_buffer(kernel: I64, index: I64, buf: I64)  -> Res[Unit, Str]
+    gpu_set_arg_i64(kernel: I64, index: I64, v: I64)       -> Res[Unit, Str]
+    gpu_set_arg_f64(kernel: I64, index: I64, v: F64)       -> Res[Unit, Str]
+    gpu_set_arg_local(kernel: I64, index: I64, bytes: I64) -> Res[Unit, Str]
+
+Four setters and not one. A kernel argument is typed on the device side, and
+passing an integer where a buffer was expected is undefined rather than an
+error. Twill has no variadic call and no way to describe a heterogeneous
+argument list, so the alternative is an encoding, and an encoding here would be
+a second place for the two sides' types to disagree.
+
+`arg_local` reserves work-group local memory for an argument the kernel declares
+`__local` with no size. Only the tiled matmul uses it, and it is on the list
+rather than folded away because a matmul without local-memory staging is the
+untiled version, which is several times slower and is the reason a GPU is being
+considered at all.
+
+Against OpenCL: `clSetKernelArg`, four times over, with `arg_local` passing a
+size and a null pointer.
+
+*Go bootstrap:* none.
+
+## NEEDS-105: launching a kernel
+
+**Status:** open. `src/gpu/device.tw` `launch`.
+
+    gpu_launch(dev: I64, kernel: I64, global: Arr[I64], local: Arr[I64])
+        -> Res[Unit, Str]
+
+`global` is the total number of work-items per dimension, 1 to 3 dimensions.
+`local` is the work-group shape, or empty to let the driver choose. Empty is the
+default everywhere except the tiled matmul, which needs a specific group shape
+for its local-memory staging to be *correct* and not merely fast: a barrier that
+only some work-items in a group reach is undefined behaviour.
+
+Note what `gpu_launch` does not take: a stream, an event, or a dependency. There
+is one queue and every launch is followed by a synchronise. That is the first
+thing to change once the answers are trusted, which is why NEEDS-106 is a
+separate entry rather than folded into this one.
+
+Against OpenCL: `clEnqueueNDRangeKernel`.
+
+*Go bootstrap:* the nearest analogue is `runChunks` in
+`internal/tensor/parallel.go`, which splits an index range across goroutines.
+The shape of the idea is the same and nothing else about it is.
+
+## NEEDS-106: synchronising with a device
+
+**Status:** open. `src/gpu/device.tw` `finish`.
+
+    gpu_finish(dev: I64) -> Res[Unit, Str]
+
+Blocks until every command queued on the device has completed. This is where a
+kernel's error surfaces, because an enqueue that returned `Ok` has only been
+accepted and not run.
+
+It is its own entry rather than part of NEEDS-105 for a forward-looking reason.
+The first version calls it after every launch, which throws away the latency
+hiding a deep queue would give. Letting the queue run ahead is the single
+largest easy win left in the design once the answers are trusted, and it is only
+possible if launch and synchronise are separable.
+
+Against OpenCL: `clFinish`.
+
+*Go bootstrap:* a `sync.WaitGroup`, in the sense that both wait.
+
+## NEEDS-107: loading a shared library and resolving a symbol at run time
+
+**Status:** open, and the mechanism NEEDS-100 through NEEDS-106 all rest on.
+
+The six entries above are signatures. This one is the thing that makes any of
+them reachable: a way to open a shared library by name at run time and look up a
+symbol in it, then call through the resulting pointer with a described
+signature.
+
+`docs/gpu-feasibility.md` established that this is the whole dependency story
+for OpenCL. `OpenCL.dll` is in `System32` on the development machine because the
+driver installed it, both GPUs register ICDs, and a host program that resolves
+the loader with `LoadLibrary` and `GetProcAddress` and declares the dozen entry
+points it needs compiled with no headers and no SDK and ran on both cards. So
+what is wanted is not an SDK binding. It is `LoadLibrary` plus `GetProcAddress`,
+and their equivalents elsewhere, plus a calling convention.
+
+That is deliberately more general than a GPU. It is a foreign function
+interface, and every consumer of one that twill might ever have goes through it.
+It is recorded here because the GPU backend is the first concrete thing that
+needs it and therefore the first thing that can say precisely what shape it must
+have: pointer-sized handles, `Arr[F64]` passed as a base pointer and a length,
+`I64` and `F64` scalars, and a return that is either an integer status or a
+handle.
+
+The alternative that avoids it entirely is native code compiled into the
+runtime, which is the same requirement wearing a different hat and is the
+subject of NEEDS-108.
+
+*Go bootstrap:* `internal/interp/builtins.go` dispatches on a name into Go
+functions in the same binary, which needs no FFI because there is no foreign
+side. That is exactly the property the GPU backend does not have.
+
+## NEEDS-108: there is nowhere for a native layer to live
+
+**Status:** open, and it is not a language feature. It is the reason NEEDS-100
+through NEEDS-107 cannot be started.
+
+Stated plainly, because the rest of `src/gpu/` and `docs/gpu.md` are written as
+though it were solved and a reader should not have to infer this from their
+silence:
+
+**A GPU backend cannot exist without a foreign function interface or native code
+of some kind. Under the current no-Go rule, that layer has nowhere to live.**
+
+Nothing in `src/gpu/` closes this and no amount of further twill would. Every
+kernel in `src/gpu/source.tw` is text that a driver has to compile, and every
+function in `src/gpu/device.tw` is a call into a library that twill has no way
+to call. The design is complete and unrunnable, and those are two separate
+facts.
+
+The options, none of which is a language feature:
+
+1. **An FFI, which is NEEDS-107.** The most general answer and the largest. It
+   gives twill a way to call anything, which is a much bigger decision than
+   "should there be a GPU backend" and should not be made as a side effect of
+   one.
+2. **Native code in the runtime.** Whatever eventually executes twill has to be
+   written in something, and that something can link the loader directly. This
+   is what `internal/` does today for `math.Exp`, which NEEDS-68 already treats
+   as a native primitive rather than a foreign call. Under that framing the
+   fifteen entries above are fifteen more native primitives alongside `f64_exp`,
+   and the question stops being "how does twill call out" and becomes "what is
+   on the primitive table". That is the smaller and more likely answer.
+3. **Neither, for now.** Which is where things stand, and which
+   `docs/gpu-feasibility.md` recommends on independent grounds: settle f32
+   first, add the matmul benchmarks at N=256, 512 and 1024 that the repository
+   does not have, and find a real twill program that is matmul-bound at 256x256
+   or larger before building any of this.
+
+The value of writing the list anyway is that the requirement is now bounded.
+Fifteen symbols out of a library that is already installed on any machine with a
+GPU, resolved at run time, with nothing added to the build and nothing added to
+the release matrix. That is a small enough number to argue about honestly, which
+is the whole point of counting it.
+
+*Go bootstrap:* it links `internal/tensor` directly, which is the option-2
+answer taken without anyone having to decide it.
+
+## NEEDS-109: `reduce_all` disagrees with the bootstrap above 8192 elements
+
+**Status:** open, and it is a correctness divergence rather than a missing
+feature. `src/tensor.tw` `reduce_all`; `internal/tensor/parallel.go`
+`parallelSum`; `src/gpu/reduce.tw` `whole_tensor_sum`.
+
+Found while designing the GPU reductions, and recorded rather than fixed because
+`src/tensor.tw` was owned by another change at the time.
+
+`internal/tensor/parallel.go` sums a whole tensor in two forms. Below
+`minParallel = 8192` it is a plain running sum. At or above it, fixed
+4096-element blocks are summed independently and their partials combined in
+block order, and the comment is explicit that the block size is fixed rather
+than derived from the core count so that "the result is the same on any number
+of cores".
+
+`src/tensor.tw` `reduce_all` is a plain running sum at every size, with no
+blocking. So for `n >= 8192` the twill reference and the Go bootstrap produce
+different last bits for the same input, today, with no GPU anywhere near it.
+
+Three implementations cannot all be right. The Go form is the one to adopt,
+because a fixed block size is a *specification* rather than an implementation
+detail: it pins the answer, it is reproducible on any hardware, and it is
+parallelisable, which the plain running sum is not. `src/gpu/reduce.tw` follows
+the Go form for exactly that reason, and is therefore bit-identical to the
+bootstrap and not to `src/tensor.tw` until this is closed.
+
+This matters more than a last-bit divergence usually would, because `testdata/`
+compares output byte for byte after a canonical float rendering (NEEDS-29). A
+divergence in the last bits of a sum over 8192 or more elements is a test
+failure, not a curiosity.
+
+*Go bootstrap:* it is the correct one here. `parallelSum` in
+`internal/tensor/parallel.go` is the text to port.
