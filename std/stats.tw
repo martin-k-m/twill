@@ -1,0 +1,717 @@
+mode systems
+
+# stats.tw: descriptive statistics and the five distributions worth having.
+#
+# WHY SYSTEMS MODE, WHEN std/num.tw ALREADY HAS mean AND var
+#
+# `std/num.tw` is the tensor version: it composes built-in reductions so that
+# `grad(std)` works without anyone writing a backward pass. That is the right
+# tool for a loss function and the wrong one for a quantile, a mode, or a
+# Poisson cdf, all of which need ordering, counting, or a loop with a carried
+# accumulator, and none of which are differentiable in a useful sense anyway.
+#
+# So this file works over `Arr[F64]` and the two are complements rather than
+# duplicates. Anything here that also exists in `std/num.tw` agrees with it
+# numerically, and where a choice differs it is named at the function.
+#
+# THE DENOMINATOR, SAID ONCE AND LOUDLY
+#
+# Every spread statistic here takes `ddof`, the delta degrees of freedom, and
+# divides by `n - ddof`.
+#
+#   ddof = 0   the population value. Right when the array *is* the whole thing
+#              you care about, and what a loss function wants.
+#   ddof = 1   the sample estimate, Bessel's correction. Right when the array is
+#              a sample and you are estimating the spread of something wider.
+#
+# There is no default, and that is the point. The commonest silent error in
+# statistical code is a population variance reported as a sample variance or the
+# reverse: the answer differs by a factor of n/(n-1), which is 1.01 at n = 100
+# and therefore never looks wrong, and 2.0 at n = 2 and therefore ruins small
+# studies specifically. A required argument makes the caller decide once,
+# visibly, at the call site.
+#
+# Why the correction is n - 1 and not something else: the mean being subtracted
+# was measured from the same sample, so the deviations are taken from a point
+# that sits closer to the data than the true mean does, and the sum of squares
+# comes out systematically small. One degree of freedom went into estimating the
+# mean; n - 1 remain.
+
+import "std/random" as random
+
+# ---- small numeric helpers -------------------------------------------------
+#
+# `abs`, `max` and `min` are tensor builtins in numeric mode and are not
+# available over an F64 here, so the three scalar forms are written out.
+
+fn fabs(x: F64) -> F64 = if x < 0.0 { 0.0 - x } else { x }
+
+fn fmax(a: F64, b: F64) -> F64 = if a > b { a } else { b }
+
+fn fmin(a: F64, b: F64) -> F64 = if a < b { a } else { b }
+
+# ---- ordering --------------------------------------------------------------
+
+# A sorted copy, ascending.
+#
+# A copy rather than in place: `median` and `quantile` both need order and
+# neither has any business reordering the caller's data, and an `Arr` parameter
+# aliases the caller's array (docs/needs.md NEEDS-71), so sorting in place here
+# would silently reorder it.
+#
+# Insertion sort below the cutoff, quicksort with a median-of-three pivot above
+# it. Median-of-three rather than first-element: a first-element pivot is
+# quadratic on already-sorted input, and already-sorted input is not a rare
+# adversarial case in statistics, it is the normal case, because callers sort
+# once and then ask for three different quantiles.
+#
+# NaN is not handled and cannot be: a NaN compares false against everything, so
+# any comparison sort places it arbitrarily and the result is not sorted in any
+# sense. Filter first if the data can contain one.
+let SORT_CUTOFF: I64 = 12
+
+fn sorted(xs: Arr[F64]) -> Arr[F64] {
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    push(out, xs[i])
+    i = i + 1
+  }
+  sort_range(out, 0, len(out) - 1)
+  out
+}
+
+fn sort_range(a: Arr[F64], lo: I64, hi: I64) {
+  while hi - lo > SORT_CUTOFF {
+    let p: F64 = median_of_three(a, lo, hi)
+    let i: I64 = lo
+    let j: I64 = hi
+    while i <= j {
+      while a[i] < p { i = i + 1 }
+      while a[j] > p { j = j - 1 }
+      if i <= j {
+        let t: F64 = a[i]
+        a[i] = a[j]
+        a[j] = t
+        i = i + 1
+        j = j - 1
+      }
+    }
+    # Recurse into the smaller side and loop on the larger, so the recursion
+    # depth stays logarithmic even on a bad split. Depth matters here:
+    # docs/needs.md NEEDS-30 records that the recursion limit is a real one.
+    if j - lo < hi - i {
+      sort_range(a, lo, j)
+      lo = i
+    } else {
+      sort_range(a, i, hi)
+      hi = j
+    }
+  }
+  insertion_sort(a, lo, hi)
+}
+
+fn median_of_three(a: Arr[F64], lo: I64, hi: I64) -> F64 {
+  let mid: I64 = lo + (hi - lo) / 2
+  let x: F64 = a[lo]
+  let y: F64 = a[mid]
+  let z: F64 = a[hi]
+  if x < y {
+    if y < z { return y }
+    if x < z { return z }
+    return x
+  }
+  if x < z { return x }
+  if y < z { return z }
+  y
+}
+
+fn insertion_sort(a: Arr[F64], lo: I64, hi: I64) {
+  let i: I64 = lo + 1
+  while i <= hi {
+    let v: F64 = a[i]
+    let j: I64 = i - 1
+    while j >= lo and a[j] > v {
+      a[j + 1] = a[j]
+      j = j - 1
+    }
+    a[j + 1] = v
+    i = i + 1
+  }
+}
+
+# ---- central tendency ------------------------------------------------------
+
+fn sum(xs: Arr[F64]) -> F64 {
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i < len(xs) {
+    total = total + xs[i]
+    i = i + 1
+  }
+  total
+}
+
+# The arithmetic mean.
+#
+# A plain running sum, not Kahan compensation and not pairwise summation. Both
+# are better for very long arrays, where the running sum loses low bits once the
+# accumulator grows far past the addend, and neither is used here because the
+# two-pass variance below is the place that error actually bites and it is
+# handled there directly. If you are averaging ten million values and the last
+# digits matter, sum in blocks.
+fn mean(xs: Arr[F64]) -> F64 {
+  if len(xs) == 0 { abort("stats.mean: empty array") }
+  sum(xs) / f64_of_i64(len(xs))
+}
+
+# The middle value, or the average of the two middle values on an even count.
+#
+# Averaging the middle pair is a choice: it makes the median of [1, 2] equal
+# 1.5, a value that is not in the data. The alternative (take the lower) keeps
+# the median an observed value, which is what you want for ordinal data. This
+# one matches every array library and `quantile(xs, 0.5)` below, and the two
+# agreeing matters more than either convention does.
+fn median(xs: Arr[F64]) -> F64 = quantile(xs, 0.5)
+
+# The q-th quantile, q in [0, 1], by **linear interpolation between the two
+# nearest order statistics**.
+#
+# This is the rule numpy calls `linear`, R calls type 7, and Excel calls
+# PERCENTILE.INC. There are nine published rules and they disagree by a whole
+# order statistic near the ends of a small sample, so naming the rule is not
+# pedantry: reporting "the 95th percentile" without it is reporting a number
+# nobody else can reproduce.
+#
+# The rule: with n values sorted, position h = (n - 1) * q, and the answer is
+# x[floor(h)] plus the fraction of the way to x[floor(h) + 1]. Type 7 is chosen
+# because it is the default everywhere else, so a twill result and a pandas
+# result on the same data agree without a flag.
+#
+# It is worth knowing what type 7 is not: it is not an unbiased estimator of the
+# population quantile (type 8 aims at that), and at q = 0 and q = 1 it returns
+# exactly the smallest and largest observation rather than extrapolating.
+fn quantile(xs: Arr[F64], q: F64) -> F64 {
+  let n: I64 = len(xs)
+  if n == 0 { abort("stats.quantile: empty array") }
+  if q < 0.0 or q > 1.0 { abort("stats.quantile: q must be in [0, 1]") }
+  let s: Arr[F64] = sorted(xs)
+  if n == 1 { return s[0] }
+  let h: F64 = f64_of_i64(n - 1) * q
+  let lo: I64 = i64_of_f64(f64_floor(h))
+  if lo >= n - 1 { return s[n - 1] }
+  let frac: F64 = h - f64_of_i64(lo)
+  s[lo] + frac * (s[lo + 1] - s[lo])
+}
+
+# The most frequent exact value, earliest in sorted order on a tie.
+#
+# "Exact" is the whole caveat. A mode over floating-point data counts bit
+# patterns, so 0.1 + 0.2 and 0.3 are different values and a mode over measured
+# continuous data is almost always just the first element, each value appearing
+# once. It is meaningful for data that is discrete in fact even when it is
+# stored as F64: counts, ratings, rounded prices, categorical codes. For
+# genuinely continuous data, bin first and take the mode of the bins.
+#
+# Ties break to the smallest value rather than to first-appearance order,
+# because the sort has already destroyed the original order and reconstructing
+# it would cost a second pass to answer a question nobody asks.
+fn mode(xs: Arr[F64]) -> F64 {
+  if len(xs) == 0 { abort("stats.mode: empty array") }
+  let s: Arr[F64] = sorted(xs)
+  let best: F64 = s[0]
+  let best_count: I64 = 1
+  let current: F64 = s[0]
+  let count: I64 = 1
+  let i: I64 = 1
+  while i < len(s) {
+    if s[i] == current {
+      count = count + 1
+    } else {
+      current = s[i]
+      count = 1
+    }
+    if count > best_count {
+      best_count = count
+      best = current
+    }
+    i = i + 1
+  }
+  best
+}
+
+fn amin(xs: Arr[F64]) -> F64 {
+  if len(xs) == 0 { abort("stats.amin: empty array") }
+  let m: F64 = xs[0]
+  let i: I64 = 1
+  while i < len(xs) {
+    m = fmin(m, xs[i])
+    i = i + 1
+  }
+  m
+}
+
+fn amax(xs: Arr[F64]) -> F64 {
+  if len(xs) == 0 { abort("stats.amax: empty array") }
+  let m: F64 = xs[0]
+  let i: I64 = 1
+  while i < len(xs) {
+    m = fmax(m, xs[i])
+    i = i + 1
+  }
+  m
+}
+
+# ---- spread ----------------------------------------------------------------
+
+# Variance with an explicit denominator of n - ddof. See the header.
+#
+# Two passes: the mean first, then the squared deviations from it. The one-pass
+# form, E[x^2] - E[x]^2, is faster and is a well-known way to lose all your
+# precision: for data with a large mean and small spread it subtracts two nearly
+# equal large numbers, and it can return a negative variance. The variance of
+# [100000000.1, 100000000.2] is where it fails, and that is an ordinary
+# timestamp column.
+fn var(xs: Arr[F64], ddof: I64) -> F64 {
+  let n: I64 = len(xs)
+  if n - ddof <= 0 { abort("stats.var: not enough data for this ddof") }
+  let mu: F64 = mean(xs)
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i < n {
+    let d: F64 = xs[i] - mu
+    total = total + d * d
+    i = i + 1
+  }
+  total / f64_of_i64(n - ddof)
+}
+
+# The standard deviation: the square root of the variance, in the units of the
+# data.
+#
+# No epsilon under the root, unlike `std/num.tw`'s. That epsilon is there so
+# that `grad(std)` of a constant tensor is finite, because `sqrt` has an
+# infinite derivative at zero. Nothing here is differentiated, so an epsilon
+# would only be a small lie about the answer: the standard deviation of a
+# constant array is exactly zero and should print as zero.
+fn std(xs: Arr[F64], ddof: I64) -> F64 = f64_sqrt(var(xs, ddof))
+
+# Half the interquartile range is not what this is: `iqr` is the full spread of
+# the middle half, q75 - q25. It is the outlier-resistant alternative to the
+# standard deviation, and it is quoted with the median rather than the mean.
+fn iqr(xs: Arr[F64]) -> F64 = quantile(xs, 0.75) - quantile(xs, 0.25)
+
+# Mean absolute deviation from the median. Also outlier-resistant, and unlike
+# the standard deviation it does not square, so one bad value moves it by its
+# own size rather than by its square.
+fn mad(xs: Arr[F64]) -> F64 {
+  let m: F64 = median(xs)
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    push(out, fabs(xs[i] - m))
+    i = i + 1
+  }
+  median(out)
+}
+
+# ---- relationships ---------------------------------------------------------
+
+# Covariance, with the same `ddof` contract as `var`. `cov(x, x, ddof)` equals
+# `var(x, ddof)` exactly, which is the property that makes the shared argument
+# right rather than merely consistent.
+fn cov(a: Arr[F64], b: Arr[F64], ddof: I64) -> F64 {
+  let n: I64 = len(a)
+  if len(b) != n { abort("stats.cov: arrays differ in length") }
+  if n - ddof <= 0 { abort("stats.cov: not enough data for this ddof") }
+  let ma: F64 = mean(a)
+  let mb: F64 = mean(b)
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i < n {
+    total = total + (a[i] - ma) * (b[i] - mb)
+    i = i + 1
+  }
+  total / f64_of_i64(n - ddof)
+}
+
+# Pearson correlation, in [-1, 1].
+#
+# No `ddof`: the correction appears once in the numerator and twice under the
+# root in the denominator and cancels exactly, so population and sample
+# correlation are the same number. Taking the argument anyway would suggest the
+# answer depends on it.
+#
+# What it does not measure: anything non-monotonic. A perfect parabola through
+# the origin has correlation zero. Look at the data.
+fn corr(a: Arr[F64], b: Arr[F64]) -> F64 {
+  let sa: F64 = std(a, 0)
+  let sb: F64 = std(b, 0)
+  if sa == 0.0 or sb == 0.0 {
+    abort("stats.corr: a constant input has no correlation")
+  }
+  cov(a, b, 0) / (sa * sb)
+}
+
+# Each value expressed in standard deviations from the mean.
+#
+# `ddof` is passed through rather than fixed, because a z-score computed for
+# standardising features before a fit wants the population value (the array is
+# the training set, which is the whole population of that transform) and a
+# z-score used as a test statistic wants the sample one.
+fn zscore(xs: Arr[F64], ddof: I64) -> Arr[F64] {
+  let mu: F64 = mean(xs)
+  let sd: F64 = std(xs, ddof)
+  if sd == 0.0 { abort("stats.zscore: input is constant") }
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    push(out, (xs[i] - mu) / sd)
+    i = i + 1
+  }
+  out
+}
+
+# ---- special functions the distributions need ------------------------------
+
+# The error function's complement, erfc(x) = 1 - erf(x).
+#
+# A Chebyshev-fitted rational form with fractional error below 1.2e-7 for every
+# x. The absolute accuracy is stated as *fractional* deliberately: the form is
+# built around exp(-x^2) so it stays accurate deep into the tail where erfc is
+# 1e-30 and an absolute-error approximation would return noise or zero. That is
+# the case the normal cdf is used for.
+#
+# It is not full double precision. Seven digits is enough for a p-value and not
+# enough for an iterative inversion, so `normal_cdf` is honest to about 1e-7 and
+# nothing here inverts it by Newton's method.
+fn erfc(x: F64) -> F64 {
+  let z: F64 = fabs(x)
+  let t: F64 = 1.0 / (1.0 + 0.5 * z)
+  let poly: F64 = -1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
+    t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 +
+    t * (-0.82215223 + t * 0.17087277))))))))
+  let ans: F64 = t * f64_exp(0.0 - z * z + poly)
+  if x >= 0.0 { return ans }
+  2.0 - ans
+}
+
+fn erf(x: F64) -> F64 = 1.0 - erfc(x)
+
+# The Lanczos coefficients for g = 7, n = 9. Transcribed as a table because
+# there is no way to derive them at runtime and no way to check them by
+# inspection; `lgamma(1) == 0` and `lgamma(0.5) == log(sqrt(pi))` in the tests
+# are what checks them.
+fn lanczos() -> Arr[F64] {
+  let c: Arr[F64] = arr_new()
+  push(c, 0.99999999999980993)
+  push(c, 676.5203681218851)
+  push(c, -1259.1392167224028)
+  push(c, 771.32342877765313)
+  push(c, -176.61502916214059)
+  push(c, 12.507343278686905)
+  push(c, -0.13857109526572012)
+  push(c, 0.0000099843695780195716)
+  push(c, 0.00000015056327351493116)
+  c
+}
+
+let SQRT_2PI: F64 = 2.5066282746310002
+let LOG_PI: F64 = 1.1447298858494002
+
+# The log of the gamma function, for x > 0.
+#
+# The log rather than gamma itself, because every use here is a factorial inside
+# an exponent: `gamma(171)` overflows a double and `binomial_pmf(1000, 500)` is
+# perfectly representable, so the whole computation stays in log space and is
+# exponentiated once at the end. A version that computed factorials directly
+# would fail on inputs the distribution is fine at.
+#
+# Lanczos with the reflection formula below 0.5. Accurate to about 15
+# significant digits, which is more than the erfc above and is why the two are
+# not held to the same tolerance in the tests.
+fn lgamma(x: F64) -> F64 {
+  if x <= 0.0 { abort("stats.lgamma: argument must be positive") }
+  # Reflection: gamma(x)gamma(1-x) = pi / sin(pi x). The series converges for
+  # x >= 0.5 only, and the small arguments are exactly where a Poisson with a
+  # small mean lands.
+  if x < 0.5 {
+    return LOG_PI - f64_log(f64_sin(3.141592653589793 * x)) - lgamma(1.0 - x)
+  }
+  let c: Arr[F64] = lanczos()
+  let z: F64 = x - 1.0
+  let a: F64 = c[0]
+  let i: I64 = 1
+  while i < 9 {
+    a = a + c[i] / (z + f64_of_i64(i))
+    i = i + 1
+  }
+  let t: F64 = z + 7.5
+  0.5 * f64_log(2.0 * 3.141592653589793) + (z + 0.5) * f64_log(t) - t + f64_log(a)
+}
+
+# log(n!) for a non-negative integer n.
+fn log_factorial(n: I64) -> F64 {
+  if n < 0 { abort("stats.log_factorial: negative argument") }
+  if n < 2 { return 0.0 }
+  lgamma(f64_of_i64(n) + 1.0)
+}
+
+# ---- the normal distribution -----------------------------------------------
+#
+# Every distribution below is a struct holding its parameters and three
+# functions over it: density (or mass), cumulative, and sample. They are
+# separate functions rather than methods on a shared enum because the subset has
+# no traits and a dispatching enum would put every distribution's parameters in
+# one payload, which is how a Poisson ends up being asked for its standard
+# deviation.
+
+# Parameterised by the **standard deviation**, not the variance. The two are the
+# common source of a silent factor-of-sd error, and the choice here follows
+# `std/random.tw` so a program never has to remember which one this library
+# means.
+struct Normal {
+  mean: F64,
+  sd: F64,
+}
+
+fn normal(mean: F64, sd: F64) -> Normal {
+  if sd <= 0.0 { abort("stats.normal: sd must be positive") }
+  Normal { mean: mean, sd: sd }
+}
+
+fn normal_pdf(d: Normal, x: F64) -> F64 {
+  let z: F64 = (x - d.mean) / d.sd
+  f64_exp(0.0 - 0.5 * z * z) / (d.sd * SQRT_2PI)
+}
+
+# The cumulative distribution, P(X <= x).
+#
+# Written as erfc(-z/sqrt(2))/2 rather than (1 + erf(z/sqrt(2)))/2. The two are
+# equal in exact arithmetic and not in floating point: for very negative z the
+# erf form computes 1 + (something within an ulp of -1) and cancels to zero,
+# reporting a probability of exactly 0 for a tail that is merely small. The erfc
+# form returns the small number directly. This is the entire reason `erfc` is
+# the primitive here and `erf` is derived from it rather than the reverse.
+fn normal_cdf(d: Normal, x: F64) -> F64 {
+  let z: F64 = (x - d.mean) / d.sd
+  0.5 * erfc(0.0 - z / 1.4142135623730951)
+}
+
+fn normal_sample(d: Normal, r: random.Rng) -> F64 =
+  random.normal_with(r, d.mean, d.sd)
+
+# ---- the uniform distribution ----------------------------------------------
+
+# Continuous uniform on [lo, hi). Half-open to match `random.uniform_range`, so
+# that `uniform_sample` never returns a value whose density this file reports as
+# zero.
+struct Uniform {
+  lo: F64,
+  hi: F64,
+}
+
+fn uniform(lo: F64, hi: F64) -> Uniform {
+  if hi <= lo { abort("stats.uniform: hi must exceed lo") }
+  Uniform { lo: lo, hi: hi }
+}
+
+fn uniform_pdf(d: Uniform, x: F64) -> F64 {
+  if x < d.lo or x >= d.hi { return 0.0 }
+  1.0 / (d.hi - d.lo)
+}
+
+fn uniform_cdf(d: Uniform, x: F64) -> F64 {
+  if x <= d.lo { return 0.0 }
+  if x >= d.hi { return 1.0 }
+  (x - d.lo) / (d.hi - d.lo)
+}
+
+fn uniform_sample(d: Uniform, r: random.Rng) -> F64 =
+  random.uniform_range(r, d.lo, d.hi)
+
+# ---- the Bernoulli distribution --------------------------------------------
+
+# One trial. The support is {0, 1} and the value is returned as an F64 so that
+# a run of draws can go straight into `mean` and `var` above.
+struct Bernoulli {
+  p: F64,
+}
+
+fn bernoulli(p: F64) -> Bernoulli {
+  if p < 0.0 or p > 1.0 { abort("stats.bernoulli: p must be in [0, 1]") }
+  Bernoulli { p: p }
+}
+
+# The probability *mass*, not a density: `pmf` rather than `pdf` for the three
+# discrete distributions, because a mass at a point is a probability and a
+# density is not, and the two get compared to each other by mistake often
+# enough to be worth distinguishing in the name.
+fn bernoulli_pmf(d: Bernoulli, k: I64) -> F64 {
+  if k == 0 { return 1.0 - d.p }
+  if k == 1 { return d.p }
+  0.0
+}
+
+fn bernoulli_cdf(d: Bernoulli, k: I64) -> F64 {
+  if k < 0 { return 0.0 }
+  if k == 0 { return 1.0 - d.p }
+  1.0
+}
+
+fn bernoulli_sample(d: Bernoulli, r: random.Rng) -> I64 {
+  if random.bernoulli(r, d.p) { return 1 }
+  0
+}
+
+# ---- the binomial distribution ---------------------------------------------
+
+# The number of successes in `n` independent trials of probability `p`.
+struct Binomial {
+  n: I64,
+  p: F64,
+}
+
+fn binomial(n: I64, p: F64) -> Binomial {
+  if n < 0 { abort("stats.binomial: n must be non-negative") }
+  if p < 0.0 or p > 1.0 { abort("stats.binomial: p must be in [0, 1]") }
+  Binomial { n: n, p: p }
+}
+
+# Computed in log space and exponentiated once.
+#
+# The direct form, C(n, k) p^k (1-p)^(n-k), overflows in the binomial
+# coefficient and underflows in the powers long before the answer itself is
+# unrepresentable: C(1000, 500) is about 1e299 and the powers are about 1e-301,
+# and their product is an ordinary number that the direct computation cannot
+# reach. In logs nothing exceeds a few thousand.
+#
+# p = 0 and p = 1 are handled before the logs, since log(0) is not a number and
+# the limits are well defined: all mass sits on k = 0 and k = n respectively.
+fn binomial_pmf(d: Binomial, k: I64) -> F64 {
+  if k < 0 or k > d.n { return 0.0 }
+  if d.p == 0.0 {
+    if k == 0 { return 1.0 }
+    return 0.0
+  }
+  if d.p == 1.0 {
+    if k == d.n { return 1.0 }
+    return 0.0
+  }
+  let log_c: F64 = log_factorial(d.n) - log_factorial(k) - log_factorial(d.n - k)
+  f64_exp(log_c + f64_of_i64(k) * f64_log(d.p)
+    + f64_of_i64(d.n - k) * f64_log(1.0 - d.p))
+}
+
+# P(X <= k), by summing the mass from 0.
+#
+# O(k) exponentials, which is fine for the n a program actually writes down and
+# is not fine for n in the millions. The closed form is the regularised
+# incomplete beta function, which needs a continued fraction with its own
+# convergence conditions; it is not here because the summation is obviously
+# correct and the incomplete beta is obviously not, and this is a first
+# implementation. If you need it at large n, that is the thing to add.
+fn binomial_cdf(d: Binomial, k: I64) -> F64 {
+  if k < 0 { return 0.0 }
+  if k >= d.n { return 1.0 }
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i <= k {
+    total = total + binomial_pmf(d, i)
+    i = i + 1
+  }
+  fmin(total, 1.0)
+}
+
+# Sampling: the sum of n Bernoulli draws below the cutoff, inversion above it.
+#
+# The sum is exact and costs n draws. Inversion costs one draw and a walk up the
+# cdf, so its cost is proportional to the mean rather than to n, which is the
+# right trade once n is large and p is not near 1/2. The cutoff is where the two
+# costs cross for a middling p; neither method is approximate, so the boundary
+# only affects speed, and the resulting stream does depend on it, which is why
+# the constant is named and fixed rather than tuned.
+let BINOMIAL_DIRECT_LIMIT: I64 = 64
+
+fn binomial_sample(d: Binomial, r: random.Rng) -> I64 {
+  if d.n <= BINOMIAL_DIRECT_LIMIT {
+    let count: I64 = 0
+    let i: I64 = 0
+    while i < d.n {
+      if random.bernoulli(r, d.p) { count = count + 1 }
+      i = i + 1
+    }
+    return count
+  }
+  let u: F64 = random.uniform(r)
+  let acc: F64 = 0.0
+  let k: I64 = 0
+  while k < d.n {
+    acc = acc + binomial_pmf(d, k)
+    if u <= acc { return k }
+    k = k + 1
+  }
+  d.n
+}
+
+# ---- the Poisson distribution ----------------------------------------------
+
+# Counts of independent events in a fixed interval, with mean (and variance)
+# `lam`. The mean and the variance being equal is the assumption the
+# distribution makes about your data, and the first thing to check before
+# reaching for it: count data is usually overdispersed.
+struct Poisson {
+  lam: F64,
+}
+
+fn poisson(lam: F64) -> Poisson {
+  if lam <= 0.0 { abort("stats.poisson: lam must be positive") }
+  Poisson { lam: lam }
+}
+
+# In log space for the same reason as the binomial: lam^k overflows and
+# exp(-lam) underflows well before the mass itself is out of range.
+fn poisson_pmf(d: Poisson, k: I64) -> F64 {
+  if k < 0 { return 0.0 }
+  f64_exp(0.0 - d.lam + f64_of_i64(k) * f64_log(d.lam) - log_factorial(k))
+}
+
+# P(X <= k) by summation. Unbounded support, so there is no `k >= n` shortcut
+# and the cost is proportional to k.
+fn poisson_cdf(d: Poisson, k: I64) -> F64 {
+  if k < 0 { return 0.0 }
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i <= k {
+    total = total + poisson_pmf(d, i)
+    i = i + 1
+  }
+  fmin(total, 1.0)
+}
+
+# Knuth's multiplication method: draw uniforms and count how many are needed for
+# their product to fall below exp(-lam).
+#
+# Correct for any lam and unusable above about 700, where exp(-lam) underflows
+# to exactly zero and the loop never terminates. The guard converts that into an
+# error rather than a hang, because a hang in a sampler is diagnosed as a
+# deadlock somewhere else entirely.
+#
+# The transformed-rejection method (PTRS) is what a library reaches for above
+# this bound. It is not here for the same reason the incomplete beta is not:
+# it is a page of constants that cannot be checked by reading them.
+let POISSON_KNUTH_LIMIT: F64 = 700.0
+
+fn poisson_sample(d: Poisson, r: random.Rng) -> I64 {
+  if d.lam > POISSON_KNUTH_LIMIT {
+    abort("stats.poisson_sample: lam above 700 needs a method this file does not have")
+  }
+  let target: F64 = f64_exp(0.0 - d.lam)
+  let p: F64 = 1.0
+  let k: I64 = -1
+  while p > target {
+    p = p * random.uniform(r)
+    k = k + 1
+  }
+  k
+}

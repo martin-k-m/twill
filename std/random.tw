@@ -1,0 +1,414 @@
+mode systems
+
+# random.tw: a seeded generator whose state is a value you hold.
+#
+# WHY THIS IS NOT THE BUILT-IN GENERATOR
+#
+# The numeric builtins `rand`, `randn`, `permutation` and `seed` share one
+# generator for the whole program (docs/needs.md NEEDS-55). That is the right
+# shape for a training script, where one `seed(k)` at the top is meant to fix
+# everything below it, and the wrong shape for a library: a function that draws
+# from the global stream changes what every later draw returns, so two
+# independent parts of a program are silently coupled through it, and the
+# coupling only shows up as an irreproducible result once someone reorders two
+# calls that looked unrelated.
+#
+# Everything here takes an `Rng` and mutates that `Rng` and nothing else. Two
+# `Rng` values seeded the same produce the same two streams no matter what order
+# the program draws from them in.
+#
+# THE SEEDING CONTRACT, WHICH IS A PROMISE AND NOT AN IMPLEMENTATION DETAIL
+#
+# For a fixed seed, `new_rng(seed)` followed by any fixed sequence of calls in
+# this module returns the same values:
+#
+#   - on every run of the same program,
+#   - on every platform and every word order,
+#   - in every future version of twill that does not change this file.
+#
+# That holds by construction rather than by testing, and the construction is the
+# reason the algorithm below was chosen over calling into a host RNG. Every step
+# is 64-bit integer arithmetic with defined wrapping (docs/self-hosting.md:
+# `add`, `sub`, `mul` wrap silently on I64) and defined shifts. There is no
+# floating-point in the state, no address, no clock, and no library whose
+# version could move under us. A host generator would give none of that: Go's
+# `math/rand` changed its stream between versions, and a stream that changes is
+# a reproducibility claim that expires.
+#
+# The one place a promise is *not* made: adding a new function to this file is
+# fine, but changing what an existing one draws is a breaking change to every
+# recorded result anyone has, and should be treated as one.
+#
+# THE ALGORITHM
+#
+# xoshiro256** for the stream, splitmix64 to expand the seed into its state.
+# xoshiro256** is chosen over a linear congruential generator because an LCG's
+# low bits have short periods, and over Mersenne Twister because MT needs 2496
+# bytes of state and fails linear-complexity tests that xoshiro passes. It is
+# not cryptographic and must not be used where that matters: the state is
+# recoverable from 256 bits of output. `choice` on a shuffled deck is fine,
+# a session token is not.
+#
+# splitmix64 for seeding is not decoration either. xoshiro's state must not be
+# all zeros (it is a fixed point and the generator dies there), and a user
+# seeding with 0, 1, 2 on three runs would otherwise get three streams that are
+# near-identical for the first few hundred draws, because the state transition
+# only mixes slowly. splitmix64 turns adjacent seeds into unrelated states, so
+# `new_rng(1)` and `new_rng(2)` are independent from the first draw.
+
+# ---- 64-bit helpers --------------------------------------------------------
+#
+# The same constant and the same logical shift as `src/float.tw`, for the same
+# reason: `shr` on I64 is arithmetic, so it smears the sign bit down from the
+# top, and every step below treats the state as unsigned. docs/needs.md
+# NEEDS-85 asks for the unsigned shift that would make these three helpers
+# unnecessary, and NEEDS-86 covers the file-level `let` initialised by the call
+# below.
+
+let SIGN_BIT: I64 = shl(1, 63)
+
+# Logical right shift by 1..63. Clearing the sign bit before the shift and
+# putting it back at its shifted position is the standard fix.
+fn ushr(x: I64, k: I64) -> I64 {
+  if k == 0 { return x }
+  let low: I64 = shr(and(x, not(SIGN_BIT)), k)
+  if and(x, SIGN_BIT) == 0 { return low }
+  or(low, shl(1, 63 - k))
+}
+
+# Rotate left. Only called with k in 1..63: at k == 0 the `64 - k` would be a
+# shift of 64, which the subset masks to 0, and the rotation would lose the
+# high half. Nothing here rotates by zero, and this comment is why it stays
+# that way.
+fn rotl(x: I64, k: I64) -> I64 = or(shl(x, k), ushr(x, 64 - k))
+
+# The three splitmix64 constants. Twill integer literals are decimal, and all
+# three exceed 2^63, so each is written as the signed value with the same 64
+# bits. The hex is given because that is how every reference states them and a
+# reader has to be able to check the port.
+#
+#   GOLDEN = 0x9E3779B97F4A7C15
+#   MIX1   = 0xBF58476D1CE4E5B9
+#   MIX2   = 0x94D049BB133111EB
+let GOLDEN: I64 = -7046029254386353131
+let MIX1: I64 = -4658895280553007687
+let MIX2: I64 = -7723592293110705685
+
+# ---- the generator ---------------------------------------------------------
+
+# Rng is the whole state. `spare` and `has_spare` belong to `normal` and are
+# explained there; they live here because a generator that loses them between
+# calls would throw away half of every Box-Muller pair, and the stream would
+# then depend on how the caller batched their draws.
+struct Rng {
+  s0: I64,
+  s1: I64,
+  s2: I64,
+  s3: I64,
+  spare: F64,
+  has_spare: Bool,
+}
+
+# SplitMix64. Also useful on its own: it is how a caller derives independent
+# child seeds from one parent seed.
+struct SplitMix {
+  state: I64,
+}
+
+fn splitmix_next(sm: SplitMix) -> I64 {
+  sm.state = sm.state + GOLDEN
+  let z: I64 = sm.state
+  let a: I64 = xor(z, ushr(z, 30)) * MIX1
+  let b: I64 = xor(a, ushr(a, 27)) * MIX2
+  xor(b, ushr(b, 31))
+}
+
+# A generator from a seed. Any I64 is a valid seed, including 0: splitmix64 has
+# no bad seeds, which is exactly why it is used for this step.
+fn new_rng(seed: I64) -> Rng {
+  let sm: SplitMix = SplitMix { state: seed }
+  Rng {
+    s0: splitmix_next(sm),
+    s1: splitmix_next(sm),
+    s2: splitmix_next(sm),
+    s3: splitmix_next(sm),
+    spare: 0.0,
+    has_spare: false,
+  }
+}
+
+# Two generators from one, for the case where a caller wants an independent
+# stream (one per worker, one per fold of a cross-validation) without inventing
+# seeds by hand and hoping they do not overlap.
+#
+# The child seed is drawn from the parent, so the parent advances: splitting is
+# a draw, and a program that splits in a loop gets a different child each time
+# rather than the same one.
+fn split_rng(r: Rng) -> Rng = new_rng(next_bits(r))
+
+# The raw 64 bits. Everything below is a transformation of this, so this is the
+# only place the stream is defined.
+fn next_bits(r: Rng) -> I64 {
+  let result: I64 = rotl(r.s1 * 5, 7) * 9
+  let t: I64 = shl(r.s1, 17)
+  r.s2 = xor(r.s2, r.s0)
+  r.s3 = xor(r.s3, r.s1)
+  r.s1 = xor(r.s1, r.s2)
+  r.s0 = xor(r.s0, r.s3)
+  r.s2 = xor(r.s2, t)
+  r.s3 = rotl(r.s3, 45)
+  result
+}
+
+# ---- continuous draws ------------------------------------------------------
+
+# 2^53, the number of representable doubles in [0, 1) at uniform spacing.
+let TWO_53: F64 = 9007199254740992.0
+
+# A uniform draw in [0, 1). Half-open, and the half that is open is the top:
+# `1.0` is never returned.
+#
+# The construction is 53 bits divided by 2^53, not `bits / 2^64` and not
+# `mod 1000000 / 1000000`. A double has a 53-bit significand, so 53 random bits
+# fill it exactly and the division is exact, which means every value produced is
+# equally likely and none is produced twice as often as its neighbour. Using all
+# 64 bits would round, and rounding is what puts a bump at the low end and lets
+# `1.0` appear.
+#
+# The 53 bits are the *top* 53, because xoshiro's lowest bits are the weakest
+# part of its output.
+fn uniform(r: Rng) -> F64 = f64_of_i64(ushr(next_bits(r), 11)) / TWO_53
+
+# A uniform draw in [lo, hi).
+#
+# `lo + (hi - lo) * u` rather than anything cleverer. It can return `hi` when
+# `hi - lo` is large enough that the multiply rounds up, so the half-open
+# promise here is weaker than `uniform`'s, and that is stated rather than
+# papered over with a clamp that would distort the top bin.
+fn uniform_range(r: Rng, lo: F64, hi: F64) -> F64 = lo + (hi - lo) * uniform(r)
+
+# A draw in (0, 1], never zero.
+#
+# `normal` needs `log(u)` and `log(0)` is negative infinity. One draw in 2^53
+# is exactly zero, which is a bug that appears once in a very long run and is
+# then impossible to reproduce from the outside. Shifting to (0, 1] costs
+# nothing and removes it.
+fn uniform_open(r: Rng) -> F64 = (f64_of_i64(ushr(next_bits(r), 11)) + 1.0) / TWO_53
+
+let TWO_PI: F64 = 6.283185307179586
+
+# A standard normal draw, mean 0 and variance 1.
+#
+# Box-Muller in its trigonometric form, not the polar (Marsaglia) form and not
+# a ziggurat.
+#
+# Against polar: the polar form rejects about 21% of pairs, so the number of
+# underlying `next_bits` calls per draw is data-dependent. That is fine for
+# speed and bad for this file, because the reproducibility contract above is
+# easiest to keep when the stream position after n draws is a fixed function of
+# n. Box-Muller consumes exactly two words per pair, always.
+#
+# Against ziggurat: a ziggurat is roughly four times faster and needs 256 table
+# constants that would have to be transcribed correctly with no way to run the
+# language to check them, and its tail fallback reintroduces the same variable
+# consumption. The transcendental calls here are the cost of not having that
+# risk, and the tails are exact rather than approximate all the way out.
+#
+# Both values of the pair are kept. Throwing the second away would double the
+# cost and, worse, make the stream depend on nothing observable: two programs
+# drawing the same count would agree either way, but a program that drew one
+# normal and then a uniform would see a different uniform than the same program
+# with the cache. The cache is in the state so that behaviour is fixed.
+fn normal(r: Rng) -> F64 {
+  if r.has_spare {
+    r.has_spare = false
+    return r.spare
+  }
+  let u1: F64 = uniform_open(r)
+  let u2: F64 = uniform(r)
+  let radius: F64 = f64_sqrt(0.0 - 2.0 * f64_log(u1))
+  let angle: F64 = TWO_PI * u2
+  r.spare = radius * f64_sin(angle)
+  r.has_spare = true
+  radius * f64_cos(angle)
+}
+
+# A normal draw with a given mean and standard deviation.
+#
+# `sd` is the standard deviation, not the variance. Every distribution in this
+# module and in `std/stats.tw` is parameterised the same way, because mixing the
+# two conventions across a codebase is the classic way to be off by a square
+# root and still get plausible numbers.
+fn normal_with(r: Rng, mean: F64, sd: F64) -> F64 = mean + sd * normal(r)
+
+# ---- integer draws ---------------------------------------------------------
+
+# The number of bits needed to represent every value in 0..n-1.
+fn bits_for(n: I64) -> I64 {
+  let k: I64 = 0
+  let limit: I64 = 1
+  while limit < n {
+    limit = limit * 2
+    k = k + 1
+  }
+  k
+}
+
+# A uniform integer in [0, n), unbiased.
+#
+# Rejection on a power-of-two mask, not `bits % n`. The modulo is the standard
+# mistake: 2^64 is not a multiple of n for any n that is not a power of two, so
+# the low residues occur once more often than the high ones. The bias is
+# invisible for small n and reaches 50% when n is near 2^63, and either way it
+# is a bias nobody looks for because the code reads as obviously correct.
+#
+# The mask-and-retry loop draws again when the value lands outside the range.
+# The mask is the smallest power of two at or above n, so the acceptance rate is
+# always above one half and the expected number of draws is under two. It does
+# not terminate in bounded time in principle; in practice the probability of ten
+# consecutive rejections is under one in a thousand.
+fn below(r: Rng, n: I64) -> I64 {
+  if n <= 0 { abort("random.below: bound must be positive") }
+  let mask: I64 = shl(1, bits_for(n)) - 1
+  let v: I64 = and(next_bits(r), mask)
+  while v >= n {
+    v = and(next_bits(r), mask)
+  }
+  v
+}
+
+# A uniform integer in [lo, hi). Empty when hi <= lo, which is an error rather
+# than an empty draw, because there is no value to return.
+fn int_range(r: Rng, lo: I64, hi: I64) -> I64 {
+  if hi <= lo { abort("random.int_range: empty range") }
+  lo + below(r, hi - lo)
+}
+
+# A coin with probability `p` of true.
+#
+# `<` rather than `<=`, so `p == 0.0` is never true (u is never negative and
+# never below zero) and `p == 1.0` is always true (u is never 1.0). Those two
+# ends are worth getting right: a Bernoulli with p = 0 that fires once in 2^53
+# draws is a test that passes for a year.
+fn bernoulli(r: Rng, p: F64) -> Bool = uniform(r) < p
+
+# ---- collections -----------------------------------------------------------
+
+# `xs` shuffled in place, and returned for convenience.
+#
+# Fisher-Yates walking downwards, swapping element i with a uniform pick from
+# 0..i inclusive. The upward variant that picks from the whole array at each
+# step is the well-known broken one: it generates n^n equally likely sequences
+# and there are only n! permutations, so some orderings come out more often.
+#
+# In place, and that is deliberate rather than an optimisation: an `Arr`
+# parameter aliases the caller's array (docs/needs.md NEEDS-71), so a version
+# that pretended to copy would be lying about the aliasing that is already
+# there. `shuffled` below is the copying one, named so the difference is
+# visible at the call site.
+fn shuffle(r: Rng, xs: Arr[F64]) -> Arr[F64] {
+  let i: I64 = len(xs) - 1
+  while i > 0 {
+    let j: I64 = below(r, i + 1)
+    let tmp: F64 = xs[i]
+    xs[i] = xs[j]
+    xs[j] = tmp
+    i = i - 1
+  }
+  xs
+}
+
+fn shuffled(r: Rng, xs: Arr[F64]) -> Arr[F64] {
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    push(out, xs[i])
+    i = i + 1
+  }
+  shuffle(r, out)
+}
+
+# The same shuffle over indices, which is what a caller shuffling rows of a
+# matrix or a parallel pair of arrays actually needs: shuffling two arrays
+# separately with the same generator does not keep them aligned, and shuffling
+# them with two generators seeded the same is a trap the first time someone
+# draws from one of them for another purpose.
+fn permutation(r: Rng, n: I64) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(out, i)
+    i = i + 1
+  }
+  let k: I64 = n - 1
+  while k > 0 {
+    let j: I64 = below(r, k + 1)
+    let tmp: I64 = out[k]
+    out[k] = out[j]
+    out[j] = tmp
+    k = k - 1
+  }
+  out
+}
+
+# One element, uniformly. Returns the value, not the index; `below(r, len(xs))`
+# is the index form and is one call, so there is no `choice_index`.
+fn choice(r: Rng, xs: Arr[F64]) -> F64 {
+  if len(xs) == 0 { abort("random.choice: empty array") }
+  xs[below(r, len(xs))]
+}
+
+# `k` elements without replacement, in the order they were selected.
+#
+# A partial Fisher-Yates over an index permutation rather than "draw and retry
+# if already taken", which degrades badly as k approaches n: the last element of
+# a sample of size n costs n draws on average.
+fn sample(r: Rng, xs: Arr[F64], k: I64) -> Arr[F64] {
+  let n: I64 = len(xs)
+  if k > n { abort("random.sample: k exceeds the population") }
+  let idx: Arr[I64] = permutation(r, n)
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < k {
+    push(out, xs[idx[i]])
+    i = i + 1
+  }
+  out
+}
+
+# `k` elements with replacement. Distinct from `sample` because the difference
+# matters statistically and both are wanted: a bootstrap resample is this one,
+# a train/test split is `sample`.
+fn choices(r: Rng, xs: Arr[F64], k: I64) -> Arr[F64] {
+  if len(xs) == 0 { abort("random.choices: empty array") }
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < k {
+    push(out, xs[below(r, len(xs))])
+    i = i + 1
+  }
+  out
+}
+
+# n independent uniform draws in [0, 1), as an array. The array-shaped forms
+# exist because filling one is the common case and a loop at every call site is
+# where an off-by-one in the count lives.
+fn uniforms(r: Rng, n: I64) -> Arr[F64] {
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(out, uniform(r))
+    i = i + 1
+  }
+  out
+}
+
+fn normals(r: Rng, n: I64) -> Arr[F64] {
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(out, normal(r))
+    i = i + 1
+  }
+  out
+}
