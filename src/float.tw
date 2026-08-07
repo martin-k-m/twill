@@ -1514,3 +1514,176 @@ fn f64_of_str(s: Str) -> Opt[F64] {
   if not p.ok { return None }
   Some(f64_from_bits(p.bits))
 }
+
+# ---- narrow binary floats --------------------------------------------------
+#
+# f32, bf16 and f16, as bit patterns held in an I64, with correctly rounded
+# conversion to and from F64. `docs/dtypes.md` is the design these implement and
+# `src/tensor.tw` is the only caller.
+#
+# This section sits at the end of the file rather than next to the F64 bit
+# layout above because it reads `INF_BITS`, which the parsing section defines.
+#
+# WHY ONE PARAMETERISED ROUTINE AND NOT THREE
+#
+# The three formats differ only in how many bits the exponent and the mantissa
+# get. Written out three times, the rounding step is transcribed three times and
+# there are three chances to write `>=` where `>` belongs. Written once, a
+# harness that checks f16 against a reference has also checked the arithmetic
+# that f32 and bf16 use. That is the same argument the exact-decimal path at the
+# top of this file rests on: fewer copies of the hard part.
+#
+# WHY THE ROUNDING IS NOT A BIT CHOP
+#
+# bf16 is the top 16 bits of an f32 and it is very tempting to convert by
+# dropping the bottom 16. That is round-toward-zero, and it is wrong in a way
+# that does not average out: every magnitude it changes, it shrinks. Over a
+# tensor the errors do not cancel, they sum, and a weight matrix quantised that
+# way is systematically smaller than the one it came from. Round-to-nearest-even
+# is the IEEE default precisely because its error has no such bias.
+
+struct FloatFmt {
+  mant_bits: I64,
+  exp_bits: I64,
+  # 2^(exp_bits - 1) - 1. Stored rather than recomputed so that a format is one
+  # literal to read and check.
+  bias: I64,
+}
+
+let FMT_F32: FloatFmt = FloatFmt { mant_bits: 23, exp_bits: 8, bias: 127 }
+let FMT_BF16: FloatFmt = FloatFmt { mant_bits: 7, exp_bits: 8, bias: 127 }
+let FMT_F16: FloatFmt = FloatFmt { mant_bits: 10, exp_bits: 5, bias: 15 }
+
+fn fmt_width(f: FloatFmt) -> I64 = f.exp_bits + f.mant_bits + 1
+
+# The all-ones exponent field, and the encoding of an infinity with it.
+fn fmt_exp_all(f: FloatFmt) -> I64 = shl(1, f.exp_bits) - 1
+fn fmt_inf(f: FloatFmt) -> I64 = shl(fmt_exp_all(f), f.mant_bits)
+
+# F64 bits to `f`'s bits, round to nearest, ties to even.
+fn f_narrow(bits: I64, f: FloatFmt) -> I64 {
+  let sbit: I64 = shl(ushr(bits, 63), f.exp_bits + f.mant_bits)
+  let inf: I64 = fmt_inf(f)
+
+  let be: I64 = and(ushr(bits, MANT_BITS), EXP_MASK)
+  let m: I64 = and(bits, MANT_MASK)
+
+  if be == EXP_MASK {
+    if m == 0 { return or(sbit, inf) }
+    # A NaN stays a NaN and the payload is dropped rather than truncated. A
+    # payload whose only set bits fall off the narrow end would truncate to
+    # zero, and a NaN with a zero mantissa is an infinity: the one rewrite a
+    # conversion must never perform.
+    return or(sbit, or(inf, shl(1, f.mant_bits - 1)))
+  }
+
+  # value = sig * 2^(e - 52), with the implicit bit supplied for a normal and
+  # the subnormal exponent pinned at the smallest normal's, exactly as `unpack`
+  # above does it.
+  let sig: I64 = m
+  let e: I64 = BIAS + 1
+  if be != 0 {
+    sig = or(m, IMPLICIT_BIT)
+    e = be + BIAS
+  }
+  if sig == 0 { return sbit }
+
+  # How many low bits of the significand the target cannot hold, and where the
+  # exponent field starts. `ebase` is the biased exponent minus one, because the
+  # implicit bit still sitting in `q` supplies the missing one when the two are
+  # added below.
+  let shift: I64 = MANT_BITS - f.mant_bits
+  let ebase: I64 = e + f.bias - 1
+  let emin: I64 = 1 - f.bias
+  if e < emin {
+    # Below the target's smallest normal the exponent stops moving and the
+    # mantissa loses bits instead. Handling it by shifting further, rather than
+    # as a separate case, is what makes the rounding below correct for
+    # subnormals with no second copy of it.
+    shift = shift + (emin - e)
+    ebase = 0
+  }
+
+  # `sig` is under 2^53, so from a shift of 54 the quotient is zero and the
+  # remainder is strictly under the halfway point, which rounds down. Returning
+  # here is not an approximation; it is also what keeps every shift below the
+  # width of an I64 so `ushr` and the mask stay meaningful.
+  if shift >= 54 { return sbit }
+
+  let q: I64 = ushr(sig, shift)
+  let rem: I64 = and(sig, shl(1, shift) - 1)
+  let half: I64 = shl(1, shift - 1)
+  if rem > half or (rem == half and and(q, 1) != 0) {
+    q = q + 1
+  }
+
+  # Both carries fall out of the addition. A normal whose mantissa rounded up to
+  # 2^(mant_bits+1) adds one to the exponent field and lands on a zero mantissa,
+  # and a subnormal that rounded up to 2^mant_bits becomes the smallest normal.
+  # Neither needs a test, which is why the assembly is `+` and not `or`.
+  let out: I64 = shl(ebase, f.mant_bits) + q
+  if out >= inf { return or(sbit, inf) }
+  or(sbit, out)
+}
+
+# `f`'s bits to F64 bits. Exact in every case: every one of the three formats is
+# a strict subset of F64, so nothing rounds here.
+fn f_widen(nb: I64, f: FloatFmt) -> I64 {
+  let expall: I64 = fmt_exp_all(f)
+  let mmask: I64 = shl(1, f.mant_bits) - 1
+  let s64: I64 = shl(and(ushr(nb, f.exp_bits + f.mant_bits), 1), 63)
+  let ef: I64 = and(ushr(nb, f.mant_bits), expall)
+  let mf: I64 = and(nb, mmask)
+  let grow: I64 = MANT_BITS - f.mant_bits
+
+  if ef == expall {
+    if mf == 0 { return or(s64, INF_BITS) }
+    # Left-aligned, so the leading payload bits survive and the result cannot
+    # collapse to an infinity.
+    return or(s64, or(INF_BITS, shl(mf, grow)))
+  }
+
+  if ef == 0 {
+    if mf == 0 { return s64 }
+    # A subnormal of the narrow format is a normal F64, so it has to be
+    # normalised: shift until the implicit bit appears, paying an exponent for
+    # each shift.
+    let e: I64 = 1 - f.bias
+    while and(mf, shl(1, f.mant_bits)) == 0 {
+      mf = shl(mf, 1)
+      e = e - 1
+    }
+    return or(s64, or(shl(e - BIAS, MANT_BITS), shl(and(mf, mmask), grow)))
+  }
+
+  or(s64, or(shl(ef - f.bias - BIAS, MANT_BITS), shl(mf, grow)))
+}
+
+# The value F64 takes when it is stored in `f` and read back. This is the
+# rounding that `src/tensor.tw` applies on every store into a narrow tensor, and
+# it is the whole observable content of a dtype until the packed buffer of
+# NEEDS-101 lands.
+fn f_round(x: F64, f: FloatFmt) -> F64 = f64_from_bits(f_widen(f_narrow(f64_bits(x), f), f))
+
+fn f64_to_f32_bits(x: F64) -> I64 = f_narrow(f64_bits(x), FMT_F32)
+fn f64_of_f32_bits(b: I64) -> F64 = f64_from_bits(f_widen(b, FMT_F32))
+
+fn f64_to_bf16_bits(x: F64) -> I64 = f_narrow(f64_bits(x), FMT_BF16)
+fn f64_of_bf16_bits(b: I64) -> F64 = f64_from_bits(f_widen(b, FMT_BF16))
+
+fn f64_to_f16_bits(x: F64) -> I64 = f_narrow(f64_bits(x), FMT_F16)
+fn f64_of_f16_bits(b: I64) -> F64 = f64_from_bits(f_widen(b, FMT_F16))
+
+fn round_f32(x: F64) -> F64 = f_round(x, FMT_F32)
+fn round_bf16(x: F64) -> F64 = f_round(x, FMT_BF16)
+fn round_f16(x: F64) -> F64 = f_round(x, FMT_F16)
+
+# f32 to bf16 in one rounding.
+#
+# The obvious route is f32 to F64 to bf16, and it is correct here only because
+# widening to F64 is exact: the single rounding still happens in `f_narrow`. The
+# route that is *not* correct is f64 to f32 to bf16 for a value that started as
+# an F64, which rounds twice and disagrees with a single rounding on the values
+# that land exactly halfway after the first one. `src/tensor.tw` casts through
+# `f_round` on the source dtype's F64 value for that reason.
+fn f32_bits_to_bf16_bits(b: I64) -> I64 = f_narrow(f_widen(b, FMT_F32), FMT_BF16)
