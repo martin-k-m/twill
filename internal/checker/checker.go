@@ -442,6 +442,22 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 	return tUnknown{}
 }
 
+// elementCount multiplies a shape out, when every dimension is known.
+//
+// A negative dimension is this checker's way of saying "not known yet", and one
+// of those makes the product meaningless rather than small, so it reports
+// nothing instead of a number that would produce a confident wrong answer.
+func elementCount(dims []int) (int, bool) {
+	n := 1
+	for _, d := range dims {
+		if d < 0 {
+			return 0, false
+		}
+		n *= d
+	}
+	return n, true
+}
+
 // listDims reads the shape of a nested list literal, when it is one a tensor
 // can be built from.
 //
@@ -987,6 +1003,21 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "reshape", "broadcast_to":
 		if len(ex.Args) >= 2 {
 			if dims, ok := constShape(ex.Args[1:]); ok {
+				// A reshape has to preserve the element count, and when both
+				// sides are known that is arithmetic the checker can do. This
+				// is the second most common shape mistake after a bad matmul
+				// and it used to reach the runtime untouched.
+				if name == "reshape" {
+					if in, ok := argTypes[0].(tTensor); ok {
+						if from, ok := elementCount(in.dims); ok {
+							if to, ok := elementCount(dims); ok && from != to {
+								c.report(ex.Line,
+									"reshape changes the number of elements: %s has %d, %s needs %d",
+									dimsString(tTensor{dims: in.dims}), from, dimsString(tTensor{dims: dims}), to)
+							}
+						}
+					}
+				}
 				return tTensor{dims: dims}
 			}
 		}
@@ -1214,6 +1245,24 @@ func convResult(argTypes []Type) Type {
 
 // reduceResult handles sum/mean/max/min: no axis reduces to a scalar; a
 // constant axis over a known shape removes that dimension.
+// reportAxis names an axis that does not exist on the tensor it was given.
+//
+// This was detected and then swallowed: both reduction paths already worked out
+// that the axis was out of range and returned an unknown type, which silences
+// everything downstream as well. Detecting a mistake and saying nothing is the
+// worst of the three options.
+func (c *checker) reportAxis(ex *ast.Call, t tTensor) {
+	c.report(ex.Line, "axis out of range for %s: it has %d %s, numbered 0 to %d",
+		dimsString(t), len(t.dims), plural(len(t.dims), "axis", "axes"), len(t.dims)-1)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
 	var u unitMap // reductions preserve the input's unit
 	if t, ok := argTypes[0].(tTensor); ok {
@@ -1231,6 +1280,7 @@ func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
 				if ax >= 0 && ax < len(t.dims) {
 					return tTensor{dims: removeDim(t.dims, ax), unit: u}
 				}
+				c.reportAxis(ex, t)
 			}
 		}
 	}
@@ -1256,6 +1306,7 @@ func (c *checker) axisReduceResult(ex *ast.Call, argTypes []Type) Type {
 		axis += len(t.dims)
 	}
 	if axis < 0 || axis >= len(t.dims) {
+		c.reportAxis(ex, t)
 		return tUnknown{}
 	}
 	return tTensor{dims: removeDim(t.dims, axis)}

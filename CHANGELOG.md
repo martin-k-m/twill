@@ -13,6 +13,16 @@
   inventing a shape for it would produce a second, imaginary error downstream
   instead of the real one.
 
+- **A reshape that changes the element count is reported.** `reshape(zeros(2, 3),
+  4, 2)` asks for eight elements from six. The message names both counts, since
+  the useful question is which one is wrong.
+
+- **An axis that does not exist is reported.** Both reduction paths already
+  worked out that the axis was out of range and then returned an unknown type,
+  which silenced everything downstream as well. Detecting a mistake and saying
+  nothing is the worst of the three options. Negative axes still count from the
+  end.
+
 ## [1.2.0] - 2026-08-06
 
 ### Added

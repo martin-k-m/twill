@@ -112,3 +112,33 @@ print(a @ a)`) {
 		}
 	}
 }
+
+func TestReshapeThatChangesTheElementCount(t *testing.T) {
+	// The second most common shape mistake after a bad matmul, and it used to
+	// reach the runtime untouched.
+	wantOne(t, "let x = zeros(2, 3)\nprint(reshape(x, 4, 2))", "changes the number of elements")
+}
+
+func TestReshapeThatFitsIsQuiet(t *testing.T) {
+	if diags := diagnostics(t, "let x = zeros(2, 3)\nprint(reshape(x, 3, 2))"); len(diags) != 0 {
+		t.Fatalf("a valid reshape was reported: %v", diags)
+	}
+}
+
+func TestAnAxisThatDoesNotExistIsReported(t *testing.T) {
+	// Both reduction paths already worked this out and then returned an unknown
+	// type, which silenced everything downstream too.
+	wantOne(t, "let x = zeros(2, 3)\nprint(sum(x, 7))", "axis out of range")
+	wantOne(t, "let x = zeros(2, 3)\nprint(argmax(x, 5))", "axis out of range")
+}
+
+func TestANegativeAxisStillCountsFromTheEnd(t *testing.T) {
+	for _, src := range []string{
+		"let x = zeros(2, 3)\nprint(sum(x, -1))",
+		"let x = zeros(2, 3)\nprint(mean(x, 0))",
+	} {
+		if diags := diagnostics(t, src); len(diags) != 0 {
+			t.Errorf("%q was reported: %v", src, diags)
+		}
+	}
+}
