@@ -11,11 +11,23 @@ mode systems
 # whole of internal/interp/interp.go's structure, and it is the part that is
 # genuinely twill's business.
 #
-# What is not here: the ninety-odd builtins in internal/interp/builtins.go, and
-# the arithmetic underneath the operators. Those reach into the tensor engine,
-# which docs/self-hosting.md section 2.2 puts in the native core. The calling
-# convention that would let this file reach them is NEEDS-25. Where a function
-# below needs one, it names the primitive it needs rather than approximating it.
+# Also here, since the port of internal/interp/builtins.go landed: the builtin
+# table, all ninety-five of them, with the arity handling, the argument
+# coercions and the error text of the Go originals.
+#
+# What those builtins do not carry is the arithmetic. src/tensor.tw has the
+# kernels now, so this file calls them by the interface that file declares at
+# its head rather than by a native calling convention. The kernels that file
+# does not have yet, and that the builtins below name anyway, are NEEDS-54.
+#
+# The one thing grad needs that neither file has is a way for the arithmetic
+# inside an interpreted f to record on a tape. That is NEEDS-75, and it is the
+# only hole in this file that is a hole in the middle of something rather than
+# at its edge.
+#
+# What is still not here: the arithmetic underneath the *operators*. eval_binary
+# below refuses a tensor operand and points at NEEDS-25. That is now a smaller
+# job than it was, since tensor.binary exists, but it is a separate one.
 #
 # The evaluator is a tree walker, exactly as the bootstrap is. docs/rewrite-plan
 # Stage 1 replaces it with a bytecode VM, and when that lands this file becomes
@@ -55,6 +67,26 @@ struct RecordVal {
 
 struct BuiltinVal {
   name: Str,
+  # The function a derivative builtin closed over. `grad(f)` does not compute
+  # anything: it returns a second builtin that remembers f and differentiates it
+  # when that one is called. The Go side gets this from a Go closure over `f`;
+  # here the captured value is a field, because a builtin is a name plus what it
+  # captured and nothing else.
+  #
+  # It is also what refuse_nested_grad reads: the returned builtin is named
+  # "grad(fn)", and seeing that name in argument position is how grad(grad(f))
+  # is recognised.
+  captured: Opt[Value],
+}
+
+fn plain_builtin(name: Str) -> Value = VBuiltin(BuiltinVal { name: name, captured: None })
+
+# A value the native core owns and twill only passes around: a fitted gbm model
+# is the only one today. It has no operations of its own, which is the point;
+# gbm_predict is the only thing that can read it, and it checks the kind.
+struct ForeignVal {
+  kind: Str,
+  handle: I64,
 }
 
 enum Value {
@@ -71,6 +103,7 @@ enum Value {
   VRecord(RecordVal),
   VClosure(Closure),
   VBuiltin(BuiltinVal),
+  VForeign(ForeignVal),
   VUnit,
 }
 
@@ -84,6 +117,7 @@ fn type_name(v: Value) -> Str {
     VRecord(_) => "record",
     VClosure(_) => "function",
     VBuiltin(_) => "builtin",
+    VForeign(f) => f.kind,
     VUnit => "unit",
   }
 }
@@ -484,7 +518,7 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
         Some(v) => Ok(v),
         None => {
           if is_builtin(x.name) {
-            return Ok(VBuiltin(BuiltinVal { name: x.name }))
+            return Ok(plain_builtin(x.name))
           }
           Err(runtime_error(x.line, bytes.concat("undefined variable ", quoted(x.name))))
         },
@@ -764,9 +798,18 @@ fn eval_call(x: ast.Call, env: Env) -> Res[Value, RuntimeError] {
 fn apply(callee: Value, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   match callee {
     VClosure(c) => call_closure(c, args, line),
-    # The builtin table is the native core's surface. NEEDS-25.
-    VBuiltin(b) => Err(runtime_error(line, bytes.concat("builtin ", bytes.concat(quoted(b.name),
-      " needs the native core (NEEDS-25)")))),
+    VBuiltin(b) => {
+      # The arity check happens here rather than inside each builtin, because
+      # the Go side does it in Apply and the message names the builtin, not the
+      # argument. A variadic builtin checks its own count and says what it
+      # wanted, which is why those messages read differently.
+      let want: I64 = builtin_arity(b.name)
+      if want >= 0 and want != len(args) {
+        return Err(runtime_error(line, bytes.concat(b.name, bytes.concat(" expects ",
+          bytes.concat(str(want), bytes.concat(" argument(s), got ", str(len(args))))))))
+      }
+      call_builtin(b, args, line)
+    },
     _ => Err(runtime_error(line, bytes.concat("cannot call a ", type_name(callee)))),
   }
 }
@@ -910,3 +953,1911 @@ fn quoted(s: Str) -> Str = str_quote(s)
 # dispatch uses, and merging them before the dispatch exists would be guessing.
 # NEEDS-52.
 fn is_builtin(name: Str) -> Bool = builtin_exists(name)
+
+# ---- builtins --------------------------------------------------------------
+#
+# The port of internal/interp/builtins.go. Ninety-five names, and the contract
+# is stricter than "same behaviour": the differential harness compares stderr
+# byte for byte, so every message below is the Go message and not an improved
+# one. Where a message reads awkwardly, it reads awkwardly on both sides.
+#
+# The kernels are not here. A builtin's job is the part that is twill's: decide
+# how many arguments it takes, coerce them, default an axis, and name the
+# kernel. That split is exactly where the Go file's `def` closures stop too,
+# which is why the port is a transcription rather than a redesign.
+#
+# The one structural difference: Go installs builtins by defining closures into
+# the global environment, so a builtin is a first-class function value carrying
+# its own body. Here a builtin is a name, and dispatch is by name. The reason is
+# that a closure over the interpreter is the thing that would need the native
+# calling convention to exist before any of this could be written down at all;
+# a name plus a switch needs nothing. `grad(f)` is the one case that has to
+# carry a value with it, and BuiltinVal.captured is that.
+
+# A membership test over a space-separated list, the same shape as check.tw's
+# `in_set`. Padding both sides is what stops "max" from matching inside
+# "cummax": the space-delimited needle can only land on a whole word.
+fn in_words(list: Str, name: Str) -> Bool {
+  let hay: Str = bytes.concat(" ", bytes.concat(list, " "))
+  let needle: Str = bytes.concat(" ", bytes.concat(name, " "))
+  bytes.index_of(hay, needle) >= 0
+}
+
+let ARITY1: Str = "relu exp log sin cos tanh sigmoid sqrt square abs grad grads value_and_grad jacobian hessian tensor scalar seed permutation eye shape len item str int floor ceil round read_csv read_frame load columns"
+
+let ARITY2: Str = "pow matmul dot conv2d maxpool2d gather maximum minimum greater less greater_equal less_equal equal concat map append gbm_predict write_frame save field map_leaves zip_leaves"
+
+# The declared arity, or -1 for variadic. Go carries this on the Builtin value
+# and checks it in Apply before the body runs, so a wrong count never reaches
+# the coercions and never produces the coercion's message instead.
+fn builtin_arity(name: Str) -> I64 {
+  if in_words(ARITY1, name) { return 1 }
+  if in_words(ARITY2, name) { return 2 }
+  if in_words("where clip fold with_field", name) { return 3 }
+  # The builtins returned by grad/grads/value_and_grad take whatever the
+  # function they wrap takes; jacobian's and hessian's take exactly one.
+  if in_words("jacobian(fn) hessian(fn)", name) { return 1 }
+  -1
+}
+
+# ---- argument coercion -----------------------------------------------------
+#
+# These are the Go file's asTensor/scalarOf/intOf/indicesOf/shapeFromArgs/
+# toItems, and they matter more than their size: every builtin's first failure
+# mode goes through one of them, so their wording is most of the error surface.
+
+fn arg_tensor(v: Value, who: Str, line: I64) -> Res[tensor.Tensor, RuntimeError] {
+  match as_tensor(v) {
+    Some(t) => Ok(t),
+    None => Err(runtime_error(line, bytes.concat(who, " expects a tensor/number"))),
+  }
+}
+
+# A single number, whether it arrived as a Num or as a one-element tensor of any
+# rank. Deliberately looser than rank0_number above: `sum(x, shape(y)[0])` hands
+# an axis over as a rank-0 tensor and a caller writing `t[0:1]` hands one over as
+# a [1], and both are one number.
+fn single_number(v: Value) -> Opt[F64] {
+  match v {
+    VNum(x) => Some(x),
+    VTensor(t) => {
+      if len(t.data) == 1 { return Some(t.data[0]) }
+      None
+    },
+    _ => None,
+  }
+}
+
+# scalarOf reads a single number. It reads a Num straight out rather than
+# widening it first, because a builtin that wants a scalar wants an axis or a
+# bound and would throw the tensor away again.
+#
+# The two failure messages are different on purpose: a many-element tensor is a
+# caller who passed the right kind of thing at the wrong size and is told
+# "expects a scalar", and anything else is told what the builtin takes at all.
+fn scalar_of(v: Value, who: Str, line: I64) -> Res[F64, RuntimeError] {
+  match single_number(v) {
+    Some(x) => return Ok(x),
+    None => unit,
+  }
+  match as_tensor(v) {
+    Some(_) => Err(runtime_error(line, bytes.concat(who, " expects a scalar"))),
+    None => Err(runtime_error(line, bytes.concat(who, " expects a tensor/number"))),
+  }
+}
+
+fn int_of(v: Value, who: Str, line: I64) -> Res[I64, RuntimeError] =
+  Ok(i64_of_f64(f64_trunc(scalar_of(v, who, line)?)))
+
+# Whether v is a single number as opposed to a sequence of them. Used where a
+# scalar and a one-element sequence have to mean different things, which is
+# `split` and only `split`.
+fn is_scalar_value(v: Value) -> Bool {
+  match v {
+    VNum(_) => true,
+    VTensor(t) => len(t.data) == 1,
+    _ => false,
+  }
+}
+
+# Go's %v on a []int: space-separated, no commas, and that is what the gbm and
+# indices messages print. tensor.shape_string writes "[2, 3]" for the
+# diagnostics the checker emits, so the two cannot share a formatter without
+# changing one side's output.
+fn shape_go(shape: Arr[I64]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(shape) {
+    push(parts, str(shape[i]))
+    i = i + 1
+  }
+  bytes.concat("[", bytes.concat(bytes.join(parts, " "), "]"))
+}
+
+# A sequence of integer indices from either a list of scalars or a 1-D tensor.
+# A bare number is one index, which is what makes `gather(x, 3)` legal.
+fn indices_of(v: Value, who: Str, line: I64) -> Res[Arr[I64], RuntimeError] {
+  match v {
+    VNum(x) => {
+      let one: Arr[I64] = arr_new()
+      push(one, i64_of_f64(f64_trunc(x)))
+      Ok(one)
+    },
+    VList(l) => {
+      let out: Arr[I64] = arr_new()
+      let i: I64 = 0
+      while i < len(l.items) {
+        push(out, int_of(l.items[i], who, line)?)
+        i = i + 1
+      }
+      Ok(out)
+    },
+    VTensor(t) => {
+      if len(t.shape) > 1 {
+        return Err(runtime_error(line, bytes.concat(who,
+          bytes.concat(" expects a 1-D tensor or list of indices, got shape ", shape_go(t.shape)))))
+      }
+      let out: Arr[I64] = arr_new()
+      let i: I64 = 0
+      while i < len(t.data) {
+        push(out, i64_of_f64(f64_trunc(t.data[i])))
+        i = i + 1
+      }
+      Ok(out)
+    },
+    _ => Err(runtime_error(line, bytes.concat(who, " expects a list or 1-D tensor of indices"))),
+  }
+}
+
+# A shape from either a spread of dimensions or a single list of them, so
+# `zeros(2, 3)` and `zeros(shape(x))` both work. A single non-list argument
+# falls through to the spread case and gives a 1-D shape, which is why
+# `zeros(5)` is a vector and not a scalar.
+fn shape_from_args(args: Arr[Value], who: Str, line: I64) -> Res[Arr[I64], RuntimeError] {
+  if len(args) == 1 {
+    match args[0] {
+      VList(l) => {
+        let dims: Arr[I64] = arr_new()
+        let i: I64 = 0
+        while i < len(l.items) {
+          push(dims, int_of(l.items[i], who, line)?)
+          i = i + 1
+        }
+        return Ok(dims)
+      },
+      _ => unit,
+    }
+  }
+  let dims: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(args) {
+    push(dims, int_of(args[i], who, line)?)
+    i = i + 1
+  }
+  Ok(dims)
+}
+
+# The elements of a sequence. A 1-D tensor iterates as its numbers; a tensor of
+# any higher rank does not, and the message says "1-D" rather than pretending
+# rows would do, because `map` over the rows of a matrix and `map` over its
+# elements are different enough that guessing is worse than refusing.
+fn to_items(v: Value, who: Str, line: I64) -> Res[Arr[Value], RuntimeError] {
+  match v {
+    VList(l) => return Ok(l.items),
+    VTensor(t) => {
+      if len(t.shape) == 1 {
+        let out: Arr[Value] = arr_new()
+        let i: I64 = 0
+        while i < len(t.data) {
+          push(out, VTensor(tensor.scalar(t.data[i])))
+          i = i + 1
+        }
+        return Ok(out)
+      }
+    },
+    _ => unit,
+  }
+  Err(runtime_error(line, bytes.concat(who, " expects a list or 1-D tensor")))
+}
+
+# A kernel's Err is a bare message; a runtime error carries the call's line. One
+# place converts, so no builtin below has to remember to.
+fn lift(r: Res[tensor.Tensor, Str], line: I64) -> Res[tensor.Tensor, RuntimeError] {
+  match r {
+    Ok(t) => Ok(t),
+    Err(m) => Err(runtime_error(line, m)),
+  }
+}
+
+fn lift_v(r: Res[tensor.Tensor, Str], line: I64) -> Res[Value, RuntimeError] =
+  Ok(VTensor(lift(r, line)?))
+
+# ---- the dispatch ----------------------------------------------------------
+
+let UNARY_MATH: Str = "relu exp log sin cos tanh sigmoid sqrt square"
+let BIN_TENSOR: Str = "matmul dot conv2d maximum minimum greater less greater_equal less_equal equal"
+let REDUCTIONS: Str = "sum mean max min prod median"
+let SCANS: Str = "cumsum cumprod cummax cummin"
+let LAST_AXIS: Str = "argmax argmin flip diff"
+let ELEM_ROUND: Str = "floor ceil round"
+let DERIVATIVES: Str = "grad grads value_and_grad jacobian hessian"
+let DERIVED: Str = "grad(fn) grads(fn) value_and_grad(fn) jacobian(fn) hessian(fn)"
+let TREE_OPS: Str = "map zip fold append enumerate map_leaves zip_leaves"
+let MAKERS: Str = "tensor scalar zeros ones fill randn rand seed permutation eye"
+let INSPECT: Str = "shape len item range list str int"
+let FILE_OPS: Str = "read_csv read_frame write_frame save load columns field with_field"
+
+fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let name: Str = b.name
+  if bytes.equal(name, "print") { return bi_print(args) }
+  if in_words(UNARY_MATH, name) { return bi_unary_math(name, args, line) }
+  if bytes.equal(name, "abs") { return bi_abs(args, line) }
+  if bytes.equal(name, "pow") { return bi_pow(args, line) }
+  if in_words(BIN_TENSOR, name) { return bi_binary(name, args, line) }
+  if bytes.equal(name, "maxpool2d") { return bi_maxpool2d(args, line) }
+  if bytes.equal(name, "gather") { return bi_gather(args, line) }
+  if bytes.equal(name, "where") { return bi_where(args, line) }
+  if bytes.equal(name, "clip") { return bi_clip(args, line) }
+  if in_words(REDUCTIONS, name) { return bi_reduce(name, args, line) }
+  if in_words("sort argsort", name) { return bi_sorting(name, args, line) }
+  if in_words("topk argtopk", name) { return bi_topping(name, args, line) }
+  if in_words(LAST_AXIS, name) { return bi_last_axis(name, args, line) }
+  if bytes.equal(name, "roll") { return bi_roll(args, line) }
+  if in_words("softmax logsumexp", name) { return bi_last_axis_op(name, args, line) }
+  if in_words("reshape broadcast_to", name) { return bi_reshaping(name, args, line) }
+  if bytes.equal(name, "transpose") { return bi_transpose(args, line) }
+  if bytes.equal(name, "einsum") { return bi_einsum(args, line) }
+  if bytes.equal(name, "concat") { return bi_concat(args, line) }
+  if bytes.equal(name, "split") { return bi_split(args, line) }
+  if in_words(SCANS, name) { return bi_scan(name, args, line) }
+  if in_words(ELEM_ROUND, name) { return bi_elem_round(name, args, line) }
+  if in_words(DERIVATIVES, name) { return bi_derivative(name, args, line) }
+  if in_words(DERIVED, name) { return bi_derived(b, args, line) }
+  if in_words(TREE_OPS, name) { return bi_tree(name, args, line) }
+  if in_words(MAKERS, name) { return bi_make(name, args, line) }
+  if in_words(INSPECT, name) { return bi_inspect(name, args, line) }
+  if in_words(FILE_OPS, name) { return bi_files(name, args, line) }
+  if in_words("gbm_fit gbm_predict", name) { return bi_gbm(name, args, line) }
+  # Unreachable through eval_expr, which only makes a VBuiltin for a name
+  # is_builtin accepts. Reachable if the two tables drift, which is NEEDS-52,
+  # and saying so is better than returning unit.
+  Err(runtime_error(line, bytes.concat("builtin ", bytes.concat(quoted(name),
+    " is named in the builtin table but has no implementation"))))
+}
+
+# ---- I/O -------------------------------------------------------------------
+
+# print writes one line with the arguments separated by single spaces. The line
+# ending is the sink's, not print's: the Go interpreter is constructed with an
+# `out func(string)` so a test or the REPL can capture output without going
+# near a file descriptor. NEEDS-56.
+fn bi_print(args: Arr[Value]) -> Res[Value, RuntimeError] {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(args) {
+    push(parts, format_value(args[i]))
+    i = i + 1
+  }
+  emit_line(bytes.join(parts, " "))
+  Ok(VUnit)
+}
+
+# ---- differentiable elementwise and binary ops -----------------------------
+
+fn bi_unary_math(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  if bytes.equal(name, "relu") { return Ok(VTensor(tensor.unary(tensor.OpRelu, t))) }
+  if bytes.equal(name, "exp") { return Ok(VTensor(tensor.unary(tensor.OpExp, t))) }
+  if bytes.equal(name, "log") { return Ok(VTensor(tensor.unary(tensor.OpLog, t))) }
+  if bytes.equal(name, "sin") { return Ok(VTensor(tensor.unary(tensor.OpSin, t))) }
+  if bytes.equal(name, "cos") { return Ok(VTensor(tensor.unary(tensor.OpCos, t))) }
+  if bytes.equal(name, "tanh") { return Ok(VTensor(tensor.unary(tensor.OpTanh, t))) }
+  if bytes.equal(name, "sigmoid") { return Ok(VTensor(tensor.unary(tensor.OpSigmoid, t))) }
+  if bytes.equal(name, "sqrt") { return Ok(VTensor(tensor.unary(tensor.OpSqrt, t))) }
+  Ok(VTensor(tensor.unary(tensor.OpSquare, t)))
+}
+
+# |x| = relu(x) + relu(-x), keeping it differentiable. Written as two relus
+# rather than a sign test because a sign test has no gradient at all, and this
+# has the subgradient 0 at the origin, which is the conventional choice.
+fn bi_abs(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let t: tensor.Tensor = arg_tensor(args[0], "abs", line)?
+  let pos: tensor.Tensor = tensor.unary(tensor.OpRelu, t)
+  let neg: tensor.Tensor = tensor.unary(tensor.OpRelu, tensor.unary(tensor.OpNeg, t))
+  lift_v(tensor.binary(tensor.OpAdd, pos, neg), line)
+}
+
+fn bi_pow(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let base: tensor.Tensor = arg_tensor(args[0], "pow", line)?
+  let p: F64 = scalar_of(args[1], "pow", line)?
+  Ok(VTensor(tensor.pow_scalar(base, p)))
+}
+
+fn bi_binary(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let x: tensor.Tensor = arg_tensor(args[0], name, line)?
+  let y: tensor.Tensor = arg_tensor(args[1], name, line)?
+  # dot is matmul under a second name, not an inner product: on two vectors the
+  # matmul rule already gives the scalar, and on matrices `dot` meaning
+  # something else would surprise every caller who wrote it for readability.
+  if in_words("matmul dot", name) { return lift_v(tensor.matmul(x, y), line) }
+  if bytes.equal(name, "conv2d") { return lift_v(tensor.conv2d(x, y), line) }
+  if bytes.equal(name, "maximum") { return lift_v(tensor.binary(tensor.OpMaximum, x, y), line) }
+  if bytes.equal(name, "minimum") { return lift_v(tensor.binary(tensor.OpMinimum, x, y), line) }
+  if bytes.equal(name, "greater") { return lift_v(tensor.binary(tensor.OpGreater, x, y), line) }
+  if bytes.equal(name, "less") { return lift_v(tensor.binary(tensor.OpLess, x, y), line) }
+  if bytes.equal(name, "greater_equal") { return lift_v(tensor.binary(tensor.OpGreaterEqual, x, y), line) }
+  if bytes.equal(name, "less_equal") { return lift_v(tensor.binary(tensor.OpLessEqual, x, y), line) }
+  # equal_op, not equal: this is the elementwise 0/1 mask, a different question
+  # from the `==` operator's single deep-equality answer.
+  lift_v(tensor.binary(tensor.OpEqual, x, y), line)
+}
+
+# maxpool2d(x, k): non-overlapping k by k max pooling over each channel.
+fn bi_maxpool2d(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let x: tensor.Tensor = arg_tensor(args[0], "maxpool2d", line)?
+  let k: I64 = int_of(args[1], "maxpool2d", line)?
+  lift_v(tensor.maxpool2d(x, k), line)
+}
+
+# gather(x, indices): select rows of x (first axis) by an index list or 1-D
+# tensor. Differentiable, and the base of embedding lookups and batching.
+fn bi_gather(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let x: tensor.Tensor = arg_tensor(args[0], "gather", line)?
+  let idx: Arr[I64] = indices_of(args[1], "gather", line)?
+  lift_v(tensor.gather(x, idx), line)
+}
+
+fn bi_where(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let c: tensor.Tensor = arg_tensor(args[0], "where", line)?
+  let x: tensor.Tensor = arg_tensor(args[1], "where", line)?
+  let y: tensor.Tensor = arg_tensor(args[2], "where", line)?
+  lift_v(tensor.where3(c, x, y), line)
+}
+
+fn bi_clip(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let t: tensor.Tensor = arg_tensor(args[0], "clip", line)?
+  let lo: F64 = scalar_of(args[1], "clip", line)?
+  let hi: F64 = scalar_of(args[2], "clip", line)?
+  Ok(VTensor(tensor.clip(t, lo, hi)))
+}
+
+# ---- reductions ------------------------------------------------------------
+#
+# One argument reduces everything to a scalar; a second reduces a single axis.
+#
+# The axis may be negative and counts from the end, and the normalisation lives
+# in the kernel (src/tensor.tw normalize_axis) rather than here, for a reason
+# worth stating: the
+# message on an out-of-range axis reports the axis *after* the negative
+# adjustment, so `sum(m, -5)` on a rank-2 tensor says "axis -3 out of range for
+# rank 2" and not "-5". Normalising in this file would report the original and
+# the two implementations would disagree on the one input that reaches the
+# message at all.
+
+fn bi_reduce(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) == 0 or len(args) > 2 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor) or (tensor, axis)")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  if len(args) == 1 {
+    if bytes.equal(name, "sum") { return Ok(VTensor(tensor.sum_all(t))) }
+    if bytes.equal(name, "mean") { return Ok(VTensor(tensor.mean_all(t))) }
+    if bytes.equal(name, "max") { return Ok(VTensor(tensor.max_all(t))) }
+    if bytes.equal(name, "min") { return Ok(VTensor(tensor.min_all(t))) }
+    if bytes.equal(name, "prod") { return Ok(VTensor(tensor.prod_all(t))) }
+    return Ok(VTensor(tensor.median_all(t)))
+  }
+  let ax: I64 = int_of(args[1], name, line)?
+  if bytes.equal(name, "sum") { return lift_v(tensor.sum_axis(t, ax), line) }
+  if bytes.equal(name, "mean") { return lift_v(tensor.mean_axis(t, ax), line) }
+  if bytes.equal(name, "max") { return lift_v(tensor.max_axis(t, ax), line) }
+  if bytes.equal(name, "min") { return lift_v(tensor.min_axis(t, ax), line) }
+  if bytes.equal(name, "prod") { return lift_v(tensor.prod_axis(t, ax), line) }
+  lift_v(tensor.median_axis(t, ax), line)
+}
+
+# sort/argsort take an optional axis and an optional "desc" flag, so `sort(t)`,
+# `sort(t, 0)` and `sort(t, 0, true)` all read the way they look.
+fn bi_sorting(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) == 0 or len(args) > 3 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor[, axis[, descending]])")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  # Default to the last axis, matching softmax and argmax rather than reducing
+  # over everything: sorting a matrix almost always means sorting each row.
+  let axis: I64 = len(t.shape) - 1
+  if len(args) >= 2 { axis = int_of(args[1], name, line)? }
+  let descending: Bool = false
+  if len(args) == 3 { descending = scalar_of(args[2], name, line)? != 0.0 }
+  if bytes.equal(name, "sort") { return lift_v(tensor.sort_axis(t, axis, descending), line) }
+  lift_v(tensor.argsort_axis(t, axis, descending), line)
+}
+
+# topk/argtopk need k, so they take (tensor, k[, axis[, smallest]]). The flag is
+# spelled "smallest" and the kernel takes "largest", so it inverts here: passing
+# a non-zero fourth argument asks for the k smallest.
+fn bi_topping(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) < 2 or len(args) > 4 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor, k[, axis[, smallest]])")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  let k: I64 = int_of(args[1], name, line)?
+  let axis: I64 = len(t.shape) - 1
+  if len(args) >= 3 { axis = int_of(args[2], name, line)? }
+  let largest: Bool = true
+  if len(args) == 4 { largest = scalar_of(args[3], name, line)? == 0.0 }
+  if bytes.equal(name, "topk") { return lift_v(tensor.topk_axis(t, k, axis, largest), line) }
+  lift_v(tensor.argtopk_axis(t, k, axis, largest), line)
+}
+
+# argmax/argmin/flip/diff all take an optional axis and default to the last one.
+fn bi_last_axis(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) == 0 or len(args) > 2 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor[, axis])")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  let axis: I64 = len(t.shape) - 1
+  if len(args) == 2 { axis = int_of(args[1], name, line)? }
+  if bytes.equal(name, "argmax") { return lift_v(tensor.argmax_axis(t, axis), line) }
+  if bytes.equal(name, "argmin") { return lift_v(tensor.argmin_axis(t, axis), line) }
+  if bytes.equal(name, "flip") { return lift_v(tensor.flip_axis(t, axis), line) }
+  lift_v(tensor.diff_axis(t, axis), line)
+}
+
+# roll takes the shift first, since that is the argument nobody omits.
+fn bi_roll(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) < 2 or len(args) > 3 {
+    return Err(runtime_error(line, "roll expects (tensor, shift[, axis])"))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], "roll", line)?
+  let shift: I64 = int_of(args[1], "roll", line)?
+  let axis: I64 = len(t.shape) - 1
+  if len(args) == 3 { axis = int_of(args[2], "roll", line)? }
+  lift_v(tensor.roll_axis(t, shift, axis), line)
+}
+
+# softmax and logsumexp default to the last axis. They have no count check on
+# the Go side and none here: a third argument is ignored rather than refused,
+# and that is transcribed rather than tightened, because tightening it would
+# turn a silently-accepted call into an error the corpus has never seen.
+fn bi_last_axis_op(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) == 0 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor[, axis])")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  let axis: I64 = len(t.shape) - 1
+  if len(args) == 2 { axis = int_of(args[1], name, line)? }
+  if bytes.equal(name, "softmax") { return lift_v(tensor.softmax(t, axis), line) }
+  lift_v(tensor.logsumexp_axis(t, axis), line)
+}
+
+# ---- shape ----------------------------------------------------------------
+
+fn bi_reshaping(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) < 2 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor, ...shape)")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  let shape: Arr[I64] = shape_from_args(rest(args, 1), name, line)?
+  if bytes.equal(name, "reshape") { return lift_v(tensor.reshape(t, shape), line) }
+  lift_v(tensor.broadcast_to(t, shape), line)
+}
+
+fn bi_transpose(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) < 1 {
+    return Err(runtime_error(line, "transpose expects a tensor"))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], "transpose", line)?
+  # No axes means the default reversal, and the empty permutation carries that
+  # rather than being an error: transpose(m) is the common call.
+  let axes: Arr[I64] = arr_new()
+  let i: I64 = 1
+  while i < len(args) {
+    push(axes, int_of(args[i], "transpose", line)?)
+    i = i + 1
+  }
+  lift_v(tensor.transpose(t, axes), line)
+}
+
+fn bi_einsum(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) < 2 {
+    return Err(runtime_error(line, "einsum expects a spec string and at least one tensor"))
+  }
+  let spec: Str = ""
+  match args[0] {
+    VStr(s) => spec = s,
+    _ => return Err(runtime_error(line, "einsum's first argument must be a spec string")),
+  }
+  let ts: Arr[tensor.Tensor] = arr_new()
+  let i: I64 = 1
+  while i < len(args) {
+    push(ts, arg_tensor(args[i], "einsum", line)?)
+    i = i + 1
+  }
+  lift_v(tensor.einsum(spec, ts), line)
+}
+
+fn bi_concat(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let items: Arr[Value] = to_items(args[0], "concat", line)?
+  let ts: Arr[tensor.Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(items) {
+    push(ts, arg_tensor(items[i], "concat", line)?)
+    i = i + 1
+  }
+  let axis: I64 = int_of(args[1], "concat", line)?
+  lift_v(tensor.concat(ts, axis), line)
+}
+
+# split(t, n | sizes[, axis]): the inverse of concat, returning a list. A scalar
+# second argument means that many equal pieces; a list or 1-D tensor means those
+# exact lengths. The axis defaults to 0, matching the axis a bare `concat`
+# result is usually built along.
+fn bi_split(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) < 2 or len(args) > 3 {
+    return Err(runtime_error(line, "split expects (tensor, n | sizes[, axis])"))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], "split", line)?
+  let axis: I64 = 0
+  if len(args) == 3 { axis = int_of(args[2], "split", line)? }
+
+  # A scalar and a one-element list mean different things, 2 pieces versus one
+  # piece of length 2, so the scalar case is tested first and explicitly rather
+  # than falling through to indices_of.
+  let is_list: Bool = false
+  match args[1] {
+    VList(_) => is_list = true,
+    _ => unit,
+  }
+  let pieces: Arr[tensor.Tensor] = arr_new()
+  if not is_list and is_scalar_value(args[1]) {
+    let n: I64 = int_of(args[1], "split", line)?
+    pieces = lift_pieces(tensor.split_equal(t, n, axis), line)?
+  } else {
+    let sizes: Arr[I64] = indices_of(args[1], "split", line)?
+    pieces = lift_pieces(tensor.split(t, sizes, axis), line)?
+  }
+  let items: Arr[Value] = arr_new()
+  let i: I64 = 0
+  while i < len(pieces) {
+    push(items, VTensor(pieces[i]))
+    i = i + 1
+  }
+  Ok(VList(ListVal { items: items }))
+}
+
+fn lift_pieces(r: Res[Arr[tensor.Tensor], Str], line: I64) -> Res[Arr[tensor.Tensor], RuntimeError] {
+  match r {
+    Ok(ps) => Ok(ps),
+    Err(m) => Err(runtime_error(line, m)),
+  }
+}
+
+# ---- scans -----------------------------------------------------------------
+#
+# Cumulative scans over a sequence (a 1-D tensor's elements in order): each
+# output element folds in the next input. Used to build signals, equity curves,
+# and running peaks for backtests. Differentiable: the scan is a chain of adds,
+# multiplies, or selections, so reverse mode unrolls it. With an axis they scan
+# along it instead, keeping the shape. The split follows the reductions: sum(t)
+# covers everything and sum(t, 0) works per axis, so cumsum(t) and cumsum(t, 0)
+# should mean the matching pair. On a 1-D tensor, which is what a sequence is,
+# the two are the same thing.
+fn bi_scan(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) == 0 or len(args) > 2 {
+    return Err(runtime_error(line, bytes.concat(name, " expects (tensor[, axis])")))
+  }
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  if len(args) == 1 {
+    if bytes.equal(name, "cumsum") { return Ok(VTensor(tensor.cumsum(t))) }
+    if bytes.equal(name, "cumprod") { return Ok(VTensor(tensor.cumprod(t))) }
+    if bytes.equal(name, "cummax") { return Ok(VTensor(tensor.cummax(t))) }
+    return Ok(VTensor(tensor.cummin(t)))
+  }
+  let axis: I64 = int_of(args[1], name, line)?
+  if bytes.equal(name, "cumsum") { return lift_v(tensor.cumsum_axis(t, axis), line) }
+  if bytes.equal(name, "cumprod") { return lift_v(tensor.cumprod_axis(t, axis), line) }
+  if bytes.equal(name, "cummax") { return lift_v(tensor.cummax_axis(t, axis), line) }
+  lift_v(tensor.cummin_axis(t, axis), line)
+}
+
+# Elementwise rounding, forward-only, handy for turning random draws into
+# integer indices or tokens. No kernel: it is a loop over a buffer with no
+# gradient rule, so it stays on this side of the line.
+#
+# `round` is half away from zero, which is Go's math.Round and not the
+# banker's rounding a reader coming from Python would assume.
+fn bi_elem_round(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let t: tensor.Tensor = arg_tensor(args[0], name, line)?
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(t.data) {
+    if bytes.equal(name, "floor") { push(out, f64_floor(t.data[i])) }
+    if bytes.equal(name, "ceil") { push(out, f64_ceil(t.data[i])) }
+    if bytes.equal(name, "round") { push(out, f64_round(t.data[i])) }
+    i = i + 1
+  }
+  Ok(VTensor(tensor.Tensor { shape: tensor.copy_shape(t.shape), data: out }))
+}
+
+fn rest(args: Arr[Value], from: I64) -> Arr[Value] {
+  let out: Arr[Value] = arr_new()
+  let i: I64 = from
+  while i < len(args) {
+    push(out, args[i])
+    i = i + 1
+  }
+  out
+}
+
+# ---- automatic differentiation ---------------------------------------------
+#
+# grad(f) does not differentiate anything. It returns a builtin that remembers f
+# and differentiates it when *that* is called, which is what makes
+# `let g = grad(loss)` and then `g(w)` in a loop the natural spelling.
+
+fn bi_derivative(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let f: Value = args[0]
+  if in_words("grad grads", name) {
+    refuse_nested_grad(name, f, line)?
+  }
+  Ok(VBuiltin(BuiltinVal { name: bytes.concat(name, "(fn)"), captured: Some(f) }))
+}
+
+# refuse_nested_grad rejects grad(grad(f)) instead of answering it wrongly.
+#
+# The gradient grad returns is a value, not a traced expression: reverse mode
+# reads the numbers out of the graph and hands them back with no history
+# attached. Differentiating that again differentiates a constant, so the answer
+# is zero, and it is zero silently, which is the worst way for a derivative to
+# be wrong. Somebody building on a second derivative would have no reason to
+# look.
+#
+# Second derivatives are hessian's job, which runs forward mode over the reverse
+# pass and gets it right. This points there rather than quietly failing.
+#
+# The condition is narrow on purpose: only a builtin, and only one of the two
+# named grad(fn) and grads(fn). value_and_grad(fn) is not refused, because it is
+# not refused on the Go side either, and a closure that happens to call grad
+# inside cannot be recognised from here at all.
+fn refuse_nested_grad(caller: Str, f: Value, line: I64) -> Res[Unit, RuntimeError] {
+  match f {
+    VBuiltin(b) => {
+      if not bytes.equal(b.name, "grad(fn)") and not bytes.equal(b.name, "grads(fn)") {
+        return Ok(unit)
+      }
+      Err(runtime_error(line, bytes.concat(caller, bytes.concat("(", bytes.concat(b.name,
+        bytes.concat(") is not a second derivative: the gradient ", bytes.concat(b.name,
+        bytes.concat(" returns is a plain value with no history, so differentiating it again ",
+        bytes.concat("gives zero. Use hessian(f) for a second derivative, or jacobian(f) for ",
+        "the matrix of first ones")))))))))
+    },
+    _ => Ok(unit),
+  }
+}
+
+fn bi_derived(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let f: Value = VUnit
+  match b.captured {
+    Some(v) => f = v,
+    # Unreachable: the only place a "...(fn)" builtin is made is bi_derivative,
+    # which always captures. Named rather than assumed, because a silent VUnit
+    # here would be differentiated as a constant and report zeros.
+    None => return Err(runtime_error(line, bytes.concat(b.name, " lost the function it wrapped"))),
+  }
+  if bytes.equal(b.name, "grad(fn)") {
+    let g: Grads = gradients(f, args, line)?
+    return Ok(g.first)
+  }
+  if bytes.equal(b.name, "grads(fn)") {
+    let g: Grads = gradients(f, args, line)?
+    return Ok(VList(ListVal { items: g.all }))
+  }
+  if bytes.equal(b.name, "value_and_grad(fn)") {
+    let g: Grads = gradients(f, args, line)?
+    let pair: Arr[Value] = arr_new()
+    push(pair, VTensor(g.value))
+    push(pair, g.first)
+    return Ok(VList(ListVal { items: pair }))
+  }
+  # The count is already enforced by the arity check in `apply`, which knows
+  # these two take one argument. The check is kept because the Go original keeps
+  # it and its message differs from the arity one, so a change to the arity
+  # table shows up here rather than silently.
+  if bytes.equal(b.name, "jacobian(fn)") {
+    if len(args) != 1 {
+      return Err(runtime_error(line, "jacobian(f) takes exactly one argument"))
+    }
+    return do_jacobian(f, args[0], line)
+  }
+  if len(args) != 1 {
+    return Err(runtime_error(line, "hessian(f) takes exactly one argument"))
+  }
+  do_hessian(f, args[0], line)
+}
+
+# The tape seam.
+#
+# src/tensor.tw splits every op in two: `binary(op, a, b)` computes, and
+# `t_binary(tp, op, a, b)` computes and records on a tape, returning a node
+# index. That split is the right one, and it is why grad is not simply a matter
+# of calling the kernels: the arithmetic that has to be recorded happens inside
+# f, in interpreted twill, in code this file evaluates but does not write.
+#
+# So something has to make the ops that run during f record on tp. Three
+# functions stand for it, and they are the whole of NEEDS-75:
+#
+#   tape_push(tp)              make tp the tape ops record on
+#   tape_pop()                 restore the previous one, or none
+#   tape_node_of(v) -> Opt[I64]  the node a traced value came from
+#
+# The Go bootstrap needs none of this because a *tensor.Tensor carries its own
+# graph edges, so a value is its own node. Here a Tensor is a shape and a
+# buffer, and node identity lives in the tape, so the two have to be associated
+# somewhere. tape_node_of is that somewhere, and until it exists grad has a hole
+# in the middle rather than a wrong answer, which is the right way round.
+#
+# What is *not* deferred is the leaf order, the tree shape of the result, and
+# the arity and error handling below, because those are what the corpus checks
+# and they are decided here rather than in the tape.
+
+# A traced argument: the value handed to f, and the tree of leaf node indices to
+# read the gradients back out of afterwards. The tree has the same shape as the
+# argument, and that is the point, so `grads(loss)({w: ..., b: ...})` gives a
+# record of gradients with the same fields rather than a flat list the caller
+# has to re-associate.
+enum GradNode {
+  GLeaf(I64),
+  GList(Arr[GradNode]),
+  GRecord(Dict[Str, GradNode]),
+  GNone,
+}
+
+struct Traced {
+  passed: Value,
+  node: GradNode,
+}
+
+fn trace_arg(tp: tensor.Tape, v: Value) -> Traced {
+  match v {
+    # grad(f)(3.0) passes a plain number, and without this it would fall to the
+    # default below and report a gradient of zero for it.
+    VNum(x) => {
+      let n: I64 = tensor.leaf(tp, tensor.scalar(x))
+      Traced { passed: VTensor(tensor.value_of(tp, n)), node: GLeaf(n) }
+    },
+    VTensor(t) => {
+      let n: I64 = tensor.leaf(tp, t)
+      Traced { passed: VTensor(tensor.value_of(tp, n)), node: GLeaf(n) }
+    },
+    VList(l) => {
+      let passed: Arr[Value] = arr_new()
+      let nodes: Arr[GradNode] = arr_new()
+      let i: I64 = 0
+      while i < len(l.items) {
+        let tr: Traced = trace_arg(tp, l.items[i])
+        push(passed, tr.passed)
+        push(nodes, tr.node)
+        i = i + 1
+      }
+      Traced { passed: VList(ListVal { items: passed }), node: GList(nodes) }
+    },
+    VRecord(r) => {
+      let fields: Dict[Str, Value] = dict_new()
+      let nodes: Dict[Str, GradNode] = dict_new()
+      for k in dict_keys(r.fields) {
+        let tr: Traced = trace_arg(tp, dict_must(r.fields, k))
+        dict_set(fields, k, tr.passed)
+        dict_set(nodes, k, tr.node)
+      }
+      Traced { passed: VRecord(RecordVal { fields: fields }), node: GRecord(nodes) }
+    },
+    # A string, a function, a unit: it has no derivative, and the gradient
+    # reported for it is a scalar zero rather than an error, so that passing a
+    # configuration record alongside the parameters still works.
+    _ => Traced { passed: v, node: GNone },
+  }
+}
+
+# grads is the backward pass's output indexed by leaf node, in the order the
+# leaves were created, which is the order trace_arg walked the arguments.
+fn grad_from_node(n: GradNode, grads: Arr[tensor.Tensor], shapes: Arr[tensor.Tensor]) -> Value {
+  match n {
+    GLeaf(idx) => {
+      # A leaf the output never depended on gets zeros of its own shape, not an
+      # error and not a scalar. An optimiser folding over a parameter tree would
+      # otherwise trip on the one parameter a branch of the model did not use.
+      if idx >= len(grads) {
+        return VTensor(tensor.zeros_like(shapes[idx]))
+      }
+      VTensor(grads[idx])
+    },
+    GList(nodes) => {
+      let items: Arr[Value] = arr_new()
+      let i: I64 = 0
+      while i < len(nodes) {
+        push(items, grad_from_node(nodes[i], grads, shapes))
+        i = i + 1
+      }
+      VList(ListVal { items: items })
+    },
+    GRecord(nodes) => {
+      let fields: Dict[Str, Value] = dict_new()
+      for k in dict_keys(nodes) {
+        dict_set(fields, k, grad_from_node(dict_must(nodes, k), grads, shapes))
+      }
+      VRecord(RecordVal { fields: fields })
+    },
+    GNone => VTensor(tensor.scalar(0.0)),
+  }
+}
+
+struct Grads {
+  value: tensor.Tensor,
+  first: Value,
+  all: Arr[Value],
+}
+
+# gradients runs f with gradient-tracking arguments and returns the scalar
+# value, the gradient of the first argument, and the gradients of all of them.
+fn gradients(f: Value, call_args: Arr[Value], line: I64) -> Res[Grads, RuntimeError] {
+  if len(call_args) == 0 {
+    return Err(runtime_error(line, "gradient function requires at least one argument"))
+  }
+  let tp: tensor.Tape = tensor.new_tape()
+  let pass_args: Arr[Value] = arr_new()
+  let nodes: Arr[GradNode] = arr_new()
+  let leaves: Arr[tensor.Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(call_args) {
+    let tr: Traced = trace_arg(tp, call_args[i])
+    push(pass_args, tr.passed)
+    push(nodes, tr.node)
+    i = i + 1
+  }
+
+  let ran: TracedRun = run_traced(f, pass_args, tp, line)?
+  let ot: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(ran.value) {
+    Some(t) => {
+      if not tensor.is_scalar(t) {
+        return Err(runtime_error(line, "grad target must return a scalar"))
+      }
+      ot = t
+    },
+    None => return Err(runtime_error(line, "grad target must return a scalar")),
+  }
+  # The seed is 1 for a scalar output: d(out)/d(out). Every other cotangent on
+  # the tape is derived from it, so a seed of the wrong shape is the one mistake
+  # that makes every gradient wrong by the same factor and looks like a learning
+  # rate problem.
+  let all_grads: Arr[tensor.Tensor] = arr_new()
+  match tensor.backward(tp, ran.node, tensor.scalar(1.0)) {
+    Ok(g) => all_grads = g,
+    Err(m) => return Err(runtime_error(line, m)),
+  }
+
+  let all: Arr[Value] = arr_new()
+  i = 0
+  while i < len(nodes) {
+    push(all, grad_from_node(nodes[i], all_grads, tape_leaf_values(tp)))
+    i = i + 1
+  }
+  Ok(Grads {
+    value: tensor.scalar(ot.data[0]),
+    first: grad_from_node(nodes[0], all_grads, tape_leaf_values(tp)),
+    all: all,
+  })
+}
+
+struct TracedRun {
+  value: Value,
+  node: I64,
+}
+
+# Run f with tp recording, and recover the node its result came from.
+#
+# The pop happens before the result is inspected rather than after, because
+# there is no `defer` here and an early return through `?` would otherwise leave
+# a finished tape installed for the rest of the program. NEEDS-75.
+fn run_traced(f: Value, args: Arr[Value], tp: tensor.Tape, line: I64) -> Res[TracedRun, RuntimeError] {
+  tape_push(tp)
+  # Line 0, and it is deliberate: the call comes from inside grad, not from a
+  # source position, and reporting the grad site would point at the wrong line
+  # when the failure is inside f. The Go side passes 0 here for the same reason.
+  let out: Res[Value, RuntimeError] = apply(f, args, 0)
+  tape_pop()
+  let v: Value = out?
+  match tape_node_of(v) {
+    Some(n) => Ok(TracedRun { value: v, node: n }),
+    # f ignored its arguments and returned a constant. The derivative of a
+    # constant is zero, and that is an answer rather than an error, so an empty
+    # tape root is legal and backward from it yields zeros.
+    None => Ok(TracedRun { value: v, node: -1 }),
+  }
+}
+
+# The leaf tensors in creation order, used only for their shapes when a leaf
+# received no gradient at all.
+fn tape_leaf_values(tp: tensor.Tape) -> Arr[tensor.Tensor] = tp.leaves
+
+# jacobian(f)(x): the full matrix of partials of a vector output f(x) with
+# respect to the vector input x, by one reverse-mode pass per output element.
+# Row j is the gradient of the j-th output. The result is [m, n] for an
+# m-vector output and an n-element input.
+fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
+  let xt: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(x) {
+    Some(t) => xt = t,
+    None => return Err(runtime_error(line, "jacobian: the input must be a tensor")),
+  }
+  let n: I64 = len(xt.data)
+  # A gradient-free pass to learn the output size. It costs one extra evaluation
+  # and buys not having to guess m from the input.
+  let y0: tensor.Tensor = apply_to_tensor(f, tensor.clone(xt), line)?
+  let m: I64 = len(y0.data)
+  let jac: Arr[F64] = arr_new()
+  let z: I64 = 0
+  while z < m * n {
+    push(jac, 0.0)
+    z = z + 1
+  }
+  let j: I64 = 0
+  while j < m {
+    # A fresh tape and a fresh leaf each pass: gradients accumulate, so reusing
+    # one would sum every row into every other.
+    let tp: tensor.Tape = tensor.new_tape()
+    let leaf: I64 = tensor.leaf(tp, xt)
+    let args: Arr[Value] = arr_new()
+    push(args, VTensor(tensor.value_of(tp, leaf)))
+    let ran: TracedRun = run_traced(f, args, tp, line)?
+    let y: tensor.Tensor = tensor.scalar(0.0)
+    match as_tensor(ran.value) {
+      Some(t) => y = t,
+      None => return Err(runtime_error(line, bytes.concat("jacobian: f must return a tensor, got ",
+        format_value(ran.value)))),
+    }
+    if len(y.data) != m {
+      return Err(runtime_error(line, "jacobian: f returned a different output size on re-evaluation"))
+    }
+    # Isolate the j-th output by seeding the backward pass with a one-hot rather
+    # than by indexing the output: indexing would need a gradient rule of its
+    # own, and the seed is where the choice of output belongs anyway.
+    let sel: Arr[F64] = arr_new()
+    let k: I64 = 0
+    while k < m {
+      if k == j { push(sel, 1.0) } else { push(sel, 0.0) }
+      k = k + 1
+    }
+    let seed: tensor.Tensor = tensor.Tensor { shape: tensor.copy_shape(y.shape), data: sel }
+    match tensor.backward(tp, ran.node, seed) {
+      Ok(g) => {
+        if leaf < len(g) {
+          k = 0
+          while k < n {
+            jac[j * n + k] = g[leaf].data[k]
+            k = k + 1
+          }
+        }
+      },
+      Err(msg) => return Err(runtime_error(line, msg)),
+    }
+    j = j + 1
+  }
+  let shape: Arr[I64] = arr_new()
+  push(shape, m)
+  push(shape, n)
+  Ok(VTensor(tensor.Tensor { shape: shape, data: jac }))
+}
+
+# hessian(f)(x): the matrix of second partial derivatives of a scalar f at x, by
+# forward-mode 2-jets over the graph built from a single input leaf. Exact
+# second-order autodiff, not a finite difference of gradients, which is the
+# whole reason grad(grad(f)) is refused rather than approximated.
+fn do_hessian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
+  let xt: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(x) {
+    Some(t) => xt = t,
+    None => return Err(runtime_error(line, "hessian: the input must be a tensor")),
+  }
+  let tp: tensor.Tape = tensor.new_tape()
+  let leaf: I64 = tensor.leaf(tp, xt)
+  # Record forward-mode (jet) closures only while building this graph, so
+  # ordinary training and grad pay nothing for second-order support. Off before
+  # the result is unwrapped, for the same reason run_traced pops before it does.
+  tensor.set_record_jets(true)
+  let args: Arr[Value] = arr_new()
+  push(args, VTensor(tensor.value_of(tp, leaf)))
+  let built: Res[TracedRun, RuntimeError] = run_traced(f, args, tp, line)
+  tensor.set_record_jets(false)
+  let ran: TracedRun = built?
+  lift_v(tensor.hessian(tp, ran.node, leaf), line)
+}
+
+# apply_to_tensor calls a one-argument function with nothing recording and
+# requires a tensor result. The message says "jacobian" even when hessian is the
+# caller, which is how the Go side reads; changing it here would diverge on a
+# message the harness compares byte for byte.
+fn apply_to_tensor(f: Value, arg: tensor.Tensor, line: I64) -> Res[tensor.Tensor, RuntimeError] {
+  let args: Arr[Value] = arr_new()
+  push(args, VTensor(arg))
+  let out: Value = apply(f, args, 0)?
+  match as_tensor(out) {
+    Some(t) => Ok(t),
+    None => Err(runtime_error(line, bytes.concat("jacobian: f must return a tensor, got ",
+      format_value(out)))),
+  }
+}
+}
+
+# ---- higher-order list and tree helpers ------------------------------------
+
+fn bi_tree(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(name, "map") {
+    let items: Arr[Value] = to_items(args[1], "map", line)?
+    let out: Arr[Value] = arr_new()
+    let i: I64 = 0
+    while i < len(items) {
+      let one: Arr[Value] = arr_new()
+      push(one, items[i])
+      push(out, apply(args[0], one, 0)?)
+      i = i + 1
+    }
+    return Ok(VList(ListVal { items: out }))
+  }
+  if bytes.equal(name, "zip") {
+    return bi_zip(args, line)
+  }
+  # fold(f, init, xs): left fold, acc = f(acc, x) over xs.
+  if bytes.equal(name, "fold") {
+    let acc: Value = args[1]
+    let items: Arr[Value] = to_items(args[2], "fold", line)?
+    let i: I64 = 0
+    while i < len(items) {
+      let pair: Arr[Value] = arr_new()
+      push(pair, acc)
+      push(pair, items[i])
+      acc = apply(args[0], pair, 0)?
+      i = i + 1
+    }
+    return Ok(acc)
+  }
+  # append is a copy plus one, not a mutation. A list value that changed under
+  # an alias would make every fold over lists depend on how many names the
+  # accumulator had.
+  if bytes.equal(name, "append") {
+    let items: Arr[Value] = to_items(args[0], "append", line)?
+    let out: Arr[Value] = arr_new()
+    let i: I64 = 0
+    while i < len(items) {
+      push(out, items[i])
+      i = i + 1
+    }
+    push(out, args[1])
+    return Ok(VList(ListVal { items: out }))
+  }
+  if bytes.equal(name, "enumerate") {
+    let items: Arr[Value] = to_items(args[0], "enumerate", line)?
+    let out: Arr[Value] = arr_new()
+    let i: I64 = 0
+    while i < len(items) {
+      let pair: Arr[Value] = arr_new()
+      push(pair, VTensor(tensor.scalar(f64_of_i64(i))))
+      push(pair, items[i])
+      push(out, VList(ListVal { items: pair }))
+      i = i + 1
+    }
+    return Ok(VList(ListVal { items: out }))
+  }
+  # map_leaves(f, tree): apply f to every tensor leaf of a tree (a tensor, or a
+  # list/record nesting tensors), preserving the structure.
+  if bytes.equal(name, "map_leaves") {
+    return map_leaves(args[0], args[1])
+  }
+  # zip_leaves(f, trees): given a list of same-shaped trees, call f with the
+  # list of leaves at each position, preserving the structure.
+  match args[1] {
+    VList(l) => zip_leaves(args[0], l.items),
+    _ => Err(runtime_error(line, "zip_leaves expects a list of trees as its second argument")),
+  }
+}
+
+# zip stops at the shortest input rather than padding, so `zip(xs, ys)` over a
+# batch and its labels cannot silently pair a value with nothing.
+fn bi_zip(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(args) == 0 {
+    return Ok(VList(ListVal { items: arr_new() }))
+  }
+  let cols: Arr[Arr[Value]] = arr_new()
+  let min_len: I64 = -1
+  let i: I64 = 0
+  while i < len(args) {
+    let items: Arr[Value] = to_items(args[i], "zip", line)?
+    push(cols, items)
+    if min_len < 0 or len(items) < min_len { min_len = len(items) }
+    i = i + 1
+  }
+  let out: Arr[Value] = arr_new()
+  let r: I64 = 0
+  while r < min_len {
+    let row: Arr[Value] = arr_new()
+    let c: I64 = 0
+    while c < len(args) {
+      push(row, cols[c][r])
+      c = c + 1
+    }
+    push(out, VList(ListVal { items: row }))
+    r = r + 1
+  }
+  Ok(VList(ListVal { items: out }))
+}
+
+fn map_leaves(f: Value, tree: Value) -> Res[Value, RuntimeError] {
+  match tree {
+    # A number is a numeric leaf like any other. Letting it fall to the
+    # pass-through default would silently skip a scalar bias in an optimiser's
+    # parameter tree.
+    VNum(_) => apply_one(f, tree),
+    VTensor(_) => apply_one(f, tree),
+    VList(l) => {
+      let out: Arr[Value] = arr_new()
+      let i: I64 = 0
+      while i < len(l.items) {
+        push(out, map_leaves(f, l.items[i])?)
+        i = i + 1
+      }
+      Ok(VList(ListVal { items: out }))
+    },
+    VRecord(r) => {
+      let fields: Dict[Str, Value] = dict_new()
+      for k in dict_keys(r.fields) {
+        dict_set(fields, k, map_leaves(f, dict_must(r.fields, k))?)
+      }
+      Ok(VRecord(RecordVal { fields: fields }))
+    },
+    # Non-tensor leaves pass through unchanged.
+    _ => Ok(tree),
+  }
+}
+
+fn apply_one(f: Value, v: Value) -> Res[Value, RuntimeError] {
+  let one: Arr[Value] = arr_new()
+  push(one, v)
+  apply(f, one, 0)
+}
+
+# zip_leaves walks a list of same-shaped trees in parallel, calling f with the
+# list of leaves at each position.
+#
+# Its structure mismatches report at line 0, because the Go side raises them
+# through panicf(0, ...) from inside the recursion, where no source position is
+# in hand. Carried across rather than improved: the harness compares the text.
+fn zip_leaves(f: Value, trees: Arr[Value]) -> Res[Value, RuntimeError] {
+  if len(trees) == 0 {
+    return Err(runtime_error(0, "zip_leaves needs at least one tree"))
+  }
+  match trees[0] {
+    VNum(_) => zip_leaf_call(f, trees),
+    VTensor(_) => zip_leaf_call(f, trees),
+    VList(first) => {
+      let out: Arr[Value] = arr_new()
+      let i: I64 = 0
+      while i < len(first.items) {
+        let sub: Arr[Value] = arr_new()
+        let k: I64 = 0
+        while k < len(trees) {
+          match trees[k] {
+            VList(lst) => {
+              if i >= len(lst.items) {
+                return Err(runtime_error(0, "zip_leaves: trees have different structures"))
+              }
+              push(sub, lst.items[i])
+            },
+            _ => return Err(runtime_error(0, "zip_leaves: trees have different structures")),
+          }
+          k = k + 1
+        }
+        push(out, zip_leaves(f, sub)?)
+        i = i + 1
+      }
+      Ok(VList(ListVal { items: out }))
+    },
+    VRecord(first) => {
+      let fields: Dict[Str, Value] = dict_new()
+      for key in dict_keys(first.fields) {
+        let sub: Arr[Value] = arr_new()
+        let k: I64 = 0
+        while k < len(trees) {
+          match trees[k] {
+            VRecord(r) => {
+              match dict_get(r.fields, key) {
+                Some(v) => push(sub, v),
+                None => return Err(runtime_error(0, "zip_leaves: record trees have different fields")),
+              }
+            },
+            _ => return Err(runtime_error(0, "zip_leaves: trees have different structures")),
+          }
+          k = k + 1
+        }
+        dict_set(fields, key, zip_leaves(f, sub)?)
+      }
+      Ok(VRecord(RecordVal { fields: fields }))
+    },
+    _ => Ok(trees[0]),
+  }
+}
+
+fn zip_leaf_call(f: Value, trees: Arr[Value]) -> Res[Value, RuntimeError] {
+  let leaves: Arr[Value] = arr_new()
+  let i: I64 = 0
+  while i < len(trees) {
+    match as_tensor(trees[i]) {
+      Some(_) => push(leaves, trees[i]),
+      None => return Err(runtime_error(0, "zip_leaves: trees have different structures")),
+    }
+    i = i + 1
+  }
+  let one: Arr[Value] = arr_new()
+  push(one, VList(ListVal { items: leaves }))
+  apply(f, one, 0)
+}
+
+# ---- tensor construction ---------------------------------------------------
+
+fn bi_make(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(name, "tensor") {
+    match args[0] {
+      # Already a tensor: returned as it is, graph and all. Rebuilding it from
+      # its numbers would silently detach it from the tape, so `tensor(x)` in
+      # the middle of a loss would zero the gradient.
+      VTensor(t) => return Ok(VTensor(t)),
+      _ => unit,
+    }
+    return lift_v(tensor.from_nested(value_to_nested(args[0], line)?), line)
+  }
+  if bytes.equal(name, "scalar") {
+    return Ok(VTensor(tensor.scalar(scalar_of(args[0], "scalar", line)?)))
+  }
+  if bytes.equal(name, "zeros") {
+    return Ok(VTensor(tensor.filled(shape_from_args(args, "zeros", line)?, 0.0)))
+  }
+  if bytes.equal(name, "ones") {
+    return Ok(VTensor(tensor.filled(shape_from_args(args, "ones", line)?, 1.0)))
+  }
+  if bytes.equal(name, "fill") {
+    if len(args) < 1 {
+      return Err(runtime_error(line, "fill expects (value, ...shape)"))
+    }
+    let v: F64 = scalar_of(args[0], "fill", line)?
+    return Ok(VTensor(tensor.filled(shape_from_args(rest(args, 1), "fill", line)?, v)))
+  }
+  if bytes.equal(name, "randn") {
+    return Ok(VTensor(random_tensor(shape_from_args(args, "randn", line)?, true)))
+  }
+  if bytes.equal(name, "rand") {
+    return Ok(VTensor(random_tensor(shape_from_args(args, "rand", line)?, false)))
+  }
+  # seed makes subsequent randn/rand reproducible from a chosen starting point.
+  if bytes.equal(name, "seed") {
+    rng_seed(int_of(args[0], "seed", line)?)
+    return Ok(VUnit)
+  }
+  # permutation(n): a shuffled ordering of 0..n-1, as a list, from the seeded
+  # RNG (so it is reproducible). Use it with gather to shuffle a dataset.
+  if bytes.equal(name, "permutation") {
+    let n: I64 = int_of(args[0], "permutation", line)?
+    if n < 0 {
+      return Err(runtime_error(line, "permutation: n must be >= 0"))
+    }
+    let perm: Arr[I64] = rng_perm(n)
+    let items: Arr[Value] = arr_new()
+    let i: I64 = 0
+    while i < n {
+      push(items, VTensor(tensor.scalar(f64_of_i64(perm[i]))))
+      i = i + 1
+    }
+    return Ok(VList(ListVal { items: items }))
+  }
+  let n: I64 = int_of(args[0], "eye", line)?
+  let d: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n * n {
+    push(d, 0.0)
+    i = i + 1
+  }
+  i = 0
+  while i < n {
+    d[i * n + i] = 1.0
+    i = i + 1
+  }
+  let shape: Arr[I64] = arr_new()
+  push(shape, n)
+  push(shape, n)
+  Ok(VTensor(tensor.Tensor { shape: shape, data: d }))
+}
+
+# The shape-free intermediate `tensor(...)` builds from: a number, or a list of
+# them, nested to any depth. It is declared here rather than in src/tensor.tw
+# because that file does not have it and is another file's to change; when the
+# tensor engine owns the constructor this moves there. NEEDS-62.
+enum Nested {
+  NLeaf(F64),
+  NList(Arr[Nested]),
+}
+
+# Nested arrays for `tensor([[1, 2], [3, 4]])`. Only numbers, tensors and lists
+# convert; a record has no shape and says so.
+fn value_to_nested(v: Value, line: I64) -> Res[Nested, RuntimeError] {
+  match v {
+    VNum(x) => Ok(NLeaf(x)),
+    VTensor(t) => Ok(tensor.to_nested(t)),
+    VList(l) => {
+      let out: Arr[Nested] = arr_new()
+      let i: I64 = 0
+      while i < len(l.items) {
+        push(out, value_to_nested(l.items[i], line)?)
+        i = i + 1
+      }
+      Ok(NList(out))
+    },
+    _ => Err(runtime_error(line, "cannot convert value to a tensor")),
+  }
+}
+
+fn random_tensor(shape: Arr[I64], normal: Bool) -> tensor.Tensor {
+  let n: I64 = tensor.element_count(shape)
+  let data: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    if normal { push(data, rng_normal()) } else { push(data, rng_uniform()) }
+    i = i + 1
+  }
+  tensor.Tensor { shape: shape, data: data }
+}
+
+# ---- inspection and utilities ----------------------------------------------
+
+fn bi_inspect(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(name, "shape") {
+    let t: tensor.Tensor = arg_tensor(args[0], "shape", line)?
+    let items: Arr[Value] = arr_new()
+    let i: I64 = 0
+    while i < len(t.shape) {
+      push(items, VTensor(tensor.scalar(f64_of_i64(t.shape[i]))))
+      i = i + 1
+    }
+    return Ok(VList(ListVal { items: items }))
+  }
+  # len does not go through as_tensor, so a plain number is not a length-1
+  # tensor here: `len(3)` is an error. That is the Go behaviour and it is worth
+  # keeping, because a number silently having a length is how a loop over the
+  # wrong variable runs once instead of failing.
+  if bytes.equal(name, "len") {
+    match args[0] {
+      VTensor(t) => {
+        if len(t.shape) == 0 { return Ok(VTensor(tensor.scalar(1.0))) }
+        return Ok(VTensor(tensor.scalar(f64_of_i64(t.shape[0]))))
+      },
+      VList(l) => return Ok(VTensor(tensor.scalar(f64_of_i64(len(l.items))))),
+      _ => return Err(runtime_error(line, "len expects a tensor or list")),
+    }
+  }
+  if bytes.equal(name, "item") {
+    let t: tensor.Tensor = arg_tensor(args[0], "item", line)?
+    if len(t.data) != 1 {
+      return Err(runtime_error(line, "item expects a single-element tensor"))
+    }
+    return Ok(VTensor(tensor.scalar(t.data[0])))
+  }
+  if bytes.equal(name, "range") { return bi_range(args, line) }
+  if bytes.equal(name, "list") {
+    let items: Arr[Value] = arr_new()
+    let i: I64 = 0
+    while i < len(args) {
+      push(items, args[i])
+      i = i + 1
+    }
+    return Ok(VList(ListVal { items: items }))
+  }
+  if bytes.equal(name, "str") { return Ok(VStr(format_value(args[0]))) }
+  # int(x): truncate a scalar toward zero (handy for computing sizes/indices).
+  # It stays a tensor rather than becoming an I64, because twill has no integer
+  # type at the value level; the truncation is the whole of the operation.
+  Ok(VTensor(tensor.scalar(f64_trunc(scalar_of(args[0], "int", line)?))))
+}
+
+fn bi_range(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let start: I64 = 0
+  let end: I64 = 0
+  let step: I64 = 1
+  if len(args) == 1 {
+    end = int_of(args[0], "range", line)?
+  } else {
+    if len(args) == 2 {
+      start = int_of(args[0], "range", line)?
+      end = int_of(args[1], "range", line)?
+    } else {
+      if len(args) == 3 {
+        start = int_of(args[0], "range", line)?
+        end = int_of(args[1], "range", line)?
+        step = int_of(args[2], "range", line)?
+      } else {
+        return Err(runtime_error(line, "range expects 1-3 arguments"))
+      }
+    }
+  }
+  # A zero step is the one case that would not terminate, so it is the one case
+  # refused. A step that runs the wrong way just gives an empty list, which is
+  # what makes `range(0, n)` safe when n is 0.
+  if step == 0 {
+    return Err(runtime_error(line, "range step cannot be 0"))
+  }
+  let items: Arr[Value] = arr_new()
+  let x: I64 = start
+  while (step > 0 and x < end) or (step < 0 and x > end) {
+    push(items, VTensor(tensor.scalar(f64_of_i64(x))))
+    x = x + step
+  }
+  Ok(VList(ListVal { items: items }))
+}
+
+# ---- files, frames and records ---------------------------------------------
+
+fn bi_files(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(name, "read_csv") {
+    match args[0] {
+      VStr(p) => return read_csv(p, line),
+      _ => return Err(runtime_error(line, "read_csv expects a string path")),
+    }
+  }
+  if bytes.equal(name, "read_frame") {
+    match args[0] {
+      VStr(p) => return read_frame(p, line),
+      _ => return Err(runtime_error(line, "read_frame expects a string path")),
+    }
+  }
+  if bytes.equal(name, "write_frame") {
+    let rec: RecordVal = RecordVal { fields: dict_new() }
+    match args[0] {
+      VRecord(r) => rec = r,
+      _ => return Err(runtime_error(line, "write_frame expects a frame (record of columns)")),
+    }
+    match args[1] {
+      VStr(p) => {
+        write_frame(rec, p, line)?
+        return Ok(VUnit)
+      },
+      _ => return Err(runtime_error(line, "write_frame expects a string path")),
+    }
+  }
+  # save(value, path): write any value (tensors, records, lists, or a fitted gbm
+  # model) to a file, so a trained model can be persisted and shipped.
+  if bytes.equal(name, "save") {
+    match args[1] {
+      VStr(p) => {
+        match save_value(args[0], resolve_path(p)) {
+          Ok(_) => return Ok(VUnit),
+          Err(m) => return Err(runtime_error(line, bytes.concat("save: ", m))),
+        }
+      },
+      _ => return Err(runtime_error(line, "save expects a string path as its second argument")),
+    }
+  }
+  # load(path): read back a value written by save.
+  if bytes.equal(name, "load") {
+    match args[0] {
+      VStr(p) => {
+        match load_value(resolve_path(p)) {
+          Ok(v) => return Ok(v),
+          Err(m) => return Err(runtime_error(line, bytes.concat("load: ", m))),
+        }
+      },
+      _ => return Err(runtime_error(line, "load expects a string path")),
+    }
+  }
+  # columns(record): the field names, in order, as a list of strings. In order,
+  # because a frame's column order is the order it was read in and a caller
+  # writing a header back out depends on it.
+  if bytes.equal(name, "columns") {
+    match args[0] {
+      VRecord(r) => {
+        let items: Arr[Value] = arr_new()
+        for k in dict_keys(r.fields) {
+          push(items, VStr(k))
+        }
+        return Ok(VList(ListVal { items: items }))
+      },
+      _ => return Err(runtime_error(line, "columns expects a record")),
+    }
+  }
+  # field(record, name): look up a field by string name (dynamic access).
+  if bytes.equal(name, "field") {
+    match args[0] {
+      VRecord(r) => {
+        match args[1] {
+          VStr(n) => {
+            match dict_get(r.fields, n) {
+              Some(v) => return Ok(v),
+              None => return Err(runtime_error(line,
+                bytes.concat("record has no field ", quoted(n)))),
+            }
+          },
+          _ => return Err(runtime_error(line, "field expects a string name")),
+        }
+      },
+      _ => return Err(runtime_error(line, "field expects a record")),
+    }
+  }
+  # with_field(record, name, value): a copy of the record with the field set. A
+  # copy, because a record is a value; an in-place set would make a frame passed
+  # to a function change under the caller.
+  match args[0] {
+    VRecord(r) => {
+      match args[1] {
+        VStr(n) => {
+          let fields: Dict[Str, Value] = dict_new()
+          for k in dict_keys(r.fields) {
+            dict_set(fields, k, dict_must(r.fields, k))
+          }
+          dict_set(fields, n, args[2])
+          Ok(VRecord(RecordVal { fields: fields }))
+        },
+        _ => Err(runtime_error(line, "with_field expects a string name")),
+      }
+    },
+    _ => Err(runtime_error(line, "with_field expects a record")),
+  }
+}
+
+# read_csv(path): load a file of numeric rows (comma- or whitespace-separated)
+# into a [rows, cols] tensor. Blank and '#' lines are skipped.
+fn read_csv(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
+  let path: Str = resolve_path(path_in)
+  let raw: Str = ""
+  match read_file(path) {
+    Some(s) => raw = s,
+    # The message quotes the resolved path, not the one the caller wrote, which
+    # is what makes a wrong working directory diagnosable.
+    None => return Err(runtime_error(line, bytes.concat("read_csv: cannot read ", quoted(path)))),
+  }
+  let rows: Arr[Arr[F64]] = arr_new()
+  for raw_line in tensor.split_on(raw, 10) {
+    let text: Str = trim_space(raw_line)
+    if len(text) == 0 or text[0] == 35 {
+      continue
+    }
+    let row: Arr[F64] = arr_new()
+    for f in split_fields(text) {
+      match f64_parse(f) {
+        Some(v) => push(row, v),
+        None => return Err(runtime_error(line,
+          bytes.concat("read_csv: ", bytes.concat(quoted(f), " is not a number")))),
+      }
+    }
+    if len(row) > 0 {
+      push(rows, row)
+    }
+  }
+  if len(rows) == 0 {
+    return Err(runtime_error(line, bytes.concat("read_csv: no numeric rows in ", quoted(path))))
+  }
+  let cols: I64 = len(rows[0])
+  let flat: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(rows) {
+    if len(rows[i]) != cols {
+      return Err(runtime_error(line, bytes.concat("read_csv: row ", bytes.concat(str(i + 1),
+        bytes.concat(" has ", bytes.concat(str(len(rows[i])), bytes.concat(" columns, expected ",
+        str(cols))))))))
+    }
+    let j: I64 = 0
+    while j < cols {
+      push(flat, rows[i][j])
+      j = j + 1
+    }
+    i = i + 1
+  }
+  let shape: Arr[I64] = arr_new()
+  push(shape, len(rows))
+  push(shape, cols)
+  Ok(VTensor(tensor.Tensor { shape: shape, data: flat }))
+}
+
+# read_frame(path): a CSV whose first row is a header, returned as a record
+# mapping each column name to its column tensor (a "frame").
+fn read_frame(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
+  let path: Str = resolve_path(path_in)
+  let raw: Str = ""
+  match read_file(path) {
+    Some(s) => raw = s,
+    None => return Err(runtime_error(line, bytes.concat("read_frame: cannot read ", quoted(path)))),
+  }
+  let header: Arr[Str] = arr_new()
+  let have_header: Bool = false
+  let rows: Arr[Arr[F64]] = arr_new()
+  for raw_line in tensor.split_on(raw, 10) {
+    let text: Str = trim_space(raw_line)
+    if len(text) == 0 or text[0] == 35 {
+      continue
+    }
+    let fields: Arr[Str] = split_fields(text)
+    if not have_header {
+      header = fields
+      have_header = true
+      continue
+    }
+    if len(fields) != len(header) {
+      return Err(runtime_error(line, bytes.concat("read_frame: row has ",
+        bytes.concat(str(len(fields)), bytes.concat(" values but ",
+        bytes.concat(str(len(header)), " columns"))))))
+    }
+    let row: Arr[F64] = arr_new()
+    let i: I64 = 0
+    while i < len(fields) {
+      match f64_parse(fields[i]) {
+        Some(v) => push(row, v),
+        None => return Err(runtime_error(line, bytes.concat("read_frame: column ",
+          bytes.concat(quoted(header[i]), bytes.concat(" value ",
+          bytes.concat(quoted(fields[i]), " is not a number")))))),
+      }
+      i = i + 1
+    }
+    push(rows, row)
+  }
+  if not have_header {
+    return Err(runtime_error(line, bytes.concat("read_frame: ", bytes.concat(quoted(path),
+      " has no header row"))))
+  }
+  let fields: Dict[Str, Value] = dict_new()
+  let c: I64 = 0
+  while c < len(header) {
+    let col: Arr[F64] = arr_new()
+    let r: I64 = 0
+    while r < len(rows) {
+      push(col, rows[r][c])
+      r = r + 1
+    }
+    let shape: Arr[I64] = arr_new()
+    push(shape, len(rows))
+    dict_set(fields, header[c], VTensor(tensor.Tensor { shape: shape, data: col }))
+    c = c + 1
+  }
+  Ok(VRecord(RecordVal { fields: fields }))
+}
+
+# write_frame writes a record of equal-length 1-D column tensors to a CSV.
+fn write_frame(frame: RecordVal, path_in: Str, line: I64) -> Res[Unit, RuntimeError] {
+  let keys: Arr[Str] = dict_keys(frame.fields)
+  if len(keys) == 0 {
+    return Err(runtime_error(line, "write_frame: frame has no columns"))
+  }
+  let nrows: I64 = -1
+  let cols: Arr[Arr[F64]] = arr_new()
+  let i: I64 = 0
+  while i < len(keys) {
+    let k: Str = keys[i]
+    let col: Arr[F64] = arr_new()
+    match as_tensor(dict_must(frame.fields, k)) {
+      Some(t) => {
+        if len(t.shape) != 1 {
+          return Err(runtime_error(line, bytes.concat("write_frame: column ",
+            bytes.concat(quoted(k), " must be a 1-D tensor"))))
+        }
+        col = t.data
+      },
+      None => return Err(runtime_error(line, bytes.concat("write_frame: column ",
+        bytes.concat(quoted(k), " must be a 1-D tensor")))),
+    }
+    if nrows < 0 {
+      nrows = len(col)
+    } else {
+      if len(col) != nrows {
+        return Err(runtime_error(line, bytes.concat("write_frame: column ",
+          bytes.concat(quoted(k), bytes.concat(" has ", bytes.concat(str(len(col)),
+          bytes.concat(" rows, expected ", str(nrows))))))))
+      }
+    }
+    push(cols, col)
+    i = i + 1
+  }
+  let b: Bytes = bytes.new()
+  bytes.push_text(b, bytes.join(keys, ","))
+  bytes.push(b, 10)
+  let r: I64 = 0
+  while r < nrows {
+    i = 0
+    while i < len(cols) {
+      if i > 0 { bytes.push(b, 44) }
+      bytes.push_text(b, format_number(cols[i][r]))
+      i = i + 1
+    }
+    bytes.push(b, 10)
+    r = r + 1
+  }
+  let path: Str = resolve_path(path_in)
+  match write_file(path, bytes.to_str(b)) {
+    Ok(_) => Ok(unit),
+    Err(_) => Err(runtime_error(line, bytes.concat("write_frame: cannot write ", quoted(path)))),
+  }
+}
+
+# Fields split on any of comma, space, tab, carriage return and semicolon, with
+# empty fields dropped. Dropping them is what lets a line of space-separated
+# numbers with runs of spaces read the same as a comma-separated one, and it is
+# also why a trailing comma does not produce a phantom column.
+fn split_fields(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i <= len(s) {
+    let at_sep: Bool = false
+    if i == len(s) {
+      at_sep = true
+    } else {
+      let c: I64 = s[i]
+      at_sep = c == 44 or c == 32 or c == 9 or c == 13 or c == 59
+    }
+    if at_sep {
+      if i > start { push(out, s[start:i]) }
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+# ASCII whitespace only. Go's strings.TrimSpace also strips the Unicode space
+# characters; a CSV containing one of those would be trimmed there and not here.
+# NEEDS-61.
+fn trim_space(s: Str) -> Str {
+  let a: I64 = 0
+  let b: I64 = len(s)
+  while a < b and is_space_byte(s[a]) {
+    a = a + 1
+  }
+  while b > a and is_space_byte(s[b - 1]) {
+    b = b - 1
+  }
+  s[a:b]
+}
+
+fn is_space_byte(c: I64) -> Bool =
+  c == 32 or c == 9 or c == 10 or c == 13 or c == 11 or c == 12
+
+# ---- gradient-boosted trees ------------------------------------------------
+
+# gbm_fit(X, y) or gbm_fit(X, y, opts): train gradient-boosted trees on a [n, d]
+# feature matrix and an [n] target/label vector. opts is an optional record of
+# hyperparameters (rounds, learning_rate, max_depth, min_leaf, lambda, gamma,
+# objective). Returns an opaque model.
+fn bi_gbm(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(name, "gbm_fit") {
+    if len(args) != 2 and len(args) != 3 {
+      return Err(runtime_error(line, "gbm_fit expects (X, y) or (X, y, opts)"))
+    }
+    let x: tensor.Tensor = arg_tensor(args[0], "gbm_fit", line)?
+    if len(x.shape) != 2 {
+      return Err(runtime_error(line, bytes.concat("gbm_fit: X must be a 2-D [n, d] tensor, got shape ",
+        shape_go(x.shape))))
+    }
+    let y: tensor.Tensor = arg_tensor(args[1], "gbm_fit", line)?
+    if len(y.shape) != 1 {
+      return Err(runtime_error(line, bytes.concat("gbm_fit: y must be a 1-D [n] tensor, got shape ",
+        shape_go(y.shape))))
+    }
+    let n: I64 = x.shape[0]
+    let d: I64 = x.shape[1]
+    if y.shape[0] != n {
+      return Err(runtime_error(line, bytes.concat("gbm_fit: X has ", bytes.concat(str(n),
+        bytes.concat(" rows but y has ", str(y.shape[0]))))))
+    }
+    let p: GbmParams = gbm_default_params()
+    if len(args) == 3 {
+      match args[2] {
+        VRecord(opts) => gbm_opts_from_record(opts, p, line)?,
+        _ => return Err(runtime_error(line, "gbm_fit: opts must be a record")),
+      }
+    }
+    match gbm_fit(x.data, y.data, n, d, p) {
+      Ok(h) => return Ok(VForeign(ForeignVal { kind: "gbm model", handle: h })),
+      Err(m) => return Err(runtime_error(line, m)),
+    }
+  }
+  # gbm_predict(model, X): score a [n, d] feature matrix with a fitted model,
+  # returning an [n] tensor (raw scores for regression, probabilities for a
+  # logistic model).
+  let handle: I64 = 0
+  match args[0] {
+    VForeign(fv) => {
+      if not bytes.equal(fv.kind, "gbm model") {
+        return Err(runtime_error(line, "gbm_predict: first argument must be a model from gbm_fit"))
+      }
+      handle = fv.handle
+    },
+    _ => return Err(runtime_error(line, "gbm_predict: first argument must be a model from gbm_fit")),
+  }
+  let x: tensor.Tensor = arg_tensor(args[1], "gbm_predict", line)?
+  if len(x.shape) != 2 {
+    return Err(runtime_error(line, bytes.concat("gbm_predict: X must be a 2-D [n, d] tensor, got shape ",
+      shape_go(x.shape))))
+  }
+  match gbm_predict(handle, x.data, x.shape[0], x.shape[1]) {
+    Ok(out) => {
+      let shape: Arr[I64] = arr_new()
+      push(shape, x.shape[0])
+      Ok(VTensor(tensor.Tensor { shape: shape, data: out }))
+    },
+    Err(m) => Err(runtime_error(line, m)),
+  }
+}
+
+struct GbmParams {
+  rounds: I64,
+  max_depth: I64,
+  min_leaf: I64,
+  learning_rate: F64,
+  lambda: F64,
+  gamma: F64,
+  # "squared" or "logistic". A string rather than an enum because it crosses
+  # into the native core, and the core is where the switch on it lives.
+  objective: Str,
+}
+
+# internal/gbm's DefaultParams. Repeated here rather than asked of the core,
+# because the defaults are part of what `gbm_fit(X, y)` means to a reader of a
+# twill program and burying them behind a call would hide them.
+fn gbm_default_params() -> GbmParams =
+  GbmParams {
+    rounds: 100,
+    max_depth: 3,
+    min_leaf: 1,
+    learning_rate: 0.1,
+    lambda: 1.0,
+    gamma: 0.0,
+    objective: "squared",
+  }
+
+# gbm_opts_from_record overrides GBM parameters from an opts record. Unknown
+# keys are ignored so the option set can grow without breaking callers.
+fn gbm_opts_from_record(opts: RecordVal, p: GbmParams, line: I64) -> Res[Unit, RuntimeError] {
+  match dict_get(opts.fields, "rounds") {
+    Some(v) => p.rounds = i64_of_f64(scalar_of(v, "gbm_fit option rounds", line)?),
+    None => unit,
+  }
+  match dict_get(opts.fields, "max_depth") {
+    Some(v) => p.max_depth = i64_of_f64(scalar_of(v, "gbm_fit option max_depth", line)?),
+    None => unit,
+  }
+  match dict_get(opts.fields, "min_leaf") {
+    Some(v) => p.min_leaf = i64_of_f64(scalar_of(v, "gbm_fit option min_leaf", line)?),
+    None => unit,
+  }
+  match dict_get(opts.fields, "learning_rate") {
+    Some(v) => p.learning_rate = scalar_of(v, "gbm_fit option learning_rate", line)?,
+    None => unit,
+  }
+  match dict_get(opts.fields, "lambda") {
+    Some(v) => p.lambda = scalar_of(v, "gbm_fit option lambda", line)?,
+    None => unit,
+  }
+  match dict_get(opts.fields, "gamma") {
+    Some(v) => p.gamma = scalar_of(v, "gbm_fit option gamma", line)?,
+    None => unit,
+  }
+  match dict_get(opts.fields, "objective") {
+    Some(v) => {
+      match v {
+        VStr(s) => {
+          if not bytes.equal(s, "squared") and not bytes.equal(s, "logistic") {
+            return Err(runtime_error(line, bytes.concat("gbm_fit: unknown objective ",
+              bytes.concat(quoted(s), " (use \"squared\" or \"logistic\")"))))
+          }
+          p.objective = s
+        },
+        _ => return Err(runtime_error(line, "gbm_fit: objective must be a string")),
+      }
+    },
+    None => unit,
+  }
+  Ok(unit)
+}
