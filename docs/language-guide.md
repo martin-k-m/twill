@@ -235,8 +235,10 @@ for Newton's method). It supports functions built from arithmetic, the unary
 math functions, `matmul`, `sum`, `mean`, and the structural ops indexing
 (`x[i]`), slicing (`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a
 function using an op outside this set raises a clear error. The reverse-mode `grad` remains
-first-order, so the general nested form `grad(grad(f))` is not supported — use
-`hessian` for second derivatives.
+first-order, so the general nested form `grad(grad(f))` is not supported: it is
+refused with an error naming `hessian`, rather than returning the zero it would
+otherwise compute. The gradient `grad` hands back is a plain value with no
+history, so differentiating it again differentiates a constant.
 
 ## Shape checking
 

@@ -458,6 +458,9 @@ func (ip *Interp) installBuiltins() {
 	// Automatic differentiation.
 	def("grad", 1, false, func(a []value.Value) (value.Value, error) {
 		f := a[0]
+		if err := refuseNestedGrad("grad", f); err != nil {
+			return nil, err
+		}
 		return &value.Builtin{Name: "grad(fn)", Variadic: true, Arity: -1, Fn: func(call []value.Value) (value.Value, error) {
 			_, grad0, _, err := ip.gradients(f, call)
 			return grad0, err
@@ -466,6 +469,9 @@ func (ip *Interp) installBuiltins() {
 
 	def("grads", 1, false, func(a []value.Value) (value.Value, error) {
 		f := a[0]
+		if err := refuseNestedGrad("grads", f); err != nil {
+			return nil, err
+		}
 		return &value.Builtin{Name: "grads(fn)", Variadic: true, Arity: -1, Fn: func(call []value.Value) (value.Value, error) {
 			_, _, all, err := ip.gradients(f, call)
 			if err != nil {
@@ -1349,6 +1355,32 @@ func gradFromNode(n *gradNode) value.Value {
 
 // gradients runs f with gradient-tracking arguments and returns the scalar
 // value, the gradient of the first argument, and the gradients of all args.
+// refuseNestedGrad rejects grad(grad(f)) instead of answering it wrongly.
+//
+// The gradient grad returns is a value, not a traced expression: reverse mode
+// reads the numbers out of the graph and hands them back with no history
+// attached. Differentiating that again differentiates a constant, so the answer
+// is zero, and it is zero silently, which is the worst way for a derivative to
+// be wrong. Somebody building on a second derivative would have no reason to
+// look.
+//
+// Second derivatives are hessian's job, which runs forward mode over the reverse
+// pass and gets it right. This points there rather than quietly failing.
+func refuseNestedGrad(caller string, f value.Value) error {
+	b, ok := f.(*value.Builtin)
+	if !ok {
+		return nil
+	}
+	if b.Name != "grad(fn)" && b.Name != "grads(fn)" {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s(%s) is not a second derivative: the gradient %s returns is a plain value with no "+
+			"history, so differentiating it again gives zero. Use hessian(f) for a second "+
+			"derivative, or jacobian(f) for the matrix of first ones",
+		caller, b.Name, b.Name)
+}
+
 func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tensor, value.Value, []value.Value, error) {
 	if len(callArgs) == 0 {
 		return nil, nil, nil, fmt.Errorf("gradient function requires at least one argument")

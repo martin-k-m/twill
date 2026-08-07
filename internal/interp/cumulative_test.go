@@ -272,3 +272,33 @@ func TestRangeStepZeroIsStillAnError(t *testing.T) {
 		t.Error("a zero step was accepted")
 	}
 }
+
+func TestNestedGradIsRefusedRatherThanAnsweredWrongly(t *testing.T) {
+	// It used to return zero. A second derivative that is silently zero is the
+	// worst way for one to be wrong: nothing about the result invites a check.
+	ip := interp.New(func(string) {})
+	_, err := ip.Run("let f = fn(x) { x * x }\nprint(grad(grad(f))(2.0))")
+	if err == nil {
+		t.Fatal("grad(grad(f)) was accepted")
+	}
+	if !strings.Contains(err.Error(), "hessian") {
+		t.Errorf("the error does not point at the thing that works: %v", err)
+	}
+}
+
+func TestHessianStillComputesTheSecondDerivative(t *testing.T) {
+	// The route the error points at has to be the one that works.
+	v, _ := run(t, "let f = fn(x) { x * x }\nhessian(f)(2.0)")
+	got := v.(*tensor.Tensor)
+	if len(got.Data) != 1 || math.Abs(got.Data[0]-2.0) > 1e-9 {
+		t.Errorf("hessian(x*x) at 2 = %v, want 2", got.Data)
+	}
+}
+
+func TestAnOrdinaryGradIsUnaffected(t *testing.T) {
+	v, _ := run(t, "let f = fn(x) { x * x + 3.0 * x }\ngrad(f)(2.0)")
+	got := v.(*tensor.Tensor)
+	if math.Abs(got.Data[0]-7.0) > 1e-9 {
+		t.Errorf("grad = %v, want 7", got.Data)
+	}
+}

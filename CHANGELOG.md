@@ -41,6 +41,13 @@
 
 ### Fixed
 
+- **`grad(grad(f))` is refused instead of answering zero.** The guide already
+  said nested reverse mode was unsupported; the implementation returned 0 anyway.
+  The gradient `grad` returns is a plain value with no history, so differentiating
+  it again differentiates a constant. A second derivative that is silently zero
+  is the worst way for one to be wrong, because nothing about the result invites
+  a check. The error names `hessian`, which computes it correctly.
+
 - **`tensor(...)` no longer discards the shape of its argument.** It returned an
   unknown type, so `tensor([[1.0, 2.0], [3.0, 4.0]]) @ tensor([[1.0, 2.0, 3.0]])`
   passed the checker and failed at run time. The literal already had a shape; the
