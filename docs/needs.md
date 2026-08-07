@@ -830,3 +830,26 @@ than silently doing nothing.
 
 One rule has to survive the port because it is the one people notice: `fmt
 --write` never renames a file. It refuses a `.ra` file and leaves it alone.
+
+### Verification of the einsum spec parser
+
+`src/tensor.tw`'s `parse_einsum` and `einsum_output_dims` were checked against
+`internal/tensor/einsum.go` by the same method: two independent transcriptions,
+compared on the parsed spec, the resolved output dimensions, and the exact error
+text.
+
+- **12,080 parse cases** (hand-written specs plus 3,000 random ones over an
+  alphabet containing `,`, `->`, spaces, uppercase and digits, at operand counts
+  0 to 3). Zero divergences.
+- **2,728 output-dimension cases**, including unknown sizes, inconsistent label
+  sizes, and rank mismatches. Zero divergences.
+
+This matters more than its size suggests, because `src/check.tw` calls the same
+parser to validate a literal spec. If the two implementations disagreed, the
+checker and the runtime would report different things about the same einsum, and
+the corpus would show it as a checker bug rather than a shared one.
+
+The structural differences that could have broken it and did not: the twill
+version splits on bytes rather than using `strings.Split`, and it sorts the
+implicit output labels with its own insertion sort rather than `sort.Slice`.
+Both are places where a port silently drifts.

@@ -820,14 +820,17 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
     return TUnknown
   }
 
-  let a: TensorType = unwrap_or_unknown(lt)
-  let b: TensorType = unwrap_or_unknown(rt)
+  # Past this point both operands have to be tensors. One that is not is not
+  # definitely wrong either, since it may be a TUnknown, so the result is
+  # unknown and nothing is reported.
+  let a: TensorType = TensorType { dims: arr_new(), unit: dict_new() }
+  let b: TensorType = TensorType { dims: arr_new(), unit: dict_new() }
   match lt {
-    Some(_) => unit,
+    Some(v) => a = v,
     None => return TUnknown,
   }
   match rt {
-    Some(_) => unit,
+    Some(v) => b = v,
     None => return TUnknown,
   }
 
@@ -854,13 +857,6 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
 fn is_comparison(op: Str) -> Bool =
   bytes.equal(op, "==") or bytes.equal(op, "!=") or bytes.equal(op, "<") or
   bytes.equal(op, "<=") or bytes.equal(op, ">") or bytes.equal(op, ">=")
-
-fn unwrap_or_unknown(t: Opt[TensorType]) -> TensorType {
-  match t {
-    Some(v) => v,
-    None => TensorType { dims: arr_new(), unit: dict_new() },
-  }
-}
 
 # with_unit attaches a unit to a tensor result and leaves anything else alone.
 fn with_unit(res: Type, u: Dict[Str, I64]) -> Type {
