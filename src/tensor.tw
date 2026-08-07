@@ -1,0 +1,450 @@
+mode systems
+
+# tensor.tw — the tensor value model and the autodiff tape, in twill.
+#
+# PARTIAL. Read this before reading the file.
+#
+# docs/self-hosting.md section 2.2 draws a line: everything that reads twill
+# source is twill, everything that executes it is not. The tensor engine is on
+# the far side of that line. It wants SIMD, an allocator and control over
+# layout, and adding those to twill would mean designing a second, lower systems
+# subset with pointers, which section 1.2 deliberately refused.
+#
+# So what is in this file is the part the front end genuinely needs and can
+# express:
+#
+#   - the shape algebra: broadcasting, strides, index arithmetic, the rules
+#     `src/check.tw` checks statically and the runtime enforces dynamically;
+#   - the einsum spec parser, in full, because `src/check.tw` calls it and a
+#     second implementation of it would be a second set of error messages;
+#   - the shape of the autodiff tape, so the emitter knows what it is emitting.
+#
+# What is not in this file is every elementwise kernel, the matmul inner loop,
+# the convolution, the reductions, the scan primitives, the parallel executor
+# and the gradient rules for each op. Those are the native core. The calling
+# convention that would let this file reach them does not exist yet and is
+# NEEDS-25; until it does, the arithmetic below that needs a kernel says so
+# rather than pretending.
+
+import "bytes.tw" as bytes
+
+# ---- the value ------------------------------------------------------------
+
+# A tensor is a flat float64 buffer plus a shape. Row-major, always dense, never
+# strided: internal/tensor/tensor.go made that choice and every kernel in the
+# core depends on it, so a twill-side view type would be a lie about what the
+# core can accept.
+#
+# Rank 0 is a scalar and is a real tensor rather than a special case. That is
+# what lets `x + 1` broadcast with no rule for scalars, and it is why `shape` of
+# a number is `[]` rather than an error.
+struct Tensor {
+  shape: Arr[I64],
+  data: Arr[F64],
+}
+
+fn rank(t: Tensor) -> I64 = len(t.shape)
+
+fn is_scalar(t: Tensor) -> Bool = len(t.shape) == 0
+
+fn element_count(shape: Arr[I64]) -> I64 {
+  let n: I64 = 1
+  let i: I64 = 0
+  while i < len(shape) {
+    n = n * shape[i]
+    i = i + 1
+  }
+  n
+}
+
+# Strides for a row-major dense buffer, trailing axis first. Computed rather
+# than stored, because a dense tensor's strides are a function of its shape and
+# storing them invites the two to disagree.
+fn strides_of(shape: Arr[I64]) -> Arr[I64] {
+  let n: I64 = len(shape)
+  let s: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(s, 1)
+    i = i + 1
+  }
+  i = n - 2
+  while i >= 0 {
+    s[i] = s[i + 1] * shape[i + 1]
+    i = i - 1
+  }
+  s
+}
+
+fn shape_string(shape: Arr[I64]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(shape) {
+    push(parts, str(shape[i]))
+    i = i + 1
+  }
+  bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]"))
+}
+
+fn shape_equal(a: Arr[I64], b: Arr[I64]) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+# ---- broadcasting ----------------------------------------------------------
+#
+# The runtime rule, which src/check.tw approximates statically. The difference
+# between the two is only that the checker has to tolerate an unknown size and
+# this does not: at run time every size is known, so a mismatch here is always
+# an error and never a silence.
+
+fn broadcast_shape(a: Arr[I64], b: Arr[I64]) -> Res[Arr[I64], Str] {
+  let ra: I64 = len(a)
+  let rb: I64 = len(b)
+  let r: I64 = ra
+  if rb > r { r = rb }
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < r {
+    push(out, 0)
+    i = i + 1
+  }
+  i = 0
+  while i < r {
+    # Aligned from the trailing axis. A missing axis is an implicit 1, which is
+    # what makes a [3] add to a [2, 3] without the caller reshaping.
+    let da: I64 = 1
+    let db: I64 = 1
+    if i < ra { da = a[ra - 1 - i] }
+    if i < rb { db = b[rb - 1 - i] }
+    if da == db {
+      out[r - 1 - i] = da
+    } else {
+      if da == 1 {
+        out[r - 1 - i] = db
+      } else {
+        if db == 1 {
+          out[r - 1 - i] = da
+        } else {
+          return Err(bytes.concat("shape mismatch: ", bytes.concat(shape_string(a),
+            bytes.concat(" vs ", bytes.concat(shape_string(b), " cannot broadcast")))))
+        }
+      }
+    }
+    i = i + 1
+  }
+  Ok(out)
+}
+
+# The flat offset in `src` (of shape `from`) that supplies the element at the
+# multi-index `idx` in a broadcast result. An axis of size 1 contributes 0,
+# which is exactly what "stretching" means: the same element is read repeatedly
+# rather than copied.
+fn broadcast_offset(from: Arr[I64], idx: Arr[I64]) -> I64 {
+  let st: Arr[I64] = strides_of(from)
+  let pad: I64 = len(idx) - len(from)
+  let off: I64 = 0
+  let i: I64 = 0
+  while i < len(from) {
+    let d: I64 = from[i]
+    let k: I64 = idx[pad + i]
+    if d == 1 { k = 0 }
+    off = off + k * st[i]
+    i = i + 1
+  }
+  off
+}
+
+# The matmul shape rule, matching src/check.tw's matmul_result. A rank-1 operand
+# is promoted, on the left to a row and on the right to a column, and the
+# promoted axis is dropped again from the result.
+fn matmul_shape(a: Arr[I64], b: Arr[I64]) -> Res[Arr[I64], Str] {
+  let a2: Arr[I64] = a
+  if len(a) == 1 {
+    a2 = arr_new()
+    push(a2, 1)
+    push(a2, a[0])
+  }
+  let b2: Arr[I64] = b
+  if len(b) == 1 {
+    b2 = arr_new()
+    push(b2, b[0])
+    push(b2, 1)
+  }
+  if len(a2) != 2 or len(b2) != 2 {
+    return Err(bytes.concat("@ needs vectors or matrices, got ",
+      bytes.concat(shape_string(a), bytes.concat(" and ", shape_string(b)))))
+  }
+  if a2[1] != b2[0] {
+    return Err(bytes.concat("shape mismatch in @: ", bytes.concat(shape_string(a),
+      bytes.concat(" @ ", bytes.concat(shape_string(b),
+      bytes.concat(" (inner ", bytes.concat(str(a2[1]),
+      bytes.concat(" != ", bytes.concat(str(b2[0]), ")")))))))))
+  }
+  let out: Arr[I64] = arr_new()
+  if len(a) == 1 and len(b) == 1 { return Ok(out) }
+  if len(a) == 1 {
+    push(out, b2[1])
+    return Ok(out)
+  }
+  if len(b) == 1 {
+    push(out, a2[0])
+    return Ok(out)
+  }
+  push(out, a2[0])
+  push(out, b2[1])
+  Ok(out)
+}
+
+# ---- einsum ----------------------------------------------------------------
+#
+# Complete, and complete on purpose: src/check.tw calls parse_einsum to validate
+# a literal spec, and a second implementation of the parser would mean a second
+# set of error messages for the same mistake. Sharing it is the reason the
+# checker's einsum diagnostics read the same as the runtime's.
+
+struct EinsumSpec {
+  inputs: Arr[Str],
+  output: Str,
+}
+
+# parse_einsum parses a spec like "ij,jk->ik" for n inputs. Without an explicit
+# "->", the output is the labels that appear exactly once, in sorted order,
+# which is the NumPy implicit convention. Repeated labels within a single input
+# subscript, which would mean a trace or a diagonal, are not supported.
+fn parse_einsum(spec_in: Str, n: I64) -> Res[EinsumSpec, Str] {
+  let spec: Str = remove_spaces(spec_in)
+  let in_part: Str = spec
+  let out_sub: Str = ""
+  let explicit: Bool = false
+  let arrow: I64 = bytes.index_of(spec, "->")
+  if arrow >= 0 {
+    in_part = spec[0:arrow]
+    out_sub = spec[arrow + 2:len(spec)]
+    explicit = true
+  }
+  let in_subs: Arr[Str] = split_on(in_part, 44)
+  if len(in_subs) != n {
+    return Err(bytes.concat("einsum: spec has ", bytes.concat(str(len(in_subs)),
+      bytes.concat(" operands but got ", str(n)))))
+  }
+
+  # counts is label to occurrence count across all operands. It decides the
+  # implicit output and validates an explicit one, so it is built first.
+  let counts: Dict[Str, I64] = dict_new()
+  let k: I64 = 0
+  while k < len(in_subs) {
+    let sub: Str = in_subs[k]
+    let seen: Dict[Str, Bool] = dict_new()
+    let i: I64 = 0
+    while i < len(sub) {
+      let ch: Str = sub[i:i + 1]
+      if sub[i] < 97 or sub[i] > 122 {
+        return Err(bytes.concat("einsum: labels must be lowercase letters, found ", quoted(ch)))
+      }
+      if dict_has(seen, ch) {
+        return Err(bytes.concat("einsum: repeated label ", bytes.concat(quoted(ch),
+          " within one operand is not supported")))
+      }
+      dict_set(seen, ch, true)
+      dict_set(counts, ch, dict_or(counts, ch, 0) + 1)
+      i = i + 1
+    }
+    k = k + 1
+  }
+
+  if not explicit {
+    # A label that appears once is a free index and survives; one that appears
+    # twice or more is summed over. Sorted so the result does not depend on the
+    # order the labels happened to be written in, which is the property that
+    # makes the implicit form usable at all.
+    let once: Arr[Str] = arr_new()
+    for ch in dict_keys(counts) {
+      if dict_must(counts, ch) == 1 {
+        push(once, ch)
+      }
+    }
+    sort_labels(once)
+    out_sub = bytes.join(once, "")
+  }
+
+  let oseen: Dict[Str, Bool] = dict_new()
+  let i: I64 = 0
+  while i < len(out_sub) {
+    let ch: Str = out_sub[i:i + 1]
+    if dict_or(counts, ch, 0) == 0 {
+      return Err(bytes.concat("einsum: output label ", bytes.concat(quoted(ch),
+        " does not appear in the inputs")))
+    }
+    if dict_has(oseen, ch) {
+      return Err(bytes.concat("einsum: repeated output label ", quoted(ch)))
+    }
+    dict_set(oseen, ch, true)
+    i = i + 1
+  }
+  Ok(EinsumSpec { inputs: in_subs, output: out_sub })
+}
+
+# einsum_output_dims resolves the output shape from the input shapes. A
+# dimension may be -1 for unknown, which is how the checker calls it; at run
+# time every dimension is known and the inconsistency check below is exact.
+fn einsum_output_dims(in_subs: Arr[Str], out_sub: Str, input_dims: Arr[Arr[I64]]) -> Res[Arr[I64], Str] {
+  let label_dim: Dict[Str, I64] = dict_new()
+  let k: I64 = 0
+  while k < len(in_subs) {
+    let sub: Str = in_subs[k]
+    if len(sub) != len(input_dims[k]) {
+      return Err(bytes.concat("einsum: operand ", bytes.concat(str(k),
+        bytes.concat(" has rank ", bytes.concat(str(len(input_dims[k])),
+        bytes.concat(" but subscript ", bytes.concat(quoted(sub),
+        bytes.concat(" has ", bytes.concat(str(len(sub)), " labels")))))))))
+    }
+    let a: I64 = 0
+    while a < len(sub) {
+      let ch: Str = sub[a:a + 1]
+      let d: I64 = input_dims[k][a]
+      match dict_get(label_dim, ch) {
+        Some(prev) => {
+          if prev >= 0 and d >= 0 and prev != d {
+            return Err(bytes.concat("einsum: label ", bytes.concat(quoted(ch),
+              bytes.concat(" has inconsistent sizes ", bytes.concat(str(prev),
+              bytes.concat(" and ", str(d)))))))
+          }
+          # An unknown recorded earlier is replaced by a known size found later,
+          # so the order the operands are written in does not change the answer.
+          if prev < 0 {
+            dict_set(label_dim, ch, d)
+          }
+        },
+        None => dict_set(label_dim, ch, d),
+      }
+      a = a + 1
+    }
+    k = k + 1
+  }
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(out_sub) {
+    push(out, dict_or(label_dim, out_sub[i:i + 1], -1))
+    i = i + 1
+  }
+  Ok(out)
+}
+
+fn remove_spaces(s: Str) -> Str {
+  let b: Bytes = bytes.new()
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] != 32 {
+      bytes.push(b, s[i])
+    }
+    i = i + 1
+  }
+  bytes.to_str(b)
+}
+
+# Split on a single byte, keeping empty fields. Empty fields matter: "ij,,k" has
+# three operands and the count check has to see all three, or the error names
+# the wrong number.
+fn split_on(s: Str, sep: I64) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i <= len(s) {
+    if i == len(s) or s[i] == sep {
+      push(out, s[start:i])
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+# Single-byte labels, so a bytewise insertion sort is a full sort. Same shape as
+# the one in check.tw and kept separate rather than shared, because a module
+# that both the checker and the runtime depend on for a two-line sort is a
+# dependency edge that buys nothing.
+fn sort_labels(xs: Arr[Str]) {
+  let i: I64 = 1
+  while i < len(xs) {
+    let v: Str = xs[i]
+    let j: I64 = i - 1
+    while j >= 0 and xs[j][0] > v[0] {
+      xs[j + 1] = xs[j]
+      j = j - 1
+    }
+    xs[j + 1] = v
+    i = i + 1
+  }
+}
+
+fn quoted(s: Str) -> Str = str_quote(s)
+
+# ---- autodiff --------------------------------------------------------------
+#
+# PARTIAL. The tape's shape is here because the emitter needs to know what it is
+# emitting; the gradient rules are not, because each one is a kernel.
+#
+# internal/tensor is reverse-mode over a taped graph: a forward pass records
+# each op with its inputs and its output, and the backward pass walks the tape
+# in reverse accumulating cotangents. That is the design this describes, and it
+# is the design the native core implements.
+
+# One recorded operation. `op` names the primitive, `inputs` are indices of
+# earlier tape entries or of leaves, and `out` is the value produced.
+#
+# Indices rather than handles: the tape is walked in reverse and an index is
+# comparable and printable, which makes a miscompiled tape debuggable. It also
+# keeps the tape a flat Arr, which is the only shape a bytecode emitter can
+# serialise without inventing a graph format.
+struct TapeEntry {
+  op: Str,
+  inputs: Arr[I64],
+  out: Tensor,
+}
+
+struct Tape {
+  entries: Arr[TapeEntry],
+  # Leaves are the values gradients are taken with respect to, in the order the
+  # caller named them, because `grads(loss)(W, b)` returns a list in that order
+  # and the order is part of the contract.
+  leaves: Arr[Tensor],
+}
+
+fn new_tape() -> Tape = Tape { entries: arr_new(), leaves: arr_new() }
+
+fn record(tp: Tape, op: Str, inputs: Arr[I64], out: Tensor) -> I64 {
+  push(tp.entries, TapeEntry { op: op, inputs: inputs, out: out })
+  len(tp.entries) - 1
+}
+
+# The backward pass, in outline. It is written out rather than left implicit
+# because the shape of the loop is the part the emitter has to reproduce, and it
+# is the part that is the same for every op.
+#
+# Not implemented: `vjp`, which is the per-op gradient rule and is one kernel
+# per primitive. That is NEEDS-25 and it is the whole of the missing half.
+#
+#   fn backward(tp: Tape, seed: Tensor) -> Arr[Tensor] {
+#     cotangents[last] = seed
+#     for i in reverse(range(len(tp.entries))) {
+#       let e = tp.entries[i]
+#       let g = cotangents[i]
+#       if g is unset { continue }        # this output did not reach the result
+#       for (k, contrib) in vjp(e.op, e.inputs, e.out, g) {
+#         cotangents[k] = accumulate(cotangents[k], contrib)
+#       }
+#     }
+#     collect the cotangents of the leaves, in leaf order
+#   }
+#
+# Two details in there are not obvious and are the ones a reimplementation gets
+# wrong. The skip on an unset cotangent is what keeps a dead branch of the graph
+# from costing a full backward pass. And `accumulate` adds rather than assigns,
+# because a value used twice receives a contribution from each use, and
+# assigning would silently drop one of them.

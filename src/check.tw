@@ -1,0 +1,2291 @@
+mode systems
+
+# check.tw — the twill shape checker, in twill.
+#
+# A port of internal/checker/checker.go. The policy is the one that file states
+# in its package comment and it is worth restating, because every decision below
+# follows from it and none of them makes sense without it:
+#
+#   The checker is best effort. It infers shapes where it can and reports a
+#   diagnostic only when a mismatch is *certain*, meaning both operand shapes
+#   are fully known and incompatible. Anything it cannot determine stays
+#   Unknown, so dynamic code never produces a false alarm.
+#
+# That is the right policy for numeric twill and the wrong one for a compiler.
+# docs/self-hosting.md section 1.3 changes it in systems mode: there a
+# `TUnknown` surviving to the end of inference is a diagnostic rather than
+# silence. Same lattice, opposite policy. This file implements the numeric
+# policy, because that is what the corpus in testdata/ was generated against and
+# what the diagnostics are compared to. The systems policy is NEEDS-34.
+#
+# A note on why so many paths return TUnknown after reporting nothing: each one
+# is a decision that the checker cannot prove a mistake, not an oversight. Where
+# the Go file explains a particular silence, that explanation is carried across
+# rather than summarised, because the silence is the part a later reader will
+# want to change and the reason is the part that stops them.
+
+import "ast.tw" as ast
+import "bytes.tw" as bytes
+import "tensor.tw" as tensor
+
+# ---- diagnostics -----------------------------------------------------------
+
+struct Diagnostic {
+  msg: Str,
+  line: I64,
+}
+
+# ---- types -----------------------------------------------------------------
+
+# dims: -1 means an unknown size; an empty list is a scalar.
+# unit is the quantity's physical unit; an empty map is dimensionless.
+struct TensorType {
+  dims: Arr[I64],
+  unit: Dict[Str, I64],
+}
+
+# elems absent means "a list whose contents are unknown", which is different
+# from a list known to be empty. The distinction decides whether concat can say
+# anything, so it cannot be collapsed to an empty array.
+struct ListType {
+  elems: Opt[Arr[Type]],
+}
+
+struct RecordType {
+  fields: Dict[Str, Type],
+}
+
+# node_id rather than a node handle: the recursion guard needs identity and
+# serial numbers give it without making heap identity a language feature. See
+# NEEDS-21 and the comment in ast.tw.
+struct FnType {
+  node_id: I64,
+  params: Arr[ast.Param],
+  ret: Opt[ast.ShapeAnno],
+  ret_unit: Opt[ast.UnitAnno],
+  body: ast.Expr,
+  env: CheckEnv,
+}
+
+struct BuiltinType {
+  name: Str,
+}
+
+enum Type {
+  TTensor(TensorType),
+  TUnknown,
+  TBool,
+  TStr,
+  TUnit,
+  TList(ListType),
+  TRecord(RecordType),
+  TFn(FnType),
+  TBuiltin(BuiltinType),
+}
+
+fn no_unit() -> Dict[Str, I64] = dict_new()
+
+fn scalar() -> Type = TTensor(TensorType { dims: arr_new(), unit: no_unit() })
+
+fn tensor_of(dims: Arr[I64]) -> Type = TTensor(TensorType { dims: dims, unit: no_unit() })
+
+fn tensor_with_unit(dims: Arr[I64], u: Dict[Str, I64]) -> Type =
+  TTensor(TensorType { dims: dims, unit: u })
+
+fn as_tensor(t: Type) -> Opt[TensorType] {
+  match t {
+    TTensor(v) => Some(v),
+    _ => None,
+  }
+}
+
+fn is_scalar(t: TensorType) -> Bool = len(t.dims) == 0
+
+fn fully_known(t: TensorType) -> Bool {
+  let i: I64 = 0
+  while i < len(t.dims) {
+    if t.dims[i] < 0 { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn dims_string(t: TensorType) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(t.dims) {
+    if t.dims[i] < 0 {
+      push(parts, "_")
+    } else {
+      push(parts, str(t.dims[i]))
+    }
+    i = i + 1
+  }
+  bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]"))
+}
+
+# A definite non-tensor operand to arithmetic is a type error rather than an
+# unknown. TUnknown is missing from this list on purpose: it is the whole
+# best-effort escape hatch.
+fn is_definite_non_tensor(t: Type) -> Bool {
+  match t {
+    TBool => true,
+    TStr => true,
+    TUnit => true,
+    TList(_) => true,
+    TRecord(_) => true,
+    TFn(_) => true,
+    TBuiltin(_) => true,
+    _ => false,
+  }
+}
+
+# ---- units -----------------------------------------------------------------
+#
+# A unit is base name to integer exponent. Units are checked statically and
+# erased at runtime, so nothing here affects what a program computes; it only
+# decides whether the program is allowed to say it.
+
+fn unit_clean(u: Dict[Str, I64]) -> Dict[Str, I64] {
+  let out: Dict[Str, I64] = dict_new()
+  for name in dict_keys(u) {
+    let v: I64 = dict_must(u, name)
+    if v != 0 {
+      dict_set(out, name, v)
+    }
+  }
+  out
+}
+
+fn unit_equal(a: Dict[Str, I64], b: Dict[Str, I64]) -> Bool {
+  if len(a) != len(b) { return false }
+  for name in dict_keys(a) {
+    match dict_get(b, name) {
+      Some(v) => {
+        if v != dict_must(a, name) { return false }
+      },
+      None => return false,
+    }
+  }
+  true
+}
+
+fn unit_mul(a: Dict[Str, I64], b: Dict[Str, I64]) -> Dict[Str, I64] {
+  let r: Dict[Str, I64] = dict_new()
+  for name in dict_keys(a) {
+    dict_set(r, name, dict_or(r, name, 0) + dict_must(a, name))
+  }
+  for name in dict_keys(b) {
+    dict_set(r, name, dict_or(r, name, 0) + dict_must(b, name))
+  }
+  unit_clean(r)
+}
+
+fn unit_div(a: Dict[Str, I64], b: Dict[Str, I64]) -> Dict[Str, I64] {
+  let r: Dict[Str, I64] = dict_new()
+  for name in dict_keys(a) {
+    dict_set(r, name, dict_or(r, name, 0) + dict_must(a, name))
+  }
+  for name in dict_keys(b) {
+    dict_set(r, name, dict_or(r, name, 0) - dict_must(b, name))
+  }
+  unit_clean(r)
+}
+
+fn unit_pow(a: Dict[Str, I64], k: I64) -> Dict[Str, I64] {
+  if k == 0 or len(a) == 0 { return dict_new() }
+  let r: Dict[Str, I64] = dict_new()
+  for name in dict_keys(a) {
+    dict_set(r, name, dict_must(a, name) * k)
+  }
+  unit_clean(r)
+}
+
+# unit_sqrt halves each exponent. An odd exponent has no whole square root, and
+# the caller reports that rather than rounding, because sqrt(USD) is not a unit
+# and pretending it is would let the mistake travel.
+struct UnitSqrt {
+  unit: Dict[Str, I64],
+  ok: Bool,
+}
+
+fn unit_sqrt(a: Dict[Str, I64]) -> UnitSqrt {
+  let r: Dict[Str, I64] = dict_new()
+  for name in dict_keys(a) {
+    let v: I64 = dict_must(a, name)
+    if v % 2 != 0 {
+      return UnitSqrt { unit: dict_new(), ok: false }
+    }
+    dict_set(r, name, v / 2)
+  }
+  UnitSqrt { unit: unit_clean(r), ok: true }
+}
+
+# The rendering is sorted by name, and that is not cosmetic: a Dict iterates in
+# insertion order, two quantities can reach the same unit by different routes,
+# and a diagnostic that prints `USD*year^-1` in one place and `year^-1*USD` in
+# another is two messages for one problem. The Go side calls sort.Strings here
+# for the same reason.
+fn unit_string(u: Dict[Str, I64]) -> Str {
+  if len(u) == 0 { return "1" }
+  let names: Arr[Str] = arr_new()
+  for name in dict_keys(u) {
+    push(names, name)
+  }
+  sort_strings(names)
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(names) {
+    let n: Str = names[i]
+    let e: I64 = dict_must(u, n)
+    if e == 1 {
+      push(parts, n)
+    } else {
+      push(parts, bytes.concat(n, bytes.concat("^", str(e))))
+    }
+    i = i + 1
+  }
+  bytes.join(parts, "*")
+}
+
+# Insertion sort, bytewise ascending, to match sort.Strings. The lists are two
+# or three elements: a comparator-taking `sort` builtin would be a larger
+# language question than this needs. See NEEDS-23.
+fn sort_strings(xs: Arr[Str]) {
+  let i: I64 = 1
+  while i < len(xs) {
+    let v: Str = xs[i]
+    let j: I64 = i - 1
+    while j >= 0 and str_greater(xs[j], v) {
+      xs[j + 1] = xs[j]
+      j = j - 1
+    }
+    xs[j + 1] = v
+    i = i + 1
+  }
+}
+
+fn str_greater(a: Str, b: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(a) and i < len(b) {
+    if a[i] != b[i] { return a[i] > b[i] }
+    i = i + 1
+  }
+  len(a) > len(b)
+}
+
+fn unit_from_anno(a: ast.UnitAnno) -> Dict[Str, I64] {
+  let r: Dict[Str, I64] = dict_new()
+  let i: I64 = 0
+  while i < len(a.factors) {
+    let f: ast.UnitFactor = a.factors[i]
+    dict_set(r, f.name, dict_or(r, f.name, 0) + f.exp)
+    i = i + 1
+  }
+  unit_clean(r)
+}
+
+# ---- environment -----------------------------------------------------------
+
+struct CheckEnv {
+  vars: Dict[Str, Type],
+  parent: Opt[CheckEnv],
+}
+
+fn new_env(parent: Opt[CheckEnv]) -> CheckEnv =
+  CheckEnv { vars: dict_new(), parent: parent }
+
+fn env_get(e: CheckEnv, name: Str) -> Opt[Type] {
+  let cur: Opt[CheckEnv] = Some(e)
+  while true {
+    match cur {
+      Some(env) => {
+        match dict_get(env.vars, name) {
+          Some(t) => return Some(t),
+          None => cur = env.parent,
+        }
+      },
+      None => return None,
+    }
+  }
+  None
+}
+
+fn env_define(e: CheckEnv, name: Str, t: Type) {
+  dict_set(e.vars, name, t)
+}
+
+# Assignment rebinds where the name was defined, walking outward, and defines
+# locally only if it was never defined at all. That mirrors interp.Env.assign,
+# and it is what makes `total = total - x` inside a loop body update the
+# variable declared outside it.
+fn env_assign(e: CheckEnv, name: Str, t: Type) {
+  let cur: Opt[CheckEnv] = Some(e)
+  while true {
+    match cur {
+      Some(env) => {
+        if dict_has(env.vars, name) {
+          dict_set(env.vars, name, t)
+          return
+        }
+        cur = env.parent
+      },
+      None => {
+        env_define(e, name, t)
+        return
+      },
+    }
+  }
+}
+
+# ---- the checker -----------------------------------------------------------
+
+struct Checker {
+  diags: Arr[Diagnostic],
+  # User functions currently being inferred, keyed by node id. Without this a
+  # recursive function inferred at a call site recurses forever.
+  stack: Dict[I64, Bool],
+  types: Dict[Str, RecordType],
+  units: Dict[Str, Bool],
+  # Set when a file imports without an alias, which makes any unknown name
+  # unprovable. See check().
+  blind_import: Bool,
+}
+
+fn report(c: Checker, line: I64, msg: Str) {
+  push(c.diags, Diagnostic { msg: msg, line: line })
+}
+
+# check analyses a program and returns any diagnostics found.
+fn check(prog: ast.Program) -> Arr[Diagnostic] {
+  let c: Checker = Checker {
+    diags: arr_new(),
+    stack: dict_new(),
+    types: dict_new(),
+    units: dict_new(),
+    blind_import: false,
+  }
+
+  # Register declared record types and units first so forward references
+  # resolve. A file that declares `type Model` at the bottom and uses it at the
+  # top is legal and common.
+  for s in prog.body {
+    match s {
+      STypeDecl(d) => register_type(c, d),
+      SUnitDecl(d) => dict_set(c.units, d.name, true),
+      _ => unit,
+    }
+  }
+
+  let env: CheckEnv = new_env(None)
+  for name in builtin_names() {
+    env_define(env, name, TBuiltin(BuiltinType { name: name }))
+  }
+
+  # An import with no alias brings its names in unqualified, and this checker
+  # does not read the imported file, so it cannot know what those names are. One
+  # of them is enough to make every unknown name unreliable, so the whole check
+  # stands down for the file rather than reporting a definition it simply cannot
+  # see. `import "std/nn" as nn` keeps the check, since then every borrowed name
+  # arrives with the alias on it.
+  for s in prog.body {
+    match s {
+      SImport(imp) => {
+        if len(imp.alias) == 0 {
+          c.blind_import = true
+        }
+      },
+      _ => unit,
+    }
+  }
+
+  # Every top-level function name, before any body is checked. A file may call a
+  # function declared further down and does at run time, so a checker that
+  # walked strictly in order would report a name that is perfectly well defined.
+  # Forward references resolve for types and units above; until this pass existed
+  # they did not for functions.
+  #
+  # The declaration is not typed here, only named: check_fn_def does the real
+  # work when the walk reaches it, and this is about knowing the name exists.
+  for s in prog.body {
+    match s {
+      SFn(fd) => {
+        match env_get(env, fd.name) {
+          Some(_) => unit,
+          None => env_define(env, fd.name, TUnknown),
+        }
+      },
+      _ => unit,
+    }
+  }
+
+  for s in prog.body {
+    infer_stmt(c, s, env)
+  }
+  dedupe(c.diags)
+}
+
+# dedupe removes repeated diagnostics. A body is checked once at its definition
+# and again at each call site, so one mistake in a function called three times
+# would otherwise be reported four times.
+fn dedupe(diags: Arr[Diagnostic]) -> Arr[Diagnostic] {
+  if len(diags) < 2 { return diags }
+  let seen: Dict[Str, Bool] = dict_new()
+  let out: Arr[Diagnostic] = arr_new()
+  let i: I64 = 0
+  while i < len(diags) {
+    let d: Diagnostic = diags[i]
+    # The key joins line and message. A line number is digits only, so the first
+    # space separates the two unambiguously and two different findings cannot
+    # collide into one.
+    let key: Str = bytes.concat(str(d.line), bytes.concat(" ", d.msg))
+    if not dict_has(seen, key) {
+      dict_set(seen, key, true)
+      push(out, d)
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn register_type(c: Checker, td: ast.TypeDecl) {
+  let fields: Dict[Str, Type] = dict_new()
+  let i: I64 = 0
+  while i < len(td.fields) {
+    let f: ast.TypeField = td.fields[i]
+    dict_set(fields, f.name, tensor_of(ast.concrete_dims(f.shape)))
+    i = i + 1
+  }
+  dict_set(c.types, td.name, RecordType { fields: fields })
+}
+
+# resolve_unit builds a unit map from an annotation and reports any factor that
+# names a unit which was never declared with `unit NAME`. A typo in a unit name
+# is otherwise indistinguishable from a new unit, and silently accepting it is
+# how annotations come to mean nothing.
+fn resolve_unit(c: Checker, a: ast.UnitAnno, line: I64) -> Dict[Str, I64] {
+  let i: I64 = 0
+  while i < len(a.factors) {
+    let f: ast.UnitFactor = a.factors[i]
+    if not dict_has(c.units, f.name) {
+      report(c, line, bytes.concat("unknown unit ", bytes.concat(quoted(f.name),
+        bytes.concat(" (declare it with `unit ", bytes.concat(f.name, "`)")))))
+    }
+    i = i + 1
+  }
+  unit_from_anno(a)
+}
+
+# ---- statements ------------------------------------------------------------
+
+fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
+  match s {
+    SLet(st) => {
+      let rhs: Type = infer_expr(c, st.value, env)
+      match st.unit {
+        Some(anno) => {
+          let want: Dict[Str, I64] = resolve_unit(c, anno, st.line)
+          match as_tensor(rhs) {
+            Some(t) => {
+              # A dimensionless value adopts the declared unit: `let px: USD =
+              # 10.0` is the normal way to introduce a quantity. Only a value
+              # that already carries a conflicting unit is a mistake.
+              if len(t.unit) != 0 and not unit_equal(t.unit, want) {
+                report(c, st.line, bytes.concat(quoted(st.name),
+                  bytes.concat(" declares unit ", bytes.concat(unit_string(want),
+                  bytes.concat(" but the value has unit ", unit_string(t.unit))))))
+              }
+              env_define(env, st.name, tensor_with_unit(t.dims, want))
+            },
+            None => env_define(env, st.name, tensor_with_unit(arr_new(), want)),
+          }
+        },
+        None => env_define(env, st.name, rhs),
+      }
+    },
+    SFn(st) => {
+      env_define(env, st.name, TFn(FnType {
+        node_id: st.id, params: st.params, ret: st.ret, ret_unit: st.ret_unit,
+        body: st.body, env: env,
+      }))
+      # Check the body once at definition using the parameter annotations, so
+      # mistakes are caught even if the function is never called. Unannotated
+      # parameters are unknown, so this only reports definite errors.
+      check_fn_def(c, st, env)
+    },
+    SAssign(st) => env_assign(env, st.name, infer_expr(c, st.value, env)),
+    SWhile(st) => {
+      infer_expr(c, st.cond, env)
+      infer_block(c, st.body, new_env(Some(env)))
+    },
+    SFor(st) => {
+      let iter: Type = infer_expr(c, st.iter, env)
+      let scope: CheckEnv = new_env(Some(env))
+      scope_define_elem(scope, st.name, iter)
+      infer_block(c, st.body, scope)
+    },
+    SReturn(st) => {
+      match st.value {
+        Some(v) => infer_expr(c, v, env),
+        None => unit,
+      }
+    },
+    SImport(st) => {
+      # Imported definitions are resolved at run time. For a namespaced import,
+      # bind the alias so field access on it stays unknown rather than being
+      # reported as an undefined name.
+      if len(st.alias) > 0 {
+        env_define(env, st.alias, TUnknown)
+      }
+    },
+    STypeDecl(_) => unit,
+    SUnitDecl(_) => unit,
+    SExpr(st) => infer_expr(c, st.x, env),
+    SBlock(b) => infer_block(c, b, new_env(Some(env))),
+  }
+}
+
+fn scope_define_elem(scope: CheckEnv, name: Str, iter: Type) {
+  env_define(scope, name, elem_type(iter))
+}
+
+# A block's value is its last expression statement. A declaration or a loop
+# leaves it Unit, which is why `fn f() { let x = 1 }` returns unit rather than 1.
+fn infer_block(c: Checker, b: ast.Block, env: CheckEnv) -> Type {
+  let last: Type = TUnit
+  for s in b.body {
+    match s {
+      SExpr(es) => last = infer_expr(c, es.x, env),
+      _ => {
+        infer_stmt(c, s, env)
+        last = TUnit
+      },
+    }
+  }
+  last
+}
+
+# elem_type returns the element type produced by iterating a value. Iterating a
+# matrix yields its rows; iterating a list yields something the checker cannot
+# name, because a list is heterogeneous.
+fn elem_type(t: Type) -> Type {
+  match t {
+    TTensor(v) => {
+      if len(v.dims) == 1 { return scalar() }
+      if len(v.dims) > 1 { return tensor_of(tail(v.dims)) }
+      TUnknown
+    },
+    TList(_) => TUnknown,
+    _ => TUnknown,
+  }
+}
+
+fn tail(xs: Arr[I64]) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 1
+  while i < len(xs) {
+    push(out, xs[i])
+    i = i + 1
+  }
+  out
+}
+
+fn copy_dims(xs: Arr[I64]) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    push(out, xs[i])
+    i = i + 1
+  }
+  out
+}
+
+# ---- expressions -----------------------------------------------------------
+
+fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
+  match e {
+    ENumber(_) => scalar(),
+    EString(_) => TStr,
+    EBool(_) => TBool,
+    EIdent(ex) => {
+      match env_get(env, ex.name) {
+        Some(t) => t,
+        None => {
+          # A name that resolves to nothing is a typo, and it was the one
+          # mistake the checker could see plainly and said nothing about.
+          # Builtins are not in the environment because they are not values, so
+          # they are checked against the table instead.
+          if not is_builtin(ex.name) and not c.blind_import {
+            report(c, ex.line, bytes.concat("unknown name ", quoted(ex.name)))
+          }
+          TUnknown
+        },
+      }
+    },
+    ETensor(ex) => infer_tensor_lit(c, ex),
+    EList(ex) => {
+      let elems: Arr[Type] = arr_new()
+      let i: I64 = 0
+      while i < len(ex.elements) {
+        push(elems, infer_expr(c, ex.elements[i], env))
+        i = i + 1
+      }
+      TList(ListType { elems: Some(elems) })
+    },
+    ELambda(ex) => TFn(FnType {
+      node_id: ex.id, params: ex.params, ret: ex.ret, ret_unit: ex.ret_unit,
+      body: ex.body, env: env,
+    }),
+    EUnary(ex) => infer_unary(c, ex, env),
+    EBinary(ex) => infer_binary(c, ex, env),
+    ECall(ex) => infer_call(c, ex, env),
+    EIndex(ex) => infer_index(c, ex, env),
+    ESlice(ex) => infer_slice(c, ex, env),
+    ERecord(ex) => {
+      let fields: Dict[Str, Type] = dict_new()
+      let i: I64 = 0
+      while i < len(ex.fields) {
+        let f: ast.RecordField = ex.fields[i]
+        dict_set(fields, f.name, infer_expr(c, f.value, env))
+        i = i + 1
+      }
+      TRecord(RecordType { fields: fields })
+    },
+    EField(ex) => {
+      match as_record(infer_expr(c, ex.target, env)) {
+        Some(rec) => {
+          match dict_get(rec.fields, ex.name) {
+            Some(ft) => ft,
+            None => {
+              report(c, ex.line, bytes.concat("record has no field ", quoted(ex.name)))
+              TUnknown
+            },
+          }
+        },
+        # Field access on anything the checker could not resolve to a record is
+        # not evidence of a mistake: it is usually a namespaced import.
+        None => TUnknown,
+      }
+    },
+    EIf(ex) => infer_if(c, ex, env),
+    EBlock(b) => infer_block(c, b, new_env(Some(env))),
+  }
+}
+
+fn as_record(t: Type) -> Opt[RecordType] {
+  match t {
+    TRecord(r) => Some(r),
+    _ => None,
+  }
+}
+
+# An `if` with no `else` has no value on one path, so its type is unknown rather
+# than the then-branch's. Joining the two branches only produces a type when
+# they agree.
+fn infer_if(c: Checker, ex: ast.IfExpr, env: CheckEnv) -> Type {
+  infer_expr(c, ex.cond, env)
+  let then_type: Type = infer_block(c, ex.then_block, new_env(Some(env)))
+  match ex.else_branch {
+    ElseBlock(alt) => join(then_type, infer_block(c, alt, new_env(Some(env)))),
+    ElseIf(alt) => join(then_type, infer_if(c, alt, env)),
+    NoElse => TUnknown,
+  }
+}
+
+# join returns the shape both branches agree on, and Unknown otherwise. It does
+# not widen: two different shapes have no common shape in this lattice and
+# inventing one would be a guess.
+fn join(a: Type, b: Type) -> Type {
+  match as_tensor(a) {
+    Some(at) => {
+      match as_tensor(b) {
+        Some(bt) => {
+          if shape_match(at, bt) { return TTensor(at) }
+          TUnknown
+        },
+        None => TUnknown,
+      }
+    },
+    None => TUnknown,
+  }
+}
+
+fn shape_match(a: TensorType, b: TensorType) -> Bool {
+  if len(a.dims) != len(b.dims) { return false }
+  let i: I64 = 0
+  while i < len(a.dims) {
+    if a.dims[i] != b.dims[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn same_dims(a: Arr[I64], b: Arr[I64]) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+# A tensor literal's shape is read by walking the nesting and requiring every
+# row at a given depth to have the same length. Ragged input is reported here
+# and typed Unknown, because a shape invented from the first row would produce a
+# second, imaginary error downstream instead of this real one.
+fn infer_tensor_lit(c: Checker, ex: ast.TensorLit) -> Type {
+  let dims: Arr[I64] = arr_new()
+  let ok: Arr[Bool] = arr_new()
+  push(ok, true)
+  walk_tensor_lit(ex.elements, 0, dims, ok)
+  if not ok[0] {
+    report(c, ex.line, "ragged tensor literal: rows have inconsistent lengths")
+    return TUnknown
+  }
+  tensor_of(dims)
+}
+
+# dims and ok are carried as mutable handles rather than returned, because this
+# walks depth-first and every level contributes to the same two answers. The Go
+# version closes over them; a struct would say the same thing with more words.
+fn walk_tensor_lit(elems: Arr[ast.Expr], depth: I64, dims: Arr[I64], ok: Arr[Bool]) {
+  if depth == len(dims) {
+    push(dims, len(elems))
+  } else {
+    if dims[depth] != len(elems) {
+      ok[0] = false
+    }
+  }
+  let i: I64 = 0
+  while i < len(elems) {
+    match elems[i] {
+      ETensor(inner) => walk_tensor_lit(inner.elements, depth + 1, dims, ok),
+      _ => unit,
+    }
+    i = i + 1
+  }
+}
+
+fn infer_unary(c: Checker, ex: ast.Unary, env: CheckEnv) -> Type {
+  let t: Type = infer_expr(c, ex.operand, env)
+  if bytes.equal(ex.op, "-") {
+    match as_tensor(t) {
+      Some(tt) => return TTensor(tt),
+      None => return TUnknown,
+    }
+  }
+  # `!` and `not` produce a boolean whatever they are given. The truthiness rule
+  # is the evaluator's business.
+  TBool
+}
+
+fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
+  let op: Str = ex.op
+
+  # Logical operators short-circuit and their result is whichever operand was
+  # returned, so the type is not necessarily boolean and the checker does not
+  # claim it is.
+  if bytes.equal(op, "and") or bytes.equal(op, "or") or bytes.equal(op, "&&") or bytes.equal(op, "||") {
+    infer_expr(c, ex.left, env)
+    infer_expr(c, ex.right, env)
+    return TUnknown
+  }
+
+  let l: Type = infer_expr(c, ex.left, env)
+  let r: Type = infer_expr(c, ex.right, env)
+  let lt: Opt[TensorType] = as_tensor(l)
+  let rt: Opt[TensorType] = as_tensor(r)
+
+  if is_comparison(op) {
+    match lt {
+      Some(a) => {
+        match rt {
+          Some(b) => {
+            if not unit_equal(a.unit, b.unit) {
+              report(c, ex.line, bytes.concat("comparing incompatible units ",
+                bytes.concat(unit_string(a.unit), bytes.concat(" and ", unit_string(b.unit)))))
+            }
+          },
+          None => unit,
+        }
+      },
+      None => unit,
+    }
+    return TBool
+  }
+
+  if is_definite_non_tensor(l) or is_definite_non_tensor(r) {
+    report(c, ex.line, bytes.concat("operator ", bytes.concat(quoted(op), " needs numbers/tensors")))
+    return TUnknown
+  }
+
+  let a: TensorType = unwrap_or_unknown(lt)
+  let b: TensorType = unwrap_or_unknown(rt)
+  match lt {
+    Some(_) => unit,
+    None => return TUnknown,
+  }
+  match rt {
+    Some(_) => unit,
+    None => return TUnknown,
+  }
+
+  if bytes.equal(op, "@") {
+    let res: ShapeResult = matmul_result(a, b)
+    if len(res.msg) > 0 {
+      report(c, ex.line, res.msg)
+      return TUnknown
+    }
+    return with_unit(res.type, unit_mul(a.unit, b.unit))
+  }
+  if bytes.equal(op, "^") {
+    return pow_unit(c, a, ex)
+  }
+  # + - * / %
+  let res: ShapeResult = elementwise_result(a, b)
+  if len(res.msg) > 0 {
+    report(c, ex.line, res.msg)
+    return TUnknown
+  }
+  with_unit(res.type, arith_unit(c, op, a, b, ex.line))
+}
+
+fn is_comparison(op: Str) -> Bool =
+  bytes.equal(op, "==") or bytes.equal(op, "!=") or bytes.equal(op, "<") or
+  bytes.equal(op, "<=") or bytes.equal(op, ">") or bytes.equal(op, ">=")
+
+fn unwrap_or_unknown(t: Opt[TensorType]) -> TensorType {
+  match t {
+    Some(v) => v,
+    None => TensorType { dims: arr_new(), unit: dict_new() },
+  }
+}
+
+# with_unit attaches a unit to a tensor result and leaves anything else alone.
+fn with_unit(res: Type, u: Dict[Str, I64]) -> Type {
+  match as_tensor(res) {
+    Some(t) => tensor_with_unit(t.dims, u),
+    None => res,
+  }
+}
+
+fn arith_unit(c: Checker, op: Str, a: TensorType, b: TensorType, line: I64) -> Dict[Str, I64] {
+  if bytes.equal(op, "+") or bytes.equal(op, "-") or bytes.equal(op, "%") {
+    # Adding a length to a price is the mistake units exist to catch.
+    if not unit_equal(a.unit, b.unit) {
+      report(c, line, bytes.concat("unit mismatch: ", bytes.concat(unit_string(a.unit),
+        bytes.concat(" ", bytes.concat(op, bytes.concat(" ", unit_string(b.unit)))))))
+    }
+    return a.unit
+  }
+  if bytes.equal(op, "*") { return unit_mul(a.unit, b.unit) }
+  if bytes.equal(op, "/") { return unit_div(a.unit, b.unit) }
+  dict_new()
+}
+
+# A dimensionless base can be raised to anything. A quantity with a unit cannot:
+# USD^x has no unit unless x is a constant integer, and reporting that is better
+# than silently erasing the unit and letting the mistake continue.
+fn pow_unit(c: Checker, lt: TensorType, ex: ast.Binary) -> Type {
+  if len(lt.unit) == 0 { return TTensor(lt) }
+  match const_int(ex.right) {
+    Some(k) => TTensor(TensorType { dims: lt.dims, unit: unit_pow(lt.unit, k) }),
+    None => {
+      report(c, ex.line, bytes.concat("a quantity with unit ", bytes.concat(unit_string(lt.unit),
+        " can only be raised to a constant integer power")))
+      tensor_of(lt.dims)
+    },
+  }
+}
+
+fn infer_index(c: Checker, ex: ast.Index, env: CheckEnv) -> Type {
+  let t: Type = infer_expr(c, ex.target, env)
+  infer_expr(c, ex.index, env)
+  match t {
+    TTensor(v) => {
+      if is_scalar(v) {
+        report(c, ex.line, "cannot index a scalar")
+        return TUnknown
+      }
+      # Indexing removes the leading axis. A vector indexes to a scalar, and
+      # the unit rides along because x[0] of a price list is a price.
+      if len(v.dims) == 1 {
+        return tensor_with_unit(arr_new(), v.unit)
+      }
+      tensor_with_unit(tail(v.dims), v.unit)
+    },
+    # A list is heterogeneous, so an element's type is not knowable from the
+    # list's.
+    TList(_) => TUnknown,
+    _ => TUnknown,
+  }
+}
+
+fn infer_slice(c: Checker, ex: ast.Slice, env: CheckEnv) -> Type {
+  let t: Type = infer_expr(c, ex.target, env)
+  match ex.start {
+    Some(e) => infer_expr(c, e, env),
+    None => unit,
+  }
+  match ex.end {
+    Some(e) => infer_expr(c, e, env),
+    None => unit,
+  }
+  match t {
+    TTensor(v) => {
+      if len(v.dims) == 0 {
+        report(c, ex.line, "cannot slice a scalar")
+        return TUnknown
+      }
+      # The trailing axes survive a slice; only the first changes, and its new
+      # length is known only when both ends are constants, or when the end is
+      # absent and the original length is known.
+      let first: I64 = -1
+      let s: I64 = 0
+      let sok: Bool = true
+      match ex.start {
+        Some(e) => {
+          match const_int(e) {
+            Some(n) => s = n,
+            None => sok = false,
+          }
+        },
+        None => unit,
+      }
+      match ex.end {
+        Some(e) => {
+          match const_int(e) {
+            Some(n) => {
+              if sok and n - s >= 0 {
+                first = n - s
+              }
+            },
+            None => unit,
+          }
+        },
+        None => {
+          if sok and v.dims[0] >= 0 and v.dims[0] - s >= 0 {
+            first = v.dims[0] - s
+          }
+        },
+      }
+      let dims: Arr[I64] = arr_new()
+      push(dims, first)
+      let i: I64 = 1
+      while i < len(v.dims) {
+        push(dims, v.dims[i])
+        i = i + 1
+      }
+      tensor_with_unit(dims, v.unit)
+    },
+    TList(_) => TList(ListType { elems: None }),
+    _ => TUnknown,
+  }
+}
+
+# ---- shape rules -----------------------------------------------------------
+
+# ShapeResult is a type plus a message. An empty message means success; the Go
+# side returns (Type, string) and the emptiness is the same signal.
+struct ShapeResult {
+  type: Type,
+  msg: Str,
+}
+
+# broadcast_dims applies NumPy broadcasting to two shapes that may contain
+# unknown dimensions. It fails only when a mismatch is *certain*: both sizes
+# known, unequal, and neither is 1. An unknown against a known 1 stays unknown,
+# because the unknown side might be anything and 1 broadcasts to all of it.
+struct Broadcast {
+  dims: Arr[I64],
+  ok: Bool,
+}
+
+fn broadcast_dims(a: TensorType, b: TensorType) -> Broadcast {
+  let ra: I64 = len(a.dims)
+  let rb: I64 = len(b.dims)
+  let r: I64 = ra
+  if rb > r { r = rb }
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < r {
+    push(out, 0)
+    i = i + 1
+  }
+  i = 0
+  while i < r {
+    # Broadcasting aligns from the trailing axis, so both shapes are read from
+    # the right. A missing axis is an implicit 1.
+    let da: I64 = 1
+    let db: I64 = 1
+    let a_known: Bool = true
+    let b_known: Bool = true
+    if i < ra {
+      da = a.dims[ra - 1 - i]
+      a_known = da >= 0
+    }
+    if i < rb {
+      db = b.dims[rb - 1 - i]
+      b_known = db >= 0
+    }
+    let d: I64 = 0
+    if not a_known and not b_known {
+      d = -1
+    } else {
+      if not a_known {
+        if db == 1 { d = -1 } else { d = db }
+      } else {
+        if not b_known {
+          if da == 1 { d = -1 } else { d = da }
+        } else {
+          if da == db {
+            d = da
+          } else {
+            if da == 1 {
+              d = db
+            } else {
+              if db == 1 {
+                d = da
+              } else {
+                return Broadcast { dims: arr_new(), ok: false }
+              }
+            }
+          }
+        }
+      }
+    }
+    out[r - 1 - i] = d
+    i = i + 1
+  }
+  Broadcast { dims: out, ok: true }
+}
+
+fn elementwise_result(a: TensorType, b: TensorType) -> ShapeResult {
+  let bc: Broadcast = broadcast_dims(a, b)
+  if not bc.ok {
+    return ShapeResult {
+      type: TUnknown,
+      msg: bytes.concat("shape mismatch: ", bytes.concat(dims_string(a),
+        bytes.concat(" vs ", bytes.concat(dims_string(b), " cannot broadcast")))),
+    }
+  }
+  ShapeResult { type: tensor_of(bc.dims), msg: "" }
+}
+
+# A rank-1 operand to `@` is promoted: on the left it is a row, on the right a
+# column, and the result drops the promoted axis again. That is the numpy rule
+# and it is what makes `v @ M` and `M @ v` both mean what a reader expects.
+fn matmul_result(a: TensorType, b: TensorType) -> ShapeResult {
+  let a2: Arr[I64] = a.dims
+  if len(a.dims) == 1 {
+    a2 = arr_new()
+    push(a2, 1)
+    push(a2, a.dims[0])
+  }
+  let b2: Arr[I64] = b.dims
+  if len(b.dims) == 1 {
+    b2 = arr_new()
+    push(b2, b.dims[0])
+    push(b2, 1)
+  }
+  # Rank 3 or higher is a batched matmul the checker does not model, so it says
+  # nothing rather than guessing. Note this returns Unknown with no message,
+  # which is a success with no information, not a failure.
+  if len(a2) != 2 or len(b2) != 2 {
+    return ShapeResult { type: TUnknown, msg: "" }
+  }
+  let k: I64 = a2[1]
+  let k2: I64 = b2[0]
+  if k >= 0 and k2 >= 0 and k != k2 {
+    return ShapeResult {
+      type: TUnknown,
+      msg: bytes.concat("shape mismatch in @: ", bytes.concat(dims_string(a),
+        bytes.concat(" @ ", bytes.concat(dims_string(b),
+        bytes.concat(" (inner ", bytes.concat(str(k),
+        bytes.concat(" != ", bytes.concat(str(k2), ")")))))))),
+    }
+  }
+  let m: I64 = a2[0]
+  let n: I64 = b2[1]
+  if len(a.dims) == 1 and len(b.dims) == 1 {
+    return ShapeResult { type: scalar(), msg: "" }
+  }
+  let dims: Arr[I64] = arr_new()
+  if len(a.dims) == 1 {
+    push(dims, n)
+    return ShapeResult { type: tensor_of(dims), msg: "" }
+  }
+  if len(b.dims) == 1 {
+    push(dims, m)
+    return ShapeResult { type: tensor_of(dims), msg: "" }
+  }
+  push(dims, m)
+  push(dims, n)
+  ShapeResult { type: tensor_of(dims), msg: "" }
+}
+
+# element_count multiplies a shape out, when every dimension is known.
+#
+# An unknown dimension makes the product meaningless rather than small, so this
+# reports nothing instead of a number that would produce a confident wrong
+# answer about a reshape.
+struct Count {
+  n: I64,
+  ok: Bool,
+}
+
+fn element_count(dims: Arr[I64]) -> Count {
+  let n: I64 = 1
+  let i: I64 = 0
+  while i < len(dims) {
+    if dims[i] < 0 { return Count { n: 0, ok: false } }
+    n = n * dims[i]
+    i = i + 1
+  }
+  Count { n: n, ok: true }
+}
+
+# list_dims reads the shape of a nested list literal, when it is one a tensor
+# can be built from.
+#
+# Ragged input reports no shape rather than the first row's. `[[1, 2], [3]]` is
+# an error at run time, and inventing a shape for it here would produce a
+# second, imaginary error somewhere downstream instead of the real one.
+struct Dims {
+  dims: Arr[I64],
+  ok: Bool,
+}
+
+fn no_dims() -> Dims = Dims { dims: arr_new(), ok: false }
+
+fn list_dims(t: Type) -> Dims {
+  let lst: ListType = ListType { elems: None }
+  match t {
+    TList(v) => lst = v,
+    _ => return no_dims(),
+  }
+  let elems: Arr[Type] = arr_new()
+  match lst.elems {
+    Some(v) => elems = v,
+    None => return no_dims(),
+  }
+  if len(elems) == 0 {
+    let d: Arr[I64] = arr_new()
+    push(d, 0)
+    return Dims { dims: d, ok: true }
+  }
+
+  # Every element has to agree, both on being a list and on its shape, or the
+  # literal is ragged.
+  let nested: Bool = false
+  match elems[0] {
+    TList(_) => nested = true,
+    _ => nested = false,
+  }
+  if nested {
+    let first: Dims = list_dims(elems[0])
+    if not first.ok { return no_dims() }
+    let i: I64 = 1
+    while i < len(elems) {
+      let d: Dims = list_dims(elems[i])
+      if not d.ok or not same_dims(d.dims, first.dims) { return no_dims() }
+      i = i + 1
+    }
+    let out: Arr[I64] = arr_new()
+    push(out, len(elems))
+    let k: I64 = 0
+    while k < len(first.dims) {
+      push(out, first.dims[k])
+      k = k + 1
+    }
+    return Dims { dims: out, ok: true }
+  }
+
+  # A flat list of scalars is one dimension. A scalar here is a tensor with no
+  # dimensions, which is how a number types in this checker.
+  let i: I64 = 0
+  while i < len(elems) {
+    match as_tensor(elems[i]) {
+      Some(e) => {
+        if len(e.dims) != 0 { return no_dims() }
+      },
+      None => return no_dims(),
+    }
+    i = i + 1
+  }
+  let out: Arr[I64] = arr_new()
+  push(out, len(elems))
+  Dims { dims: out, ok: true }
+}
+
+# ---- calls -----------------------------------------------------------------
+
+fn infer_call(c: Checker, ex: ast.Call, env: CheckEnv) -> Type {
+  let callee: Type = infer_expr(c, ex.callee, env)
+  let arg_types: Arr[Type] = arr_new()
+  let i: I64 = 0
+  while i < len(ex.args) {
+    push(arg_types, infer_expr(c, ex.args[i], env))
+    i = i + 1
+  }
+  match callee {
+    TBuiltin(fn_) => infer_builtin_call(c, fn_.name, ex, arg_types),
+    TFn(fn_) => infer_user_call(c, fn_, ex, arg_types),
+    TUnknown => TUnknown,
+    # A number is not callable either, but `f(x)` where f is a tensor is a
+    # plausible typo for indexing and worth naming. TFn and TBuiltin are handled
+    # above; everything left is a definite mistake.
+    _ => {
+      report(c, ex.line, "value is not callable")
+      TUnknown
+    },
+  }
+}
+
+# param_type gives a parameter's type from its annotation alone, for checking a
+# body at its definition. Shape variables and unannotated params are unknown,
+# which is why a definition-time check reports only definite errors.
+fn param_type(c: Checker, p: ast.Param) -> Type {
+  match p.unit {
+    Some(u) => return tensor_with_unit(arr_new(), unit_from_anno(u)),
+    None => unit,
+  }
+  if len(p.type_name) > 0 {
+    match dict_get(c.types, p.type_name) {
+      Some(t) => return TRecord(t),
+      None => unit,
+    }
+    if dict_has(c.units, p.type_name) {
+      let u: Dict[Str, I64] = dict_new()
+      dict_set(u, p.type_name, 1)
+      return tensor_with_unit(arr_new(), u)
+    }
+    return TUnknown
+  }
+  match p.shape {
+    Some(s) => tensor_of(ast.concrete_dims(s)),
+    None => TUnknown,
+  }
+}
+
+fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
+  if dict_has(c.stack, fd.id) { return }
+  let scope: CheckEnv = new_env(Some(env))
+  let i: I64 = 0
+  while i < len(fd.params) {
+    let p: ast.Param = fd.params[i]
+    match p.unit {
+      Some(u) => resolve_unit(c, u, fd.line),
+      None => unit,
+    }
+    env_define(scope, p.name, param_type(c, p))
+    i = i + 1
+  }
+  match fd.ret_unit {
+    Some(u) => resolve_unit(c, u, fd.line),
+    None => unit,
+  }
+
+  dict_set(c.stack, fd.id, true)
+  let body_type: Type = infer_fn_body(c, fd.body, scope)
+  dict_del(c.stack, fd.id)
+
+  match fd.ret {
+    Some(anno) => {
+      let expected: TensorType = TensorType { dims: ast.concrete_dims(anno), unit: dict_new() }
+      match as_tensor(body_type) {
+        Some(got) => {
+          # Both sides must be fully known before this is a certain mismatch. A
+          # signature with a shape variable in it is checked at the call site
+          # instead, where the variable has a value.
+          if fully_known(expected) and fully_known(got) and not shape_match(expected, got) {
+            report(c, fd.line, bytes.concat("function ", bytes.concat(quoted(fd.name),
+              bytes.concat(" returns ", bytes.concat(dims_string(got),
+              bytes.concat(" but its signature declares ", dims_string(expected)))))))
+          }
+        },
+        None => unit,
+      }
+    },
+    None => unit,
+  }
+  match fd.ret_unit {
+    Some(u) => check_return_unit(c, fd.line, fd.name, u, body_type),
+    None => unit,
+  }
+}
+
+# A body is either a block, whose type is its last expression statement, or a
+# single expression after `=`.
+fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv) -> Type {
+  match body {
+    EBlock(blk) => infer_block(c, blk, scope),
+    _ => infer_expr(c, body, scope),
+  }
+}
+
+fn check_return_unit(c: Checker, line: I64, name: Str, ret_unit: ast.UnitAnno, body_type: Type) {
+  let want: Dict[Str, I64] = unit_from_anno(ret_unit)
+  match as_tensor(body_type) {
+    Some(got) => {
+      if not unit_equal(got.unit, want) {
+        let who: Str = "function"
+        if len(name) > 0 {
+          who = bytes.concat("function ", quoted(name))
+        }
+        report(c, line, bytes.concat(who, bytes.concat(" returns unit ",
+          bytes.concat(unit_string(got.unit), bytes.concat(" but its signature declares ",
+          unit_string(want))))))
+      }
+    },
+    None => unit,
+  }
+}
+
+fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  if len(fn_.params) != len(arg_types) {
+    report(c, ex.line, bytes.concat("function expects ", bytes.concat(str(len(fn_.params)),
+      bytes.concat(" argument(s), got ", str(len(arg_types))))))
+    return TUnknown
+  }
+
+  # subst maps shape variables (n, k, ...) to the concrete sizes learned from
+  # the arguments, so a variable used in several places must agree.
+  let subst: Dict[Str, I64] = dict_new()
+  let scope: CheckEnv = new_env(Some(fn_.env))
+  let i: I64 = 0
+  while i < len(fn_.params) {
+    let p: ast.Param = fn_.params[i]
+    let bound: Bool = false
+    match p.unit {
+      Some(u) => {
+        let want: Dict[Str, I64] = unit_from_anno(u)
+        check_arg_unit(c, ex.line, i, p.name, want, arg_types[i])
+        env_define(scope, p.name, tensor_with_unit(arr_new(), want))
+        bound = true
+      },
+      None => unit,
+    }
+    if not bound and len(p.type_name) > 0 {
+      bound = true
+      match dict_get(c.types, p.type_name) {
+        Some(expected) => {
+          check_record_arg(c, ex.line, i, p.name, expected, arg_types[i])
+          # The body sees the declared type, so field access in it is typed even
+          # when the caller passed something the checker could not read.
+          env_define(scope, p.name, TRecord(expected))
+        },
+        None => {
+          if dict_has(c.units, p.type_name) {
+            let want: Dict[Str, I64] = dict_new()
+            dict_set(want, p.type_name, 1)
+            check_arg_unit(c, ex.line, i, p.name, want, arg_types[i])
+            env_define(scope, p.name, tensor_with_unit(arr_new(), want))
+          } else {
+            report(c, ex.line, bytes.concat("unknown type ", bytes.concat(quoted(p.type_name),
+              bytes.concat(" on parameter ", quoted(p.name)))))
+            env_define(scope, p.name, arg_types[i])
+          }
+        },
+      }
+    }
+    if not bound {
+      match p.shape {
+        Some(anno) => {
+          bound = true
+          match as_tensor(arg_types[i]) {
+            Some(got) => {
+              unify(c, ex.line, i, p.name, anno.dims, got.dims, subst)
+              # Use the concrete argument shape in the body, not the annotation:
+              # the annotation may contain variables and the argument does not.
+              env_define(scope, p.name, TTensor(got))
+            },
+            None => env_define(scope, p.name, tensor_of(ast.concrete_dims(anno))),
+          }
+        },
+        None => unit,
+      }
+    }
+    if not bound {
+      env_define(scope, p.name, arg_types[i])
+    }
+    i = i + 1
+  }
+
+  # Guard against infinite recursion during inference. A recursive function is
+  # answered from its signature, which is the only thing available without
+  # running the inference that is already in progress.
+  if dict_has(c.stack, fn_.node_id) {
+    match fn_.ret {
+      Some(anno) => return tensor_of(substitute(anno.dims, subst)),
+      None => unit,
+    }
+    match fn_.ret_unit {
+      Some(u) => return tensor_with_unit(arr_new(), unit_from_anno(u)),
+      None => unit,
+    }
+    return TUnknown
+  }
+
+  dict_set(c.stack, fn_.node_id, true)
+  let body_type: Type = infer_fn_body(c, fn_.body, scope)
+  dict_del(c.stack, fn_.node_id)
+
+  match fn_.ret {
+    Some(anno) => {
+      let expected_dims: Arr[I64] = substitute(anno.dims, subst)
+      let expected: TensorType = TensorType { dims: expected_dims, unit: dict_new() }
+      match as_tensor(body_type) {
+        Some(got) => {
+          if fully_known(expected) and fully_known(got) and not shape_match(expected, got) {
+            report(c, ex.line, bytes.concat("function returns ", bytes.concat(dims_string(got),
+              bytes.concat(" but its signature declares ", dims_string(expected)))))
+          }
+          # Carry the body's unit through a shape return: a signature that
+          # declares a shape says nothing about the unit, so erasing it here
+          # would lose information the caller can use.
+          return tensor_with_unit(expected_dims, got.unit)
+        },
+        None => return TTensor(expected),
+      }
+    },
+    None => unit,
+  }
+  match fn_.ret_unit {
+    Some(u) => {
+      check_return_unit(c, ex.line, "", u, body_type)
+      return tensor_with_unit(arr_new(), unit_from_anno(u))
+    },
+    None => unit,
+  }
+  body_type
+}
+
+# A dimensionless value (a bare literal, or a computed quantity that carries no
+# unit) is adopted into the parameter's unit; only a value that already carries
+# a conflicting unit is an error.
+fn check_arg_unit(c: Checker, line: I64, arg_idx: I64, name: Str,
+                  want: Dict[Str, I64], arg: Type) {
+  match as_tensor(arg) {
+    Some(got) => {
+      if len(got.unit) != 0 and not unit_equal(got.unit, want) {
+        report(c, line, bytes.concat("argument ", bytes.concat(str(arg_idx + 1),
+          bytes.concat(" (", bytes.concat(quoted(name),
+          bytes.concat(") has unit ", bytes.concat(unit_string(got.unit),
+          bytes.concat(" but the signature expects ", unit_string(want)))))))))
+      }
+    },
+    None => unit,
+  }
+}
+
+# check_record_arg verifies a record argument against a declared record type:
+# every declared field must be present with a matching shape. Extra fields are
+# allowed, because a record with more than the declared fields still satisfies
+# everything the body can ask of it.
+fn check_record_arg(c: Checker, line: I64, arg_idx: I64, name: Str,
+                    expected: RecordType, arg: Type) {
+  let rec: RecordType = RecordType { fields: dict_new() }
+  match as_record(arg) {
+    Some(r) => rec = r,
+    None => {
+      # An unknown argument is not evidence of a mistake; anything else is.
+      match arg {
+        TUnknown => return,
+        _ => {
+          report(c, line, bytes.concat("argument ", bytes.concat(str(arg_idx + 1),
+            bytes.concat(" (", bytes.concat(quoted(name), ") should be a record")))))
+          return
+        },
+      }
+    },
+  }
+  for field in dict_keys(expected.fields) {
+    let ft: Type = dict_must(expected.fields, field)
+    match dict_get(rec.fields, field) {
+      None => report(c, line, bytes.concat("argument ", bytes.concat(str(arg_idx + 1),
+        bytes.concat(" (", bytes.concat(quoted(name),
+        bytes.concat(") is missing field ", quoted(field))))))),
+      Some(got) => {
+        match as_tensor(ft) {
+          Some(want) => {
+            match as_tensor(got) {
+              Some(gt) => {
+                if fully_known(want) and fully_known(gt) and not shape_match(want, gt) {
+                  report(c, line, bytes.concat("argument ", bytes.concat(str(arg_idx + 1),
+                    bytes.concat(" (", bytes.concat(quoted(name),
+                    bytes.concat(") field ", bytes.concat(quoted(field),
+                    bytes.concat(" is ", bytes.concat(dims_string(gt),
+                    bytes.concat(" but the type declares ", dims_string(want)))))))))))
+                }
+              },
+              None => unit,
+            }
+          },
+          None => unit,
+        }
+      },
+    }
+  }
+}
+
+# unify checks an argument's shape against a parameter's annotation, recording
+# shape variables in subst and reporting any definite mismatch.
+fn unify(c: Checker, line: I64, arg_idx: I64, name: Str, pattern: Arr[ast.Dim],
+         actual: Arr[I64], subst: Dict[Str, I64]) {
+  if len(pattern) != len(actual) {
+    # Only a definite mismatch when the argument's rank is fully known, which it
+    # is here: actual comes from a tensor type, and a tensor always knows its
+    # rank even when it does not know its sizes.
+    report(c, line, bytes.concat("argument ", bytes.concat(str(arg_idx + 1),
+      bytes.concat(" (", bytes.concat(quoted(name),
+      bytes.concat(") has rank ", bytes.concat(str(len(actual)),
+      bytes.concat(" but the signature expects rank ", str(len(pattern))))))))))
+    return
+  }
+  let i: I64 = 0
+  while i < len(pattern) {
+    let pd: ast.Dim = pattern[i]
+    let ad: I64 = actual[i]
+    if ast.dim_is_concrete(pd) {
+      if ad >= 0 and ad != pd.size {
+        report(c, line, bytes.concat("argument ", bytes.concat(str(arg_idx + 1),
+          bytes.concat(" (", bytes.concat(quoted(name),
+          bytes.concat(") axis ", bytes.concat(str(i),
+          bytes.concat(" is ", bytes.concat(str(ad),
+          bytes.concat(" but the signature expects ", str(pd.size)))))))))))
+      }
+    } else {
+      if len(pd.name) > 0 and ad >= 0 {
+        match dict_get(subst, pd.name) {
+          Some(prev) => {
+            if prev != ad {
+              report(c, line, bytes.concat("shape variable ", bytes.concat(quoted(pd.name),
+                bytes.concat(" is ", bytes.concat(str(prev),
+                bytes.concat(" elsewhere but ", bytes.concat(str(ad),
+                bytes.concat(" in argument ", str(arg_idx + 1)))))))))
+            }
+          },
+          None => dict_set(subst, pd.name, ad),
+        }
+      }
+    }
+    i = i + 1
+  }
+}
+
+# substitute resolves an annotation's dims using known shape variables, leaving
+# -1 for anything still unknown.
+fn substitute(dims: Arr[ast.Dim], subst: Dict[Str, I64]) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(dims) {
+    let d: ast.Dim = dims[i]
+    if ast.dim_is_concrete(d) {
+      push(out, d.size)
+    } else {
+      if len(d.name) > 0 {
+        match dict_get(subst, d.name) {
+          Some(v) => push(out, v),
+          None => push(out, -1),
+        }
+      } else {
+        push(out, -1)
+      }
+    }
+    i = i + 1
+  }
+  out
+}
+
+# ---- builtins --------------------------------------------------------------
+
+fn builtin_names() -> Arr[Str] {
+  let a: Arr[Str] = arr_new()
+  for name in split_words("print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian") {
+    push(a, name)
+  }
+  a
+}
+
+fn builtin_set() -> Dict[Str, Bool] {
+  let d: Dict[Str, Bool] = dict_new()
+  for name in builtin_names() {
+    dict_set(d, name, true)
+  }
+  d
+}
+
+let BUILTINS: Dict[Str, Bool] = builtin_set()
+
+fn is_builtin(name: Str) -> Bool = dict_has(BUILTINS, name)
+
+fn split_words(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i <= len(s) {
+    if i == len(s) or s[i] == 32 {
+      if i > start {
+        push(out, s[start:i])
+      }
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn arg_tensor(arg_types: Arr[Type], i: I64) -> Opt[TensorType] {
+  if i >= len(arg_types) { return None }
+  as_tensor(arg_types[i])
+}
+
+fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  # Shape and unit preserved.
+  if in_set(name, "relu abs softmax clip") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => return TTensor(t),
+      None => return TUnknown,
+    }
+  }
+  # Transcendental functions need a dimensionless argument: exp(USD) is not a
+  # quantity. The result is dimensionless whatever the input was.
+  if in_set(name, "exp log sin cos tanh sigmoid") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(t.unit) != 0 {
+          report(c, ex.line, bytes.concat(name, bytes.concat(
+            " expects a dimensionless argument but got unit ", unit_string(t.unit))))
+        }
+        return tensor_of(t.dims)
+      },
+      None => return TUnknown,
+    }
+  }
+  if bytes.equal(name, "sqrt") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        let r: UnitSqrt = unit_sqrt(t.unit)
+        if not r.ok {
+          report(c, ex.line, bytes.concat("sqrt of unit ", bytes.concat(unit_string(t.unit),
+            " is not a whole unit")))
+        }
+        return tensor_with_unit(t.dims, r.unit)
+      },
+      None => return TUnknown,
+    }
+  }
+  if bytes.equal(name, "square") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => return tensor_with_unit(t.dims, unit_pow(t.unit, 2)),
+      None => return TUnknown,
+    }
+  }
+  if bytes.equal(name, "int") { return tensor_of(arr_new()) }
+  if in_set(name, "item len") { return scalar() }
+  if in_set(name, "sum mean max min prod median") { return reduce_result(c, ex, arg_types) }
+  if in_set(name, "argmax argmin logsumexp") { return axis_reduce_result(c, ex, arg_types) }
+  if in_set(name, "maximum minimum greater less greater_equal less_equal equal") {
+    return broadcast_two(c, ex, arg_types)
+  }
+  if bytes.equal(name, "where") { return broadcast_where(c, ex, arg_types) }
+  if in_set(name, "reshape broadcast_to") { return reshape_result(c, name, ex, arg_types) }
+  if bytes.equal(name, "einsum") { return infer_einsum(c, ex, arg_types) }
+  if bytes.equal(name, "concat") { return infer_concat(c, ex, arg_types) }
+  # fold's result is whatever the folded function returns, which depends on a
+  # value the checker does not have.
+  if bytes.equal(name, "fold") { return TUnknown }
+  if in_set(name, "append enumerate columns split shape range list map zip permutation") {
+    return TList(ListType { elems: None })
+  }
+  if in_set(name, "write_frame print save") { return TUnit }
+  if bytes.equal(name, "scalar") { return scalar() }
+  if bytes.equal(name, "pow") { return pow_result(c, ex, arg_types) }
+  if in_set(name, "matmul dot") {
+    if len(arg_types) == 2 {
+      match arg_tensor(arg_types, 0) {
+        Some(a) => {
+          match arg_tensor(arg_types, 1) {
+            Some(b) => {
+              let res: ShapeResult = matmul_result(a, b)
+              if len(res.msg) > 0 {
+                report(c, ex.line, res.msg)
+                return TUnknown
+              }
+              return with_unit(res.type, unit_mul(a.unit, b.unit))
+            },
+            None => return TUnknown,
+          }
+        },
+        None => return TUnknown,
+      }
+    }
+    return TUnknown
+  }
+  if bytes.equal(name, "transpose") { return transpose_result(ex, arg_types) }
+  if in_set(name, "zeros ones randn rand") {
+    let s: Dims = const_shape(ex.args, 0)
+    if s.ok { return tensor_of(s.dims) }
+    return TUnknown
+  }
+  if bytes.equal(name, "fill") {
+    if len(ex.args) >= 1 {
+      let s: Dims = const_shape(ex.args, 1)
+      if s.ok { return tensor_of(s.dims) }
+    }
+    return TUnknown
+  }
+  if bytes.equal(name, "eye") {
+    if len(ex.args) == 1 {
+      match const_int(ex.args[0]) {
+        Some(n) => {
+          let d: Arr[I64] = arr_new()
+          push(d, n)
+          push(d, n)
+          return tensor_of(d)
+        },
+        None => return TUnknown,
+      }
+    }
+    return TUnknown
+  }
+  # The loaded value's type depends on the file, so leave it unknown.
+  if bytes.equal(name, "load") { return TUnknown }
+  if bytes.equal(name, "str") { return TStr }
+  if bytes.equal(name, "tensor") { return tensor_builtin_result(arg_types) }
+  # These return values whose shape depends on runtime data; treat the result as
+  # unknown so downstream code is not falsely flagged.
+  if in_set(name, "grad grads value_and_grad jacobian hessian gbm_fit") { return TUnknown }
+  # A cumulative scan, a reversal, or elementwise rounding all preserve the
+  # input's shape but not necessarily its unit, so the unit is dropped.
+  if in_set(name, "cumsum cumprod cummax cummin floor ceil round flip roll") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => return tensor_of(t.dims),
+      None => return TUnknown,
+    }
+  }
+  # Selecting rows keeps the trailing dims but the row count is dynamic.
+  if bytes.equal(name, "gather") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(t.dims) >= 1 {
+          let dims: Arr[I64] = copy_dims(t.dims)
+          dims[0] = -1
+          return tensor_of(dims)
+        }
+        return TUnknown
+      },
+      None => return TUnknown,
+    }
+  }
+  if bytes.equal(name, "conv2d") { return conv_result(arg_types) }
+  # [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
+  if bytes.equal(name, "maxpool2d") {
+    let dims: Arr[I64] = arr_new()
+    push(dims, -1)
+    push(dims, -1)
+    push(dims, -1)
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(t.dims) == 3 {
+          dims[0] = t.dims[0]
+        }
+      },
+      None => unit,
+    }
+    return tensor_of(dims)
+  }
+  # One score per row of the feature matrix, which is the second argument.
+  if bytes.equal(name, "gbm_predict") {
+    let dims: Arr[I64] = arr_new()
+    push(dims, -1)
+    if len(arg_types) == 2 {
+      match arg_tensor(arg_types, 1) {
+        Some(t) => {
+          if len(t.dims) >= 1 {
+            dims[0] = t.dims[0]
+          }
+        },
+        None => unit,
+      }
+    }
+    return tensor_of(dims)
+  }
+  TUnknown
+}
+
+fn in_set(name: Str, words: Str) -> Bool {
+  for w in split_words(words) {
+    if bytes.equal(w, name) { return true }
+  }
+  false
+}
+
+# A reshape has to preserve the element count, and when both sides are known
+# that is arithmetic the checker can do. This is the second most common shape
+# mistake after a bad matmul and it used to reach the runtime untouched.
+fn reshape_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  if len(ex.args) < 2 { return TUnknown }
+  let s: Dims = const_shape(ex.args, 1)
+  if not s.ok { return TUnknown }
+  if bytes.equal(name, "reshape") {
+    match arg_tensor(arg_types, 0) {
+      Some(in_) => {
+        let from: Count = element_count(in_.dims)
+        if from.ok {
+          let to: Count = element_count(s.dims)
+          if to.ok and from.n != to.n {
+            report(c, ex.line, bytes.concat("reshape changes the number of elements: ",
+              bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new() }),
+              bytes.concat(" has ", bytes.concat(str(from.n),
+              bytes.concat(", ", bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new() }),
+              bytes.concat(" needs ", str(to.n)))))))))
+          }
+        }
+      },
+      None => unit,
+    }
+  }
+  tensor_of(s.dims)
+}
+
+fn pow_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  match arg_tensor(arg_types, 0) {
+    Some(t) => {
+      if len(t.unit) == 0 { return TTensor(t) }
+      if len(ex.args) >= 2 {
+        match const_int(ex.args[1]) {
+          Some(k) => return tensor_with_unit(t.dims, unit_pow(t.unit, k)),
+          None => unit,
+        }
+      }
+      report(c, ex.line, bytes.concat("pow of a quantity with unit ",
+        bytes.concat(unit_string(t.unit), " needs a constant integer exponent")))
+      tensor_of(t.dims)
+    },
+    None => TUnknown,
+  }
+}
+
+# A tensor built from a literal has a shape the checker can read, and reading it
+# is most of what makes the checker worth running. The mistake people actually
+# make is `tensor([[1, 2], [3, 4]]) @ tensor([[1, 2, 3]])`, and it used to pass
+# because this returned unknown for every argument. Anything that is not a
+# literal still does.
+fn tensor_builtin_result(arg_types: Arr[Type]) -> Type {
+  if len(arg_types) != 1 { return TUnknown }
+  # A tensor literal was already given a shape on the way in, and `tensor(...)`
+  # around it was throwing that away.
+  match as_tensor(arg_types[0]) {
+    Some(t) => return TTensor(t),
+    None => unit,
+  }
+  let d: Dims = list_dims(arg_types[0])
+  if d.ok { return tensor_of(d.dims) }
+  TUnknown
+}
+
+fn transpose_result(ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  match arg_tensor(arg_types, 0) {
+    Some(t) => {
+      if len(ex.args) == 1 {
+        let rev: Arr[I64] = arr_new()
+        let i: I64 = 0
+        while i < len(t.dims) {
+          push(rev, t.dims[len(t.dims) - 1 - i])
+          i = i + 1
+        }
+        return tensor_of(rev)
+      }
+      let axes: Arr[I64] = arr_new()
+      let i: I64 = 1
+      while i < len(ex.args) {
+        match const_int(ex.args[i]) {
+          Some(ax) => push(axes, ax),
+          None => return TUnknown,
+        }
+        i = i + 1
+      }
+      if len(axes) != len(t.dims) { return TUnknown }
+      let perm: Arr[I64] = arr_new()
+      let k: I64 = 0
+      while k < len(axes) {
+        let ax: I64 = axes[k]
+        # A negative axis in a permutation is not supported by the runtime
+        # either, so an out-of-range axis makes the result unknown rather than a
+        # diagnostic. Reporting it is NEEDS-35.
+        if ax < 0 or ax >= len(t.dims) { return TUnknown }
+        push(perm, t.dims[ax])
+        k = k + 1
+      }
+      tensor_of(perm)
+    },
+    None => TUnknown,
+  }
+}
+
+# report_axis names an axis that does not exist on the tensor it was given.
+#
+# This used to be detected and then swallowed: both reduction paths already
+# worked out that the axis was out of range and returned an unknown type, which
+# silences everything downstream as well. Detecting a mistake and saying nothing
+# is the worst of the three options.
+fn report_axis(c: Checker, ex: ast.Call, t: TensorType) {
+  report(c, ex.line, bytes.concat("axis out of range for ", bytes.concat(dims_string(t),
+    bytes.concat(": it has ", bytes.concat(str(len(t.dims)),
+    bytes.concat(" ", bytes.concat(plural(len(t.dims), "axis", "axes"),
+    bytes.concat(", numbered 0 to ", str(len(t.dims) - 1)))))))))
+}
+
+fn plural(n: I64, one: Str, many: Str) -> Str {
+  if n == 1 { return one }
+  many
+}
+
+# reduce_result handles sum/mean/max/min/prod/median: no axis reduces to a
+# scalar; a constant axis over a known shape removes that dimension. Reductions
+# preserve the input's unit, because the mean of a list of prices is a price.
+fn reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  let u: Dict[Str, I64] = dict_new()
+  match arg_tensor(arg_types, 0) {
+    Some(t) => u = t.unit,
+    None => unit,
+  }
+  if len(arg_types) == 1 {
+    return tensor_with_unit(arr_new(), u)
+  }
+  if len(arg_types) == 2 {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(t.dims) > 0 {
+          match const_int(ex.args[1]) {
+            Some(ax0) => {
+              let ax: I64 = ax0
+              # A negative axis counts from the end, which is the runtime's rule
+              # and the one people write when they mean "the last axis".
+              if ax < 0 { ax = ax + len(t.dims) }
+              if ax >= 0 and ax < len(t.dims) {
+                return tensor_with_unit(remove_dim(t.dims, ax), u)
+              }
+              report_axis(c, ex, t)
+            },
+            None => unit,
+          }
+        }
+      },
+      None => unit,
+    }
+  }
+  TUnknown
+}
+
+# axis_reduce_result handles argmax/argmin/logsumexp, which always reduce one
+# axis and default to the last. The result is dimensionless: an index has no
+# unit, and logsumexp's argument had to be dimensionless anyway.
+fn axis_reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  match arg_tensor(arg_types, 0) {
+    Some(t) => {
+      if len(t.dims) == 0 { return TUnknown }
+      let axis: I64 = len(t.dims) - 1
+      if len(ex.args) == 2 {
+        match const_int(ex.args[1]) {
+          Some(ax) => axis = ax,
+          None => return TUnknown,
+        }
+      }
+      if axis < 0 { axis = axis + len(t.dims) }
+      if axis < 0 or axis >= len(t.dims) {
+        report_axis(c, ex, t)
+        return TUnknown
+      }
+      tensor_of(remove_dim(t.dims, axis))
+    },
+    None => TUnknown,
+  }
+}
+
+fn remove_dim(dims: Arr[I64], axis: I64) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(dims) {
+    if i != axis {
+      push(out, dims[i])
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn broadcast_two(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  if len(arg_types) != 2 { return TUnknown }
+  match arg_tensor(arg_types, 0) {
+    Some(a) => {
+      match arg_tensor(arg_types, 1) {
+        Some(b) => {
+          let res: ShapeResult = elementwise_result(a, b)
+          if len(res.msg) > 0 {
+            report(c, ex.line, res.msg)
+            return TUnknown
+          }
+          res.type
+        },
+        None => TUnknown,
+      }
+    },
+    None => TUnknown,
+  }
+}
+
+# where(cond, a, b) broadcasts its two value arguments. The condition's shape is
+# not checked against them, which is the runtime's behaviour.
+fn broadcast_where(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  if len(arg_types) != 3 { return TUnknown }
+  match arg_tensor(arg_types, 1) {
+    Some(a) => {
+      match arg_tensor(arg_types, 2) {
+        Some(b) => {
+          let res: ShapeResult = elementwise_result(a, b)
+          if len(res.msg) > 0 {
+            report(c, ex.line, res.msg)
+            return TUnknown
+          }
+          res.type
+        },
+        None => TUnknown,
+      }
+    },
+    None => TUnknown,
+  }
+}
+
+# conv_result infers the output shape of conv2d: input [Cin, H, W] and weight
+# [Cout, Cin, KH, KW] give [Cout, H-KH+1, W-KW+1], with any unknown dimension
+# left unknown. There is no padding and no stride, so the arithmetic is exact.
+fn conv_result(arg_types: Arr[Type]) -> Type {
+  let dims: Arr[I64] = arr_new()
+  push(dims, -1)
+  push(dims, -1)
+  push(dims, -1)
+  if len(arg_types) != 2 { return tensor_of(dims) }
+  match arg_tensor(arg_types, 1) {
+    Some(w) => {
+      if len(w.dims) == 4 {
+        dims[0] = w.dims[0]
+        match arg_tensor(arg_types, 0) {
+          Some(in_) => {
+            if len(in_.dims) == 3 {
+              if in_.dims[1] >= 0 and w.dims[2] >= 0 {
+                dims[1] = in_.dims[1] - w.dims[2] + 1
+              }
+              if in_.dims[2] >= 0 and w.dims[3] >= 0 {
+                dims[2] = in_.dims[2] - w.dims[3] + 1
+              }
+            }
+          },
+          None => unit,
+        }
+      }
+    },
+    None => unit,
+  }
+  tensor_of(dims)
+}
+
+# infer_einsum validates a literal einsum spec and, when the input shapes are
+# known, resolves the output shape. The spec parser is shared with the runtime,
+# so an invalid spec is reported here in the runtime's own words rather than in
+# a second wording that a reader would have to learn.
+fn infer_einsum(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  if len(ex.args) < 2 { return TUnknown }
+  let spec: Str = ""
+  match ex.args[0] {
+    EString(lit) => spec = lit.value,
+    _ => return TUnknown,
+  }
+  match tensor.parse_einsum(spec, len(ex.args) - 1) {
+    Ok(parsed) => infer_einsum_dims(c, ex, arg_types, parsed),
+    Err(msg) => {
+      report(c, ex.line, msg)
+      TUnknown
+    },
+  }
+}
+
+fn infer_einsum_dims(c: Checker, ex: ast.Call, arg_types: Arr[Type],
+                     parsed: tensor.EinsumSpec) -> Type {
+  let dims: Arr[Arr[I64]] = arr_new()
+  let i: I64 = 0
+  while i < len(parsed.inputs) {
+    match arg_tensor(arg_types, i + 1) {
+      Some(t) => push(dims, t.dims),
+      None => {
+        # The spec is valid but an operand's shape is unknown, so the rank of
+        # the result is known and nothing else is.
+        let od: Arr[I64] = arr_new()
+        let j: I64 = 0
+        while j < len(parsed.output) {
+          push(od, -1)
+          j = j + 1
+        }
+        return tensor_of(od)
+      },
+    }
+    i = i + 1
+  }
+  match tensor.einsum_output_dims(parsed.inputs, parsed.output, dims) {
+    Ok(out) => tensor_of(out),
+    Err(msg) => {
+      report(c, ex.line, msg)
+      TUnknown
+    },
+  }
+}
+
+# infer_concat works out the shape of a concatenation, and reports the pieces
+# that cannot be joined.
+#
+# Worth doing twice over: the mismatch itself reached the runtime, and the
+# unknown type it used to return blinded everything downstream of it as well, so
+# a whole pipeline built on a concat was unchecked from that point on.
+fn infer_concat(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  if len(arg_types) < 1 { return TUnknown }
+  let elems: Arr[Type] = arr_new()
+  match arg_types[0] {
+    TList(lst) => {
+      match lst.elems {
+        Some(v) => elems = v,
+        None => return TUnknown,
+      }
+    },
+    _ => return TUnknown,
+  }
+  if len(elems) == 0 { return TUnknown }
+
+  # Every piece has to be a tensor whose shape is known. One that is not makes
+  # the result unknowable rather than wrong, so this says nothing.
+  let parts: Arr[TensorType] = arr_new()
+  let i: I64 = 0
+  while i < len(elems) {
+    match as_tensor(elems[i]) {
+      Some(t) => {
+        if len(t.dims) == 0 { return TUnknown }
+        let k: I64 = 0
+        while k < len(t.dims) {
+          if t.dims[k] < 0 { return TUnknown }
+          k = k + 1
+        }
+        push(parts, t)
+      },
+      None => return TUnknown,
+    }
+    i = i + 1
+  }
+
+  let rank: I64 = len(parts[0].dims)
+  i = 1
+  while i < len(parts) {
+    if len(parts[i].dims) != rank {
+      report(c, ex.line, bytes.concat("concat needs pieces of the same rank: ",
+        bytes.concat(dims_string(parts[0]), bytes.concat(" has ", bytes.concat(str(rank),
+        bytes.concat(", ", bytes.concat(dims_string(parts[i]),
+        bytes.concat(" has ", str(len(parts[i].dims)))))))))
+      return TUnknown
+    }
+    i = i + 1
+  }
+
+  let axis: I64 = 0
+  if len(ex.args) >= 2 {
+    match const_int(ex.args[1]) {
+      Some(ax) => axis = ax,
+      None => return TUnknown,
+    }
+  }
+  if axis < 0 { axis = axis + rank }
+  if axis < 0 or axis >= rank {
+    report_axis(c, ex, parts[0])
+    return TUnknown
+  }
+
+  # Every axis but the joined one has to agree. This is the runtime's rule and
+  # its wording, so a reader who has seen one message recognises the other.
+  let total: I64 = 0
+  i = 0
+  while i < len(parts) {
+    let p: TensorType = parts[i]
+    total = total + p.dims[axis]
+    let k: I64 = 0
+    while k < len(p.dims) {
+      if k != axis and p.dims[k] != parts[0].dims[k] {
+        report(c, ex.line, bytes.concat("concat: shapes differ on axis ",
+          bytes.concat(str(k), bytes.concat(": ", bytes.concat(dims_string(parts[0]),
+          bytes.concat(" and ", dims_string(p)))))))
+        return TUnknown
+      }
+      k = k + 1
+    }
+    i = i + 1
+  }
+
+  let dims: Arr[I64] = copy_dims(parts[0].dims)
+  dims[axis] = total
+  tensor_with_unit(dims, parts[0].unit)
+}
+
+# ---- literal shape extraction ---------------------------------------------
+
+# const_int reads an integer from a literal, and only from a literal. A named
+# constant is not folded, because the checker does not evaluate.
+fn const_int(e: ast.Expr) -> Opt[I64] {
+  match e {
+    ENumber(n) => {
+      let iv: I64 = i64_of_f64(n.value)
+      if f64_of_i64(iv) == n.value { return Some(iv) }
+      None
+    },
+    _ => None,
+  }
+}
+
+# const_shape reads a shape from integer-literal arguments starting at `from`,
+# or from a single list literal of integer literals. Both spellings are accepted
+# because both are in use: `zeros(2, 3)` and `zeros([2, 3])`.
+fn const_shape(args: Arr[ast.Expr], from: I64) -> Dims {
+  let rest: Arr[ast.Expr] = arr_new()
+  let i: I64 = from
+  while i < len(args) {
+    push(rest, args[i])
+    i = i + 1
+  }
+  if len(rest) == 1 {
+    match rest[0] {
+      EList(lst) => {
+        let dims: Arr[I64] = arr_new()
+        let k: I64 = 0
+        while k < len(lst.elements) {
+          match const_int(lst.elements[k]) {
+            Some(n) => push(dims, n),
+            None => return no_dims(),
+          }
+          k = k + 1
+        }
+        return Dims { dims: dims, ok: true }
+      },
+      _ => unit,
+    }
+  }
+  let dims: Arr[I64] = arr_new()
+  i = 0
+  while i < len(rest) {
+    match const_int(rest[i]) {
+      Some(n) => push(dims, n),
+      None => return no_dims(),
+    }
+    i = i + 1
+  }
+  Dims { dims: dims, ok: true }
+}
+
+fn quoted(s: Str) -> Str = str_quote(s)
