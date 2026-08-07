@@ -2413,3 +2413,155 @@ failure, not a curiosity.
 
 *Go bootstrap:* it is the correct one here. `parallelSum` in
 `internal/tensor/parallel.go` is the text to port.
+
+## NEEDS-110: dtype names in the surface language
+
+**Status:** blocking for anything that wants a narrow tensor. `src/tensor.tw`
+has the whole dtype machinery and no way to reach it from a program.
+
+`docs/dtypes.md` is the design. What is missing is the syntax. Three things,
+none of them large on its own:
+
+    bf16                       a dtype as a name, in expression position
+    zeros([784, 128], bf16)    a constructor that takes one
+    x.to(f32)                  the explicit cast
+
+A dtype is not a type, and treating it as one is the mistake to avoid:
+`Tensor[bf16]` as a parameterised type would make every function that takes a
+tensor generic over seven dtypes and hand the checker a unification problem it
+does not otherwise have. A dtype is a run-time property of a value and a name in
+the term language, as it is in numpy.
+
+The seven names are `bool`, `i8`, `i32`, `f16`, `bf16`, `f32`, `f64`. They
+should be contextual rather than reserved: `f32` stays an ordinary identifier
+everywhere else, and only the dtype argument of a constructor and of `.to` reads
+it as one. `tensor.dtype_of_name` already maps the string to the code.
+
+*Go bootstrap:* `internal/tensor.Tensor` is `[]float64` with no dtype at all, so
+there is nothing to be contextual against. `builtins.go` `zeros` takes only a
+shape.
+
+## NEEDS-111: a packed, byte-addressable buffer
+
+**Status:** open, and the entry that decides whether the dtype work saves a
+single byte. `src/tensor.tw` `Tensor.data`.
+
+The dtype semantics landed without it: a bf16 tensor holds bf16 values, rounded
+correctly, and `martin-k-m/shuttle` can now measure the error that quantisation
+introduces. What it still cannot measure is a saving, because `Tensor.data` is
+`Arr[F64]` and a bf16 element occupies 64 bits like everything else. Until this
+lands, shuttle's report that quantisation shrinks nothing stands.
+
+Wanted: a buffer with a byte length and typed element access.
+
+    Buf                                 an opaque packed byte buffer
+    buf_new(bytes)                      allocate, zeroed
+    buf_len(b)                          length in bytes
+    buf_get(b, dtype, i) -> F64         read element i, widened
+    buf_set(b, dtype, i, x)             write element i, rounded
+
+The rounding on `buf_set` is exactly `tensor.dt_round` and the widening on
+`buf_get` is exactly `float.f_widen`, so this is a layout change and not a
+semantics change: every kernel in `src/tensor.tw` keeps its current text with
+`t.data[i]` becoming `buf_get(t.data, t.dtype, i)`. Preserving that property is
+why the semantics went first.
+
+Two consequences worth stating. Memory drops 2x for f32 and i32, 4x for bf16 and
+f16, and 8x for i8 and bool, which is the whole point. And an aliasing question
+appears that `Arr[F64]` never had, since a `Buf` is a byte range two tensors
+could share; nothing in `src/tensor.tw` does that today because every kernel
+allocates its own output, and the primitive should not offer a slicing view
+until something needs one.
+
+This is also the entry `src/gpu/buffer.tw` wants. A device upload of a bf16
+tensor currently has to narrow on the way out and widen on the way back, and a
+packed host buffer is the same bytes the device wants.
+
+*Go bootstrap:* `[]float64`, one allocation per tensor. A `[]byte` read through
+`encoding/binary` and `math.Float32frombits` is the direct equivalent.
+
+## NEEDS-112: loss scaling for f16
+
+**Status:** open. `docs/dtypes.md`, "Loss scaling, and the f16 story".
+
+f16 has five exponent bits, so its smallest normal is 2^-14 and real gradients
+go under it. bf16 does not have the problem and needs nothing here. f16 is
+unusable for training without it, which is both why the design says to prefer
+bf16 and why this entry exists rather than being skipped.
+
+Two functions:
+
+    backward_scaled(tp, root, seed, scale) -> Res[Arr[Tensor], Str]
+    grads_finite(gs) -> Bool
+
+`backward_scaled` seeds with `seed * scale`, so by the chain rule every gradient
+returns scaled by exactly that factor and the caller divides it out.
+`grads_finite` is the overflow check that decides whether the step happens at
+all.
+
+Together they support dynamic loss scaling: skip the step and halve the scale
+when a gradient comes back non-finite, double it after a run of clean steps. The
+reason to name them rather than leave the loop to callers is the skip. A
+hand-written version that clips the infinity to a large finite number instead of
+skipping looks like it works, trains to a worse model, and reports nothing.
+
+Both are writable in twill today over `backward` and `binary`. They are here so
+that there is one of them rather than one per caller.
+
+*Go bootstrap:* none. `internal/tensor` has no dtype, so no gradient can
+underflow in a way float64 would notice.
+
+## NEEDS-113: dtype in the static checker
+
+**Status:** open, and a diagnostic gap rather than a convenience.
+`src/check.tw` tracks shapes and not dtypes.
+
+The checker already approximates `broadcast_shape` statically, so a shape
+mismatch is a compile error. It has no equivalent for `promote`, so nothing is
+reported until the program runs. Three cases go unseen:
+
+    f16_tensor + bf16_tensor       is f32, which is correct and surprising
+    i32_tensor / 2                 whether the literal promotes, and therefore
+                                   whether this is integer division
+    bf16_weights + f64_bias        widens the whole layer to f64 and undoes the
+                                   reason the weights were narrow
+
+The third is the one that matters. It is not an error, it is a silent
+performance regression with a perfectly correct answer, and a checker that knows
+dtypes is the only place it can be caught. It should be a warning and not an
+error: the program means what it says.
+
+Wanted: a dtype on the checker's tensor type, `tensor.promote` applied at every
+binary node, and a diagnostic when a narrow operand is widened by a wider one.
+
+*Go bootstrap:* `internal/checker` has one numeric type. There is nothing to
+promote.
+
+## NEEDS-114: dtype-aware printing and parsing
+
+**Status:** open, and it makes the dtype work invisible from a program until it
+lands. `src/float.tw` `format_number` and `f64_shortest`, `src/eval.tw` `print`.
+
+`print(x)` renders the F64 in the buffer. For a bf16 tensor that F64 is the
+exact widening of a bf16 value, so it prints seventeen digits of a number that
+distinguishes about three. The output is not wrong; it is unreadable, and it
+claims a precision the value does not have.
+
+Wanted: `f64_shortest` generalised to a format, so a bf16 value prints the
+shortest decimal that round-trips *through bf16*. The machinery is already
+there. `round_shortest` cuts the exact decimal at the first digit where no other
+float of the format could round back to it, and the only format-specific things
+it reads are `MANT_BITS`, `BIAS` and `IMPLICIT_BIT`, which is exactly what
+`float.FloatFmt` carries.
+
+The inverse matters too. `f64_of_str` parses at f64 and a narrow literal is then
+rounded a second time. Decimal double rounding is almost always harmless, and
+"almost always" is not a specification, so the parse should take the format.
+
+The dtype should print alongside the tensor as well, since two tensors holding
+`[0.33, 0.66]` in f64 and in bf16 are different values and nothing currently
+distinguishes them.
+
+*Go bootstrap:* `internal/value.FormatNumber` is float64-only. `strconv`'s
+`FormatFloat` and `ParseFloat` both take a bit size already, which is the same
+generalisation this asks for.

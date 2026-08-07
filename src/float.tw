@@ -1662,7 +1662,7 @@ fn f_widen(nb: I64, f: FloatFmt) -> I64 {
 # The value F64 takes when it is stored in `f` and read back. This is the
 # rounding that `src/tensor.tw` applies on every store into a narrow tensor, and
 # it is the whole observable content of a dtype until the packed buffer of
-# NEEDS-101 lands.
+# NEEDS-111 lands.
 fn f_round(x: F64, f: FloatFmt) -> F64 = f64_from_bits(f_widen(f_narrow(f64_bits(x), f), f))
 
 fn f64_to_f32_bits(x: F64) -> I64 = f_narrow(f64_bits(x), FMT_F32)

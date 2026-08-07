@@ -110,7 +110,7 @@ import "float.tw" as flt
 #
 # The dtype is the *semantics* of the element: which values exist, what a store
 # rounds to, and what an operation accumulates in. The buffer is the *physical
-# layout*. This change lands the first and leaves the second to NEEDS-101,
+# layout*. This change lands the first and leaves the second to NEEDS-111,
 # because they are separable and the semantics is the part that can be specified
 # and checked without a byte-addressable buffer primitive to write into.
 #
@@ -118,12 +118,12 @@ import "float.tw" as flt
 # the F64 widening of a value representable in `dtype`. Nothing writes into a
 # buffer except through `mk`, which enforces it, or `mk_raw`, whose callers copy
 # elements that already satisfy it. So a bf16 tensor holds bf16 values today and
-# will hold them in sixteen bits each when NEEDS-101 lands, and no kernel above
+# will hold them in sixteen bits each when NEEDS-111 lands, and no kernel above
 # this line changes when it does.
 #
 # What that does not buy, and it should be said plainly rather than discovered:
 # no memory is saved yet. `martin-k-m/shuttle` reports that quantisation shrinks
-# nothing, and it stays right about the bytes until NEEDS-101. What it stops
+# nothing, and it stays right about the bytes until NEEDS-111. What it stops
 # being right about is that quantisation does nothing at all: an int8 or bf16
 # tensor now holds the values int8 or bf16 can hold, and the error that
 # introduces is measurable from twill.
@@ -181,7 +181,7 @@ fn dtype_of_name(s: Str) -> Opt[I64] {
 }
 
 # Storage width per element. Nothing reads this yet except a diagnostic; it is
-# here because NEEDS-101's packed buffer needs exactly this table and a second
+# here because NEEDS-111's packed buffer needs exactly this table and a second
 # copy of it elsewhere is a second thing to get wrong.
 fn dtype_bits(dt: I64) -> I64 {
   if dt == DT_BOOL { return 8 }
