@@ -1,0 +1,140 @@
+# frame.tw - repainting a block of lines in place.
+#
+# One state machine, used by the spinner and the progress bar and by anything
+# added later. It exists so that the "am I allowed to animate" question and the
+# "how do I not corrupt the scrollback" question are each answered once.
+#
+# The contract: a Frame owns a rectangle of `height` lines at the bottom of the
+# output. Between `open` and `close` nothing else may write to stdout. On close
+# the rectangle either keeps its final contents or is erased, and either way the
+# cursor comes back and the terminal is left in the state it was found in.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/width" as w
+
+struct Frame {
+  caps: cp.Caps,
+  height: I64,     # lines currently painted
+  live: Bool,      # repainting in place, rather than streaming
+  open: Bool,
+  last: Str,       # last body painted, to suppress no-op repaints
+  next_due: I64,   # earliest millisecond at which a repaint is worthwhile
+}
+
+# Roughly 30 repaints a second. Faster is invisible and costs bytes on every
+# link between here and the eye, which is the thing that makes a remote session
+# feel slow. Slower reads as stutter on a spinner.
+let MIN_INTERVAL_MS: I64 = 33
+
+fn new(c: cp.Caps) -> Frame = Frame {
+  caps: c,
+  height: 0,
+  # The single decision that makes everything downstream degrade. Without a tty
+  # the frame becomes an append-only log of whatever the caller renders, and the
+  # caller does not have to know which mode it is in.
+  live: c.animate,
+  open: false,
+  last: "",
+  next_due: 0,
+}
+
+fn open(f: Frame) -> Str {
+  f.open = true
+  # The cursor is hidden for the whole frame rather than per repaint: toggling
+  # it every 33ms makes it flicker on terminals that redraw eagerly.
+  if f.live { ansi.hide_cursor(f.caps) } else { "" }
+}
+
+# True when enough time has passed that a repaint is worth the bytes. Callers in
+# a tight loop (a training step at 10kHz) ask this rather than rendering, so the
+# cost of an unneeded frame is one clock read and not a full render.
+fn due(f: Frame, now_ms: I64) -> Bool {
+  if !f.live { false } else { now_ms >= f.next_due }
+}
+
+# Paint `body` (which may be several lines, separated by \n) over whatever the
+# frame painted last.
+fn paint(f: Frame, body: Str, now_ms: I64) -> Str {
+  if !f.live {
+    # No tty: emit nothing at all. A non-interactive run gets its milestones
+    # from the caller's explicit log lines, not from a progress bar flattened
+    # into two hundred near-identical lines of text.
+    ""
+  } else if body == f.last {
+    # Repainting identical bytes is pure flicker on terminals that do not
+    # double-buffer, so it is skipped rather than sent.
+    ""
+  } else {
+    let out = ansi.rewind(f.caps, f.height) + clip(f, body)
+    f.height = count_lines(body)
+    f.last = body
+    f.next_due = now_ms + MIN_INTERVAL_MS
+    out
+  }
+}
+
+# Trim every line to the terminal width. A line that wraps breaks the frame
+# permanently: the rewind counts logical lines and the terminal counts visual
+# ones, so one over-long line turns the next repaint into a smear. Truncating is
+# not a nicety, it is what keeps the arithmetic true.
+fn clip(f: Frame, body: Str) -> Str {
+  let lines = split_lines(body)
+  let out: Str = ""
+  let i: I64 = 0
+  while i < len(lines) {
+    if i > 0 { out = out + "\n" }
+    out = out + w.truncate(lines[i], f.caps.width)
+    i = i + 1
+  }
+  out
+}
+
+# Close the frame. `keep` decides whether the last painted state survives, and
+# the choice is per widget rather than global: a progress bar that reached 100%
+# is a record worth keeping, a spinner is not, because "loading" is never
+# information after the fact.
+fn close(f: Frame, keep: Bool) -> Str {
+  if !f.open { "" }
+  else {
+    f.open = false
+    if !f.live { "" }
+    else if keep { "\n" + ansi.show_cursor(f.caps) }
+    else { ansi.rewind(f.caps, f.height) + ansi.show_cursor(f.caps) }
+  }
+}
+
+# Called from the interrupt path. The terminal must not be left with a hidden
+# cursor because the user pressed Ctrl-C during a build; that state survives the
+# process and the user has to type `reset` to get their shell back.
+fn abandon(f: Frame) -> Str {
+  f.open = false
+  if f.live { "\n" + ansi.show_cursor(f.caps) } else { "" }
+}
+
+fn count_lines(s: Str) -> I64 {
+  let n: I64 = 1
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 10 { n = n + 1 }
+    i = i + 1
+  }
+  n
+}
+
+fn split_lines(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 10 {
+      push(out, slice(s, start, i))
+      start = i + 1
+    }
+    i = i + 1
+  }
+  push(out, slice(s, start, len(s)))
+  out
+}

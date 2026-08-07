@@ -1,0 +1,152 @@
+# ansi.tw - escape sequences, and the styling that composes them.
+#
+# Every function here takes the capability record and returns a string. Nothing
+# here writes. That separation is what lets the whole UI be rendered into a
+# buffer and diffed in a test, and it is why the plain-text path costs nothing:
+# at LEVEL_PLAIN these functions return "" and the caller's string concatenation
+# collapses to exactly the text it would have printed anyway.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/color" as col
+
+# ESC. Twill string literals recognise \n, \t, \" and \\ and nothing else, so
+# the byte is built rather than written. Every sequence below starts here.
+fn esc() -> Str = chr(27)
+fn csi() -> Str = esc() + "["
+fn osc() -> Str = esc() + "]"
+fn bel() -> Str = chr(7)
+
+# ── Styling ─────────────────────────────────────────────────────────────────
+
+# A style is a colour plus attribute flags, resolved to a sequence once, at the
+# point of use. Held as a value so a theme can be a table of these.
+struct Style {
+  fg: col.Rgb,
+  has_fg: Bool,
+  bg: col.Rgb,
+  has_bg: Bool,
+  bold: Bool,
+  dim: Bool,
+  italic: Bool,
+  underline: Bool,
+}
+
+fn plain_style() -> Style = Style {
+  fg: col.rgb(0, 0, 0), has_fg: false,
+  bg: col.rgb(0, 0, 0), has_bg: false,
+  bold: false, dim: false, italic: false, underline: false,
+}
+
+fn fg(c: col.Rgb) -> Style {
+  let s = plain_style()
+  s.fg = c
+  s.has_fg = true
+  s
+}
+
+fn bold(s: Style) -> Style {
+  s.bold = true
+  s
+}
+
+fn dim(s: Style) -> Style {
+  s.dim = true
+  s
+}
+
+fn italic(s: Style) -> Style {
+  s.italic = true
+  s
+}
+
+fn underline(s: Style) -> Style {
+  s.underline = true
+  s
+}
+
+fn on(s: Style, c: col.Rgb) -> Style {
+  s.bg = c
+  s.has_bg = true
+  s
+}
+
+fn reset(c: cp.Caps) -> Str = if cp.coloured(c) { csi() + "0m" } else { "" }
+
+# One SGR sequence for the whole style rather than one per attribute. Terminals
+# accept both; a single sequence is a third of the bytes, which is the
+# difference between a frame loop that flickers on a slow link and one that
+# does not.
+fn open(c: cp.Caps, s: Style) -> Str {
+  if !cp.coloured(c) { "" }
+  else {
+    let ps: Arr[Str] = arr()
+    if s.bold { push(ps, "1") }
+    # Dim is unreliable: some terminals ignore SGR 2, and the ones that do not
+    # render it inconsistently against a light background. It is used here only
+    # for genuinely secondary text, never for anything that must be read.
+    if s.dim { push(ps, "2") }
+    if s.italic { push(ps, "3") }
+    if s.underline { push(ps, "4") }
+    if s.has_fg { push(ps, col.fg_params(c.level, s.fg)) }
+    if s.has_bg { push(ps, col.bg_params(c.level, s.bg)) }
+    if len(ps) == 0 { "" } else { csi() + join(ps, ";") + "m" }
+  }
+}
+
+# Wrap text in a style and close it. Closing with a full reset rather than a
+# targeted "default foreground" is deliberate: partial resets leave a terminal
+# in a state that depends on what came before, and the first time that shows up
+# is when someone scrolls back through a log.
+fn paint(c: cp.Caps, s: Style, text: Str) -> Str {
+  if !cp.coloured(c) { text } else { open(c, s) + text + reset(c) }
+}
+
+fn paint_fg(c: cp.Caps, colr: col.Rgb, text: Str) -> Str = paint(c, fg(colr), text)
+
+# ── Cursor and erasure ──────────────────────────────────────────────────────
+#
+# Guarded on `tty` rather than on colour. A cursor movement written into a file
+# is worse than a colour: it is invisible in a pager and reorders the text.
+
+fn hide_cursor(c: cp.Caps) -> Str = if c.tty { csi() + "?25l" } else { "" }
+fn show_cursor(c: cp.Caps) -> Str = if c.tty { csi() + "?25h" } else { "" }
+
+fn up(c: cp.Caps, n: I64) -> Str = if c.tty && n > 0 { csi() + str(n) + "A" } else { "" }
+fn down(c: cp.Caps, n: I64) -> Str = if c.tty && n > 0 { csi() + str(n) + "B" } else { "" }
+fn column(c: cp.Caps, n: I64) -> Str = if c.tty { csi() + str(n) + "G" } else { "" }
+
+fn clear_line(c: cp.Caps) -> Str = if c.tty { csi() + "2K" } else { "" }
+fn clear_below(c: cp.Caps) -> Str = if c.tty { csi() + "0J" } else { "" }
+
+# Return to the start of a block `n` lines tall and erase it. This is the whole
+# of in-place repainting; there is no alternate screen anywhere in this CLI,
+# because a tool that clears your scrollback to show a progress bar and then
+# hands it back is a tool you cannot read the output of afterwards.
+fn rewind(c: cp.Caps, n: I64) -> Str {
+  if !c.tty { "" } else { column(c, 1) + up(c, n - 1) + clear_below(c) }
+}
+
+# ── Hyperlinks ──────────────────────────────────────────────────────────────
+
+# OSC 8. The label is what a user reads and the URL is what they click, so when
+# links are unavailable the label alone is the honest fallback only when it
+# already contains the destination. Diagnostics link a `file:line` label to a
+# `file://` URL, which satisfies that; a decorative "docs" label would not, and
+# there are none in this CLI.
+fn link(c: cp.Caps, url: Str, label: Str) -> Str {
+  if !c.hyperlinks { label }
+  else { osc() + "8;;" + url + bel() + label + osc() + "8;;" + bel() }
+}
+
+fn join(parts: Arr[Str], sep: Str) -> Str {
+  let out: Str = ""
+  let i: I64 = 0
+  while i < len(parts) {
+    if i > 0 { out = out + sep }
+    out = out + parts[i]
+    i = i + 1
+  }
+  out
+}

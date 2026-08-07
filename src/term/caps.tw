@@ -1,0 +1,143 @@
+# caps.tw - what the terminal on the other end can actually do.
+#
+# Everything else in src/term/ asks this file one question and obeys the answer.
+# The bias is deliberate and one-directional: when a signal is ambiguous, assume
+# less. A plain-text run in a capable terminal is a missed flourish. An escape
+# sequence in a log file is a bug someone has to grep out, and it is the kind of
+# bug that survives for years because the person who caused it never sees it.
+
+mode systems
+
+# Colour tiers, low to high. Plain I64 constants rather than an enum because
+# they are compared and ordered ("at least 256-colour") far more often than they
+# are matched, and ordering an enum needs a conversion at every site.
+let LEVEL_PLAIN: I64 = 0
+let LEVEL_256: I64 = 1
+let LEVEL_TRUECOLOR: I64 = 2
+
+struct Caps {
+  level: I64,       # one of LEVEL_*
+  tty: Bool,        # stdout is a terminal, so repainting in place is legal
+  width: I64,       # columns, or the 80-column fallback
+  height: I64,
+  hyperlinks: Bool, # OSC 8 is understood rather than printed as garbage
+  unicode: Bool,    # braille and box drawing will render, not tofu
+  animate: Bool,    # frame loops are allowed to run
+}
+
+# The full negotiation, in the order the signals override each other.
+fn detect() -> Caps {
+  let tty = is_tty_stdout()
+  let term = env_or("TERM", "")
+  let lv = detect_level(tty, term)
+  let dims = window_size()
+  Caps {
+    level: lv,
+    tty: tty,
+    width: if dims.cols > 0 { dims.cols } else { 80 },
+    height: if dims.rows > 0 { dims.rows } else { 24 },
+    hyperlinks: tty && detect_hyperlinks(term),
+    unicode: detect_unicode(),
+    # Animation needs a tty and a cursor that can be moved. It does not need
+    # colour, so a monochrome tty still gets a spinner, which is the right call:
+    # the spinner's job is to say "still working", and that is orthogonal.
+    animate: tty && term != "dumb",
+  }
+}
+
+fn detect_level(tty: Bool, term: Str) -> I64 {
+  # NO_COLOR is honoured on presence, whatever the value, per the convention at
+  # no-color.org. Checking for a particular value is a common misreading of it.
+  if has_env("NO_COLOR") { LEVEL_PLAIN }
+  # The escape hatch in the other direction, for CI logs that are replayed
+  # through a renderer and for anyone piping into `less -R` on purpose.
+  else if env_or("FORCE_COLOR", "") != "" { forced_level() }
+  else if !tty { LEVEL_PLAIN }
+  else if term == "" || term == "dumb" { LEVEL_PLAIN }
+  else if env_or("COLORTERM", "") == "truecolor" { LEVEL_TRUECOLOR }
+  else if env_or("COLORTERM", "") == "24bit" { LEVEL_TRUECOLOR }
+  # These identify themselves through TERM_PROGRAM and not through COLORTERM,
+  # and all three have had 24-bit colour for years.
+  else if is_known_truecolor(env_or("TERM_PROGRAM", "")) { LEVEL_TRUECOLOR }
+  else if contains(term, "256color") { LEVEL_256 }
+  else if contains(term, "direct") { LEVEL_TRUECOLOR }
+  # A terminal that named itself but claimed nothing gets the 8-colour subset of
+  # the 256 tier, which every ANSI terminal since 1979 renders correctly.
+  else { LEVEL_256 }
+}
+
+fn forced_level() -> I64 {
+  let v = env_or("FORCE_COLOR", "")
+  if v == "0" { LEVEL_PLAIN }
+  else if v == "1" { LEVEL_256 }
+  else { LEVEL_TRUECOLOR }
+}
+
+fn is_known_truecolor(prog: Str) -> Bool =
+  prog == "iTerm.app" || prog == "WezTerm" || prog == "vscode" || prog == "ghostty"
+
+# OSC 8 is silently ignored by terminals that do not implement it, but a few
+# older ones print the payload, and a URL splattered mid-sentence is worse than
+# a plain unlinked path. Allow it only where it is known good.
+fn detect_hyperlinks(term: Str) -> Bool {
+  let prog = env_or("TERM_PROGRAM", "")
+  if prog == "iTerm.app" || prog == "WezTerm" || prog == "ghostty" { true }
+  else if env_or("VTE_VERSION", "") != "" { true }
+  else if env_or("WT_SESSION", "") != "" { true }
+  else { false }
+}
+
+# Braille art and box drawing need a UTF-8 locale. Windows Terminal and the
+# modern consoles are UTF-8 without saying so in the environment.
+fn detect_unicode() -> Bool {
+  if env_or("WT_SESSION", "") != "" { true }
+  else if env_or("TERM_PROGRAM", "") != "" { true }
+  else {
+    let l = env_or("LC_ALL", env_or("LC_CTYPE", env_or("LANG", "")))
+    contains(l, "UTF-8") || contains(l, "utf8") || contains(l, "UTF8")
+  }
+}
+
+# ── Derived questions, asked by name so call sites do not compare constants ──
+
+fn coloured(c: Caps) -> Bool = c.level > LEVEL_PLAIN
+
+# The width to lay text out in. Capped because a maximised terminal on a wide
+# monitor is 300 columns and a 300-column paragraph is unreadable; the cap is
+# lifted for anything the caller says is tabular.
+fn text_width(c: Caps) -> I64 {
+  let w = c.width - 2
+  if w > 100 { 100 } else if w < 20 { 20 } else { w }
+}
+
+fn env_or(name: Str, fallback: Str) -> Str {
+  match env(name) {
+    Opt.Some(v) => v,
+    Opt.None => fallback,
+  }
+}
+
+fn has_env(name: Str) -> Bool {
+  match env(name) {
+    Opt.Some(_) => true,
+    Opt.None => false,
+  }
+}
+
+fn contains(hay: Str, needle: Str) -> Bool = index_of(hay, needle) >= 0
+
+fn index_of(hay: Str, needle: Str) -> I64 {
+  let n = len(needle)
+  let h = len(hay)
+  if n == 0 { 0 }
+  else if n > h { 0 - 1 }
+  else {
+    let i: I64 = 0
+    let found: I64 = 0 - 1
+    while i <= h - n && found < 0 {
+      if slice(hay, i, i + n) == needle { found = i }
+      i = i + 1
+    }
+    found
+  }
+}

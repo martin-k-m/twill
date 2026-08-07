@@ -1,0 +1,274 @@
+# width.tw - measuring, truncating and wrapping text that contains escapes.
+#
+# The rule this file exists to enforce: a styled string's length in bytes has
+# nothing to do with the number of cells it occupies. Every alignment bug in a
+# terminal UI is some variant of counting the wrong one. Padding, truncation and
+# wrapping all route through `display_width` here, and no other file is allowed
+# to call `len` on something that might be styled.
+
+mode systems
+
+# ── Scanning ────────────────────────────────────────────────────────────────
+
+# Length in cells. Escape sequences contribute nothing; a UTF-8 sequence
+# contributes once for its whole run of bytes, twice if the codepoint is wide.
+fn display_width(s: Str) -> I64 {
+  let w: I64 = 0
+  let i: I64 = 0
+  let n = len(s)
+  while i < n {
+    let b = s[i]
+    if b == 27 {
+      i = skip_escape(s, i)
+    } else {
+      let cp = decode_at(s, i)
+      w = w + cell_width(cp.value)
+      i = i + cp.size
+    }
+  }
+  w
+}
+
+# Index of the first byte after the escape sequence starting at `i`.
+#
+# Three shapes matter: CSI (ESC [ params letter), OSC (ESC ] ... terminated by
+# BEL or ESC \), and everything else, which is ESC plus one byte. A malformed
+# sequence must still advance, or a truncated write from a killed child process
+# hangs the formatter, which is a real failure mode and not a hypothetical.
+fn skip_escape(s: Str, i: I64) -> I64 {
+  let n = len(s)
+  if i + 1 >= n { n }
+  else {
+    let k = s[i + 1]
+    if k == 91 { skip_csi(s, i + 2) }
+    else if k == 93 { skip_osc(s, i + 2) }
+    else { i + 2 }
+  }
+}
+
+# CSI runs over parameter and intermediate bytes and ends at the first byte in
+# 0x40..0x7E, the "final byte" of ECMA-48.
+fn skip_csi(s: Str, start: I64) -> I64 {
+  let n = len(s)
+  let j = start
+  while j < n && !(s[j] >= 64 && s[j] <= 126) { j = j + 1 }
+  if j < n { j + 1 } else { n }
+}
+
+fn skip_osc(s: Str, start: I64) -> I64 {
+  let n = len(s)
+  let j = start
+  let end: I64 = 0 - 1
+  while j < n && end < 0 {
+    if s[j] == 7 { end = j + 1 }
+    else if s[j] == 27 && j + 1 < n && s[j + 1] == 92 { end = j + 2 }
+    else { j = j + 1 }
+  }
+  if end < 0 { n } else { end }
+}
+
+struct Cp { value: I64, size: I64 }
+
+# UTF-8 decode of one codepoint. Invalid bytes decode as themselves at width 1
+# rather than raising: this is a formatter, and refusing to print a diagnostic
+# because the source file had a stray byte in it would be exactly backwards.
+fn decode_at(s: Str, i: I64) -> Cp {
+  let n = len(s)
+  let b = s[i]
+  if b < 128 { Cp { value: b, size: 1 } }
+  else if b >= 240 && i + 3 < n {
+    Cp { value: ((b - 240) * 262144) + cont(s, i + 1) * 4096 + cont(s, i + 2) * 64 + cont(s, i + 3), size: 4 }
+  }
+  else if b >= 224 && i + 2 < n {
+    Cp { value: ((b - 224) * 4096) + cont(s, i + 1) * 64 + cont(s, i + 2), size: 3 }
+  }
+  else if b >= 192 && i + 1 < n {
+    Cp { value: ((b - 192) * 64) + cont(s, i + 1), size: 2 }
+  }
+  else { Cp { value: b, size: 1 } }
+}
+
+fn cont(s: Str, i: I64) -> I64 = s[i] % 64
+
+# Cells occupied by one codepoint.
+#
+# This is not a full East Asian Width table and does not try to be. It covers
+# the combining marks and the CJK and emoji blocks, which is everything that can
+# appear in a path, an identifier, or a diagnostic's source line in practice. A
+# complete table is thousands of ranges and would need regenerating per unicode
+# release; the failure mode of this approximation is one column of misalignment
+# in a case the tool does not produce itself.
+fn cell_width(c: I64) -> I64 {
+  if c == 0 { 0 }
+  else if c < 32 { 0 }                                # control, never printed
+  else if c >= 768 && c <= 879 { 0 }                  # combining diacriticals
+  else if c >= 8203 && c <= 8207 { 0 }                # zero width space family
+  else if c == 65039 || c == 65038 { 0 }              # variation selectors
+  else if c >= 4352 && c <= 4447 { 2 }                # hangul jamo
+  else if c >= 8986 && c <= 8987 { 2 }                # watch, hourglass
+  else if c >= 11904 && c <= 12871 { 2 }              # CJK radicals, kana
+  else if c >= 12880 && c <= 19903 { 2 }              # CJK ideographs, extension A
+  else if c >= 19968 && c <= 42191 { 2 }              # unified ideographs, yi
+  else if c >= 63744 && c <= 64255 { 2 }              # compatibility ideographs
+  else if c >= 65281 && c <= 65376 { 2 }              # fullwidth forms
+  else if c >= 127744 && c <= 129782 { 2 }            # emoji and pictographs
+  else { 1 }
+}
+
+# ── Shaping ─────────────────────────────────────────────────────────────────
+
+# Truncate to `w` cells, appending an ellipsis when anything was cut, and
+# leaving every escape sequence encountered on the way intact. Dropping the
+# sequences would be simpler and would leave the terminal painted in whatever
+# colour the cut landed in, bleeding into the next line.
+fn truncate(s: Str, w: I64) -> Str {
+  if display_width(s) <= w { s }
+  else if w <= 1 { "" }
+  else {
+    let limit = w - 1                                 # one cell for the ellipsis
+    let out: Str = ""
+    let used: I64 = 0
+    let i: I64 = 0
+    let n = len(s)
+    while i < n && used < limit {
+      if s[i] == 27 {
+        let j = skip_escape(s, i)
+        out = out + slice(s, i, j)                    # zero width, always kept
+        i = j
+      } else {
+        let cp = decode_at(s, i)
+        let cw = cell_width(cp.value)
+        if used + cw > limit { i = n }
+        else {
+          out = out + slice(s, i, i + cp.size)
+          used = used + cw
+          i = i + cp.size
+        }
+      }
+    }
+    out + ELLIPSIS
+  }
+}
+
+let ELLIPSIS: Str = "…"
+
+fn pad_right(s: Str, w: I64) -> Str {
+  let d = w - display_width(s)
+  if d <= 0 { s } else { s + spaces(d) }
+}
+
+fn pad_left(s: Str, w: I64) -> Str {
+  let d = w - display_width(s)
+  if d <= 0 { s } else { spaces(d) + s }
+}
+
+fn spaces(n: I64) -> Str = repeat(" ", n)
+
+fn repeat(unit: Str, n: I64) -> Str {
+  let out: Str = ""
+  let i: I64 = 0
+  while i < n {
+    out = out + unit
+    i = i + 1
+  }
+  out
+}
+
+# Wrap on word boundaries to `w` cells, each continuation line prefixed with
+# `indent`. Used for the explanation paragraph under a diagnostic and for
+# command descriptions in the help, which is why it indents rather than
+# returning bare lines: a wrapped description that starts back at column zero
+# reads as a new command.
+fn wrap(s: Str, w: I64, indent: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr()
+  let words = split_spaces(s)
+  let inner = w - display_width(indent)
+  if inner < 8 { inner = 8 }                          # below this, wrapping is noise
+  let line: Str = ""
+  let i: I64 = 0
+  while i < len(words) {
+    let word = words[i]
+    if line == "" { line = word }
+    else if display_width(line) + 1 + display_width(word) <= inner {
+      line = line + " " + word
+    } else {
+      push(out, line)
+      line = word
+    }
+    i = i + 1
+  }
+  if line != "" { push(out, line) }
+  indent_after_first(out, indent)
+}
+
+fn indent_after_first(lines: Arr[Str], indent: Str) -> Arr[Str] {
+  let i: I64 = 1
+  while i < len(lines) {
+    lines[i] = indent + lines[i]
+    i = i + 1
+  }
+  lines
+}
+
+fn split_spaces(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr()
+  let cur: Str = ""
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 32 || s[i] == 9 || s[i] == 10 {
+      if cur != "" { push(out, cur) }
+      cur = ""
+    } else {
+      cur = cur + slice(s, i, i + 1)
+    }
+    i = i + 1
+  }
+  if cur != "" { push(out, cur) }
+  out
+}
+
+# The cell offset of byte `b` within `s`, which is how a caret is placed under a
+# source line. Tabs are the reason this is not just `display_width` of a prefix:
+# a tab advances to the next multiple of eight, so its width depends on where it
+# starts, and a caret under a tab-indented line lands in the wrong place in
+# every tool that forgets this.
+fn cells_before(s: Str, b: I64, tab: I64) -> I64 {
+  let w: I64 = 0
+  let i: I64 = 0
+  while i < b && i < len(s) {
+    if s[i] == 9 {
+      w = w + (tab - w % tab)
+      i = i + 1
+    } else if s[i] == 27 {
+      i = skip_escape(s, i)
+    } else {
+      let cp = decode_at(s, i)
+      w = w + cell_width(cp.value)
+      i = i + cp.size
+    }
+  }
+  w
+}
+
+# A source line with tabs expanded, so that the line and the caret under it are
+# measured by the same rule. Rendering the tab and computing around it is the
+# alternative, and it breaks the moment the terminal's tab stop is not eight.
+fn expand_tabs(s: Str, tab: I64) -> Str {
+  let out: Str = ""
+  let w: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 9 {
+      let n = tab - w % tab
+      out = out + spaces(n)
+      w = w + n
+      i = i + 1
+    } else {
+      let cp = decode_at(s, i)
+      out = out + slice(s, i, i + cp.size)
+      w = w + cell_width(cp.value)
+      i = i + cp.size
+    }
+  }
+  out
+}

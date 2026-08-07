@@ -1,0 +1,118 @@
+# color.tw - colour values and the two downward approximations.
+#
+# A colour is stored once, as 24-bit RGB, and rendered differently depending on
+# what the terminal admits to supporting. Storing it once is the whole trick:
+# every call site names a colour, never an escape sequence, so adding a
+# capability tier later touches this file and nothing else.
+
+mode systems
+
+import "src/term/caps" as caps
+
+struct Rgb { r: I64, g: I64, b: I64 }
+
+fn rgb(r: I64, g: I64, b: I64) -> Rgb = Rgb { r: r, g: g, b: b }
+
+# ── The 256-colour approximation ────────────────────────────────────────────
+
+# Terminals that predate truecolor offer a fixed 216-entry cube plus 24 greys.
+# Nearest-entry search would be more accurate; quantising each channel
+# independently is what every other tool does, is one pass, and is
+# indistinguishable at the sizes text is drawn.
+
+# The cube's levels are 0, 95, 135, 175, 215, 255: an uneven ramp, so the
+# midpoints between neighbours are the thresholds rather than a plain divide.
+fn cube_index(v: I64) -> I64 {
+  if v < 48 { 0 }
+  else if v < 115 { 1 }
+  else { (v - 35) / 40 }
+}
+
+fn cube_level(i: I64) -> I64 = if i == 0 { 0 } else { 55 + i * 40 }
+
+# True when the three channels are close enough that the 24-step grey ramp is a
+# better match than the coarse 6-level cube. The cube's grey diagonal has six
+# entries; the ramp has twenty four, so for near-grey colours (which is most of
+# a terminal UI: dim text, rules, borders) the ramp is four times finer.
+fn is_near_grey(c: Rgb) -> Bool {
+  let hi = max_i(c.r, max_i(c.g, c.b))
+  let lo = min_i(c.r, min_i(c.g, c.b))
+  hi - lo < 10
+}
+
+fn to_256(c: Rgb) -> I64 {
+  if is_near_grey(c) {
+    let l = (c.r + c.g + c.b) / 3
+    # The ramp runs 8, 18, 28 ... 238 at indices 232..255. Below and above it
+    # the cube's pure black and pure white are the closer answers.
+    if l < 8 { 16 }
+    else if l > 238 { 231 }
+    else { 232 + (l - 8) / 10 }
+  } else {
+    let ri = cube_index(c.r)
+    let gi = cube_index(c.g)
+    let bi = cube_index(c.b)
+    16 + 36 * ri + 6 * gi + bi
+  }
+}
+
+fn max_i(a: I64, b: I64) -> I64 = if a > b { a } else { b }
+fn min_i(a: I64, b: I64) -> I64 = if a < b { a } else { b }
+
+# ── Interpolation ───────────────────────────────────────────────────────────
+
+# A point on the straight line from `a` to `b`, with `t` given in thousandths.
+# Thousandths rather than a float because every consumer of this walks an
+# integer index over an integer width, and a float here would only be rounded
+# back at the end.
+fn lerp(a: Rgb, b: Rgb, t: I64) -> Rgb {
+  let u = clamp_i(t, 0, 1000)
+  rgb(mix1(a.r, b.r, u), mix1(a.g, b.g, u), mix1(a.b, b.b, u))
+}
+
+fn mix1(a: I64, b: I64, t: I64) -> I64 = a + (b - a) * t / 1000
+
+fn clamp_i(v: I64, lo: I64, hi: I64) -> I64 = min_i(hi, max_i(lo, v))
+
+# Step `i` of `n` along a ramp. Guarded because a one-cell ramp is a real case
+# (a progress bar one column wide) and 0/0 is not a colour.
+fn ramp_at(a: Rgb, b: Rgb, i: I64, n: I64) -> Rgb {
+  if n < 2 { a } else { lerp(a, b, i * 1000 / (n - 1)) }
+}
+
+# A three-stop ramp. The mint mark is not a two-colour gradient; it lifts to the
+# accent in the middle and settles into teal, which is what makes it read as
+# light falling on a twist rather than a fade.
+fn ramp3_at(a: Rgb, mid: Rgb, b: Rgb, i: I64, n: I64) -> Rgb {
+  if n < 2 { a }
+  else {
+    let t = i * 1000 / (n - 1)
+    if t < 500 { lerp(a, mid, t * 2) } else { lerp(mid, b, (t - 500) * 2) }
+  }
+}
+
+# ── Rendering ───────────────────────────────────────────────────────────────
+
+# The SGR parameter body for a foreground colour, without the escape or the
+# terminator, so `sgr` in ansi.tw can join several of these into one sequence.
+# Returns the empty string at the plain tier, which is what makes every styled
+# call site degrade without a branch of its own.
+fn fg_params(lv: I64, c: Rgb) -> Str {
+  if lv == caps.LEVEL_TRUECOLOR {
+    "38;2;" + str(c.r) + ";" + str(c.g) + ";" + str(c.b)
+  } else if lv == caps.LEVEL_256 {
+    "38;5;" + str(to_256(c))
+  } else {
+    ""
+  }
+}
+
+fn bg_params(lv: I64, c: Rgb) -> Str {
+  if lv == caps.LEVEL_TRUECOLOR {
+    "48;2;" + str(c.r) + ";" + str(c.g) + ";" + str(c.b)
+  } else if lv == caps.LEVEL_256 {
+    "48;5;" + str(to_256(c))
+  } else {
+    ""
+  }
+}
