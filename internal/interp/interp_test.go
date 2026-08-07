@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/martin-k-m/raster/internal/interp"
-	"github.com/martin-k-m/raster/internal/tensor"
 	"github.com/martin-k-m/raster/internal/value"
 )
 
@@ -22,14 +21,17 @@ func run(t *testing.T, src string) (value.Value, []string) {
 	return v, out
 }
 
+// scalar reads the number a program produced, without caring whether it came
+// back unboxed or as a rank-0 tensor. Which one it is is an interpreter detail
+// and no test should be pinning it.
 func scalar(t *testing.T, src string) float64 {
 	t.Helper()
 	v, _ := run(t, src)
-	tv, ok := v.(*tensor.Tensor)
+	n, ok := value.AsNumber(v)
 	if !ok {
-		t.Fatalf("expected a tensor, got %s", value.Format(v))
+		t.Fatalf("expected a number, got %s", value.Format(v))
 	}
-	return tv.Data[0]
+	return n
 }
 
 func TestArithmeticPrecedence(t *testing.T) {

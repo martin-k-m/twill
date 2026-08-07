@@ -23,6 +23,25 @@ for step in range(100) {
 }
 `
 
+// A loop that does nothing but scalar arithmetic, which is where the
+// interpreter's allocation cost shows up undiluted by any real work.
+const scalarLoopProgram = `
+let acc = 0.0
+for i in range(3000000) {
+  acc = acc + 1.0
+}
+`
+
+func BenchmarkScalarLoop(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		ip := interp.New(func(string) {})
+		if _, err := ip.Run(scalarLoopProgram); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkTrainingLoop(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

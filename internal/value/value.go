@@ -9,13 +9,59 @@ import (
 	"github.com/martin-k-m/raster/internal/tensor"
 )
 
-// Value is any runtime value. Concrete types: *tensor.Tensor, Bool, Str,
+// Value is any runtime value. Concrete types: Num, *tensor.Tensor, Bool, Str,
 // *List, *Closure, *Builtin, Unit.
 type Value any
+
+// Num is a plain number: one that carries no shape and no gradient history.
+//
+// Raster's numbers are rank-0 tensors, and a *tensor.Tensor costs two heap
+// allocations (the struct and its one-element backing slice) before anything
+// is computed. An interpreted scalar loop makes one of those per literal, per
+// loop counter and per intermediate result, which profiling put at over half
+// the runtime of `acc = acc + 1.0`. A Num boxed in a Value interface is one
+// eight-byte allocation instead.
+//
+// The cost is that every boundary expecting a tensor has to widen: see
+// AsTensor. A Num is produced only where nothing can be differentiating it, so
+// widening never loses a graph. Anything that could (a grad argument, a tensor
+// op, an autodiff leaf) turns it back into a rank-0 tensor first, which is why
+// gradients see the same graph they always did.
+type Num float64
 
 type Bool bool
 type Str string
 type Unit struct{}
+
+// AsTensor widens a number to the rank-0 tensor the tensor engine works in,
+// and passes a tensor through untouched. It reports false for anything that is
+// not numeric.
+//
+// Every place that used to type-assert *tensor.Tensor goes through here, so
+// adding Num did not have to change what any of them accept.
+func AsTensor(v Value) (*tensor.Tensor, bool) {
+	switch t := v.(type) {
+	case *tensor.Tensor:
+		return t, true
+	case Num:
+		return tensor.Scalar(float64(t)), true
+	}
+	return nil, false
+}
+
+// AsNumber reads a value that is a single number, whether it arrived as a Num
+// or as a one-element tensor. It does not allocate.
+func AsNumber(v Value) (float64, bool) {
+	switch t := v.(type) {
+	case Num:
+		return float64(t), true
+	case *tensor.Tensor:
+		if len(t.Data) == 1 {
+			return t.Data[0], true
+		}
+	}
+	return 0, false
+}
 
 type List struct {
 	Items []Value
@@ -208,6 +254,8 @@ func (e *Env) LocalNames() []string { return e.order }
 
 func Truthy(v Value) bool {
 	switch t := v.(type) {
+	case Num:
+		return t != 0
 	case *tensor.Tensor:
 		if t.IsScalar() {
 			return t.Data[0] != 0
@@ -231,6 +279,8 @@ func Truthy(v Value) bool {
 // Format renders a value for print and the REPL.
 func Format(v Value) string {
 	switch t := v.(type) {
+	case Num:
+		return FormatNumber(float64(t))
 	case *tensor.Tensor:
 		if t.IsScalar() {
 			return FormatNumber(t.Data[0])

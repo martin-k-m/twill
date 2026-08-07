@@ -4,6 +4,36 @@
 
 ### Changed
 
+- **A number that needs no gradient is not a heap-allocated tensor.** Every
+  Raster number was a rank-0 `*tensor.Tensor`, which costs two allocations (the
+  struct and its one-element backing slice) before any arithmetic happens. A
+  scalar loop paid that for every literal, every loop counter and every
+  intermediate result: seven allocations per iteration, and over half the
+  runtime in the allocator and collector.
+
+  Values that cannot be carrying a gradient are now a `value.Num`, a bare
+  float64, which costs one eight-byte box instead of two allocations. Measured
+  on `for i in range(3000000) { acc = acc + 1.0 }`, both binaries built and run
+  interleaved in one container: 1389 ms to 574 ms, 59% faster, 21.0 million
+  allocations down to 12.0 million and 1.94 GB down to 648 MB.
+
+  The cost is that every boundary wanting a tensor has to widen back to one:
+  gradient tracking, tensor ops, indexing, printing, saving, and the pytree
+  walks an optimiser uses. That widening is what keeps gradients exactly what
+  they were, and it is centralised in `value.AsTensor` so a new boundary cannot
+  quietly forget it. `grad` and `hessian` over a plain scalar argument have
+  tests, because a missed widening there does not fail loudly, it answers zero.
+
+  Which representation a value has is not observable: a `Num` and the rank-0
+  tensor holding it compare equal, print the same, and save to the same bytes.
+  The scalar arithmetic is a second implementation of the same six operators,
+  so a test evaluates each one both ways and requires exact agreement.
+
+  An earlier attempt to give `Tensor` an inline `[1]float64` backing array was
+  rejected: it removed 20% of the allocations but moved the clock 1%, and it
+  added 8 bytes to every tensor including the large ones that dominate real
+  memory.
+
 - **Two scalars with no gradient take a direct path.** The general binary op
   charged a scalar addition a broadcast computation, a `parallelFor` over one
   element, and a slice allocation for that element. Doing the arithmetic is

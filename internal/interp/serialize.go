@@ -75,6 +75,10 @@ func loadValue(path string) (value.Value, error) {
 
 func writeValue(w *bufio.Writer, v value.Value) error {
 	switch t := v.(type) {
+	case value.Num:
+		// Saved as the rank-0 tensor it stands for, so the file format did not
+		// change and an old file still loads.
+		return writeValue(w, tensor.Scalar(float64(t)))
 	case *tensor.Tensor:
 		if err := w.WriteByte(tagTensor); err != nil {
 			return err

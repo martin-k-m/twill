@@ -3,6 +3,7 @@ package interp
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -189,7 +190,7 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		if start, end, step, ok := ip.rangeLoop(st.Iter, env); ok {
 			for x := start; (step > 0 && x < end) || (step < 0 && x > end); x += step {
 				scope := value.NewEnv(env)
-				scope.Define(st.Name, tensor.Scalar(float64(x)))
+				scope.Define(st.Name, value.Num(float64(x)))
 				ip.execBlockIn(st.Body, scope)
 			}
 			return value.TheUnit
@@ -262,12 +263,11 @@ func (ip *Interp) rangeLoop(iter ast.Expr, env *value.Env) (start, end, step int
 
 	bounds := make([]int, len(call.Args))
 	for i, arg := range call.Args {
-		v := ip.evalExpr(arg, env)
-		t, isTensor := v.(*tensor.Tensor)
-		if !isTensor || !t.IsScalar() {
+		n, isNum := rank0Number(ip.evalExpr(arg, env))
+		if !isNum {
 			return 0, 0, 0, false
 		}
-		bounds[i] = int(t.Data[0])
+		bounds[i] = int(n)
 	}
 
 	step = 1
@@ -289,11 +289,15 @@ func (ip *Interp) rangeLoop(iter ast.Expr, env *value.Env) (start, end, step int
 
 func (ip *Interp) iterate(v value.Value, line int) []value.Value {
 	switch t := v.(type) {
+	case value.Num:
+		ip.panicf(line, "can only iterate 1-D tensors")
 	case *tensor.Tensor:
 		if len(t.Shape) == 1 {
 			out := make([]value.Value, len(t.Data))
 			for i, x := range t.Data {
-				out[i] = tensor.Scalar(x)
+				// Indexing a tensor never carried the graph across, so the
+				// element is a plain number and stays one.
+				out[i] = value.Num(x)
 			}
 			return out
 		}
@@ -463,7 +467,7 @@ func (ip *Interp) resolveImport(path string) (string, error) {
 func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 	switch ex := e.(type) {
 	case *ast.NumberLit:
-		return tensor.Scalar(ex.Value)
+		return value.Num(ex.Value)
 	case *ast.StringLit:
 		return value.Str(ex.Value)
 	case *ast.BoolLit:
@@ -562,6 +566,9 @@ func (ip *Interp) tensorNested(elements []ast.Expr, line int) []any {
 func (ip *Interp) evalUnary(ex *ast.Unary, env *value.Env) value.Value {
 	v := ip.evalExpr(ex.Operand, env)
 	if ex.Op == "-" {
+		if n, isNum := v.(value.Num); isNum {
+			return -n
+		}
 		t, ok := v.(*tensor.Tensor)
 		if !ok {
 			ip.panicf(ex.Line, "unary '-' expects a number/tensor")
@@ -597,8 +604,20 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 		return value.Bool(ip.compare(op, l, r, ex.Line))
 	}
 
-	lt, lok := l.(*tensor.Tensor)
-	rt, rok := r.(*tensor.Tensor)
+	// Two plain numbers are the whole of an interpreted scalar loop, and going
+	// through the tensor engine to add them allocates a rank-0 tensor for the
+	// answer that nothing will ever differentiate. Neither operand can be
+	// carrying a graph here, because a Num never has one.
+	if ln, lIsNum := l.(value.Num); lIsNum {
+		if rn, rIsNum := r.(value.Num); rIsNum {
+			if res, handled := numArith(op, float64(ln), float64(rn)); handled {
+				return res
+			}
+		}
+	}
+
+	lt, lok := value.AsTensor(l)
+	rt, rok := value.AsTensor(r)
 	if !lok || !rok {
 		ip.panicf(ex.Line, "operator %q expects numbers/tensors", op)
 	}
@@ -632,11 +651,51 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 	return res
 }
 
+// numArith does scalar arithmetic without building a tensor. It reports false
+// for operators whose meaning is not purely scalar (`@`) or that it does not
+// know, leaving those to the tensor engine so there is one definition of each.
+//
+// The results have to match broadcastBinary's element functions exactly, so a
+// program cannot tell which path evaluated it.
+func numArith(op string, x, y float64) (value.Value, bool) {
+	switch op {
+	case "+":
+		return value.Num(x + y), true
+	case "-":
+		return value.Num(x - y), true
+	case "*":
+		return value.Num(x * y), true
+	case "/":
+		return value.Num(x / y), true
+	case "%":
+		return value.Num(x - math.Floor(x/y)*y), true
+	case "^":
+		return value.Num(math.Pow(x, y)), true
+	}
+	return nil, false
+}
+
+// rank0Number reads a value that is a single number of no shape: a plain Num,
+// or a rank-0 tensor. A one-element vector is deliberately excluded, because it
+// was before Num existed and shape is part of what a tensor means.
+func rank0Number(v value.Value) (float64, bool) {
+	switch t := v.(type) {
+	case value.Num:
+		return float64(t), true
+	case *tensor.Tensor:
+		if t.IsScalar() {
+			return t.Data[0], true
+		}
+	}
+	return 0, false
+}
+
 func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
-	lt, lok := l.(*tensor.Tensor)
-	rt, rok := r.(*tensor.Tensor)
-	if lok && rok && lt.IsScalar() && rt.IsScalar() {
-		a, b := lt.Data[0], rt.Data[0]
+	// Scalar comparison covers loop conditions and guards, so it reads the
+	// numbers out directly rather than widening either side to a tensor first.
+	a, aok := rank0Number(l)
+	b, bok := rank0Number(r)
+	if aok && bok {
 		switch op {
 		case "==":
 			return a == b
@@ -669,6 +728,16 @@ func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
 // parameter tree. Values of different types are never equal, and functions,
 // which have no structure worth walking, compare by identity.
 func deepEqual(l, r value.Value) bool {
+	// A number equals a rank-0 tensor holding it: whether a value went down the
+	// unboxed path is an implementation detail, not something `==` may see.
+	if ln, ok := l.(value.Num); ok {
+		rn, isNum := rank0Number(r)
+		return isNum && float64(ln) == rn
+	}
+	if rn, ok := r.(value.Num); ok {
+		ln, isNum := rank0Number(l)
+		return isNum && ln == float64(rn)
+	}
 	switch lv := l.(type) {
 	case *tensor.Tensor:
 		rv, ok := r.(*tensor.Tensor)
@@ -806,11 +875,11 @@ func (ip *Interp) callClosure(c *value.Closure, args []value.Value) (ret value.V
 func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {
 	target := ip.evalExpr(ex.Target, env)
 	idxVal := ip.evalExpr(ex.Index, env)
-	it, ok := idxVal.(*tensor.Tensor)
-	if !ok || !it.IsScalar() {
+	n, ok := rank0Number(idxVal)
+	if !ok {
 		ip.panicf(ex.Line, "index must be a scalar number")
 	}
-	idx := int(it.Data[0])
+	idx := int(n)
 
 	switch t := target.(type) {
 	case *tensor.Tensor:
@@ -830,6 +899,8 @@ func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
 
 	dim0 := -1
 	switch t := target.(type) {
+	case value.Num:
+		ip.panicf(ex.Line, "cannot slice a scalar")
 	case *tensor.Tensor:
 		if len(t.Shape) == 0 {
 			ip.panicf(ex.Line, "cannot slice a scalar")
@@ -875,12 +946,11 @@ func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
 }
 
 func (ip *Interp) sliceBound(e ast.Expr, env *value.Env, line int) int {
-	v := ip.evalExpr(e, env)
-	t, ok := v.(*tensor.Tensor)
-	if !ok || !t.IsScalar() {
+	n, ok := rank0Number(ip.evalExpr(e, env))
+	if !ok {
 		ip.panicf(line, "slice bounds must be scalar numbers")
 	}
-	return int(t.Data[0])
+	return int(n)
 }
 
 func (ip *Interp) indexTensor(t *tensor.Tensor, idx, line int) *tensor.Tensor {

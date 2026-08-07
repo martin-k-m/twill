@@ -1179,7 +1179,7 @@ func (ip *Interp) writeFrame(frame *value.Record, path string) error {
 	nrows := -1
 	cols := make([][]float64, len(frame.Keys))
 	for i, k := range frame.Keys {
-		t, ok := frame.Fields[k].(*tensor.Tensor)
+		t, ok := value.AsTensor(frame.Fields[k])
 		if !ok || len(t.Shape) != 1 {
 			return fmt.Errorf("write_frame: column %q must be a 1-D tensor", k)
 		}
@@ -1214,7 +1214,10 @@ func (ip *Interp) writeFrame(frame *value.Record, path string) error {
 // mapLeaves applies f to each tensor leaf of tree, preserving structure.
 func (ip *Interp) mapLeaves(f, tree value.Value) value.Value {
 	switch t := tree.(type) {
-	case *tensor.Tensor:
+	case value.Num, *tensor.Tensor:
+		// A number is a numeric leaf like any other. Letting it fall to the
+		// pass-through default would silently skip a scalar bias in an
+		// optimiser's parameter tree.
 		return ip.Apply(f, []value.Value{t}, 0)
 	case *value.List:
 		out := make([]value.Value, len(t.Items))
@@ -1240,10 +1243,10 @@ func (ip *Interp) zipLeaves(f value.Value, trees []value.Value) value.Value {
 		ip.panicf(0, "zip_leaves needs at least one tree")
 	}
 	switch first := trees[0].(type) {
-	case *tensor.Tensor:
+	case value.Num, *tensor.Tensor:
 		leaves := make([]value.Value, len(trees))
 		for i, tr := range trees {
-			if _, ok := tr.(*tensor.Tensor); !ok {
+			if _, ok := value.AsTensor(tr); !ok {
 				ip.panicf(0, "zip_leaves: trees have different structures")
 			}
 			leaves[i] = tr
@@ -1302,6 +1305,11 @@ type recordNode struct {
 
 func traceArg(v value.Value) (value.Value, *gradNode) {
 	switch t := v.(type) {
+	case value.Num:
+		// grad(f)(3.0) passes a plain number, and without this it would fall to
+		// the default below and report a gradient of zero for it.
+		leaf := tensor.Leaf([]float64{float64(t)}, nil)
+		return leaf, &gradNode{leaf: leaf}
 	case *tensor.Tensor:
 		leaf := tensor.Leaf(t.Data, t.Shape)
 		return leaf, &gradNode{leaf: leaf}
@@ -1392,7 +1400,7 @@ func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tens
 	}
 
 	out := ip.Apply(f, passArgs, 0)
-	ot, ok := out.(*tensor.Tensor)
+	ot, ok := value.AsTensor(out)
 	if !ok || !ot.IsScalar() {
 		return nil, nil, nil, fmt.Errorf("grad target must return a scalar")
 	}
@@ -1411,7 +1419,7 @@ func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tens
 // output component: row j is the gradient of the j-th output w.r.t. x. The
 // result is an [m, n] tensor for an m-vector output and an n-element input.
 func (ip *Interp) jacobian(f value.Value, x value.Value) (value.Value, error) {
-	xt, ok := x.(*tensor.Tensor)
+	xt, ok := value.AsTensor(x)
 	if !ok {
 		return nil, fmt.Errorf("jacobian: the input must be a tensor")
 	}
@@ -1453,7 +1461,7 @@ func (ip *Interp) jacobian(f value.Value, x value.Value) (value.Value, error) {
 // hessian computes the Hessian of a scalar function f at x by forward-mode
 // second-order autodiff over the graph built from a single input leaf.
 func (ip *Interp) hessian(f value.Value, x value.Value) (value.Value, error) {
-	xt, ok := x.(*tensor.Tensor)
+	xt, ok := value.AsTensor(x)
 	if !ok {
 		return nil, fmt.Errorf("hessian: the input must be a tensor")
 	}
@@ -1476,7 +1484,7 @@ func (ip *Interp) hessian(f value.Value, x value.Value) (value.Value, error) {
 // applyToTensor calls a one-argument function and requires a tensor result.
 func (ip *Interp) applyToTensor(f value.Value, arg *tensor.Tensor) (*tensor.Tensor, error) {
 	out := ip.Apply(f, []value.Value{arg}, 0)
-	yt, ok := out.(*tensor.Tensor)
+	yt, ok := value.AsTensor(out)
 	if !ok {
 		return nil, fmt.Errorf("jacobian: f must return a tensor, got %s", value.Format(out))
 	}
@@ -1486,27 +1494,32 @@ func (ip *Interp) applyToTensor(f value.Value, arg *tensor.Tensor) (*tensor.Tens
 // --- argument coercion -----------------------------------------------------
 
 func asTensor(v value.Value, who string) (*tensor.Tensor, error) {
-	if t, ok := v.(*tensor.Tensor); ok {
+	if t, ok := value.AsTensor(v); ok {
 		return t, nil
 	}
 	return nil, fmt.Errorf("%s expects a tensor/number", who)
 }
 
+// scalarOf reads a single number. It reads a Num straight out rather than
+// widening it first, because a builtin that wants a scalar wants an axis or a
+// bound and would throw the tensor away again.
 func scalarOf(v value.Value, who string) (float64, error) {
-	t, err := asTensor(v, who)
-	if err != nil {
-		return 0, err
+	if n, ok := value.AsNumber(v); ok {
+		return n, nil
 	}
-	if t.Size() != 1 {
+	if _, numeric := value.AsTensor(v); numeric {
 		return 0, fmt.Errorf("%s expects a scalar", who)
 	}
-	return t.Data[0], nil
+	return 0, fmt.Errorf("%s expects a tensor/number", who)
 }
 
 // isScalarValue reports whether v is a single number, as opposed to a sequence
 // of them. Used where a scalar and a one-element sequence have to mean
 // different things.
 func isScalarValue(v value.Value) bool {
+	if _, ok := v.(value.Num); ok {
+		return true
+	}
 	t, ok := v.(*tensor.Tensor)
 	return ok && t.Size() == 1
 }
@@ -1523,6 +1536,8 @@ func intOf(v value.Value, who string) (int, error) {
 // or a 1-D tensor.
 func indicesOf(v value.Value, who string) ([]int, error) {
 	switch t := v.(type) {
+	case value.Num:
+		return []int{int(math.Trunc(float64(t)))}, nil
 	case *value.List:
 		out := make([]int, len(t.Items))
 		for i, it := range t.Items {
@@ -1590,6 +1605,8 @@ func toItems(v value.Value, who string) ([]value.Value, error) {
 
 func valueToNested(v value.Value) (any, error) {
 	switch t := v.(type) {
+	case value.Num:
+		return float64(t), nil
 	case *tensor.Tensor:
 		return t.ToNested(), nil
 	case *value.List:
