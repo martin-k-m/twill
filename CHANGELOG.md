@@ -17,6 +17,13 @@
   4, 2)` asks for eight elements from six. The message names both counts, since
   the useful question is which one is wrong.
 
+- **An unknown name is reported.** `print(nope + 1.0)` used to pass. Forward
+  references still resolve, because a file may call a function declared further
+  down and does at run time. A file with an unaliased `import` stands the check
+  down entirely: that form brings names in unqualified, the checker does not read
+  the imported file, and reporting a name it simply cannot see would be worse
+  than reporting nothing. An aliased import keeps the check.
+
 - **An axis that does not exist is reported.** Both reduction paths already
   worked out that the axis was out of range and then returned an unknown type,
   which silenced everything downstream as well. Detecting a mistake and saying

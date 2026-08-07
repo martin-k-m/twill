@@ -36,6 +36,32 @@ func Check(prog *ast.Program) []Diagnostic {
 	for name := range builtinNames {
 		env.define(name, tBuiltin{name})
 	}
+	// An import with no alias brings its names in unqualified, and this checker
+	// does not read the imported file, so it cannot know what those names are.
+	// One of them is enough to make every unknown name unreliable, so the whole
+	// check stands down for the file rather than reporting a definition it
+	// simply cannot see. `import "std/nn" as nn` keeps the check, since then
+	// every borrowed name arrives with the alias on it.
+	for _, st := range prog.Body {
+		if imp, ok := st.(*ast.Import); ok && imp.Alias == "" {
+			c.blindImport = true
+		}
+	}
+	// Every top-level function name, before any body is checked. A file may call
+	// a function declared further down and does at run time, so a checker that
+	// walks strictly in order would report a name that is perfectly well
+	// defined. The line above says forward references resolve, and until now
+	// that was true of types and units but not of functions.
+	//
+	// The declaration is not typed here, only named: checkFnDef does the real
+	// work when the walk reaches it, and this is about knowing the name exists.
+	for _, s := range prog.Body {
+		if fn, ok := s.(*ast.FnDecl); ok {
+			if _, seen := env.get(fn.Name); !seen {
+				env.define(fn.Name, tUnknown{})
+			}
+		}
+	}
 	for _, s := range prog.Body {
 		c.inferStmt(s, env)
 	}
@@ -65,6 +91,9 @@ type checker struct {
 	stack map[ast.Node]bool  // user functions currently being inferred
 	types map[string]tRecord // declared record types
 	units map[string]bool    // declared base units
+	// Set when a file imports without an alias, which makes any unknown name
+	// unprovable. See Check.
+	blindImport bool
 }
 
 func (c *checker) registerType(td *ast.TypeDecl) {
@@ -387,6 +416,13 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 	case *ast.Ident:
 		if t, ok := env.get(ex.Name); ok {
 			return t
+		}
+		// A name that resolves to nothing is a typo, and it was the one mistake
+		// the checker could see plainly and said nothing about. Builtins are not
+		// in the environment because they are not values, so they are checked
+		// against the table instead.
+		if !builtinNames[ex.Name] && !c.blindImport {
+			c.report(ex.Line, "unknown name %q", ex.Name)
 		}
 		return tUnknown{}
 	case *ast.TensorLit:

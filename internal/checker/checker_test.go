@@ -142,3 +142,34 @@ func TestANegativeAxisStillCountsFromTheEnd(t *testing.T) {
 		}
 	}
 }
+
+func TestAnUnknownNameIsReported(t *testing.T) {
+	wantOne(t, "let x = 1.0\nprint(nope + x)", `unknown name "nope"`)
+}
+
+func TestAFunctionDeclaredLaterIsNotUnknown(t *testing.T) {
+	// A file may call a function declared further down, and does at run time.
+	// Walking strictly in order would report a name that is perfectly defined.
+	src := `fn caller(x) = helper(x) * 2.0
+fn helper(x) = x + 1.0
+print(caller(3.0))`
+	if diags := diagnostics(t, src); len(diags) != 0 {
+		t.Fatalf("a forward reference was reported: %v", diags)
+	}
+}
+
+func TestAnUnaliasedImportSilencesTheNameCheck(t *testing.T) {
+	// It brings its names in unqualified and the checker does not read the
+	// imported file, so it cannot know what those names are. Guessing would
+	// report definitions that exist.
+	src := "import \"std/nn\"\nlet x = 1.0\nprint(whatever_nn_defines + x)"
+	if diags := diagnostics(t, src); len(diags) != 0 {
+		t.Fatalf("a blind import still reported unknown names: %v", diags)
+	}
+}
+
+func TestAnAliasedImportKeepsTheNameCheck(t *testing.T) {
+	// Every borrowed name arrives with the alias on it, so an unqualified name
+	// is still provably nothing.
+	wantOne(t, "import \"std/nn\" as nn\nprint(nope)", `unknown name "nope"`)
+}
