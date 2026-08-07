@@ -823,13 +823,39 @@ merging them before the dispatch exists would be guessing at its shape.
 
 ## NEEDS-53: the formatter
 
-**Status:** not started. `src/main.tw` `cmd_fmt`.
+**Status:** done. `src/fmt.tw`, wired into `src/main.tw` `format_file`.
 
-`internal/format/format.go` has not been ported. `twill fmt` reports that rather
-than silently doing nothing.
+`internal/format/format.go` is ported. What is left of this entry is the
+primitives the port names, which are NEEDS-68 and NEEDS-71, and the two
+behaviours it inherited rather than chose, which are NEEDS-69 and NEEDS-70.
 
-One rule has to survive the port because it is the one people notice: `fmt
---write` never renames a file. It refuses a `.ra` file and leaves it alone.
+The rule that had to survive the port, because it is the one people notice:
+`fmt --write` never renames a file. The retired-extension check runs before the
+file is opened, so such a file is refused and left exactly as it was.
+
+### Verification of the source formatter
+
+`src/fmt.tw` was checked against `internal/format/format.go` by transcribing the
+twill formatter, and the lexer and parser it stands on, into one executable
+form, and comparing its output against the reference binary's `twill fmt`.
+
+- **405 files** (every `.tw` file in `testdata/`, `examples/`, `std/` and
+  `src/`). Zero divergences, zero idempotence failures. 23 of the 405 are
+  negative fixtures that both implementations reject, with the same error kind.
+- **13,000 generated programs**, over an alphabet built to hit the parts the
+  corpus does not: mixed-precedence operator chains, `^` against `-`, unary
+  operators over binary operands, slices with either side absent, unit
+  expressions with negative and multi-digit exponents, `unit` declarations,
+  lambdas with and without block bodies, own-line and trailing comments, empty
+  comments, and float literals spanning the exponent thresholds. 8,230 formatted
+  on both sides, byte identical, all idempotent. The remaining 4,770 were
+  rejected by both, and the rejections agreed on kind: a syntax error on one
+  side was a syntax error on the other, a comment the formatter cannot place was
+  a refusal on both.
+
+The one divergence the run actually found was the float exponent threshold, and
+it is now NEEDS-68. It would not have been caught by the corpus, which contains
+no float literal that reaches `%g`.
 
 ### Verification of the einsum spec parser
 
@@ -856,50 +882,34 @@ Both are places where a port silently drifts.
 
 ---
 
-## NEEDS-54: the tensor kernel set the builtins call
+## NEEDS-54: the kernels `src/tensor.tw` does not have yet
 
-**Status:** blocking for `src/eval.tw`. Every builtin that computes anything.
+**Status:** blocking for `src/eval.tw`. Named by the builtins that call them.
 
-NEEDS-25 is the calling convention. This is the list of what has to be on the
-other end of it, arrived at by porting `internal/interp/builtins.go` and writing
-down every kernel a builtin names. It is the surface, not the implementation:
-each entry is one function in `internal/tensor` today.
+`src/tensor.tw` implements the kernels in twill and declares its interface at
+the head of the file. The builtins in `src/eval.tw` call that interface, and
+these are the entries it does not have yet. Each one is named by a builtin that
+would otherwise have nothing to call, and each is a kernel plus its gradient
+rule, in the style of the ones already there.
 
-Under the no-Go rule there is no escape hatch here. None of these can be written
-in twill: they are the elementwise loops, the matmul inner loop, the
-convolution, the reductions and the reverse-mode gradient rule for each, which
-`docs/self-hosting.md` section 2.2 put in the native core precisely because they
-want SIMD and layout control. Every one of them must be a native primitive.
-
-| Kernel | Signature | Go |
+| Missing | Wanted by | Go |
 |---|---|---|
-| `relu` `exp` `log` `sin` `cos` `tanh` `sigmoid` `sqrt` `square` `neg` | `(Tensor) -> Tensor` | `tensor.Relu` and friends |
-| `add` `mul` | `(Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.Add`, `tensor.Mul` |
-| `pow_scalar` | `(Tensor, F64) -> Tensor` | `tensor.PowScalar` |
-| `clip` | `(Tensor, F64, F64) -> Tensor` | `tensor.Clip` |
-| `matmul` `conv2d` `maximum` `minimum` `greater` `less` `greater_equal` `less_equal` `equal_op` | `(Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.MatMul` and friends |
-| `where_op` | `(Tensor, Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.Where` |
-| `maxpool2d` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.MaxPool2D` |
-| `gather` | `(Tensor, Arr[I64]) -> Res[Tensor, Str]` | `tensor.Gather` |
-| `sum` `mean` `max_all` `min_all` `prod` `median` | `(Tensor) -> Tensor` | `tensor.Sum` and friends |
-| `sum_axis` `mean_axis` `max_axis` `min_axis` `prod_axis` `median_axis` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.SumAxis` and friends |
-| `sort_axis` `argsort_axis` | `(Tensor, I64, Bool) -> Res[Tensor, Str]` | `tensor.SortAxis`, `tensor.ArgsortAxis` |
-| `topk_axis` `argtopk_axis` | `(Tensor, I64, I64, Bool) -> Res[Tensor, Str]` | `tensor.TopKAxis`, `tensor.ArgTopKAxis` |
-| `argmax_axis` `argmin_axis` `flip_axis` `diff_axis` `softmax` `logsumexp` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.ArgmaxAxis` and friends |
-| `roll_axis` | `(Tensor, I64, I64) -> Res[Tensor, Str]` | `tensor.RollAxis` |
-| `reshape` `broadcast_to` | `(Tensor, Arr[I64]) -> Res[Tensor, Str]` | `tensor.Reshape`, `tensor.BroadcastTo` |
-| `transpose_perm` | `(Tensor, Arr[I64]) -> Res[Tensor, Str]` | `tensor.TransposePerm` |
-| `einsum` | `(Str, Arr[Tensor]) -> Res[Tensor, Str]` | `tensor.Einsum` |
-| `concat` | `(Arr[Tensor], I64) -> Res[Tensor, Str]` | `tensor.Concat` |
-| `split` `split_equal` | `(Tensor, Arr[I64] \| I64, I64) -> Res[Arr[Tensor], Str]` | `tensor.Split`, `tensor.SplitEqual` |
-| `cumsum` `cumprod` `cummax` `cummin` | `(Tensor) -> Tensor` | `tensor.CumSum` and friends |
-| `cumsum_axis` `cumprod_axis` `cummax_axis` `cummin_axis` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.CumsumAxis` and friends |
-| `leaf` | `(Arr[F64], Arr[I64]) -> Tensor` | `tensor.Leaf` |
-| `leaf_grad` | `(Tensor) -> Opt[Arr[F64]]` | reading `t.Grad`, which is nil until a backward pass reaches it |
-| `backward` | `(Tensor) -> Res[Unit, Str]` | `(*Tensor).Backward` |
-| `set_record_jets` | `(Bool)` | `tensor.SetRecordJets` |
-| `hessian` | `(Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.Hessian`, which returns `([]float64, n)` and is reshaped by the caller there |
-| `from_nested` `to_nested` | see NEEDS-62 | `tensor.FromNested`, `(*Tensor).ToNested` |
+| `conv2d(a, b) -> Res[Tensor, Str]` | `conv2d` | `internal/tensor/conv.go` `Conv2D` |
+| `maxpool2d(t, k) -> Res[Tensor, Str]` | `maxpool2d` | `internal/tensor/conv.go` `MaxPool2D` |
+| `diff_axis(t, axis) -> Res[Tensor, Str]` | `diff` | `tensor.DiffAxis` |
+| `roll_axis(t, shift, axis) -> Res[Tensor, Str]` | `roll` | `tensor.RollAxis` |
+| `cumsum` `cumprod` `cummax` `cummin` `(t) -> Tensor` | the scan builtins with one argument | `internal/tensor/scan.go` |
+| `cumsum_axis` `cumprod_axis` `cummax_axis` `cummin_axis` `(t, axis) -> Res[Tensor, Str]` | the same four with an axis | `internal/tensor/scan.go` |
+| `from_nested(Nested) -> Res[Tensor, Str]`, `to_nested(t) -> Nested` | `tensor` | `tensor.FromNested`, `(*Tensor).ToNested` |
+| `set_record_jets(Bool)`, `hessian(tp, root, leaf) -> Res[Tensor, Str]` | `hessian` | `internal/tensor/jet.go` |
+| `new_tape`, `leaf`, `value_of`, `backward`, and the `t_` twins | `grad`, `grads`, `value_and_grad`, `jacobian`, `hessian` | the graph edges on `*Tensor` |
+
+The tape entries are declared in `src/tensor.tw`'s header and not yet written;
+they are listed here because `src/eval.tw` calls them today and because their
+exact shape, `backward(tp, root, seed) -> Res[Arr[Tensor], Str]` returning leaf
+gradients in creation order, is what makes the leaf ordering below `grads`
+correct. `grads(loss)(W, b)` returns a list in the order the arguments were
+named, and that order is the order `trace_arg` created the leaves in.
 
 Two things about this list are load-bearing and easy to lose.
 
@@ -909,10 +919,11 @@ text is compared byte for byte by the differential harness, so a kernel that
 aborts instead of returning a message takes the line number with it.
 
 Negative axes are normalised **inside** the kernel and not in `src/eval.tw`.
-`internal/tensor/ops.go` `normalizeAxis` adds the rank first and then reports the
-*adjusted* axis if it is still out of range, so `sum(m, -5)` on a rank-2 tensor
-says `axis -3 out of range for rank 2`. Normalising on the twill side would
-report `-5` and diverge on the single input that reaches the message.
+`src/tensor.tw` `normalize_axis` follows `internal/tensor/ops.go`: it adds the
+rank first and then reports the *adjusted* axis if it is still out of range, so
+`sum(m, -5)` on a rank-2 tensor says `axis -3 out of range for rank 2`.
+Normalising on the eval side would report `-5` and diverge on the single input
+that reaches the message.
 
 ## NEEDS-55: a seeded random number generator
 
@@ -1244,3 +1255,136 @@ exists for it. It is one message and it is written down so the differential
 harness's first complaint is not a surprise.
 
 *Go bootstrap:* `fmt.Errorf` with `%v`.
+
+## NEEDS-68: `f64_shortest`, Go's `%g` for the source formatter
+
+**Status:** blocking for `src/fmt.tw`. `format_number`.
+
+`f64_shortest(F64) -> Str`, which must equal Go's
+`strconv.FormatFloat(x, 'g', -1, 64)` exactly. This is not NEEDS-57's
+`format_number` (that one renders a `Value` for `print`) and it is not
+NEEDS-29's hexadecimal dump form. It is the decimal spelling a number literal
+gets when `twill fmt` writes it back out, and it is compared byte for byte
+against the Go formatter over the whole corpus.
+
+The contract is narrower than "prints a float", and the differential run caught
+the part that is easy to get wrong, so it is written down here rather than left
+to the reader of `strconv`:
+
+- Shortest digits that round-trip back to the same `F64`.
+- Exponent form when the decimal exponent is `< -4` or `>= 6`. Not 21. Go uses
+  a precision of 6 for this decision when the precision is "shortest".
+- The exponent is at least two digits and always signed: `1e-07`, `1e+20`.
+- Negative zero prints as `-0`.
+
+Measured against the reference binary: `1234567.5` gives `1.2345675e+06`,
+`123456.5` gives `123456.5`, `1e20` gives `1e+20`. `1000000` never reaches this
+function, because `format_number` takes the integer path first, which is why the
+threshold of 6 is invisible until a value has a fractional part.
+
+*Go bootstrap:* `strconv.FormatFloat`, through `internal/format`'s
+`formatNumber`.
+
+## NEEDS-69: the formatter drops `unit USD`
+
+**Status:** open, and it is a bug on the Go side first. `src/fmt.tw` `stmt`,
+`internal/format/format.go` `(*printer).stmt`.
+
+`internal/format/format.go`'s statement switch has no case for `*ast.UnitDecl`,
+so a `unit` declaration formats to nothing and a file that declares a base unit
+loses it. `src/fmt.tw` reproduces this deliberately: the cross-agreement check
+compares bytes, so fixing it in one implementation alone would turn a silently
+dropped declaration into a reported divergence and bury the real problem under
+a harness failure.
+
+Fix both together, in one change, or the corpus goes red. The fix is one line on
+each side, printing `unit <name>` through the same trailing-comment path every
+other single-line statement uses.
+
+## NEEDS-70: the formatter does not preserve blank lines
+
+**Status:** open, cosmetic, and the most likely reason someone stops running
+`twill fmt`. `src/fmt.tw`, and `internal/format/format.go` equally.
+
+The printer emits one line per statement and nothing else, so the blank lines a
+author put between paragraphs of a function are gone after one format. Comments
+survive; the whitespace that groups them does not.
+
+Preserving them needs the tree to carry the gap: the statement line numbers are
+already there, so a gap of two or more source lines between consecutive
+statements could re-emit as one blank line. That rule is not in the Go file to
+copy, which is exactly why it is recorded here rather than invented in the port.
+Whatever is chosen has to be chosen on both sides at once, for the same reason
+as NEEDS-69.
+
+## NEEDS-71: a `Dict` keyed by `I64`
+
+**Status:** open, a workaround is in place. `src/fmt.tw` `Printer.trailing`,
+`line_key`.
+
+The formatter maps a source line to the trailing comment on it. The natural type
+is `Dict[I64, Str]`; `docs/self-hosting.md` only specifies `Str` keys, so the
+line number is rendered with `str()` at every set and every get. That is a
+decimal conversion per statement printed, and it makes the key type a lie about
+what the map is for.
+
+Either `Dict` takes any equatable key, or this stays a documented workaround.
+It is not blocking and it is not free: the same pattern will appear anywhere the
+compiler wants to key on a node id, which `src/ast.tw` hands out precisely so it
+can be keyed on.
+
+## NEEDS-72: `twill tokens` is not a command
+
+**Status:** recorded so it is not read as an accident. `src/main.tw`.
+
+The earlier draft of `src/main.tw` had `twill tokens <file>` and
+`twill dump --dump=tokens`, and `src/lex.tw`'s `dump_tokens` was written for
+them. `cmd/twill/main.go` has neither, and this file is compared against it with
+stderr byte for byte, so a command the reference binary does not have would make
+`twill tokens x.tw` print a token stream on one side and
+`twill: cannot read file "tokens"` on the other.
+
+`dump_tokens` stays in `src/lex.tw` and the lexer's differential check should
+call it directly rather than through the CLI. If a token dump is wanted from the
+command line, it has to be added to the Go binary first.
+
+## NEEDS-75: a tape the interpreted code records on
+
+**Status:** blocking for `src/eval.tw`. `grad`, `grads`, `value_and_grad`,
+`jacobian`, `hessian`. It is the one hole in `src/eval.tw` that is in the middle
+of something rather than at its edge.
+
+`src/tensor.tw` splits every op in two: `binary(op, a, b)` computes, and
+`t_binary(tp, op, a, b)` computes and records on a tape, returning a node index.
+That split is right, and it is exactly why grad is not just a matter of calling
+kernels: the arithmetic that has to be recorded happens inside f, which is
+interpreted twill, in code `src/eval.tw` evaluates but does not write.
+
+Three functions stand for the missing piece:
+
+    tape_push(tp)                  make tp the tape ops record on
+    tape_pop()                     restore the previous one, or none
+    tape_node_of(v) -> Opt[I64]    the node a traced value came from
+
+The Go bootstrap needs none of them, because a `*tensor.Tensor` carries its own
+graph edges: a value *is* a node, and `Backward` walks from it. Here a `Tensor`
+is a shape and a buffer, node identity lives in the tape, and the association
+between the two has to exist somewhere. These three are that somewhere.
+
+Whichever way it is answered, two things follow and both are design decisions
+rather than coding:
+
+- **Every builtin needs a taped path.** `relu(x)` inside a loss has to record;
+  `relu(x)` in a print statement should not, or every forward pass pins its
+  whole history alive. `src/eval.tw` calls the untaped kernel today. The natural
+  answer is that each builtin asks whether a tape is installed and picks the
+  twin, which doubles nothing but touches every call site.
+- **Nesting.** `tape_push`/`tape_pop` are a stack rather than a single slot
+  because `jacobian(f)` runs f once per output element and `grad` inside a
+  function passed to `map` is legal. A single slot would make the inner call
+  silently steal the outer tape's recording.
+
+The alternative, giving `VTensor` a node field, was not taken here because it
+would put a gradient concept into the value model that most values never use,
+and `src/tensor.tw` deliberately kept `Tensor` a shape and a buffer. Recorded so
+the choice is visible rather than assumed.

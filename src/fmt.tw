@@ -1,0 +1,679 @@
+mode systems
+
+# fmt.tw: the twill source formatter, in twill.
+#
+# A port of internal/format/format.go, and a port rather than a rewrite. The
+# differential harness checks two properties of this file and the second one is
+# what forces the discipline:
+#
+#   - formatting formatted source returns it unchanged, and
+#   - the output is byte identical to the Go formatter's on every file in
+#     testdata/, examples/, std/ and src/.
+#
+# Byte identity means every decision here has to be the Go file's decision, down
+# to the ones that look arbitrary. Where a rule below reads like a choice, it is
+# not one: it is what internal/format/format.go does, and the reason it does it
+# is carried across rather than summarised. Two of them are worth finding before
+# reading the code, because both are places a "tidier" formatter would drift:
+#
+#   - There is no line-width limit and no wrapping. An expression prints on one
+#     line however long it is. A wrapping formatter would have to decide where
+#     to break, and that decision is not in the Go file to copy.
+#   - Blank lines in the input are not preserved. The printer emits one line per
+#     statement and nothing else, so paragraph breaks between statements are
+#     lost. This is a real cost and it is the Go behaviour; NEEDS-56 records it.
+#
+# Comments are the part a formatter usually gets wrong, so this file does not
+# try to be clever about them. A comment on its own line is re-emitted, at the
+# indent of the statement it precedes, before that statement. A comment hanging
+# off the end of a line of code is re-attached to whatever that line becomes.
+# Anything else the printer cannot place makes `source` refuse the whole file
+# rather than drop it, which is checked by re-parsing the output and comparing
+# the comment sets. A formatter that silently eats a comment is a formatter
+# people stop running.
+
+import "ast.tw" as ast
+import "lex.tw" as lex
+import "parse.tw" as parse
+import "bytes.tw" as bytes
+
+# ---- errors ----------------------------------------------------------------
+
+# The two ways formatting fails are reported differently by the CLI: a syntax
+# error gets the file:line:col treatment and a source excerpt, a refusal is a
+# plain sentence. Go carries both in one `error` and type-switches in
+# reportError; naming the two cases is the same information without the switch.
+enum FormatError {
+  FSyntax(lex.SyntaxError),
+  FRefused(Str),
+}
+
+fn error_text(e: FormatError) -> Str {
+  match e {
+    FSyntax(s) => lex.error_text(s),
+    FRefused(m) => m,
+  }
+}
+
+# ---- entry point -----------------------------------------------------------
+
+# source parses src and returns the canonically formatted text. It refuses
+# (with an error) rather than drop any comment it can't place.
+fn source(src: Str) -> Res[Str, FormatError] {
+  let parsed: parse.Parsed = ast_parse(src)?
+  let out: Str = format(parsed.program, parsed.comments)
+  # Safety: the formatted output must carry the same comments as the input.
+  # This is the whole guarantee of the file. It costs a second parse per format,
+  # which is cheap next to being wrong once.
+  let again: parse.Parsed = parsed
+  match parse.parse_with_comments(out) {
+    Ok(q) => again = q,
+    Err(_) => return Err(FRefused("internal: formatted output did not re-parse")),
+  }
+  if not same_comments(parsed.comments, again.comments) {
+    return Err(FRefused(
+      "cannot format: a comment sits somewhere the formatter can't preserve (e.g. inside an inline block); left unchanged"))
+  }
+  Ok(out)
+}
+
+fn ast_parse(src: Str) -> Res[parse.Parsed, FormatError] {
+  match parse.parse_with_comments(src) {
+    Ok(p) => Ok(p),
+    Err(e) => Err(FSyntax(e)),
+  }
+}
+
+fn format(prog: ast.Program, comments: Arr[lex.Comment]) -> Str {
+  let p: Printer = new_printer()
+  let i: I64 = 0
+  while i < len(comments) {
+    let c: lex.Comment = comments[i]
+    if c.trailing {
+      dict_set(p.trailing, line_key(c.line), c.text)
+    } else {
+      push(p.own, c)
+    }
+    i = i + 1
+  }
+  # Go sorts `own` by line with a stable sort here. The scan hands comments back
+  # in source order and no two own-line comments share a line, so the sort is an
+  # identity and is not repeated. Emitting them in order is what emitLeading
+  # below depends on.
+  let j: I64 = 0
+  while j < len(prog.body) {
+    stmt(p, prog.body[j], 0)
+    j = j + 1
+  }
+  # Flush own-line comments that trail the last statement. The bound is a line
+  # number no source file reaches rather than a special case in emit_leading.
+  emit_leading(p, 0, 1073741824)
+  let out: Str = bytes.to_str(p.buf)
+  if not bytes.has_suffix(out, "\n") {
+    out = bytes.concat(out, "\n")
+  }
+  out
+}
+
+# same_comments compares two comment sets by text alone, ignoring order and
+# position. Position is exactly what formatting changes, so comparing it would
+# reject every reformat; the question being asked is only whether anything was
+# dropped or invented.
+fn same_comments(a: Arr[lex.Comment], b: Arr[lex.Comment]) -> Bool {
+  if len(a) != len(b) { return false }
+  let ta: Arr[Str] = sorted_texts(a)
+  let tb: Arr[Str] = sorted_texts(b)
+  let i: I64 = 0
+  while i < len(ta) {
+    if not bytes.equal(ta[i], tb[i]) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn sorted_texts(cs: Arr[lex.Comment]) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(cs) {
+    push(out, cs[i].text)
+    i = i + 1
+  }
+  sort_strings(out)
+  out
+}
+
+# Insertion sort, in place. The input is the comment set of one source file, so
+# it is small and already close to sorted often enough that a better algorithm
+# would be a bigger source of bugs than of savings. It must order by raw bytes,
+# because Go's sort.Strings does and the two are compared.
+fn sort_strings(xs: Arr[Str]) {
+  let i: I64 = 1
+  while i < len(xs) {
+    let v: Str = xs[i]
+    let j: I64 = i - 1
+    while j >= 0 and str_less(v, xs[j]) {
+      xs[j + 1] = xs[j]
+      j = j - 1
+    }
+    xs[j + 1] = v
+    i = i + 1
+  }
+}
+
+fn str_less(a: Str, b: Str) -> Bool {
+  let n: I64 = len(a)
+  if len(b) < n { n = len(b) }
+  let i: I64 = 0
+  while i < n {
+    if a[i] != b[i] { return a[i] < b[i] }
+    i = i + 1
+  }
+  len(a) < len(b)
+}
+
+# ---- the printer -----------------------------------------------------------
+
+struct Printer {
+  buf: Bytes,
+  # own-line comments, in line order, with own_idx the first not yet emitted.
+  own: Arr[lex.Comment],
+  own_idx: I64,
+  # line number -> trailing comment text. Keyed by the decimal line because the
+  # Dict the systems subset offers takes Str keys; see NEEDS-57.
+  trailing: Dict[Str, Str],
+}
+
+fn new_printer() -> Printer =
+  Printer { buf: bytes.new(), own: arr_new(), own_idx: 0, trailing: dict_new() }
+
+fn line_key(n: I64) -> Str = str(n)
+
+# emit_leading writes any pending own-line comments that come before
+# before_line. Because `own` is in line order and own_idx only moves forward, a
+# comment is emitted exactly once and always ahead of the code it introduced.
+fn emit_leading(p: Printer, indent: I64, before_line: I64) {
+  while p.own_idx < len(p.own) and p.own[p.own_idx].line < before_line {
+    line(p, indent, comment_text(p.own[p.own_idx].text))
+    p.own_idx = p.own_idx + 1
+  }
+}
+
+# The scan strips the `#` and the surrounding space, so re-emitting normalises
+# `#foo` and `#    foo` to `# foo`. An empty comment stays a bare `#` rather
+# than becoming `# ` with a trailing space, which would not survive a
+# whitespace-trimming editor and so would not be idempotent.
+fn comment_text(text: Str) -> Str {
+  if len(text) == 0 { return "#" }
+  bytes.concat("# ", text)
+}
+
+fn line(p: Printer, indent: I64, text: Str) {
+  bytes.push_text(p.buf, bytes.repeat("  ", indent))
+  bytes.push_text(p.buf, text)
+  bytes.push_text(p.buf, "\n")
+}
+
+# line_c writes a statement line, appending its trailing comment if any. The
+# separator is two spaces, always, so that trailing comments are not aligned
+# into a column: column alignment makes an unrelated edit on one line reflow
+# every other line in the group, and the resulting diff hides the real change.
+fn line_c(p: Printer, indent: I64, text: Str, src_line: I64) {
+  let full: Str = text
+  match dict_get(p.trailing, line_key(src_line)) {
+    Some(t) => full = bytes.concat(text, bytes.concat("  ", comment_text(t))),
+    None => unit,
+  }
+  line(p, indent, full)
+}
+
+# ---- statements ------------------------------------------------------------
+
+fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
+  emit_leading(p, indent, ast.stmt_line(s))
+  match s {
+    SLet(st) => {
+      let name: Str = st.name
+      match st.unit {
+        Some(u) => name = bytes.concat(name, bytes.concat(": ", unit_anno(u))),
+        None => unit,
+      }
+      line_c(p, indent, bytes.concat("let ", bytes.concat(name,
+        bytes.concat(" = ", expr(p, st.value)))), st.line)
+    },
+    SAssign(st) => line_c(p, indent,
+      bytes.concat(st.name, bytes.concat(" = ", expr(p, st.value))), st.line),
+    SFn(st) => fn_decl(p, st, indent),
+    SWhile(st) => block_stmt(p, indent,
+      bytes.concat("while ", expr(p, st.cond)), st.body, st.line),
+    SFor(st) => block_stmt(p, indent,
+      bytes.concat("for ", bytes.concat(st.name, bytes.concat(" in ", expr(p, st.iter)))),
+      st.body, st.line),
+    SReturn(st) => {
+      match st.value {
+        Some(v) => line_c(p, indent, bytes.concat("return ", expr(p, v)), st.line),
+        None => line_c(p, indent, "return", st.line),
+      }
+    },
+    SImport(st) => {
+      if len(st.alias) > 0 {
+        line_c(p, indent, bytes.concat("import ", bytes.concat(quoted(st.path),
+          bytes.concat(" as ", st.alias))), st.line)
+      } else {
+        line_c(p, indent, bytes.concat("import ", quoted(st.path)), st.line)
+      }
+    },
+    STypeDecl(st) => {
+      let fields: Arr[Str] = arr_new()
+      let i: I64 = 0
+      while i < len(st.fields) {
+        let f: ast.TypeField = st.fields[i]
+        push(fields, bytes.concat(f.name, bytes.concat(": ", shape(f.shape))))
+        i = i + 1
+      }
+      line_c(p, indent, bytes.concat("type ", bytes.concat(st.name,
+        bytes.concat(" = { ", bytes.concat(bytes.join(fields, ", "), " }")))), st.line)
+    },
+    SExpr(st) => line_c(p, indent, expr(p, st.x), st.line),
+    # A bare block statement prints its contents at the same indent, with no
+    # braces: the braces carried no meaning the tree kept, so re-emitting them
+    # would invent a scope the parser did not record.
+    SBlock(st) => {
+      let i: I64 = 0
+      while i < len(st.body) {
+        stmt(p, st.body[i], indent)
+        i = i + 1
+      }
+    },
+    # `unit USD` prints as nothing, because internal/format/format.go has no
+    # case for *ast.UnitDecl and its statement switch falls through silently.
+    # This is a bug on the Go side and it is reproduced here on purpose: the
+    # cross-agreement check compares bytes, so fixing it in one implementation
+    # alone would turn a dropped declaration into a reported divergence and
+    # bury it. NEEDS-55 is the entry to fix both together.
+    SUnitDecl(_) => unit,
+  }
+}
+
+fn fn_decl(p: Printer, f: ast.FnDecl, indent: I64) {
+  let sig: Str = bytes.concat("fn ", bytes.concat(f.name,
+    bytes.concat("(", bytes.concat(params(p, f.params),
+      bytes.concat(")", ret_part(f.ret, f.ret_unit))))))
+  match f.body {
+    EBlock(blk) => block_stmt(p, indent, sig, blk, f.line),
+    _ => line_c(p, indent, bytes.concat(sig, bytes.concat(" = ", expr(p, f.body))), f.line),
+  }
+}
+
+# block_stmt prints `<header> {` ... `}` with the body indented, emitting any
+# comments that fall inside the block.
+fn block_stmt(p: Printer, indent: I64, header: Str, blk: ast.Block, header_line: I64) {
+  line_c(p, indent, bytes.concat(header, " {"), header_line)
+  let i: I64 = 0
+  while i < len(blk.body) {
+    stmt(p, blk.body[i], indent + 1)
+    i = i + 1
+  }
+  # Comments before the closing brace. Without this a comment on the last line
+  # of a block would be pushed out past the `}` and end up introducing whatever
+  # followed the block, which reads as a comment about the wrong code.
+  emit_leading(p, indent + 1, blk.end_line)
+  line(p, indent, "}")
+}
+
+# ---- annotations -----------------------------------------------------------
+
+fn params(p: Printer, ps: Arr[ast.Param]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(ps) {
+    let prm: ast.Param = ps[i]
+    let s: Str = prm.name
+    # The three annotation forms are mutually exclusive and are tested in this
+    # order because the parser fills at most one of them.
+    match prm.shape {
+      Some(sh) => s = bytes.concat(s, bytes.concat(": ", shape(sh))),
+      None => {
+        if len(prm.type_name) > 0 {
+          s = bytes.concat(s, bytes.concat(": ", prm.type_name))
+        } else {
+          match prm.unit {
+            Some(u) => s = bytes.concat(s, bytes.concat(": ", unit_anno(u))),
+            None => unit,
+          }
+        }
+      },
+    }
+    push(parts, s)
+    i = i + 1
+  }
+  bytes.join(parts, ", ")
+}
+
+# ret_part prints the `-> ...` return annotation, which is either a shape or a
+# unit (never both).
+fn ret_part(r: Opt[ast.ShapeAnno], u: Opt[ast.UnitAnno]) -> Str {
+  match r {
+    Some(sh) => return bytes.concat(" -> ", shape(sh)),
+    None => unit,
+  }
+  match u {
+    Some(ua) => return bytes.concat(" -> ", unit_anno(ua)),
+    None => unit,
+  }
+  ""
+}
+
+# unit_anno renders a unit expression as `USD`, `USD/share`, `USD/year^2`, or
+# `1/year`, grouping positive-exponent factors as the numerator and
+# negative-exponent factors as the denominator. Factors keep their source order
+# within each group rather than being sorted, so `USD*share` does not silently
+# become `share*USD`.
+fn unit_anno(u: ast.UnitAnno) -> Str {
+  let num: Arr[Str] = arr_new()
+  let den: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(u.factors) {
+    let f: ast.UnitFactor = u.factors[i]
+    if f.exp == 0 {
+      # A factor that cancelled to exponent zero is dimensionless and prints as
+      # nothing; the `1` numerator below covers the case where they all did.
+      i = i + 1
+      continue
+    }
+    if f.exp == 1 {
+      push(num, f.name)
+    } else {
+      if f.exp > 0 {
+        push(num, bytes.concat(f.name, bytes.concat("^", str(f.exp))))
+      } else {
+        if f.exp == -1 {
+          push(den, f.name)
+        } else {
+          push(den, bytes.concat(f.name, bytes.concat("^", str(-f.exp))))
+        }
+      }
+    }
+    i = i + 1
+  }
+  let num_s: Str = "1"
+  if len(num) > 0 {
+    num_s = bytes.join(num, "*")
+  }
+  if len(den) == 0 {
+    return num_s
+  }
+  bytes.concat(num_s, bytes.concat("/", bytes.join(den, "*")))
+}
+
+fn shape(s: ast.ShapeAnno) -> Str {
+  let dims: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(s.dims) {
+    let d: ast.Dim = s.dims[i]
+    if ast.dim_is_concrete(d) {
+      push(dims, str(d.size))
+    } else {
+      if len(d.name) > 0 {
+        push(dims, d.name)
+      } else {
+        push(dims, "_")
+      }
+    }
+    i = i + 1
+  }
+  bytes.concat("[", bytes.concat(bytes.join(dims, ", "), "]"))
+}
+
+# ---- expressions -----------------------------------------------------------
+
+fn expr(p: Printer, e: ast.Expr) -> Str {
+  match e {
+    ENumber(x) => format_number(x.value),
+    EString(x) => quoted(x.value),
+    EBool(x) => bool_text(x.value),
+    EIdent(x) => x.name,
+    # A tensor literal and a list literal print identically, because they are
+    # written identically: which one the parser built is decided by the
+    # elements, so re-parsing the output rebuilds the same kind.
+    ETensor(x) => bytes.concat("[", bytes.concat(expr_list(p, x.elements), "]")),
+    EList(x) => bytes.concat("[", bytes.concat(expr_list(p, x.elements), "]")),
+    ERecord(x) => {
+      let parts: Arr[Str] = arr_new()
+      let i: I64 = 0
+      while i < len(x.fields) {
+        let f: ast.RecordField = x.fields[i]
+        push(parts, bytes.concat(f.name, bytes.concat(": ", expr(p, f.value))))
+        i = i + 1
+      }
+      bytes.concat("{ ", bytes.concat(bytes.join(parts, ", "), " }"))
+    },
+    ELambda(x) => {
+      let sig: Str = bytes.concat("fn(", bytes.concat(params(p, x.params),
+        bytes.concat(")", ret_part(x.ret, x.ret_unit))))
+      match x.body {
+        EBlock(blk) => bytes.concat(sig, bytes.concat(" ", inline_block(blk))),
+        _ => bytes.concat(sig, bytes.concat(" = ", expr(p, x.body))),
+      }
+    },
+    EUnary(x) => {
+      # `not` is a word, so it needs the space `-` and `!` must not have.
+      if bytes.equal(x.op, "not") {
+        bytes.concat("not ", operand(p, x.operand))
+      } else {
+        bytes.concat(x.op, operand(p, x.operand))
+      }
+    },
+    EBinary(x) => bytes.concat(paren_child(p, x.left, x.op, false),
+      bytes.concat(" ", bytes.concat(x.op, bytes.concat(" ",
+        paren_child(p, x.right, x.op, true))))),
+    ECall(x) => bytes.concat(expr(p, x.callee),
+      bytes.concat("(", bytes.concat(expr_list(p, x.args), ")"))),
+    EIndex(x) => bytes.concat(expr(p, x.target),
+      bytes.concat("[", bytes.concat(expr(p, x.index), "]"))),
+    ESlice(x) => {
+      let lo: Str = ""
+      let hi: Str = ""
+      match x.start {
+        Some(s) => lo = expr(p, s),
+        None => unit,
+      }
+      match x.end {
+        Some(s) => hi = expr(p, s),
+        None => unit,
+      }
+      bytes.concat(expr(p, x.target), bytes.concat("[", bytes.concat(lo,
+        bytes.concat(":", bytes.concat(hi, "]")))))
+    },
+    EField(x) => bytes.concat(expr(p, x.target), bytes.concat(".", x.name)),
+    EIf(x) => if_expr(p, x),
+    EBlock(x) => inline_block(x),
+  }
+}
+
+# operand parenthesizes a binary expression under a unary operator so
+# `-(a + b)` / `not (a and b)` keep their meaning.
+fn operand(p: Printer, e: ast.Expr) -> Str {
+  match e {
+    EBinary(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
+    _ => expr(p, e),
+  }
+}
+
+# The parser's table, duplicated here rather than imported, because the
+# formatter needs a precedence for every operator it may print and a missing
+# entry must read as zero. parse.precedence_of returns an Opt and threading that
+# through paren_child would turn a lookup into a control-flow question.
+fn precedence_table() -> Dict[Str, I64] {
+  let d: Dict[Str, I64] = dict_new()
+  dict_set(d, "or", 1)
+  dict_set(d, "||", 1)
+  dict_set(d, "and", 2)
+  dict_set(d, "&&", 2)
+  dict_set(d, "==", 3)
+  dict_set(d, "!=", 3)
+  dict_set(d, "<", 4)
+  dict_set(d, "<=", 4)
+  dict_set(d, ">", 4)
+  dict_set(d, ">=", 4)
+  dict_set(d, "+", 5)
+  dict_set(d, "-", 5)
+  dict_set(d, "*", 6)
+  dict_set(d, "/", 6)
+  dict_set(d, "%", 6)
+  dict_set(d, "@", 6)
+  dict_set(d, "^", 7)
+  d
+}
+
+let PRECEDENCE: Dict[Str, I64] = precedence_table()
+
+fn prec_of(op: Str) -> I64 {
+  match dict_get(PRECEDENCE, op) {
+    Some(v) => v,
+    None => 0,
+  }
+}
+
+# paren_child formats a binary operand, adding parentheses only when needed to
+# preserve the operator tree's precedence and associativity. Only when needed:
+# printing them everywhere would be safe and would make `a + b * c + d` read as
+# `((a) + ((b) * (c))) + (d)`, so the rule is worth the care.
+fn paren_child(p: Printer, child: ast.Expr, parent_op: Str, is_right: Bool) -> Str {
+  match child {
+    EBinary(b) => {
+      let child_prec: I64 = prec_of(b.op)
+      let parent_prec: I64 = prec_of(parent_op)
+      let need: Bool = child_prec < parent_prec
+      if child_prec == parent_prec {
+        # Equal precedence needs parentheses on the side the operator does not
+        # associate toward: `a - (b - c)` keeps them, `a - b - c` does not.
+        let right_assoc: Bool = bytes.equal(parent_op, "^")
+        if is_right != right_assoc {
+          need = true
+        }
+      }
+      let s: Str = expr(p, child)
+      if need {
+        return bytes.concat("(", bytes.concat(s, ")"))
+      }
+      s
+    },
+    _ => expr(p, child),
+  }
+}
+
+fn bool_text(b: Bool) -> Str {
+  if b { return "true" }
+  "false"
+}
+
+fn expr_list(p: Printer, es: Arr[ast.Expr]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(es) {
+    push(parts, expr(p, es[i]))
+    i = i + 1
+  }
+  bytes.join(parts, ", ")
+}
+
+fn if_expr(p: Printer, x: ast.IfExpr) -> Str {
+  let s: Str = bytes.concat("if ", bytes.concat(expr(p, x.cond),
+    bytes.concat(" ", inline_block(x.then_block))))
+  match x.else_branch {
+    NoElse => unit,
+    ElseBlock(b) => s = bytes.concat(s, bytes.concat(" else ", inline_block(b))),
+    # An `else if` chain stays flat rather than nesting, so a five-way branch
+    # does not print with five levels of indentation.
+    ElseIf(f) => s = bytes.concat(s, bytes.concat(" else ", if_expr(p, f))),
+  }
+  s
+}
+
+# inline_block renders a block as `{ ... }`. Statements are separated by `;` so
+# the result stays a single formatted line inside an expression, which is what
+# lets a block appear in the middle of one.
+#
+# The nested printer is deliberately empty of comments. A comment inside an
+# inline block has nowhere to go, since `#` runs to the end of the line and this
+# block is not going to be at the end of one, so it is dropped here and the
+# comment-set check in `source` turns that drop into a refusal to format the
+# file at all.
+fn inline_block(blk: ast.Block) -> Str {
+  if len(blk.body) == 0 { return "{}" }
+  let sub: Printer = new_printer()
+  let i: I64 = 0
+  while i < len(blk.body) {
+    stmt(sub, blk.body[i], 0)
+    i = i + 1
+  }
+  let parts: Arr[Str] = split_trimmed_lines(bytes.to_str(sub.buf))
+  bytes.concat("{ ", bytes.concat(bytes.join(parts, "; "), " }"))
+}
+
+# The sub-printer's output is a run of indented lines; this is Go's
+# strings.Split of the right-trimmed text followed by a TrimSpace of each line.
+# Every line the sub-printer wrote is indented from column zero, so trimming the
+# leading spaces is what flattens the nesting onto one line.
+fn split_trimmed_lines(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let end: I64 = len(s)
+  while end > 0 and s[end - 1] == 10 {
+    end = end - 1
+  }
+  let start: I64 = 0
+  let i: I64 = 0
+  while i < end {
+    if s[i] == 10 {
+      push(out, trim_space(s[start:i]))
+      start = i + 1
+    }
+    i = i + 1
+  }
+  push(out, trim_space(s[start:end]))
+  out
+}
+
+fn trim_space(s: Str) -> Str {
+  let lo: I64 = 0
+  let hi: I64 = len(s)
+  while lo < hi and is_space(s[lo]) {
+    lo = lo + 1
+  }
+  while hi > lo and is_space(s[hi - 1]) {
+    hi = hi - 1
+  }
+  s[lo:hi]
+}
+
+fn is_space(c: I64) -> Bool = c == 32 or c == 9 or c == 10 or c == 13
+
+# ---- literals --------------------------------------------------------------
+
+# quoted is the lexer's %q rendering, shared so that a string literal survives a
+# format unchanged and so the formatter and the token dump cannot drift apart.
+# See NEEDS-20 for the parts of %q it does not cover.
+fn quoted(s: Str) -> Str = lex.quote_value(s)
+
+# format_number prints a float the way Go's formatter does: whole numbers with
+# no decimal point, everything else in Go's shortest round-tripping `%g`.
+#
+# f64_shortest is that `%g`, and its contract is narrower than "prints a float",
+# so NEEDS-54 states it exactly. The part that is easy to get wrong and that the
+# differential run caught: the switch to exponent form happens at decimal
+# exponent < -4 or >= 6, not at 21. `1234567.5` prints as `1.2345675e+06` while
+# `1000000` prints as `1000000`, because the second one never reaches here.
+#
+# The integer test is guarded by the I64 range because Go's float-to-int
+# conversion is undefined outside it, and an unguarded `i64(n)` on 1e30 would
+# compare equal to nothing useful. Inside the range the guard changes nothing;
+# outside it Go reaches `%g` too, so the guard is how the two agree.
+fn format_number(n: F64) -> Str {
+  if n >= -9223372036854775808.0 and n < 9223372036854775808.0 {
+    let k: I64 = i64(n)
+    if f64(k) == n {
+      return str(k)
+    }
+  }
+  f64_shortest(n)
+}

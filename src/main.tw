@@ -2,226 +2,419 @@ mode systems
 
 # main.tw: the twill CLI, in twill.
 #
-# `twill run`, `twill check`, `twill fmt`, `twill dump`. This is the shape of
-# cmd/twill/main.go, and the parts it can express today are the argument
-# handling, the command dispatch, the legacy-extension refusal and the exit
-# codes. Everything that reads or writes a file is NEEDS-28, and `fmt` needs a
-# formatter that has not been written yet.
+# A port of cmd/twill/main.go and cmd/twill/dump.go. The commands are `run`,
+# `check`, `fmt`, `repl` and the bare-file form, plus `--dump=canonical` on the
+# two run paths.
+#
+# Everything user-visible here is a contract rather than a convenience, because
+# the differential harness runs the two binaries side by side and compares
+# stdout and stderr byte for byte. That includes the usage lines, the exit
+# codes, the quoting in the error messages and the two-space gutter in the
+# source excerpt. Where this file looks pedantic, that is why: a friendlier
+# message is a divergence.
+#
+# The three exit codes are Go's. 0 is success, 2 is "you invoked it wrong" and 1
+# is everything else, including a program that failed to check. A separate code
+# for diagnostics would be more useful to CI and is not what the reference
+# binary does, so it is not what this does.
 #
 # src/cli/ and src/term/ belong to another agent and this file does not reach
-# into them. When they land, the argument parsing below is what should move
-# there and this file should shrink to a dispatch.
+# into them. When they land, the REPL and the diagnostic rendering are what
+# should move there.
 
 import "lex.tw" as lex
 import "parse.tw" as parse
 import "check.tw" as check
-import "ast.tw" as ast
+import "fmt.tw" as fmt
 import "bytes.tw" as bytes
+
+let VERSION: Str = "1.2.0"
 
 let EXIT_OK: I64 = 0
 let EXIT_ERROR: I64 = 1
-# A check that found diagnostics is a different outcome from a check that could
-# not run, and CI wants to tell them apart.
-let EXIT_DIAGNOSTICS: I64 = 2
+# 2 is reserved for a bad invocation, so a script can tell "you typed the
+# command wrong" from "the program you pointed at has a problem".
+let EXIT_USAGE: I64 = 2
+
+# Spelled as one token so that adding it cannot change how any existing
+# argument is parsed.
+let DUMP_CANONICAL: Str = "--dump=canonical"
 
 fn main() -> I64 {
-  let argv: Arr[Str] = args()
-  if len(argv) < 2 {
-    write_err(usage())
-    return EXIT_ERROR
+  # Go works from os.Args[1:]. Dropping the program name here rather than
+  # offsetting every index below is what keeps this file readable next to it.
+  let a: Arr[Str] = drop_first(args())
+  if len(a) == 0 {
+    return repl()
   }
-  let cmd: Str = argv[1]
+  let cmd: Str = a[0]
 
-  if bytes.equal(cmd, "version") {
-    write_out(bytes.concat(version_string(), "\n"))
+  if bytes.equal(cmd, "-v") or bytes.equal(cmd, "--version") or bytes.equal(cmd, "version") {
+    write_out(bytes.concat("Twill ", bytes.concat(VERSION, "\n")))
     return EXIT_OK
   }
-  if bytes.equal(cmd, "help") or bytes.equal(cmd, "-h") or bytes.equal(cmd, "--help") {
+  if bytes.equal(cmd, "-h") or bytes.equal(cmd, "--help") or bytes.equal(cmd, "help") {
     write_out(usage())
     return EXIT_OK
   }
-
-  if len(argv) < 3 {
-    write_err(bytes.concat(cmd, " needs a file\n"))
-    return EXIT_ERROR
+  if bytes.equal(cmd, "check") {
+    if len(a) < 2 {
+      write_err("usage: twill check <file>\n")
+      return EXIT_USAGE
+    }
+    return check_only(a[1])
   }
-  let path: Str = argv[2]
+  if bytes.equal(cmd, "fmt") {
+    if len(a) < 2 {
+      write_err("usage: twill fmt <file> [--write]\n")
+      return EXIT_USAGE
+    }
+    return format_file(a[1], has_flag(a, "--write") or has_flag(a, "-w"))
+  }
+  if bytes.equal(cmd, "run") {
+    if len(a) < 2 {
+      write_err("usage: twill run <file>\n")
+      return EXIT_USAGE
+    }
+    if has_flag(a, DUMP_CANONICAL) {
+      return run_file_canonical(a[1], not has_flag(a, "--no-check"))
+    }
+    return run_file(a[1], not has_flag(a, "--no-check"))
+  }
+  if bytes.equal(cmd, "repl") {
+    return repl()
+  }
 
-  # The extension is checked on the name alone, before the file is opened, so
-  # that a `.ra` path is refused ahead of a missing-file error. The extension is
-  # the user's real problem and "cannot read file" would hide it. See section 4
-  # of docs/self-hosting.md: this is a hard break with no deprecation window.
+  # A leading `-` here is a flag nobody recognised. Treating it as a filename
+  # instead would report "cannot read file" for a typo in an option, which sends
+  # the reader looking for a missing file that was never meant to exist.
+  if bytes.has_prefix(cmd, "-") {
+    write_err(bytes.concat("twill: unknown flag ", bytes.concat(lex.quote_value(cmd), "\n")))
+    return EXIT_USAGE
+  }
+  if has_flag(a, DUMP_CANONICAL) {
+    return run_file_canonical(cmd, not has_flag(a, "--no-check"))
+  }
+  run_file(cmd, not has_flag(a, "--no-check"))
+}
+
+# ---- commands --------------------------------------------------------------
+
+fn run_file(path: Str, do_check: Bool) -> I64 {
   match check_legacy_ext(path) {
     Some(msg) => {
-      write_err(bytes.concat(msg, "\n"))
+      write_err(bytes.concat("twill: ", bytes.concat(msg, "\n")))
       return EXIT_ERROR
     },
     None => unit,
   }
-
   let src: Str = ""
   match read_file(path) {
     Ok(b) => src = b,
-    Err(msg) => {
-      write_err(bytes.concat("cannot read ", bytes.concat(path, bytes.concat(": ",
-        bytes.concat(msg, "\n")))))
+    Err(_) => {
+      write_err(cannot_read(path))
       return EXIT_ERROR
     },
   }
 
-  if bytes.equal(cmd, "run") { return cmd_run(path, src) }
-  if bytes.equal(cmd, "check") { return cmd_check(path, src) }
-  if bytes.equal(cmd, "fmt") { return cmd_fmt(path, src, has_flag(argv, "--write")) }
-  if bytes.equal(cmd, "dump") { return cmd_dump(path, src, dump_mode(argv)) }
-  if bytes.equal(cmd, "tokens") { return cmd_tokens(path, src) }
-
-  write_err(bytes.concat("unknown command ", bytes.concat(cmd, "\n")))
-  write_err(usage())
-  EXIT_ERROR
-}
-
-fn usage() -> Str {
-  bytes.concat("twill - a language for tensors\n\n",
-  bytes.concat("usage:\n",
-  bytes.concat("  twill run <file.tw>            run a program\n",
-  bytes.concat("  twill check <file.tw>          report shape and type problems\n",
-  bytes.concat("  twill fmt [--write] <file.tw>  format a program\n",
-  bytes.concat("  twill dump [--dump=canonical] <file.tw>\n",
-  bytes.concat("  twill tokens <file.tw>         print the token stream\n",
-  bytes.concat("  twill version\n", "")))))))))
-}
-
-fn version_string() -> Str = "twill (self-hosted front end, incomplete)"
-
-# ---- commands --------------------------------------------------------------
-
-fn cmd_run(path: Str, src: Str) -> I64 {
-  let prog: ast.Program = ast.Program { body: arr_new() }
-  match parse.parse(src) {
-    Ok(p) => prog = p,
-    Err(e) => {
-      write_err(bytes.concat(path, bytes.concat(":", bytes.concat(lex.error_text(e), "\n"))))
-      return EXIT_ERROR
-    },
-  }
   # `run` type-checks first and refuses to run on a diagnostic. A shape error
   # found statically is the same error the program would hit ten seconds into a
   # training loop, and reporting it before the loop starts is the entire point
-  # of having a checker.
-  let diags: Arr[check.Diagnostic] = check.check(prog)
-  if len(diags) > 0 {
-    print_diags(path, diags)
-    return EXIT_DIAGNOSTICS
+  # of having a checker. `--no-check` is the escape hatch, and the message names
+  # it so nobody has to find it in the help.
+  if do_check {
+    let rc: I64 = precheck(path, src)
+    if rc != EXIT_OK {
+      return rc
+    }
   }
   write_err("run needs the evaluator's native core (NEEDS-25)\n")
   EXIT_ERROR
 }
 
-fn cmd_check(path: Str, src: Str) -> I64 {
+# run_file_canonical mirrors run_file and then dumps. It is a separate function
+# rather than a flag inside run_file so that the existing path keeps exactly the
+# behaviour it had.
+#
+# --dump=canonical is the differential harness's entry point, so its output is a
+# contract in the strongest sense: it prints the program's result and every
+# top-level binding it defined, with floats as hexadecimal bit patterns, which
+# is what makes two implementations comparable with no tolerance. Decimal
+# formatting would round away exactly the one-ulp differences the dump exists to
+# catch.
+fn run_file_canonical(path: Str, do_check: Bool) -> I64 {
+  match check_legacy_ext(path) {
+    Some(msg) => {
+      write_err(bytes.concat("twill: ", bytes.concat(msg, "\n")))
+      return EXIT_ERROR
+    },
+    None => unit,
+  }
+  let src: Str = ""
+  match read_file(path) {
+    Ok(b) => src = b,
+    Err(_) => {
+      write_err(cannot_read(path))
+      return EXIT_ERROR
+    },
+  }
+  if do_check {
+    let rc: I64 = precheck(path, src)
+    if rc != EXIT_OK {
+      return rc
+    }
+  }
+  write_err("canonical dump needs the evaluator (NEEDS-25, NEEDS-29)\n")
+  EXIT_ERROR
+}
+
+# precheck is the parse-and-check block both run paths share, including the
+# trailer that names --no-check. It returns EXIT_OK when the program is clear to
+# run.
+fn precheck(path: Str, src: Str) -> I64 {
   match parse.parse(src) {
+    Err(e) => {
+      report_syntax(path, src, e)
+      return EXIT_ERROR
+    },
+    Ok(prog) => {
+      let diags: Arr[check.Diagnostic] = check.check(prog)
+      if len(diags) > 0 {
+        print_diags(path, src, diags)
+        write_err(bytes.concat("twill: ", bytes.concat(str(len(diags)),
+          " shape error(s); not running (use --no-check to run anyway)\n")))
+        return EXIT_ERROR
+      }
+      EXIT_OK
+    },
+  }
+}
+
+fn check_only(path: Str) -> I64 {
+  match check_legacy_ext(path) {
+    Some(msg) => {
+      write_err(bytes.concat("twill: ", bytes.concat(msg, "\n")))
+      return EXIT_ERROR
+    },
+    None => unit,
+  }
+  let src: Str = ""
+  match read_file(path) {
+    Ok(b) => src = b,
+    Err(_) => {
+      write_err(cannot_read(path))
+      return EXIT_ERROR
+    },
+  }
+  match parse.parse(src) {
+    Err(e) => {
+      report_syntax(path, src, e)
+      EXIT_ERROR
+    },
     Ok(prog) => {
       let diags: Arr[check.Diagnostic] = check.check(prog)
       if len(diags) == 0 {
-        write_out(bytes.concat(path, ": no problems found\n"))
+        write_out(bytes.concat(path, ": no shape problems found\n"))
         return EXIT_OK
       }
-      print_diags(path, diags)
-      EXIT_DIAGNOSTICS
-    },
-    Err(e) => {
-      write_err(bytes.concat(path, bytes.concat(":", bytes.concat(lex.error_text(e), "\n"))))
+      # No --no-check trailer here: `check` was asked to report, not to run, so
+      # there is nothing to offer to run anyway.
+      print_diags(path, src, diags)
       EXIT_ERROR
     },
   }
 }
 
-# Diagnostics print in source order, one per line, prefixed with the file so
-# that an editor can jump to them. The checker already dedupes, so a mistake in
-# a function called three times appears once.
-fn print_diags(path: Str, diags: Arr[check.Diagnostic]) {
+# format_file prints canonically formatted source, or rewrites the file with
+# --write.
+#
+# The rule that matters most, because it is the one people notice: --write never
+# renames a file. The legacy-extension check runs before anything is read or
+# written, so a retired extension is refused and the file is left exactly as it
+# was. A formatter that renames files is a formatter people stop trusting.
+fn format_file(path: Str, write: Bool) -> I64 {
+  match check_legacy_ext(path) {
+    Some(msg) => {
+      write_err(bytes.concat("twill: ", bytes.concat(msg, "\n")))
+      return EXIT_ERROR
+    },
+    None => unit,
+  }
+  let src: Str = ""
+  match read_file(path) {
+    Ok(b) => src = b,
+    Err(_) => {
+      write_err(cannot_read(path))
+      return EXIT_ERROR
+    },
+  }
+  let out: Str = ""
+  match fmt.source(src) {
+    Ok(text) => out = text,
+    Err(e) => {
+      report_format_error(path, src, e)
+      return EXIT_ERROR
+    },
+  }
+  if write {
+    match write_file(path, out) {
+      Ok(_) => return EXIT_OK,
+      Err(_) => {
+        write_err(bytes.concat("twill: cannot write file ",
+          bytes.concat(lex.quote_value(path), "\n")))
+        return EXIT_ERROR
+      },
+    }
+  }
+  write_out(out)
+  EXIT_OK
+}
+
+# The REPL is src/cli/repl.tw's, and the line editing it needs is NEEDS-47: the
+# host reads a line and hands it over. Until that seam exists there is nothing
+# to start, and saying so beats printing a prompt that cannot read.
+fn repl() -> I64 {
+  write_err("the REPL needs a line reader (NEEDS-47)\n")
+  EXIT_ERROR
+}
+
+# ---- diagnostics -----------------------------------------------------------
+
+fn cannot_read(path: Str) -> Str =
+  bytes.concat("twill: cannot read file ", bytes.concat(lex.quote_value(path), "\n"))
+
+# Diagnostics print one per line, prefixed with the file and line so an editor
+# can jump to them, each followed by the offending source line. The checker
+# already dedupes, so a mistake in a function called three times appears once.
+fn print_diags(path: Str, src: Str, diags: Arr[check.Diagnostic]) {
   let i: I64 = 0
   while i < len(diags) {
     let d: check.Diagnostic = diags[i]
-    write_err(bytes.concat(path, bytes.concat(":line ", bytes.concat(str(d.line),
-      bytes.concat(": ", bytes.concat(d.msg, "\n"))))))
+    write_err(bytes.concat(path, bytes.concat(":", bytes.concat(str(d.line),
+      bytes.concat(": shape error: ", bytes.concat(d.msg, "\n"))))))
+    show_context(src, d.line, 0)
     i = i + 1
   }
 }
 
-# NOT IMPLEMENTED. The formatter is internal/format/format.go and it has not
-# been ported. It is listed here rather than omitted because `twill fmt` is one
-# of the four commands and a CLI that silently lacks one of them is worse than
-# one that says so.
-#
-# The rule that must survive the port, because it is the one people notice: fmt
-# --write never renames a file. It refuses a .ra file and leaves it alone. A
-# formatter that renames files is a formatter people stop trusting.
-fn cmd_fmt(path: Str, src: Str, write: Bool) -> I64 {
-  write_err("fmt is not ported yet (NEEDS-53)\n")
-  EXIT_ERROR
+fn report_syntax(path: Str, src: Str, e: lex.SyntaxError) {
+  write_err(bytes.concat(path, bytes.concat(":", bytes.concat(str(e.line),
+    bytes.concat(":", bytes.concat(str(e.col),
+      bytes.concat(": syntax error: ", bytes.concat(e.msg, "\n"))))))))
+  show_context(src, e.line, e.col)
 }
 
-# `dump` is the differential harness's entry point, so its output is a contract
-# rather than a convenience. --dump=canonical prints the program's result and
-# every top-level binding with floats as hex bit patterns, which is what makes
-# two implementations comparable with no tolerance.
-#
-# The token dump below is the part that works today, and it is what the lexer's
-# differential check reads.
-fn cmd_dump(path: Str, src: Str, mode: Str) -> I64 {
-  if bytes.equal(mode, "tokens") { return cmd_tokens(path, src) }
-  if bytes.equal(mode, "canonical") {
-    write_err("canonical dump needs the evaluator (NEEDS-25, NEEDS-29)\n")
-    return EXIT_ERROR
+# A formatter refusal is not a position in the file, so it gets the plain
+# `error: ...` form rather than the file:line:col treatment. Go reaches the same
+# two shapes through a type switch on `error`; here the enum makes the two cases
+# the signature.
+fn report_format_error(path: Str, src: Str, e: fmt.FormatError) {
+  match e {
+    FSyntax(s) => report_syntax(path, src, s),
+    FRefused(m) => write_err(bytes.concat("error: ", bytes.concat(m, "\n"))),
   }
-  write_err(bytes.concat("unknown dump mode ", bytes.concat(mode, "\n")))
-  EXIT_ERROR
 }
 
-fn cmd_tokens(path: Str, src: Str) -> I64 {
-  match lex.tokenize(src) {
-    Ok(toks) => {
-      write_out(lex.dump_tokens(toks))
-      EXIT_OK
-    },
-    Err(e) => {
-      write_err(bytes.concat(path, bytes.concat(":", bytes.concat(lex.error_text(e), "\n"))))
-      EXIT_ERROR
-    },
+# show_context prints the source line and, when col > 0, a caret beneath it. The
+# gutter is `  N | `, and the caret is placed by the gutter's rendered width, so
+# a four-digit line number does not shift the caret off the character it names.
+fn show_context(src: Str, line: I64, col: I64) {
+  if len(src) == 0 or line < 1 {
+    return
   }
+  let lines: Arr[Str] = split_lines(src)
+  if line > len(lines) {
+    return
+  }
+  let prefix: Str = bytes.concat("  ", bytes.concat(str(line), " | "))
+  write_err(bytes.concat(prefix, bytes.concat(lines[line - 1], "\n")))
+  if col > 0 {
+    write_err(bytes.concat(bytes.repeat(" ", len(prefix) + col - 1), "^\n"))
+  }
+}
+
+# Go's strings.Split on "\n": a trailing newline yields a final empty element,
+# which is what makes `line > len(lines)` the right bound rather than an
+# off-by-one.
+fn split_lines(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 10 {
+      push(out, s[start:i])
+      start = i + 1
+    }
+    i = i + 1
+  }
+  push(out, s[start:len(s)])
+  out
+}
+
+# ---- usage -----------------------------------------------------------------
+
+fn usage() -> Str {
+  let b: Bytes = bytes.new()
+  bytes.push_text(b, bytes.concat("Twill ", bytes.concat(VERSION, "\n")))
+  bytes.push_text(b, "\n")
+  bytes.push_text(b, "Usage:\n")
+  bytes.push_text(b, "  twill <file.tw>            Shape-check, then run a program\n")
+  bytes.push_text(b, "  twill run <file.tw>        Same as above\n")
+  bytes.push_text(b, "  twill run <file> --no-check   Run without the static shape check\n")
+  bytes.push_text(b, "  twill run <file> --dump=canonical   Run, then dump top-level bindings exactly\n")
+  bytes.push_text(b, "  twill check <file.tw>      Shape-check only, no execution\n")
+  bytes.push_text(b, "  twill fmt <file.tw>        Print canonically formatted source\n")
+  bytes.push_text(b, "  twill fmt <file> --write   Format the file in place\n")
+  bytes.push_text(b, "  twill                      Start the REPL\n")
+  bytes.push_text(b, "  twill --version            Print the version\n")
+  bytes.push_text(b, "\n")
+  bytes.push_text(b, "In the REPL: :help, :quit\n")
+  bytes.to_str(b)
 }
 
 # ---- argument handling -----------------------------------------------------
 
-fn has_flag(argv: Arr[Str], flag: Str) -> Bool {
+fn drop_first(argv: Arr[Str]) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
   let i: I64 = 1
   while i < len(argv) {
-    if bytes.equal(argv[i], flag) { return true }
+    push(out, argv[i])
+    i = i + 1
+  }
+  out
+}
+
+# Scans every argument, including the command word, which is Go's hasFlag over
+# os.Args[1:]. A file literally named `--write` would be read as the flag; that
+# is the reference behaviour and not worth diverging over.
+fn has_flag(a: Arr[Str], flag: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(a) {
+    if bytes.equal(a[i], flag) { return true }
     i = i + 1
   }
   false
 }
 
-fn dump_mode(argv: Arr[Str]) -> Str {
-  let i: I64 = 1
-  while i < len(argv) {
-    if bytes.has_prefix(argv[i], "--dump=") {
-      return argv[i][7:len(argv[i])]
-    }
-    i = i + 1
-  }
-  "tokens"
-}
+# ---- the retired extension -------------------------------------------------
 
+# The extension is checked on the name alone, before the file is opened, so that
+# a retired-extension path is refused ahead of a missing-file error. The
+# extension is the user's real problem and "cannot read file" would hide it. See
+# section 4 of docs/self-hosting.md: this is a hard break with no deprecation
+# window, and the file is refused outright rather than read anyway, so that
+# there is exactly one source extension to explain.
+#
 # Case insensitive, and on the name alone. A file called `helpers.RA` is the
-# same mistake as `helpers.ra` and deserves the same message.
+# same mistake as the lowercase spelling and deserves the same message.
 fn check_legacy_ext(path: Str) -> Opt[Str] {
   if len(path) < 3 { return None }
   let ext: Str = lower(path[len(path) - 3:len(path)])
   if not bytes.equal(ext, ".ra") { return None }
-  let base: Str = path[0:len(path) - 3]
-  Some(bytes.concat("twill no longer reads .ra files: rename ", bytes.concat(path,
-    bytes.concat(" to ", bytes.concat(base, ".tw")))))
+  let renamed: Str = bytes.concat(path[0:len(path) - 3], ".tw")
+  Some(bytes.concat(lex.quote_value(path),
+    bytes.concat(" uses the retired .ra extension: Twill source files are .tw, so rename it to ",
+      lex.quote_value(renamed))))
 }
 
 fn lower(s: Str) -> Str {
