@@ -778,7 +778,7 @@ separately because they are cheap individually and easy to lose track of.
 | `read_file`, `args`, `write_out`, `write_err` | main.tw | `os` |
 | `abort(msg)` | everywhere | `panic` |
 
-## NEEDS-34: the systems-mode checker policy
+## NEEDS-49: the systems-mode checker policy
 
 **Status:** open, and it is the design decision, not a coding task.
 
@@ -792,7 +792,7 @@ itself.
 Until it exists, the self-hosted compiler is not type-checked by its own
 checker, which is an uncomfortable place to be and worth naming.
 
-## NEEDS-35: an out-of-range axis in `transpose`
+## NEEDS-50: an out-of-range axis in `transpose`
 
 **Status:** open, low priority. `src/check.tw` `transpose_result`.
 
@@ -801,7 +801,7 @@ diagnostic, matching `internal/checker/checker.go`. Every other axis-taking
 builtin reports it through `report_axis`. Fixing this means changing the Go side
 too, or the diagnostics diverge.
 
-## NEEDS-36: the import resolver
+## NEEDS-51: the import resolver
 
 **Status:** blocking for `src/eval.tw`. `exec_import`.
 
@@ -813,7 +813,7 @@ lands in a record while an unaliased one lands unqualified.
 What is missing is file reading (NEEDS-28) and a way to reach the embedded
 standard library from twill, which the bootstrap does with `go:embed`.
 
-## NEEDS-37: one builtin table, not two
+## NEEDS-52: one builtin table, not two
 
 **Status:** open, tidiness. `src/check.tw` and `src/eval.tw`.
 
@@ -821,7 +821,7 @@ The checker's table is what the diagnostics are compared against; the
 evaluator's would be what the dispatch uses. They are separate today because
 merging them before the dispatch exists would be guessing at its shape.
 
-## NEEDS-38: the formatter
+## NEEDS-53: the formatter
 
 **Status:** not started. `src/main.tw` `cmd_fmt`.
 

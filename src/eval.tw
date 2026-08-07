@@ -455,7 +455,7 @@ fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
 # ---- imports ---------------------------------------------------------------
 #
 # PARTIAL. The resolver's policy is here; the file reading and the std lookup
-# are NEEDS-28 and NEEDS-36.
+# are NEEDS-28 and NEEDS-51.
 #
 # The rules that matter and are not obvious:
 #   - A path is resolved relative to the importing file, not the process's
@@ -469,7 +469,7 @@ fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
 #   - With no alias the module's bindings land in the importer's environment
 #     unqualified. With one they land in a record under the alias.
 fn exec_import(st: ast.Import, env: Env) -> Res[Flow, RuntimeError] {
-  Err(runtime_error(st.line, "import is not implemented in the self-hosted evaluator yet (NEEDS-36)"))
+  Err(runtime_error(st.line, "import is not implemented in the self-hosted evaluator yet (NEEDS-51)"))
 }
 
 # ---- expressions -----------------------------------------------------------
@@ -908,5 +908,5 @@ fn quoted(s: Str) -> Str = str_quote(s)
 # right end state; today they are separate because the checker's table is the
 # one the diagnostics are compared against and the evaluator's is the one the
 # dispatch uses, and merging them before the dispatch exists would be guessing.
-# NEEDS-37.
+# NEEDS-52.
 fn is_builtin(name: Str) -> Bool = builtin_exists(name)

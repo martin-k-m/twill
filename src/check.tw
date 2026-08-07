@@ -16,7 +16,7 @@ mode systems
 # `TUnknown` surviving to the end of inference is a diagnostic rather than
 # silence. Same lattice, opposite policy. This file implements the numeric
 # policy, because that is what the corpus in testdata/ was generated against and
-# what the diagnostics are compared to. The systems policy is NEEDS-34.
+# what the diagnostics are compared to. The systems policy is NEEDS-49.
 #
 # A note on why so many paths return TUnknown after reporting nothing: each one
 # is a decision that the checker cannot prove a mistake, not an oversight. Where
@@ -1911,7 +1911,7 @@ fn transpose_result(ex: ast.Call, arg_types: Arr[Type]) -> Type {
         let ax: I64 = axes[k]
         # A negative axis in a permutation is not supported by the runtime
         # either, so an out-of-range axis makes the result unknown rather than a
-        # diagnostic. Reporting it is NEEDS-35.
+        # diagnostic. Reporting it is NEEDS-50.
         if ax < 0 or ax >= len(t.dims) { return TUnknown }
         push(perm, t.dims[ax])
         k = k + 1

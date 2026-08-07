@@ -157,7 +157,7 @@ fn print_diags(path: Str, diags: Arr[check.Diagnostic]) {
 # --write never renames a file. It refuses a .ra file and leaves it alone. A
 # formatter that renames files is a formatter people stop trusting.
 fn cmd_fmt(path: Str, src: Str, write: Bool) -> I64 {
-  write_err("fmt is not ported yet (NEEDS-38)\n")
+  write_err("fmt is not ported yet (NEEDS-53)\n")
   EXIT_ERROR
 }
 
