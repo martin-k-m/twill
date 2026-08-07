@@ -1,0 +1,300 @@
+# tensor.tw - printing a tensor so it can be read.
+#
+# The values a twill session produces are mostly tensors, so this is the output
+# people look at most, and it is where a numerical tool is either pleasant or
+# exhausting. Three rules.
+#
+# Columns align on the decimal point. Ragged numbers cannot be compared down a
+# column, and comparing down a column is the only reason anyone prints a matrix.
+#
+# One format for the whole tensor, chosen from its own range. Formatting each
+# element independently gives a grid where 0.5 and 1e-08 are the same width and
+# neither tells you the scale, and a common exponent factored out front does.
+#
+# Large tensors elide their middle rather than their tail. The last rows of a
+# tensor are as informative as the first, usually more so when something has
+# gone wrong at an edge, and a printout truncated at the top is a printout that
+# hides the bug.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/width" as w
+import "src/cli/theme" as th
+
+# A tensor handed over by the runtime: dimensions, and the elements in row-major
+# order. Read-only, and deliberately not the runtime's own representation, so
+# the formatter cannot be broken by a change to it.
+struct View {
+  dims: Arr[I64],
+  data: Arr[F64],
+}
+
+# Rows and columns shown before the elision. Six is enough to see a pattern and
+# short enough that a 1000x1000 matrix still prints in under a screen.
+let EDGE: I64 = 3
+let EDGE_1D: I64 = 6
+
+# ── Entry ───────────────────────────────────────────────────────────────────
+
+fn render(c: cp.Caps, t: View) -> Str {
+  let f = choose_format(t)
+  let rank = len(t.dims)
+  if rank == 0 { fmt(f, t.data[0]) + "\n" }
+  else if rank == 1 { row_1d(c, t, f) + shape_note(c, t) }
+  else if rank == 2 { matrix(c, t, f) + shape_note(c, t) }
+  # Rank 3 and above is printed as its leading slices, labelled. A flattened
+  # nested-bracket dump of a rank-4 tensor is not readable by anyone, and
+  # pretending otherwise wastes a screen.
+  else { slices(c, t, f) + shape_note(c, t) }
+}
+
+# The shape, always, in muted text under the values. It is the one fact about a
+# tensor that is never inferable from the numbers when the tensor was elided,
+# and it is what the user came to twill for.
+fn shape_note(c: cp.Caps, t: View) -> Str =
+  ansi.paint(c, th.muted(), "  " + shape_text(t.dims) + "\n")
+
+fn shape_text(dims: Arr[I64]) -> Str {
+  let out: Str = "["
+  let i: I64 = 0
+  while i < len(dims) {
+    if i > 0 { out = out + ", " }
+    out = out + str(dims[i])
+    i = i + 1
+  }
+  out + "]"
+}
+
+# ── Number format ───────────────────────────────────────────────────────────
+
+struct Fmt {
+  decimals: I64,
+  exponent: I64,     # common power of ten factored out, 0 when none
+  width: I64,        # cells every element is padded to
+}
+
+# One pass over the data decides the format for all of it. Scientific notation
+# is used only when the range genuinely needs it: switching to exponents for a
+# tensor of ordinary numbers is the single most common way numerical output
+# becomes unreadable.
+fn choose_format(t: View) -> Fmt {
+  let hi = max_abs(t.data)
+  let all_int = every_integral(t.data)
+  let dec = if all_int { 0 }
+            else if hi >= 1000.0 { 1 }
+            else if hi >= 1.0 { 4 }
+            else { 6 }
+  let expo = if hi > 0.0 && (hi >= 100000.0 || hi < 0.001) { decade(hi) } else { 0 }
+  let f = Fmt { decimals: dec, exponent: expo, width: 0 }
+  f.width = widest(t.data, f)
+  f
+}
+
+fn widest(data: Arr[F64], f: Fmt) -> I64 {
+  let best: I64 = 1
+  let i: I64 = 0
+  while i < len(data) {
+    let n = len(fmt(f, data[i]))
+    if n > best { best = n }
+    i = i + 1
+  }
+  best
+}
+
+fn fmt(f: Fmt, v: F64) -> Str {
+  let scaled = if f.exponent == 0 { v } else { v / pow10(f.exponent) }
+  fmt_fixed(scaled, f.decimals)
+}
+
+# Fixed-point rendering with a fixed number of decimals, so every element in the
+# tensor has its point in the same place once padded.
+fn fmt_fixed(v: F64, dec: I64) -> Str {
+  let neg = v < 0.0
+  let a = if neg { 0.0 - v } else { v }
+  let scale = pow10(dec)
+  let n = i64(a * scale + 0.5)
+  let whole = n / i64(scale)
+  let frac = n % i64(scale)
+  let sign = if neg && n > 0 { "-" } else { "" }
+  if dec == 0 { sign + str(whole) }
+  else { sign + str(whole) + "." + w.repeat("0", dec - len(str(frac))) + str(frac) }
+}
+
+fn pow10(n: I64) -> F64 {
+  let out: F64 = 1.0
+  let i: I64 = 0
+  while i < n {
+    out = out * 10.0
+    i = i + 1
+  }
+  out
+}
+
+fn decade(v: F64) -> I64 {
+  let e: I64 = 0
+  let x = v
+  while x >= 10.0 {
+    x = x / 10.0
+    e = e + 1
+  }
+  while x < 1.0 && e > 0 - 30 {
+    x = x * 10.0
+    e = e - 1
+  }
+  e
+}
+
+fn max_abs(data: Arr[F64]) -> F64 {
+  let best: F64 = 0.0
+  let i: I64 = 0
+  while i < len(data) {
+    let a = if data[i] < 0.0 { 0.0 - data[i] } else { data[i] }
+    if a > best { best = a }
+    i = i + 1
+  }
+  best
+}
+
+fn every_integral(data: Arr[F64]) -> Bool {
+  let ok = true
+  let i: I64 = 0
+  while i < len(data) && ok {
+    if data[i] != f64(i64(data[i])) { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+# ── Vectors and matrices ────────────────────────────────────────────────────
+
+fn row_1d(c: cp.Caps, t: View, f: Fmt) -> Str {
+  let n = t.dims[0]
+  # How many fit is decided by the terminal, not by a constant. A wide window
+  # should show a wide vector; eliding a 20-element vector on a 200-column
+  # display is the formatter being precious.
+  let fits = (c.width - 6) / (f.width + 2)
+  let out = "  " + ansi.paint(c, th.rule(), "[")
+  if n <= fits || n <= EDGE_1D * 2 + 1 {
+    out = out + cells(c, t, f, 0, n, 0)
+  } else {
+    out = out + cells(c, t, f, 0, EDGE_1D, 0) + gap(c) + cells(c, t, f, n - EDGE_1D, n, 0)
+  }
+  out + " " + ansi.paint(c, th.rule(), "]") + "\n"
+}
+
+fn cells(c: cp.Caps, t: View, f: Fmt, from: I64, to: I64, base: I64) -> Str {
+  let out: Str = ""
+  let i = from
+  while i < to {
+    if i > from { out = out + " " }
+    out = out + ansi.paint(c, th.code(), w.pad_left(fmt(f, t.data[base + i]), f.width + 1))
+    i = i + 1
+  }
+  out
+}
+
+# The elision glyph. Muted, and horizontal, so it reads as "continues" rather
+# than as a value.
+fn gap(c: cp.Caps) -> Str = ansi.paint(c, th.muted(), if c.unicode { "  …  " } else { " ... " })
+
+fn matrix(c: cp.Caps, t: View, f: Fmt) -> Str {
+  let rows = t.dims[0]
+  let cols = t.dims[1]
+  let out: Str = ""
+  if rows <= EDGE * 2 + 1 {
+    let r: I64 = 0
+    while r < rows {
+      out = out + matrix_row(c, t, f, r, cols)
+      r = r + 1
+    }
+  } else {
+    let r: I64 = 0
+    while r < EDGE {
+      out = out + matrix_row(c, t, f, r, cols)
+      r = r + 1
+    }
+    # The count of hidden rows, not a bare ellipsis. "473 more rows" is a fact;
+    # "..." makes the reader go and look up the shape to work it out.
+    out = out + "  " + ansi.paint(c, th.muted(), vdots(c) + " " + str(rows - EDGE * 2) + " more rows") + "\n"
+    let r2 = rows - EDGE
+    while r2 < rows {
+      out = out + matrix_row(c, t, f, r2, cols)
+      r2 = r2 + 1
+    }
+  }
+  out
+}
+
+fn vdots(c: cp.Caps) -> Str = if c.unicode { "⋮" } else { ":" }
+
+fn matrix_row(c: cp.Caps, t: View, f: Fmt, r: I64, cols: I64) -> Str {
+  let base = r * cols
+  let fits = (c.width - 6) / (f.width + 2)
+  let out = "  " + ansi.paint(c, th.rule(), "[")
+  if cols <= fits {
+    out = out + cells(c, t, f, 0, cols, base)
+  } else {
+    let half = fits / 2 - 1
+    out = out + cells(c, t, f, 0, half, base) + gap(c) + cells(c, t, f, cols - half, cols, base)
+  }
+  out + " " + ansi.paint(c, th.rule(), "]") + "\n"
+}
+
+# ── Higher ranks ────────────────────────────────────────────────────────────
+
+# The leading axis is peeled off and each slice is printed as a matrix under its
+# own index. Beyond two levels of peeling the output stops being worth the
+# space, so it reports the shape and stops, which is honest.
+fn slices(c: cp.Caps, t: View, f: Fmt) -> Str {
+  let n = t.dims[0]
+  let inner = product_from(t.dims, 1)
+  let show = if n > EDGE { EDGE } else { n }
+  let out: Str = ""
+  let i: I64 = 0
+  while i < show {
+    out = out + ansi.paint(c, th.muted(), "  [" + str(i) + "]") + "\n" +
+      render(c, sub_view(t, i, inner))
+    i = i + 1
+  }
+  if n > show {
+    out = out + "  " + ansi.paint(c, th.muted(), vdots(c) + " " + str(n - show) + " more slices") + "\n"
+  }
+  out
+}
+
+fn sub_view(t: View, i: I64, inner: I64) -> View = View {
+  dims: tail(t.dims),
+  data: slice_arr(t.data, i * inner, (i + 1) * inner),
+}
+
+fn tail(dims: Arr[I64]) -> Arr[I64] {
+  let out: Arr[I64] = arr()
+  let i: I64 = 1
+  while i < len(dims) {
+    push(out, dims[i])
+    i = i + 1
+  }
+  out
+}
+
+fn slice_arr(data: Arr[F64], from: I64, to: I64) -> Arr[F64] {
+  let out: Arr[F64] = arr()
+  let i = from
+  while i < to {
+    push(out, data[i])
+    i = i + 1
+  }
+  out
+}
+
+fn product_from(dims: Arr[I64], k: I64) -> I64 {
+  let p: I64 = 1
+  let i = k
+  while i < len(dims) {
+    p = p * dims[i]
+    i = i + 1
+  }
+  p
+}

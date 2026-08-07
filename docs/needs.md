@@ -505,3 +505,245 @@ This is not the real harness. The real one runs `src/lex.tw` on a twill runtime
 and compares against the Go binary, and it cannot exist until the entries above
 are implemented. Until then this is the strongest available evidence, and it is
 strong enough to have found NEEDS-33.
+
+---
+
+# What the command line needs from the language
+
+Appended by the CLI work. `src/term/` and `src/cli/` are the twill command line
+written in twill, and they rest on everything above plus the entries here. Same
+conventions: what the feature is, which file reaches for it, what the Go side
+does in the same place.
+
+## NEEDS-34 - `chr(n)` for a single byte
+
+**Status:** blocking. Nothing in `src/term/` emits an escape sequence without it.
+
+Twill string literals recognise `\n`, `\t`, `\"` and `\\` and nothing else
+(`docs/language-guide.md`), so ESC (27) and BEL (7) cannot be written. Needed:
+`chr(n: I64) -> Str` producing the one-byte string for `n` in 0..255, and it
+must be a byte and not a codepoint, because `src/cli/banner.tw` hand-encodes
+U+2800 braille as three bytes and would be encoding an encoding otherwise.
+
+*Reaches for it:* `src/term/ansi.tw` (`esc`, `bel`), `src/cli/banner.tw`
+(`braille`).
+
+*Go bootstrap:* `internal/builtins` has no `chr`. The Go side writes the escape
+introducer as a string literal.
+
+*Alternative that would also do:* an `\x1b` escape in the lexer's string
+scanner. `chr` is preferred because the braille packing needs arithmetic on the
+byte anyway.
+
+## NEEDS-35 - `Str` concatenation with `+`
+
+**Status:** blocking. Every renderer builds its output by concatenation.
+
+`docs/self-hosting.md` gives `Bytes` a `concat` and gives `Str` length, byte
+indexing and slicing, but never says `Str + Str`. The CLI is almost entirely
+string building, and doing it through `Bytes` would mean a conversion at every
+one of several hundred sites.
+
+*Reaches for it:* every file in `src/term/` and `src/cli/`.
+
+*Go bootstrap:* `+` on `value.Str` is currently an error; the interpreter's
+binary op dispatches only tensors.
+
+*Note on cost:* naive concatenation in a loop is quadratic. `src/term/width.tw`
+`repeat` and `src/cli/progress.tw` `bar` both build strings a cell at a time, so
+either the implementation ropes them or a `Bytes` builder is exposed and these
+files are rewritten against it. Flagging it now rather than discovering it on a
+200-column progress bar.
+
+## NEEDS-36 - `arr(...)` as a literal constructor
+
+**Status:** blocking.
+
+`docs/self-hosting.md` specifies `Arr[T]` with `push`, `pop`, index and `slice`,
+but no way to write one down. `arr()` for empty and `arr(a, b, c)` for a
+populated one, with `T` unified from the arguments.
+
+*Reaches for it:* `src/cli/help.tw` `groups()` builds the entire help screen as
+nested `arr(...)` literals; `src/cli/spinner.tw` `glyphs`.
+
+*Go bootstrap:* `list(...)` exists and is the model to copy, but returns the
+heterogeneous `value.List`.
+
+## NEEDS-37 - `Opt[T]` and `match`, for `env`
+
+**Status:** blocking for `src/term/caps.tw`.
+
+`env(name) -> Opt[Str]` from `docs/self-hosting.md` section 1.2 needs the enum
+and the `match` that reads it. `caps.tw` `env_or` and `has_env` are the only
+uses in the CLI, but they are on the path of every command, so the whole
+capability layer is behind this.
+
+*Go bootstrap:* `os.Getenv` returning a value and a found flag.
+
+## NEEDS-38 - `is_tty_stdout()` and `window_size()`
+
+**Status:** blocking for anything that decides to animate.
+
+Two runtime queries not in `docs/self-hosting.md` section 1.2, which lists only
+`read_file`, `write_file`, `stdin_all`, `write_out`, `write_err`, `args`, `env`
+and `exit`.
+
+- `is_tty_stdout() -> Bool`. Whether stdout is a character device. This is the
+  single most important call in the CLI: it is what keeps escape sequences out
+  of a redirected log, and there is no way to infer it from the environment.
+  Note that stderr needs the same question asked separately, since diagnostics
+  go there while a progress bar goes to stdout, and one may be a pipe while the
+  other is not.
+- `window_size()` returning columns and rows, from `TIOCGWINSZ` on unix and
+  `GetConsoleScreenBufferInfo` on Windows, with a zero result meaning unknown
+  rather than an error.
+
+*Reaches for it:* `src/term/caps.tw` `detect`.
+
+*Go bootstrap:* neither exists. The current CLI writes to stdout
+unconditionally.
+
+*Not asked for:* SIGWINCH. A resize mid-frame smears one repaint and corrects
+itself on the next, which is an acceptable cost for not needing a signal
+interface in the language.
+
+## NEEDS-39 - a monotonic millisecond clock
+
+**Status:** blocking for the spinner and the progress bar.
+
+`now_ms() -> I64`, monotonic, unaffected by wall-clock adjustment. Every
+animated thing in `src/cli/` is driven by it: the frame rate limit in
+`src/term/frame.tw`, the spinner's delay gate, the progress bar's smoothed rate
+and its estimate.
+
+Monotonic specifically, not wall clock. An NTP step backwards during a long
+training run makes a wall-clock rate negative and the estimate nonsense, and
+that is a bug that only appears on long runs, which are exactly the runs where
+the estimate matters.
+
+*Threaded, not called.* No file in `src/cli/` calls it: the current time is a
+parameter to every function that needs it. That is deliberate, so the renderers
+stay pure and can be tested by feeding them a clock, and it means this entry is
+only needed by whatever drives the loop.
+
+*Go bootstrap:* the standard library clock, not used for any of this yet.
+
+## NEEDS-40 - `F64` in systems mode, with `cos` and the conversions
+
+**Status:** blocking for `src/cli/banner.tw` and `src/cli/tensor.tw`.
+
+`docs/self-hosting.md` says systems mode has no tensors, and is right, but it
+does not say what a plain float is in systems mode. Two files need one:
+
+- `src/cli/banner.tw` computes the ribbon from `cos`, because the mark is
+  generated from the twist rather than pasted in as glyphs.
+- `src/cli/tensor.tw` formats tensor elements and cannot do that in integers.
+
+Needed: `F64` as a systems-mode scalar type distinct from a rank-0 tensor, the
+`f64()` and `i64()` conversions already specified in section 1.2, and `cos` and
+`sin` usable on it.
+
+*Go bootstrap:* these are tensor builtins; in numeric mode a scalar is a rank-0
+tensor and the distinction does not arise.
+
+## NEEDS-41 - a read-only tensor view for the formatter
+
+**Status:** blocking for `src/cli/tensor.tw` and the REPL.
+
+The REPL's job is printing tensors, and systems mode has none. `tensor.tw`
+declares a `View` of dimensions plus row-major elements and formats that, so
+what is needed is one bridge: a builtin that turns a numeric-mode tensor into
+those two arrays.
+
+`view_of(t)`, or a pair of `shape_of` and `elements_of`. Read-only and by copy.
+The copy is the point: the formatter must not be able to alias a live tensor,
+and a 512x512 matrix is elided down to nine rows anyway, so a lazy view would be
+an optimisation of the wrong thing.
+
+*Go bootstrap:* the tensor type already carries its dimensions and a flat data
+slice, so this is an exposure rather than an implementation.
+
+## NEEDS-42 - struct field mutation through a handle
+
+**Status:** blocking for `src/term/frame.tw`, `src/cli/spinner.tw`,
+`src/cli/progress.tw`, `src/cli/repl.tw`.
+
+Reference semantics for structs, as specified in `docs/self-hosting.md` section
+1.2. Every stateful widget is a struct whose fields a function mutates and whose
+caller sees the change: `frame.paint` updates `height`, `last` and `next_due`;
+`progress.advance` updates `done` and the smoothed rate; `repl.feed` updates the
+bracket depth.
+
+This is already in the design, but it is worth recording that the CLI is its
+second consumer after the lexer, and that the CLI needs the mutation to be
+visible through a field of another struct (a `Spinner` holds a `Frame`, and
+`step` mutates through it), which is a case a lexer never exercises.
+
+## NEEDS-43 - `Arr[T]` element assignment
+
+**Status:** blocking for `src/term/width.tw` `indent_after_first`.
+
+`docs/self-hosting.md` gives `Arr[T]` an index and a `push`, and its feature
+list says "indexed assignment" while the summary table does not repeat it.
+Recording the use so it is not dropped: `width.tw` rewrites wrapped lines in
+place to add the continuation indent.
+
+## NEEDS-44 - integer division and modulo on `I64`
+
+**Status:** blocking, and it is a semantics question rather than a missing
+operator.
+
+`/` and `%` exist, but on tensors they are float operations. On `I64` they must
+truncate toward zero, and `%` must take the sign of the dividend. The 256-colour
+quantisation in `src/term/color.tw`, the braille packing in
+`src/cli/banner.tw`, and the eighth-block arithmetic in `src/cli/progress.tw`
+are all exact integer arithmetic and are wrong under any other rounding.
+
+Also needed: division by zero on `I64` as an error value rather than a panic,
+which section 1.2 already specifies.
+
+## NEEDS-45 - `str()` on `I64`
+
+**Status:** blocking.
+
+`str(n)` for an `I64` must produce the digits with no decimal point and no
+exponent. Today `str` on a scalar goes through the tensor printer, and a
+trailing `.0` would land in every line number, every column count and every axis
+index in every diagnostic.
+
+*Reaches for it:* everywhere. `src/cli/diagnostic.tw` alone uses it for the
+line, the column and the gutter width.
+
+## NEEDS-46 - `Str` equality must survive the `Str` rewrite
+
+**Status:** not a new feature. Recorded as a constraint.
+
+`==` and `!=` on `Str` already work by the deep-equality rule in
+`docs/language-guide.md`, and `src/term/caps.tw` leans on it for every
+environment comparison. `docs/self-hosting.md` flags making `Str` a distinct
+indexable value as the medium-risk change in the whole subset, so this entry
+exists to say that the CLI is a second consumer of that rule holding.
+
+## NEEDS-47 - a line reader for the REPL
+
+**Status:** not blocking. `src/cli/repl.tw` is written around not having it.
+
+`repl.tw` owns the prompt and the framing and does not own the read loop,
+because line editing, history and completion are a terminal-raw-mode problem
+that does not belong in the language. Recorded so the seam is deliberate: the
+host reads a line and hands it to `repl.feed`, and the only thing the language
+needs is `stdin_all` or a `read_line`.
+
+The one thing the host must get right is restoring the terminal on exit, which
+`src/term/frame.tw` `abandon` covers for the frame path but which the line
+reader must do for its own raw mode.
+
+## NEEDS-48 - `write_out` and `write_err` taking a `Str`
+
+**Status:** blocking for `src/cli/main.tw`.
+
+Section 1.2 specifies `write_out(Bytes)`. The CLI produces `Str` everywhere and
+would otherwise convert at every call site. Either overload accepts a `Str`, or
+`Str` to `Bytes` is a zero-copy conversion and that is stated, because if it
+copies then the progress bar allocates its whole rendered frame thirty times a
+second.

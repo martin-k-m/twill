@@ -1,0 +1,122 @@
+# repl.tw - the interactive session.
+#
+# A REPL's design is mostly its prompt, because the prompt is on screen for the
+# whole session and everything else comes and goes. So the prompt is the mark:
+# one glyph in the accent mint, one space, and nothing else. No hostname, no
+# path, no counter, no box. Every character in a prompt is a character of every
+# line the user reads back through their scrollback afterwards.
+#
+# The continuation prompt is the same glyph in the quiet teal, which is enough
+# to distinguish "still typing an expression" from "new expression" without
+# adding a second symbol to learn.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/width" as w
+import "src/cli/theme" as th
+import "src/cli/tensor" as tn
+import "src/cli/diagnostic" as dg
+import "src/cli/banner" as bn
+
+struct Repl {
+  caps: cp.Caps,
+  depth: I64,        # unclosed brackets, so the prompt can say so
+  count: I64,        # expressions evaluated, for the closing line only
+}
+
+fn new(c: cp.Caps) -> Repl = Repl { caps: c, depth: 0, count: 0 }
+
+# ── The prompt ──────────────────────────────────────────────────────────────
+
+fn prompt(r: Repl) -> Str {
+  let c = r.caps
+  # Without a tty there is no prompt at all. Piping a script into the REPL and
+  # getting a prompt glyph interleaved through the transcript is a corrupted
+  # transcript, and it is the reason `twill repl < script.tw` is unusable in
+  # most tools that do this.
+  if !c.tty { "" }
+  else if r.depth > 0 { ansi.paint_fg(c, th.teal(), th.glyph(c)) + " " }
+  else { ansi.paint_fg(c, th.accent(), th.glyph(c)) + " " }
+}
+
+# ── Results ─────────────────────────────────────────────────────────────────
+
+# A result is printed without an `out[3] =` label. The label is a convention
+# from notebooks where results are referred to later; in a terminal REPL nobody
+# refers back by index, and the label costs a column of every line forever.
+fn show_tensor(r: Repl, t: tn.View) -> Str {
+  r.count = r.count + 1
+  tn.render(r.caps, t)
+}
+
+fn show_scalar(r: Repl, text: Str) -> Str {
+  r.count = r.count + 1
+  "  " + ansi.paint(r.caps, th.code(), text) + "\n"
+}
+
+# A binding echoes its name and shape, not its value. `let w = zeros([512, 512])`
+# printing 262144 numbers is the classic REPL papercut, and the shape is what
+# the user actually wanted confirmed.
+fn show_binding(r: Repl, name: Str, t: tn.View) -> Str {
+  r.count = r.count + 1
+  "  " + ansi.paint(r.caps, th.emphasis(), name) + " " +
+    ansi.paint(r.caps, th.muted(), ": ") +
+    ansi.paint(r.caps, th.axis_ok(), tn.shape_text(t.dims)) + "\n"
+}
+
+fn show_unit(r: Repl) -> Str = ""
+
+# Errors in a REPL use the same renderer as errors from a file. The source line
+# is the line just typed and the file is `<repl>`, which keeps one diagnostic
+# format across the whole tool: a user who has learned to read a build error can
+# read this one.
+fn show_error(r: Repl, d: dg.Diagnostic) -> Str = dg.render(r.caps, d)
+
+# ── Session ─────────────────────────────────────────────────────────────────
+
+fn greet(r: Repl, version: Str) -> Str {
+  if !r.caps.tty { "" }
+  else {
+    bn.render(r.caps, version) + "\n" +
+      ansi.paint(r.caps, th.muted(), "  :help for commands, Ctrl-D to leave") + "\n\n"
+  }
+}
+
+# Ctrl-D. One line, past tense, no exclamation. A tool that says goodbye
+# cheerfully every time is a tool that is slightly tiring to use.
+fn farewell(r: Repl) -> Str {
+  if !r.caps.tty { "" }
+  else { ansi.paint(r.caps, th.muted(), "  " + str(r.count) + " expressions\n") }
+}
+
+# Ctrl-C mid-expression clears the buffer rather than exiting, and says so once.
+# Exiting on the first Ctrl-C is the behaviour that loses people's work.
+fn interrupt(r: Repl) -> Str {
+  r.depth = 0
+  ansi.paint(r.caps, th.muted(), "  cancelled, Ctrl-D to leave") + "\n"
+}
+
+# Called with each line read, so the prompt can become a continuation prompt.
+# Bracket counting rather than a parse: the REPL must decide before it has
+# anything parseable, and the depth of unclosed brackets is the only signal
+# available at that point.
+fn feed(r: Repl, line: Str) -> Repl {
+  let i: I64 = 0
+  let in_str = false
+  while i < len(line) {
+    let b = line[i]
+    if in_str {
+      if b == 92 { i = i + 1 }                        # escape, skip the next byte
+      else if b == 34 { in_str = false }
+    }
+    else if b == 34 { in_str = true }
+    else if b == 35 { i = len(line) }                 # comment, ignore the rest
+    else if b == 40 || b == 91 || b == 123 { r.depth = r.depth + 1 }
+    else if b == 41 || b == 93 || b == 125 { r.depth = r.depth - 1 }
+    i = i + 1
+  }
+  if r.depth < 0 { r.depth = 0 }                      # a stray closer is the parser's problem
+  r
+}

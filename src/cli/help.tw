@@ -1,0 +1,155 @@
+# help.tw - the help screen.
+#
+# Help is the page most people read first and almost nobody reads twice, so it
+# is optimised for scanning rather than for completeness. Commands are grouped
+# by what someone is trying to do, not alphabetically: alphabetical order is
+# only useful to a reader who already knows the name, and a reader who knows the
+# name is not on this page.
+#
+# The colour rule here is the one that most separates a designed CLI from a
+# coloured one. Colour marks structure, so group titles and command names carry
+# it and descriptions do not. The opposite, colouring the descriptions, makes a
+# page where every line is loud and the shape of the page is invisible.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/width" as w
+import "src/cli/theme" as th
+import "src/cli/banner" as banner
+
+struct Item {
+  name: Str,
+  args: Str,        # "<file.tw>", shown after the name in muted text
+  about: Str,
+}
+
+struct Group {
+  title: Str,
+  items: Arr[Item],
+}
+
+fn item(name: Str, args: Str, about: Str) -> Item = Item { name: name, args: args, about: about }
+
+# The grouping. Four groups, because five is where a reader stops seeing groups
+# and starts seeing a list again.
+fn groups() -> Arr[Group] {
+  arr(
+    Group { title: "Run", items: arr(
+      item("run", "<file.tw>", "Evaluate a program and print what it returns."),
+      item("repl", "", "Start an interactive session."),
+      item("fmt", "[paths]", "Format twill source in place."),
+    )},
+    Group { title: "Build", items: arr(
+      item("build", "<file.tw>", "Type and shape check, then emit a module."),
+      item("check", "[paths]", "Check without emitting anything."),
+      item("test", "[paths]", "Run every test in the given files."),
+    )},
+    Group { title: "Packages", items: arr(
+      item("add", "<package>", "Add a dependency with spool and record it."),
+      item("sync", "", "Install exactly what the lockfile pins."),
+    )},
+    Group { title: "Inspect", items: arr(
+      item("shapes", "<file.tw>", "Print the inferred shape of every binding."),
+      item("dump", "<module>", "Print a module's canonical textual form."),
+    )},
+  )
+}
+
+fn flags() -> Arr[Item] {
+  arr(
+    item("--help", "", "Show this page. Add a command name for detail on it."),
+    item("--version", "", "Print the version and exit."),
+    item("--no-color", "", "Disable colour. NO_COLOR in the environment does the same."),
+    item("--quiet", "", "Print only errors."),
+  )
+}
+
+# ── Layout ──────────────────────────────────────────────────────────────────
+
+fn render(c: cp.Caps, version: Str) -> Str {
+  let gs = groups()
+  # One description column across every group, not one per group. Alignment that
+  # resets between groups reads as four small tables rather than one page, and
+  # the ragged left edge of the descriptions is exactly what makes a help screen
+  # look thrown together.
+  let name_w = widest(gs, flags())
+  banner.render(c, version) + "\n" +
+    usage(c) + "\n" +
+    sections(c, gs, name_w) +
+    section(c, "Options", flags(), name_w) +
+    footer(c)
+}
+
+fn usage(c: cp.Caps) -> Str =
+  ansi.paint(c, th.heading(), "Usage") + "\n" +
+  "  " + ansi.paint(c, th.emphasis(), "twill") + " " +
+  ansi.paint(c, th.muted(), "<command> [arguments] [options]") + "\n"
+
+fn sections(c: cp.Caps, gs: Arr[Group], name_w: I64) -> Str {
+  let out: Str = ""
+  let i: I64 = 0
+  while i < len(gs) {
+    out = out + section(c, gs[i].title, gs[i].items, name_w)
+    i = i + 1
+  }
+  out
+}
+
+fn section(c: cp.Caps, title: Str, items: Arr[Item], name_w: I64) -> Str {
+  let out = "\n" + ansi.paint(c, th.heading(), title) + "\n"
+  let i: I64 = 0
+  while i < len(items) {
+    out = out + row(c, items[i], name_w)
+    i = i + 1
+  }
+  out
+}
+
+# `  build <file.tw>       Type and shape check, then emit a module.`
+#
+# The name is emphasised and the argument placeholder is muted, inside the same
+# column. That distinction matters more than it sounds: the reader is scanning
+# for a verb, and the placeholder is noise until they have found it.
+fn row(c: cp.Caps, it: Item, name_w: I64) -> Str {
+  let head = ansi.paint(c, th.success(), it.name) +
+    (if it.args == "" { "" } else { " " + ansi.paint(c, th.muted(), it.args) })
+  let gap = name_w - w.display_width(it.name) - (if it.args == "" { 0 } else { 1 + w.display_width(it.args) })
+  let indent = w.spaces(2 + name_w + 2)
+  let lines = w.wrap(it.about, cp.text_width(c) - 2, indent)
+  let out = "  " + head + w.spaces(gap + 2) + ansi.paint(c, th.body(), lines[0]) + "\n"
+  let i: I64 = 1
+  while i < len(lines) {
+    out = out + ansi.paint(c, th.body(), lines[i]) + "\n"
+    i = i + 1
+  }
+  out
+}
+
+fn widest(gs: Arr[Group], fs: Arr[Item]) -> I64 {
+  let best: I64 = 0
+  let i: I64 = 0
+  while i < len(gs) {
+    best = max_item(gs[i].items, best)
+    i = i + 1
+  }
+  max_item(fs, best)
+}
+
+fn max_item(items: Arr[Item], best: I64) -> I64 {
+  let i: I64 = 0
+  while i < len(items) {
+    let n = w.display_width(items[i].name) +
+      (if items[i].args == "" { 0 } else { 1 + w.display_width(items[i].args) })
+    if n > best { best = n }
+    i = i + 1
+  }
+  best
+}
+
+# One closing line, and it is a pointer rather than a farewell. Help pages that
+# end with three paragraphs of links are help pages people stop reading to the
+# bottom of.
+fn footer(c: cp.Caps) -> Str =
+  "\n" + ansi.paint(c, th.muted(), "  twill <command> --help for detail on one command.") + "\n"

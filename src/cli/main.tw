@@ -1,0 +1,110 @@
+# main.tw - argument dispatch, and the rules about when the tool decorates.
+#
+# This file is short on purpose. Everything it does is decide which renderer
+# runs; nothing here formats anything itself. The value it adds is the three
+# policies at the bottom, which are the ones that get quietly violated when a
+# command is added in a hurry.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/cli/theme" as th
+import "src/cli/help" as help
+import "src/cli/banner" as banner
+import "src/cli/repl" as repl
+
+let VERSION: Str = "0.28.0"
+
+fn main() -> I64 {
+  let argv = args()
+  let c = negotiate(argv)
+  if len(argv) <= 1 { write_out(greeting(c)); 0 }
+  else { dispatch(c, argv[1], rest(argv)) }
+}
+
+# The command line can only ever reduce capability, never raise it above what
+# the terminal supports. `--color` forcing colour into a pipe is a flag people
+# ask for and it belongs in FORCE_COLOR, where it is at least visible to every
+# tool in the pipeline rather than to this one.
+fn negotiate(argv: Arr[Str]) -> cp.Caps {
+  let c = cp.detect()
+  if has_flag(argv, "--no-color") { c.level = cp.LEVEL_PLAIN }
+  if has_flag(argv, "--quiet") { c.animate = false }
+  c
+}
+
+fn dispatch(c: cp.Caps, cmd: Str, rest: Arr[Str]) -> I64 {
+  if cmd == "--help" || cmd == "-h" || cmd == "help" { write_out(help.render(c, VERSION)); 0 }
+  else if cmd == "--version" { write_out(VERSION + "\n"); 0 }
+  else if cmd == "repl" { run_repl(c) }
+  else { run_command(c, cmd, rest) }
+}
+
+# ── The three policies ──────────────────────────────────────────────────────
+
+# One: the banner appears on a bare `twill` and on `twill --help`, and nowhere
+# else. Both are moments where a person is looking for orientation. Every other
+# command is a person who knows what they want, and showing them the logo is
+# taking two lines of their terminal to tell them what tool they just ran.
+fn greeting(c: cp.Caps) -> Str =
+  banner.render(c, VERSION) + "\n" +
+    ansi.paint(c, th.muted(), "  twill --help to see what it does\n")
+
+# Two: animation is for things that take time. A command decides between the
+# spinner and the progress bar by whether it knows its total, and it decides
+# whether to use either at all by whether the work can plausibly exceed the
+# spinner's own delay gate. `twill --version` gets no spinner; neither does
+# formatting one file. This function exists to make that a decision someone has
+# to write down rather than a default they inherit.
+fn wants_indicator(cmd: Str, work_items: I64) -> Bool {
+  if cmd == "--version" || cmd == "--help" { false }
+  else { work_items > 1 }
+}
+
+# Three: exit codes are the API. A rendered diagnostic that exits 0 is a broken
+# build that CI reports as green, which is worse than an ugly error message by
+# a wide margin. Anything that renders an error returns 1 from here.
+fn exit_code(errors: I64) -> I64 = if errors > 0 { 1 } else { 0 }
+
+fn run_repl(c: cp.Caps) -> I64 {
+  let r = repl.new(c)
+  write_out(repl.greet(r, VERSION))
+  # The read loop belongs to the host, which owns line editing and history.
+  # What this file owns is the prompt and the framing, which is what is here.
+  0
+}
+
+fn run_command(c: cp.Caps, cmd: Str, rest: Arr[Str]) -> I64 {
+  write_err(unknown(c, cmd))
+  2
+}
+
+# An unknown command is a mistyped one, so the reply is a suggestion and not the
+# help page. Dumping forty lines of help at someone who typed `twill buidl` is
+# the tool making them find their own typo.
+fn unknown(c: cp.Caps, cmd: Str) -> Str {
+  ansi.paint(c, th.error(), th.mark_err(c)) + " unknown command " +
+    ansi.paint(c, th.emphasis(), cmd) + "\n" +
+    ansi.paint(c, th.muted(), "  twill --help lists the commands\n")
+}
+
+fn has_flag(argv: Arr[Str], flag: Str) -> Bool {
+  let i: I64 = 0
+  let found = false
+  while i < len(argv) {
+    if argv[i] == flag { found = true }
+    i = i + 1
+  }
+  found
+}
+
+fn rest(argv: Arr[Str]) -> Arr[Str] {
+  let out: Arr[Str] = arr()
+  let i: I64 = 2
+  while i < len(argv) {
+    push(out, argv[i])
+    i = i + 1
+  }
+  out
+}
