@@ -1,0 +1,430 @@
+mode systems
+
+# ast.tw — the twill syntax tree, in twill.
+#
+# A port of internal/ast/ast.go. The Go version expresses the tree as three
+# interfaces (Node, Stmt, Expr) with unexported marker methods, and every
+# consumer type-switches over them. This version uses enums, and that is the
+# single largest reason docs/self-hosting.md argues for writing the compiler in
+# twill at all: adding a variant here makes the checker, the evaluator and the
+# formatter fail to compile until each has been taught about it, where the Go
+# tree stays silent and the missing case is found by a user.
+#
+# Node identity
+# -------------
+# Every node carries an `id`. internal/checker/checker.go keys its recursion
+# guard on `map[ast.Node]bool`, which is pointer identity, and two structurally
+# identical lambdas in one file must not share a guard entry. Rather than ask
+# the language for heap identity as a Dict key, which leaks the collector into
+# the semantics, the parser hands out serial numbers. The dump uses them too, so
+# they are not purely a workaround. See NEEDS-21.
+
+# ---- node ids --------------------------------------------------------------
+
+struct NodeIds {
+  next: I64,
+}
+
+fn new_ids() -> NodeIds = NodeIds { next: 1 }
+
+# Ids start at 1 so that 0 can mean "no node", which the else-branch and the
+# bare `return` both need.
+fn fresh(ids: NodeIds) -> I64 {
+  let n: I64 = ids.next
+  ids.next = n + 1
+  n
+}
+
+# ---- annotations -----------------------------------------------------------
+
+# Dim is one dimension of a shape annotation: either a concrete size (>= 0), a
+# named shape variable (name != ""), or an anonymous unknown, written `_`, which
+# is size -1 with an empty name.
+struct Dim {
+  size: I64,
+  name: Str,
+}
+
+fn concrete_dim(n: I64) -> Dim = Dim { size: n, name: "" }
+fn var_dim(name: Str) -> Dim = Dim { size: -1, name: name }
+fn anon_dim() -> Dim = Dim { size: -1, name: "" }
+
+fn dim_is_concrete(d: Dim) -> Bool = d.size >= 0
+
+# ShapeAnno is an optional tensor-shape annotation on a parameter or a return.
+# An empty dims list means a scalar, that is, a rank-0 tensor, and is written
+# `[]`. The distinction between "[]" and "no annotation" is carried by the
+# Opt around the ShapeAnno, not by the ShapeAnno itself.
+struct ShapeAnno {
+  dims: Arr[Dim],
+}
+
+# concrete_dims returns the annotation as plain sizes, with -1 for any dimension
+# that is a variable or anonymous. This is the form the checker's tTensor uses.
+fn concrete_dims(s: ShapeAnno) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(s.dims) {
+    let d: Dim = s.dims[i]
+    if dim_is_concrete(d) {
+      push(out, d.size)
+    } else {
+      push(out, -1)
+    }
+    i = i + 1
+  }
+  out
+}
+
+# UnitFactor is one `name^exp` term of a unit expression, as in USD or year^-1.
+struct UnitFactor {
+  name: Str,
+  exp: I64,
+}
+
+# UnitAnno is a scalar unit expression like `USD`, `USD/year` or `1/year`,
+# stored as a product of factors. A division is a negative exponent, so there is
+# no separate node for it and no precedence question.
+struct UnitAnno {
+  factors: Arr[UnitFactor],
+}
+
+# Param is a function parameter with an optional annotation: a shape (`x: [n,
+# 2]`), a bare name that is either a declared record type or a unit (`m: Model`,
+# `p: USD`), or a compound unit expression (`r: USD/year`).
+#
+# The three are mutually exclusive and the parser decides between them, but the
+# bare-name case cannot be resolved without the type and unit tables, so it stays
+# a string until the checker sees it. That is the Go structure and it is kept,
+# because collapsing it here would mean the parser needs the checker's tables.
+struct Param {
+  name: Str,
+  shape: Opt[ShapeAnno],
+  type_name: Str,
+  unit: Opt[UnitAnno],
+}
+
+fn plain_param(name: Str) -> Param =
+  Param { name: name, shape: None, type_name: "", unit: None }
+
+struct TypeField {
+  name: Str,
+  shape: ShapeAnno,
+}
+
+# ---- expressions -----------------------------------------------------------
+
+struct NumberLit { id: I64, value: F64, line: I64 }
+struct StringLit { id: I64, value: Str, line: I64 }
+struct BoolLit { id: I64, value: Bool, line: I64 }
+struct Ident { id: I64, name: Str, line: I64 }
+
+# TensorLit holds numeric or nested-tensor elements. The parser decides between
+# a tensor literal and a list literal by looking at the elements: see
+# is_numeric_elem in parse.tw. The distinction is made at parse time and not
+# later, because `[1, 2] @ [3, 4]` has to mean a matmul of two tensors.
+struct TensorLit { id: I64, elements: Arr[Expr], line: I64 }
+struct ListLit { id: I64, elements: Arr[Expr], line: I64 }
+
+struct Lambda {
+  id: I64,
+  params: Arr[Param],
+  ret: Opt[ShapeAnno],
+  ret_unit: Opt[UnitAnno],
+  body: Expr,
+  line: I64,
+}
+
+struct Unary { id: I64, op: Str, operand: Expr, line: I64 }
+struct Binary { id: I64, op: Str, left: Expr, right: Expr, line: I64 }
+struct Call { id: I64, callee: Expr, args: Arr[Expr], line: I64 }
+struct Index { id: I64, target: Expr, index: Expr, line: I64 }
+
+# Slice is target[start:end] along the first axis. Either side may be absent,
+# meaning the beginning or the end respectively.
+struct Slice { id: I64, target: Expr, start: Opt[Expr], end: Opt[Expr], line: I64 }
+
+struct RecordField { name: Str, value: Expr }
+struct RecordLit { id: I64, fields: Arr[RecordField], line: I64 }
+
+# Field is record field access: target.name.
+struct Field { id: I64, target: Expr, name: Str, line: I64 }
+
+# Block is a brace-delimited statement sequence. It is both a statement and an
+# expression, exactly as in the Go tree, where *ast.Block satisfies both
+# interfaces. Here that costs one variant in each enum rather than one method.
+#
+# end_line is the line of the closing brace and exists only for the formatter,
+# which needs to know whether a block was written on one line.
+struct Block {
+  id: I64,
+  body: Arr[Stmt],
+  line: I64,
+  end_line: I64,
+}
+
+struct IfExpr {
+  id: I64,
+  cond: Expr,
+  then_block: Block,
+  else_branch: Else,
+  line: I64,
+}
+
+# The else branch is a block, a further `if`, or nothing. The Go tree types this
+# as `Else Node` and every consumer type-switches on it with a nil check; naming
+# the three cases is the same information with the failure mode removed.
+enum Else {
+  NoElse,
+  ElseBlock(Block),
+  ElseIf(IfExpr),
+}
+
+enum Expr {
+  ENumber(NumberLit),
+  EString(StringLit),
+  EBool(BoolLit),
+  EIdent(Ident),
+  ETensor(TensorLit),
+  EList(ListLit),
+  ELambda(Lambda),
+  EUnary(Unary),
+  EBinary(Binary),
+  ECall(Call),
+  EIndex(Index),
+  ESlice(Slice),
+  ERecord(RecordLit),
+  EField(Field),
+  EIf(IfExpr),
+  EBlock(Block),
+}
+
+# ---- statements ------------------------------------------------------------
+
+struct Let {
+  id: I64,
+  name: Str,
+  unit: Opt[UnitAnno],
+  value: Expr,
+  line: I64,
+}
+
+struct FnDecl {
+  id: I64,
+  name: Str,
+  params: Arr[Param],
+  ret: Opt[ShapeAnno],
+  ret_unit: Opt[UnitAnno],
+  body: Expr,
+  line: I64,
+}
+
+struct Assign { id: I64, name: Str, value: Expr, line: I64 }
+struct While { id: I64, cond: Expr, body: Block, line: I64 }
+struct For { id: I64, name: Str, iter: Expr, body: Block, line: I64 }
+
+# A bare `return` has no value.
+struct Return { id: I64, value: Opt[Expr], line: I64 }
+
+# Import binds a module. alias is non-empty for `import "..." as name`, which
+# brings the module in as a namespace record. An import with no alias brings its
+# names in unqualified, and that has a consequence for the checker: see the
+# blind-import rule in check.tw.
+struct Import { id: I64, path: Str, alias: Str, line: I64 }
+
+# UnitDecl declares a base unit: `unit USD`.
+struct UnitDecl { id: I64, name: Str, line: I64 }
+
+# TypeDecl declares a record type: `type Name = { field: shape, ... }`.
+struct TypeDecl { id: I64, name: Str, fields: Arr[TypeField], line: I64 }
+
+struct ExprStmt { id: I64, x: Expr, line: I64 }
+
+enum Stmt {
+  SLet(Let),
+  SFn(FnDecl),
+  SAssign(Assign),
+  SWhile(While),
+  SFor(For),
+  SReturn(Return),
+  SImport(Import),
+  SUnitDecl(UnitDecl),
+  STypeDecl(TypeDecl),
+  SExpr(ExprStmt),
+  SBlock(Block),
+}
+
+struct Program {
+  body: Arr[Stmt],
+}
+
+# ---- positions -------------------------------------------------------------
+#
+# The Go tree gives every node a Pos() method returning its line. Here it is one
+# exhaustive match per enum, which is the whole trade: the match is longer than
+# the interface, and the day a variant is added the compiler names this function
+# instead of a user finding a zero line number in a diagnostic.
+
+fn expr_line(e: Expr) -> I64 {
+  match e {
+    ENumber(x) => x.line,
+    EString(x) => x.line,
+    EBool(x) => x.line,
+    EIdent(x) => x.line,
+    ETensor(x) => x.line,
+    EList(x) => x.line,
+    ELambda(x) => x.line,
+    EUnary(x) => x.line,
+    EBinary(x) => x.line,
+    ECall(x) => x.line,
+    EIndex(x) => x.line,
+    ESlice(x) => x.line,
+    ERecord(x) => x.line,
+    EField(x) => x.line,
+    EIf(x) => x.line,
+    EBlock(x) => x.line,
+  }
+}
+
+fn expr_id(e: Expr) -> I64 {
+  match e {
+    ENumber(x) => x.id,
+    EString(x) => x.id,
+    EBool(x) => x.id,
+    EIdent(x) => x.id,
+    ETensor(x) => x.id,
+    EList(x) => x.id,
+    ELambda(x) => x.id,
+    EUnary(x) => x.id,
+    EBinary(x) => x.id,
+    ECall(x) => x.id,
+    EIndex(x) => x.id,
+    ESlice(x) => x.id,
+    ERecord(x) => x.id,
+    EField(x) => x.id,
+    EIf(x) => x.id,
+    EBlock(x) => x.id,
+  }
+}
+
+fn stmt_line(s: Stmt) -> I64 {
+  match s {
+    SLet(x) => x.line,
+    SFn(x) => x.line,
+    SAssign(x) => x.line,
+    SWhile(x) => x.line,
+    SFor(x) => x.line,
+    SReturn(x) => x.line,
+    SImport(x) => x.line,
+    SUnitDecl(x) => x.line,
+    STypeDecl(x) => x.line,
+    SExpr(x) => x.line,
+    SBlock(x) => x.line,
+  }
+}
+
+fn stmt_id(s: Stmt) -> I64 {
+  match s {
+    SLet(x) => x.id,
+    SFn(x) => x.id,
+    SAssign(x) => x.id,
+    SWhile(x) => x.id,
+    SFor(x) => x.id,
+    SReturn(x) => x.id,
+    SImport(x) => x.id,
+    SUnitDecl(x) => x.id,
+    STypeDecl(x) => x.id,
+    SExpr(x) => x.id,
+    SBlock(x) => x.id,
+  }
+}
+
+# ---- constructors ----------------------------------------------------------
+#
+# One per variant, taking the id source. They exist so that no other file has to
+# remember to allocate an id, and so that `fresh` is called in exactly one place
+# per node kind. A node built without an id would break the checker's recursion
+# guard in a way that shows up as a hang, not as a wrong answer.
+
+fn number_lit(ids: NodeIds, value: F64, line: I64) -> Expr =
+  ENumber(NumberLit { id: fresh(ids), value: value, line: line })
+
+fn string_lit(ids: NodeIds, value: Str, line: I64) -> Expr =
+  EString(StringLit { id: fresh(ids), value: value, line: line })
+
+fn bool_lit(ids: NodeIds, value: Bool, line: I64) -> Expr =
+  EBool(BoolLit { id: fresh(ids), value: value, line: line })
+
+fn ident(ids: NodeIds, name: Str, line: I64) -> Expr =
+  EIdent(Ident { id: fresh(ids), name: name, line: line })
+
+fn tensor_lit(ids: NodeIds, elements: Arr[Expr], line: I64) -> Expr =
+  ETensor(TensorLit { id: fresh(ids), elements: elements, line: line })
+
+fn list_lit(ids: NodeIds, elements: Arr[Expr], line: I64) -> Expr =
+  EList(ListLit { id: fresh(ids), elements: elements, line: line })
+
+fn lambda(ids: NodeIds, params: Arr[Param], ret: Opt[ShapeAnno], ret_unit: Opt[UnitAnno],
+          body: Expr, line: I64) -> Expr =
+  ELambda(Lambda { id: fresh(ids), params: params, ret: ret, ret_unit: ret_unit,
+                   body: body, line: line })
+
+fn unary(ids: NodeIds, op: Str, operand: Expr, line: I64) -> Expr =
+  EUnary(Unary { id: fresh(ids), op: op, operand: operand, line: line })
+
+fn binary(ids: NodeIds, op: Str, left: Expr, right: Expr, line: I64) -> Expr =
+  EBinary(Binary { id: fresh(ids), op: op, left: left, right: right, line: line })
+
+fn call(ids: NodeIds, callee: Expr, args: Arr[Expr], line: I64) -> Expr =
+  ECall(Call { id: fresh(ids), callee: callee, args: args, line: line })
+
+fn index(ids: NodeIds, target: Expr, idx: Expr, line: I64) -> Expr =
+  EIndex(Index { id: fresh(ids), target: target, index: idx, line: line })
+
+fn slice(ids: NodeIds, target: Expr, start: Opt[Expr], end: Opt[Expr], line: I64) -> Expr =
+  ESlice(Slice { id: fresh(ids), target: target, start: start, end: end, line: line })
+
+fn record_lit(ids: NodeIds, fields: Arr[RecordField], line: I64) -> Expr =
+  ERecord(RecordLit { id: fresh(ids), fields: fields, line: line })
+
+fn field(ids: NodeIds, target: Expr, name: Str, line: I64) -> Expr =
+  EField(Field { id: fresh(ids), target: target, name: name, line: line })
+
+fn new_block(ids: NodeIds, body: Arr[Stmt], line: I64, end_line: I64) -> Block =
+  Block { id: fresh(ids), body: body, line: line, end_line: end_line }
+
+fn if_expr(ids: NodeIds, cond: Expr, then_block: Block, else_branch: Else, line: I64) -> IfExpr =
+  IfExpr { id: fresh(ids), cond: cond, then_block: then_block,
+           else_branch: else_branch, line: line }
+
+fn let_stmt(ids: NodeIds, name: Str, unit: Opt[UnitAnno], value: Expr, line: I64) -> Stmt =
+  SLet(Let { id: fresh(ids), name: name, unit: unit, value: value, line: line })
+
+fn fn_decl(ids: NodeIds, name: Str, params: Arr[Param], ret: Opt[ShapeAnno],
+           ret_unit: Opt[UnitAnno], body: Expr, line: I64) -> FnDecl =
+  FnDecl { id: fresh(ids), name: name, params: params, ret: ret, ret_unit: ret_unit,
+           body: body, line: line }
+
+fn assign_stmt(ids: NodeIds, name: Str, value: Expr, line: I64) -> Stmt =
+  SAssign(Assign { id: fresh(ids), name: name, value: value, line: line })
+
+fn while_stmt(ids: NodeIds, cond: Expr, body: Block, line: I64) -> Stmt =
+  SWhile(While { id: fresh(ids), cond: cond, body: body, line: line })
+
+fn for_stmt(ids: NodeIds, name: Str, iter: Expr, body: Block, line: I64) -> Stmt =
+  SFor(For { id: fresh(ids), name: name, iter: iter, body: body, line: line })
+
+fn return_stmt(ids: NodeIds, value: Opt[Expr], line: I64) -> Stmt =
+  SReturn(Return { id: fresh(ids), value: value, line: line })
+
+fn import_stmt(ids: NodeIds, path: Str, alias: Str, line: I64) -> Stmt =
+  SImport(Import { id: fresh(ids), path: path, alias: alias, line: line })
+
+fn unit_decl(ids: NodeIds, name: Str, line: I64) -> Stmt =
+  SUnitDecl(UnitDecl { id: fresh(ids), name: name, line: line })
+
+fn type_decl(ids: NodeIds, name: Str, fields: Arr[TypeField], line: I64) -> Stmt =
+  STypeDecl(TypeDecl { id: fresh(ids), name: name, fields: fields, line: line })
+
+fn expr_stmt(ids: NodeIds, x: Expr, line: I64) -> Stmt =
+  SExpr(ExprStmt { id: fresh(ids), x: x, line: line })
