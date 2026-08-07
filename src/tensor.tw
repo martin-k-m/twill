@@ -1520,3 +1520,434 @@ fn flip_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   }
   Ok(Tensor { shape: copy_shape(t.shape), data: out })
 }
+
+# ---- shape ops -------------------------------------------------------------
+
+# Same buffer, new shape.
+#
+# Gradient: the identity on the buffer. Element i of the output is element i of
+# the input, so the cotangent is copied straight back, only wearing the input's
+# shape again. This is the one op where the gradient is genuinely nothing.
+fn reshape(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
+  if element_count(shape) != len(t.data) {
+    return Err(bytes.concat("reshape: cannot fit ", bytes.concat(str(len(t.data)),
+      bytes.concat(" elements into shape ", shape_string(shape)))))
+  }
+  let c: Tensor = clone(t)
+  Ok(Tensor { shape: copy_shape(shape), data: c.data })
+}
+
+# Resolve a permutation argument. An empty `axes` reverses them, which is the
+# plain transpose.
+fn resolve_perm(rank_in: I64, axes: Arr[I64]) -> Res[Arr[I64], Str] {
+  let perm: Arr[I64] = arr_new()
+  if len(axes) == 0 {
+    let i: I64 = 0
+    while i < rank_in {
+      push(perm, rank_in - 1 - i)
+      i = i + 1
+    }
+    return Ok(perm)
+  }
+  if len(axes) != rank_in {
+    return Err(bytes.concat("transpose: got ", bytes.concat(str(len(axes)),
+      bytes.concat(" axes for a rank-", bytes.concat(str(rank_in), " tensor")))))
+  }
+  let seen: Arr[Bool] = arr_new()
+  let i: I64 = 0
+  while i < rank_in {
+    push(seen, false)
+    i = i + 1
+  }
+  i = 0
+  while i < rank_in {
+    let ax: I64 = axes[i]
+    # Not normalized against negatives: the bootstrap does not accept a negative
+    # transpose axis either, and src/check.tw's transpose_result agrees. See
+    # NEEDS-50 for the mismatch in how an out-of-range one is reported.
+    if ax < 0 or ax >= rank_in or seen[ax] {
+      return Err(bytes.concat("transpose: invalid axis permutation ", shape_string(axes)))
+    }
+    seen[ax] = true
+    push(perm, ax)
+    i = i + 1
+  }
+  Ok(perm)
+}
+
+# transpose_origin[o] is the input offset supplying output offset o. Computed by
+# division here rather than by an odometer, because the odometer walks the
+# *output* while the mapping needed is from output coordinates to a permuted set
+# of input strides, and spelling that as an odometer means building the permuted
+# stride vector anyway. The division form is the one in the bootstrap.
+fn transpose_origins(in_shape: Arr[I64], perm: Arr[I64], out_shape: Arr[I64]) -> Arr[I64] {
+  let r: I64 = len(perm)
+  let in_str: Arr[I64] = strides_of(in_shape)
+  let out_str: Arr[I64] = strides_of(out_shape)
+  let n: I64 = element_count(out_shape)
+  let origin: Arr[I64] = arr_new()
+  let o: I64 = 0
+  while o < n {
+    let rem: I64 = o
+    let src: I64 = 0
+    let i: I64 = 0
+    while i < r {
+      let coord: I64 = rem / out_str[i]
+      rem = rem % out_str[i]
+      src = src + coord * in_str[perm[i]]
+      i = i + 1
+    }
+    push(origin, src)
+    o = o + 1
+  }
+  origin
+}
+
+# Permute axes.
+#
+# Gradient: a permutation of the buffer, so the inverse permutation of the
+# cotangent. Expressed as a scatter through the same origin table the forward
+# pass used, which is the same thing and cannot get the inverse backwards.
+fn transpose(t: Tensor, axes: Arr[I64]) -> Res[Tensor, Str] {
+  let perm: Arr[I64] = resolve_perm(len(t.shape), axes)?
+  let out_shape: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(perm) {
+    push(out_shape, t.shape[perm[i]])
+    i = i + 1
+  }
+  let origin: Arr[I64] = transpose_origins(t.shape, perm, out_shape)
+  let out: Arr[F64] = alloc(len(origin))
+  let o: I64 = 0
+  while o < len(origin) {
+    out[o] = t.data[origin[o]]
+    o = o + 1
+  }
+  Ok(Tensor { shape: out_shape, data: out })
+}
+
+# Expand a tensor to `shape` under the usual right-aligned rules: every axis of
+# the input must already match the target or be 1, and the input may have fewer
+# axes, which are prepended.
+#
+# Broadcasting normally happens implicitly inside a binary op, and that is enough
+# right up until the shape to broadcast against is not one of the operands. The
+# case that forces it is a reduction result, which is why this and keep_axis are
+# two spellings of the same need.
+#
+# Gradient: the exact reverse of the expansion. Every output that read a given
+# input element sends its cotangent back to it, so a broadcast axis *sums*. This
+# is the summing-back that is the classic autodiff bug, and it is worth being
+# precise about why it is a sum rather than a copy: the input element appears in
+# the output many times, the output is a function of that one element in each of
+# those places, and the chain rule over a variable used n times adds the n
+# contributions. Copying instead of adding gives a gradient that is too small by
+# a factor of the broadcast width and is not obviously wrong at a glance.
+fn broadcast_to(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
+  if len(shape) < len(t.shape) {
+    return Err(bytes.concat("cannot broadcast ", bytes.concat(shape_string(t.shape),
+      bytes.concat(" to ", bytes.concat(shape_string(shape), ": fewer axes in target")))))
+  }
+  # Checked against broadcast_shape rather than reimplementing the rule, so
+  # there is one definition of what is compatible. The result must equal the
+  # target exactly: a shape that broadcasts *with* the target but is not equal
+  # to it (a 5 against a 1) would expand the target too, which is not what was
+  # asked for.
+  let got: Arr[I64] = match broadcast_shape(t.shape, shape) {
+    Ok(s) => s,
+    Err(_) => arr_new(),
+  }
+  if not shape_equal(got, shape) {
+    return Err(bytes.concat("cannot broadcast ", bytes.concat(shape_string(t.shape),
+      bytes.concat(" to ", shape_string(shape)))))
+  }
+
+  let n: I64 = element_count(shape)
+  let out: Arr[F64] = alloc(n)
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(t.shape, shape))
+  let odo: Odometer = odo_new(shape, contrib)
+  let o: I64 = 0
+  while o < n {
+    out[o] = t.data[odo.offs[0]]
+    odo_step(odo)
+    o = o + 1
+  }
+  Ok(Tensor { shape: copy_shape(shape), data: out })
+}
+
+# sum_to_shape reduces `g` down to `target` by summing every axis that `target`
+# broadcast along. It is the gradient of broadcast_to expressed as a reduction
+# rather than as a scatter.
+#
+# Nothing in this file calls it: every backward pass below scatters through the
+# same effective strides its forward pass read through, which is equivalent and
+# has one fewer place to be wrong. It is here because it is the shape of the
+# rule people expect to see, and because a future fused kernel that cannot
+# afford the scatter needs it. Equivalence: scattering `g[o]` to input offset
+# `src(o)` for every o accumulates, at each input element, the sum of the g at
+# every output that read it, which is what summing the broadcast axes computes.
+fn sum_to_shape(g: Tensor, target: Arr[I64]) -> Res[Tensor, Str] {
+  if shape_equal(g.shape, target) { return Ok(clone(g)) }
+  let out: Arr[F64] = alloc(element_count(target))
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(target, g.shape))
+  let odo: Odometer = odo_new(g.shape, contrib)
+  let o: I64 = 0
+  while o < len(g.data) {
+    out[odo.offs[0]] = out[odo.offs[0]] + g.data[o]
+    odo_step(odo)
+    o = o + 1
+  }
+  Ok(Tensor { shape: copy_shape(target), data: out })
+}
+
+# Join tensors along an axis. Shapes must match on every other axis.
+#
+# Gradient: concat is a copy into disjoint regions, so each input takes back
+# exactly the slab of the cotangent it filled. Disjoint is why nothing sums here
+# and why concat is the easy one; split is the same op read the other way and
+# has the same gradient with the roles swapped.
+fn concat(ts: Arr[Tensor], axis_in: I64) -> Res[Tensor, Str] {
+  if len(ts) == 0 { return Err("concat: need at least one tensor") }
+  let rank_in: I64 = len(ts[0].shape)
+  let axis: I64 = normalize_axis(axis_in, rank_in)?
+  let total: I64 = 0
+  let p: I64 = 0
+  while p < len(ts) {
+    if len(ts[p].shape) != rank_in { return Err("concat: mismatched ranks") }
+    let d: I64 = 0
+    while d < rank_in {
+      if d != axis and ts[p].shape[d] != ts[0].shape[d] {
+        return Err(bytes.concat("concat: shapes differ on axis ", str(d)))
+      }
+      d = d + 1
+    }
+    total = total + ts[p].shape[axis]
+    p = p + 1
+  }
+  let out_shape: Arr[I64] = copy_shape(ts[0].shape)
+  out_shape[axis] = total
+  let sp: Spans = axis_spans(out_shape, axis)
+  let out: Arr[F64] = alloc(element_count(out_shape))
+
+  let offset: I64 = 0
+  p = 0
+  while p < len(ts) {
+    let l: I64 = ts[p].shape[axis]
+    let i: I64 = 0
+    while i < sp.before {
+      let k: I64 = 0
+      while k < l {
+        let j: I64 = 0
+        while j < sp.after {
+          out[i * total * sp.after + (offset + k) * sp.after + j] =
+            ts[p].data[i * l * sp.after + k * sp.after + j]
+          j = j + 1
+        }
+        k = k + 1
+      }
+      i = i + 1
+    }
+    offset = offset + l
+    p = p + 1
+  }
+  Ok(Tensor { shape: out_shape, data: out })
+}
+
+# The offset along `axis` at which piece `p` of a concat starts. The backward
+# pass needs it and recomputing it there from the input shapes is cheaper than
+# carrying it on the tape.
+fn concat_offset(ts: Arr[Tensor], axis: I64, p: I64) -> I64 {
+  let off: I64 = 0
+  let i: I64 = 0
+  while i < p {
+    off = off + ts[i].shape[axis]
+    i = i + 1
+  }
+  off
+}
+
+# Cut a tensor into consecutive pieces along one axis. The inverse of concat.
+#
+# `sizes` must add up to the axis exactly. A short or long list is an error
+# rather than a silent drop, because a split that quietly loses a row shows up
+# later as a wrong loss rather than as a crash.
+#
+# Gradient: each piece's cotangent lands in the slab of the parent it came from,
+# and the pieces are disjoint, so the parent's gradient is assembled rather than
+# summed. Where it *does* sum is when two pieces are used in the same expression
+# and both send gradient back: those are two separate tape nodes with the same
+# input, and the accumulate in the backward loop handles it.
+fn split(t: Tensor, sizes: Arr[I64], axis_in: I64) -> Res[Arr[Tensor], Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  if len(sizes) == 0 { return Err("split: need at least one piece") }
+  let total: I64 = 0
+  let i: I64 = 0
+  while i < len(sizes) {
+    if sizes[i] < 0 {
+      return Err(bytes.concat("split: negative size ", str(sizes[i])))
+    }
+    total = total + sizes[i]
+    i = i + 1
+  }
+  if total != t.shape[axis] {
+    return Err(bytes.concat("split: sizes sum to ", bytes.concat(str(total),
+      bytes.concat(" but axis ", bytes.concat(str(axis),
+      bytes.concat(" has length ", str(t.shape[axis])))))))
+  }
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[Tensor] = arr_new()
+  let offset: I64 = 0
+  let p: I64 = 0
+  while p < len(sizes) {
+    push(out, split_piece(t, axis, offset, sizes[p])?)
+    offset = offset + sizes[p]
+    p = p + 1
+  }
+  Ok(out)
+}
+
+# One piece of a split. Copied rather than aliased: a view sharing the parent's
+# buffer would let a later write to one piece silently change the others' idea
+# of the parent, and nothing else in this file hands out an alias.
+fn split_piece(t: Tensor, axis: I64, offset: I64, size: I64) -> Res[Tensor, Str] {
+  let sp: Spans = axis_spans(t.shape, axis)
+  let shape: Arr[I64] = copy_shape(t.shape)
+  shape[axis] = size
+  let data: Arr[F64] = alloc(sp.before * size * sp.after)
+  let i: I64 = 0
+  while i < sp.before {
+    let k: I64 = 0
+    while k < size {
+      let j: I64 = 0
+      while j < sp.after {
+        data[i * size * sp.after + k * sp.after + j] =
+          t.data[i * sp.length * sp.after + (offset + k) * sp.after + j]
+        j = j + 1
+      }
+      k = k + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: shape, data: data })
+}
+
+# Cut into `n` equal pieces. The axis must divide evenly; numpy's array_split
+# tolerates a remainder, and that leniency turns a wrong `n` into ragged output
+# rather than an error, so it is not copied.
+fn split_equal(t: Tensor, n: I64, axis_in: I64) -> Res[Arr[Tensor], Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  if n <= 0 {
+    return Err(bytes.concat("split: piece count must be positive, got ", str(n)))
+  }
+  let l: I64 = t.shape[axis]
+  if l % n != 0 {
+    return Err(bytes.concat("split: axis ", bytes.concat(str(axis),
+      bytes.concat(" has length ", bytes.concat(str(l),
+      bytes.concat(", which ", bytes.concat(str(n), " does not divide evenly")))))))
+  }
+  let sizes: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(sizes, l / n)
+    i = i + 1
+  }
+  split(t, sizes, axis)
+}
+
+# The size of one row along axis 0, which is what index and slice move in.
+fn row_size(shape: Arr[I64]) -> I64 {
+  let n: I64 = 1
+  let i: I64 = 1
+  while i < len(shape) {
+    n = n * shape[i]
+    i = i + 1
+  }
+  n
+}
+
+# Select one element or row along the first axis, dropping that axis: a rank-1
+# tensor yields a scalar and a rank-n tensor yields a row of shape shape[1:].
+#
+# Gradient: the cotangent lands in the selected row and every other row gets
+# nothing. Indexing is a linear map with a 0/1 matrix, and its transpose is the
+# scatter this describes.
+fn index_axis0(t: Tensor, idx: I64) -> Res[Tensor, Str] {
+  if len(t.shape) == 0 { return Err("cannot index a scalar") }
+  let dim0: I64 = t.shape[0]
+  if idx < 0 or idx >= dim0 {
+    return Err(bytes.concat("index ", bytes.concat(str(idx),
+      bytes.concat(" out of range [0, ", bytes.concat(str(dim0), ")")))))
+  }
+  let rs: I64 = row_size(t.shape)
+  let off: I64 = idx * rs
+  let data: Arr[F64] = alloc(rs)
+  let i: I64 = 0
+  while i < rs {
+    data[i] = t.data[off + i]
+    i = i + 1
+  }
+  Ok(Tensor { shape: remove_axis(t.shape, 0), data: data })
+}
+
+# Rows [start, end) along the first axis, keeping the trailing dimensions. A
+# negative bound counts from the end, matching the slice syntax in the language.
+#
+# Gradient: as for index_axis0, over a contiguous run of rows.
+fn slice_axis0(t: Tensor, start_in: I64, end_in: I64) -> Res[Tensor, Str] {
+  if len(t.shape) == 0 { return Err("cannot slice a scalar") }
+  let dim0: I64 = t.shape[0]
+  let start: I64 = start_in
+  let end: I64 = end_in
+  if start < 0 { start = start + dim0 }
+  if end < 0 { end = end + dim0 }
+  if start < 0 or end > dim0 or start > end {
+    return Err(bytes.concat("slice [", bytes.concat(str(start_in),
+      bytes.concat(":", bytes.concat(str(end_in),
+      bytes.concat("] out of range for first dim ", str(dim0)))))))
+  }
+  let rs: I64 = row_size(t.shape)
+  let n: I64 = (end - start) * rs
+  let data: Arr[F64] = alloc(n)
+  let i: I64 = 0
+  while i < n {
+    data[i] = t.data[start * rs + i]
+    i = i + 1
+  }
+  let shape: Arr[I64] = copy_shape(t.shape)
+  shape[0] = end - start
+  Ok(Tensor { shape: shape, data: data })
+}
+
+# Select rows from x along its first axis by a list of indices. The primitive
+# behind embedding lookups and index-based minibatching.
+#
+# Gradient: scatter-add each output row's cotangent back to its source row. The
+# *add* is what makes a repeated index correct: an embedding row used by three
+# tokens in a batch receives all three contributions, and an assignment would
+# keep only the last one. This is the same accumulate-not-assign rule as the
+# tape's, in the one place where a single op can hit it on its own.
+fn gather(x: Tensor, idx: Arr[I64]) -> Res[Tensor, Str] {
+  if len(x.shape) == 0 { return Err("gather: cannot gather from a scalar") }
+  let n: I64 = x.shape[0]
+  let rs: I64 = row_size(x.shape)
+  let out: Arr[F64] = alloc(len(idx) * rs)
+  let i: I64 = 0
+  while i < len(idx) {
+    let ix: I64 = idx[i]
+    if ix < 0 or ix >= n {
+      return Err(bytes.concat("gather: index ", bytes.concat(str(ix),
+        bytes.concat(" out of range [0, ", bytes.concat(str(n), ")")))))
+    }
+    let j: I64 = 0
+    while j < rs {
+      out[i * rs + j] = x.data[ix * rs + j]
+      j = j + 1
+    }
+    i = i + 1
+  }
+  let shape: Arr[I64] = copy_shape(x.shape)
+  shape[0] = len(idx)
+  Ok(Tensor { shape: shape, data: out })
+}
