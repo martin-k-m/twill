@@ -438,7 +438,7 @@ fn dedupe(diags: Arr[Diagnostic]) -> Arr[Diagnostic] {
     # The key joins line and message. A line number is digits only, so the first
     # space separates the two unambiguously and two different findings cannot
     # collide into one.
-    let key: Str = bytes.concat(str(d.line), bytes.concat(" ", d.msg))
+    let key: Str = bytes.concat(str(d.line), bytes.concat(" ", d.msg))
     if not dict_has(seen, key) {
       dict_set(seen, key, true)
       push(out, d)
