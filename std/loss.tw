@@ -1,0 +1,219 @@
+# loss.tw: the objective functions, in one module.
+#
+# These used to live at the bottom of std/nn.tw. They are their own module now
+# because a loss is not a layer: it has no parameters, it is the one place a
+# model's numbers meet the labels, and it is where numerical accidents actually
+# happen. std/nn imports this module, so `nn.mse` and the rest still resolve and
+# nothing that already imported std/nn has to change.
+#
+# Convention, applied without exception: every function here returns a scalar,
+# and every function that could reduce over a batch takes the mean rather than
+# the sum. The mean is what keeps a learning rate meaningful when the batch size
+# changes; a summed loss silently scales the gradient with the batch, which is
+# how a run that was tuned at batch 32 diverges at batch 256.
+
+# ── Regression ──────────────────────────────────────────────────────────────
+
+# Mean squared error.
+fn mse(pred, target) = mean(square(pred - target))
+
+# Mean absolute error. The penalty grows linearly, so a single wild label pulls
+# the fit far less than it would under mse.
+fn mae(pred, target) = mean(abs(pred - target))
+
+# Huber loss: squared within `delta` of the target, linear outside it.
+#
+# The point is to be mse where the model is nearly right and mae where it is
+# not, so outliers stop dominating the gradient without giving up the smooth
+# curvature near the optimum that makes the easy part converge quickly. The two
+# pieces are matched in value and slope at `delta`, which is why the linear arm
+# carries the `- 0.5 * delta` offset rather than being a plain `delta * e`.
+fn huber(pred, target, delta) {
+  let e = abs(pred - target)
+  mean(where(less_equal(e, delta), 0.5 * square(e), delta * (e - 0.5 * delta)))
+}
+
+# Log-cosh: smooth everywhere, and asymptotically linear like mae.
+#
+# Written through the stable form rather than as log(cosh(e)): cosh(20) is about
+# 2.4e8 and cosh(750) overflows to inf, whose log is inf. |e| + log1p(exp(-2|e|))
+# is the same number and never forms the large one.
+fn logcosh(pred, target) {
+  let e = abs(pred - target)
+  mean(e + log(1.0 + exp(-2.0 * e)) - 0.6931471805599453)
+}
+
+# ── Classification, from logits ─────────────────────────────────────────────
+
+# Softmax cross-entropy for one example: `logits` is a length-C vector of raw
+# scores and `target` a one-hot vector of the same length.
+#
+# This is the stable form, fused with the log-softmax, and the fusion is the
+# whole reason it is written this way. The naive route is
+# `-sum(target * log(softmax(logits)))`, which exponentiates first. A logit of
+# 800 overflows exp to inf and the softmax comes back NaN; a logit of -800
+# underflows to exactly 0, whose log is -inf and whose gradient is NaN. Even
+# well inside those bounds the log of a number near zero loses most of its
+# significant digits, so the loss is noise long before it is an error.
+#
+# logsumexp(logits) - sum(logits * target) is algebraically identical and never
+# forms either extreme, because logsumexp subtracts the maximum before it
+# exponentiates. The gradient is the clean softmax(logits) - target.
+fn cross_entropy(logits, target) = logsumexp(logits, 0) - sum(logits * target)
+
+# Batched softmax cross-entropy: `logits` is [N, C], `targets` is [N, C] one-hot.
+# Reduced over classes on axis 1, then averaged over the batch.
+fn cross_entropy_batch(logits, targets) =
+  mean(logsumexp(logits, 1) - sum(logits * targets, 1))
+
+# The same thing with integer class labels rather than one-hot rows.
+#
+# `labels` is an [N] tensor of class indices. Building the one-hot matrix costs
+# an [N, C] tensor that is almost entirely zeros, which is the usual reason
+# libraries offer a sparse variant, so it is offered here too.
+fn cross_entropy_sparse(logits, labels, classes) =
+  cross_entropy_batch(logits, onehot_rows(labels, classes))
+
+# Negative log-likelihood: the same loss when the model already emits log
+# probabilities (from `nn.log_softmax`) rather than raw logits.
+#
+# Kept separate rather than folded into cross_entropy because the distinction is
+# exactly the mistake worth making impossible: pass log-probabilities to
+# cross_entropy and it applies a second log-softmax, which does not error and
+# does not obviously misbehave. It just trains badly.
+fn nll(logprobs, target) = -sum(logprobs * target)
+
+fn nll_batch(logprobs, targets) = -mean(sum(logprobs * targets, 1))
+
+# Binary cross-entropy from probabilities in (0, 1).
+#
+# The epsilon is a floor, not a fix. If something upstream already called
+# sigmoid on a logit of -50 the probability is exactly 0 and the true loss is
+# infinite; the epsilon replaces the infinity with a large finite number and
+# leaves the gradient wrong. Prefer `bce_with_logits` whenever the logits are in
+# reach, and keep this one for the case where only a probability survives.
+fn bce(pred, target) {
+  let eps = 0.0000001
+  let terms = target * log(pred + eps) + (1.0 - target) * log(1.0 - pred + eps)
+  -mean(terms)
+}
+
+# Binary cross-entropy straight from logits, without ever forming the
+# probability. Written as max(x, 0) - x * target + log(1 + exp(-|x|)), which is
+# the same number for every input and finite for all of them: the exponential
+# only ever sees a non-positive argument, so it cannot overflow.
+fn bce_with_logits(logits, target) {
+  let stable = relu(logits) - logits * target + log(1.0 + exp(-abs(logits)))
+  mean(stable)
+}
+
+# Focal loss, from logits, for the case where one class swamps the other.
+#
+# Cross-entropy on a 99:1 split is dominated by the easy majority: each of those
+# examples contributes little, and there are enough of them that the sum still
+# buries the minority gradient. The (1 - p)^gamma factor scales an example down
+# by how confidently it is already right, so the loss keeps its attention on
+# what the model still gets wrong. gamma = 0 is exactly bce_with_logits.
+fn focal(logits, target, gamma) {
+  let p = sigmoid(logits)
+  let pt = target * p + (1.0 - target) * (1.0 - p)
+  let ce = relu(logits) - logits * target + log(1.0 + exp(-abs(logits)))
+  mean(pow(1.0 - pt, gamma) * ce)
+}
+
+# ── Margin ──────────────────────────────────────────────────────────────────
+
+# Hinge loss for a target in {-1, +1}. Zero once the example is on the right
+# side of the margin, so correct and confident predictions stop contributing
+# gradient at all, which is what makes it a margin loss rather than a
+# probability one.
+fn hinge(pred, target) = mean(relu(1.0 - target * pred))
+
+# Squared hinge. Same zero region, but the penalty grows quadratically outside
+# it, so a badly violated margin is punished harder and the loss is smooth at
+# the hinge point instead of having a kink there.
+fn hinge_squared(pred, target) = mean(square(relu(1.0 - target * pred)))
+
+# ── Distributions ───────────────────────────────────────────────────────────
+
+# KL divergence from q to p, both probability vectors over the same support.
+#
+# Not symmetric, and the asymmetry is the meaning: it is the extra cost, in
+# nats, of describing data that is really p using a code built for q. Where p is
+# zero the term is zero regardless of q, which the epsilon-guarded log gets
+# right because it is multiplied by that same zero p.
+fn kl_div(p, q) {
+  let eps = 0.0000001
+  sum(p * (log(p + eps) - log(q + eps)))
+}
+
+fn kl_div_batch(p, q) {
+  let eps = 0.0000001
+  mean(sum(p * (log(p + eps) - log(q + eps)), 1))
+}
+
+# Jensen-Shannon divergence: the symmetric, bounded relative of the above. It is
+# the mean KL of each distribution from their mixture, and it stays finite even
+# where one distribution puts zero mass and the other does not, which is exactly
+# where KL goes to infinity.
+fn js_div(p, q) {
+  let m = 0.5 * (p + q)
+  0.5 * kl_div(p, m) + 0.5 * kl_div(q, m)
+}
+
+# Cross-entropy between two probability vectors (not logits). H(p, q), which is
+# kl_div(p, q) plus the entropy of p; equal to it up to a constant in p, so the
+# two give the same gradients in q and different numbers.
+fn cross_entropy_probs(p, q) {
+  let eps = 0.0000001
+  -sum(p * log(q + eps))
+}
+
+# Poisson negative log-likelihood for count targets, from a log-rate.
+#
+# Parameterised by log(rate) rather than rate for the same reason the
+# classification losses take logits: the model can then emit any real number,
+# and nothing has to constrain an output to be positive.
+fn poisson_nll(log_rate, target) = mean(exp(log_rate) - target * log_rate)
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+# One-hot vector of length n with a 1 at index i.
+fn onehot(i, n) = equal(tensor(range(n)), i)
+
+# [N] integer labels to an [N, classes] one-hot matrix.
+#
+# Built by broadcasting a label column against a class row rather than by a
+# loop, so it is one comparison over the whole matrix.
+fn onehot_rows(labels, classes) =
+  equal(reshape(labels, len(labels), 1), reshape(tensor(range(classes)), 1, classes))
+
+# Add a weight per example to any of the batch losses above.
+#
+# Separate rather than a `weights` argument on each loss, because a weighted
+# mean is not the mean of the weighted terms and getting that wrong is a silent
+# rescale of the learning rate. This divides by the sum of the weights, so the
+# result stays on the same scale as the unweighted loss.
+fn weighted(per_example, weights) = sum(per_example * weights) / sum(weights)
+
+# L2 penalty over a parameter tree, for adding to a loss.
+#
+# Not the same thing as the `weight_decay` in optim's adamw, and worth being
+# explicit about which you are using: this one goes through the gradient and
+# therefore through the optimizer's adaptive scaling; decoupled decay does not.
+#
+# The accumulation is a closure that `map_leaves` calls once per leaf, because
+# there is no fold over a tree's leaves: `map_leaves` and `zip_leaves` both give
+# back a tree, and a tree of scalars still has to be collapsed by something. The
+# returned tree is discarded; the total comes out through the captured binding.
+fn l2_penalty(params) {
+  let total = 0.0
+  map_leaves(fn(p) { total = total + sum(square(p)); p }, params)
+  total
+}
+
+fn l1_penalty(params) {
+  let total = 0.0
+  map_leaves(fn(p) { total = total + sum(abs(p)); p }, params)
+  total
+}

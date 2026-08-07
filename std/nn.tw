@@ -1,38 +1,450 @@
-# nn.tw — a small neural-network toolkit written in Twill.
+# nn.tw: a neural-network toolkit written in Twill.
 #
-# Import it with:  import "std/nn"  — the library ships inside the binary, so
-# the path is the same from any directory. It pulls in the optimizers from
-# std/optim as well. Parameters are held in plain lists, so `grad`
-# differentiates a whole model at once and the optimizers update it.
+# Import it with:  import "std/nn". The library ships inside the binary, so
+# the path is the same from any directory. It pulls in std/optim and std/loss as
+# well, so `nn.adam_step` and `nn.mse` resolve without a second import.
+#
+# Two conventions run through the whole module and are worth reading once.
+#
+# 1. Parameters are plain tensors in plain containers: a record of tensors, or a
+#    list of those. Nothing else is ever put in a parameter tree, no layer
+#    objects, no flags, no functions, because `grad` follows the structure it
+#    is given and hands back a gradient with the same shape, and `map_leaves`
+#    walks every leaf. A single string or function among the leaves breaks both.
+#    That is why a layer here is two separate things: a function that says what
+#    the layer computes, and a record of tensors it computes with.
+#
+# 2. Nothing is hidden. A layer that needs a mode (dropout) or carries running
+#    statistics (batchnorm) takes them as arguments and returns them, the same
+#    way the optimizers take and return their state. It is more typing than a
+#    global `model.train()` and it is the reason two runs of the same script
+#    agree.
 
 import "std/optim"
+import "std/loss"
 
-# ---- layers --------------------------------------------------------------
+# ── Initialisation ──────────────────────────────────────────────────────────
+#
+# Strategies are named, and the name is required. This is deliberate: the
+# difference between Xavier and He is a factor of sqrt(2) in the variance of
+# every weight, which is small enough that a badly initialised network still
+# trains, just worse, and nothing in the output ever says so. A default here
+# would be a silent choice about a thing that matters.
+#
+# The scale each one uses, for a weight of shape [nout, nin]:
+#
+#   "xavier"  sd = sqrt(1 / nin)      Glorot. Keeps forward variance steady
+#                                     through a symmetric activation (tanh),
+#                                     which passes its input straight through
+#                                     near zero.
+#   "he"      sd = sqrt(2 / nin)      Kaiming. The extra 2 pays back what relu
+#                                     destroys: it zeroes half its inputs, so
+#                                     variance halves at every layer, and by
+#                                     layer ten the signal is 1/1000 of what it
+#                                     started as.
+#   "lecun"   sd = sqrt(1 / nin)      Same scale as xavier, different argument
+#                                     (self-normalising nets, selu).
+#   "uniform" U(-limit, limit)        Glorot's uniform variant, limit
+#                                     sqrt(6 / (nin + nout)), matched in
+#                                     variance to xavier rather than to nothing.
+#   "zeros"                           For biases, and for deliberately breaking
+#                                     a layer in a test.
+#
+# Xavier here uses fan-in only, not the fan-in/fan-out average some libraries
+# use, because it is the form the rest of this file and the existing examples
+# were written against and a quiet change of scale is exactly what this module
+# is trying to prevent.
 
-# Affine layer: y = W @ x + b.
+fn init(strategy, nout, nin) {
+  if strategy == "he" {
+    randn(nout, nin) * sqrt(2.0 / nin)
+  } else if strategy == "xavier" {
+    randn(nout, nin) * sqrt(1.0 / nin)
+  } else if strategy == "lecun" {
+    randn(nout, nin) * sqrt(1.0 / nin)
+  } else if strategy == "uniform" {
+    let limit = sqrt(6.0 / (nin + nout))
+    (rand(nout, nin) * 2.0 - 1.0) * limit
+  } else if strategy == "zeros" {
+    zeros(nout, nin)
+  } else {
+    # An unknown name has to be loud. There is no way to raise an error from
+    # Twill yet (docs/needs.md NEEDS-94), so this prints and then returns NaNs,
+    # which turn the first loss into NaN. A zero tensor would train to nothing
+    # and look like a bad learning rate for an afternoon.
+    print("nn.init: unknown strategy", strategy)
+    fill(0.0 / 0.0, nout, nin)
+  }
+}
+
+# The old spellings, kept because the examples use them. `init` is the one to
+# reach for in new code, since it puts the choice in the call.
+fn he_init(nout, nin) = init("he", nout, nin)
+fn xavier_init(nout, nin) = init("xavier", nout, nin)
+fn uniform_init(nout, nin) = init("uniform", nout, nin)
+
+# A [vocab, dim] embedding table. Small fixed scale rather than a fan-based one:
+# an embedding row is looked up, not summed over, so there is no fan-in to
+# correct for, and the usual failure is a table so large that the first
+# attention softmax saturates.
+fn embedding_init(vocab, dim) = randn(vocab, dim) * 0.1
+
+# A convolution kernel [Cout, Cin, KH, KW] with fan-in Cin*KH*KW, plus a zero
+# bias [Cout, 1, 1]. Returns the [kernel, bias] pair the `conv` layer expects.
+fn conv_init(cout, cin, kh, kw) =
+  [randn(cout, cin, kh, kw) * sqrt(2.0 / (cin * kh * kw)), zeros(cout, 1, 1)]
+
+# The same, with the strategy named. `he` and `xavier` differ here exactly as
+# they do for a dense layer, over the flattened fan-in.
+fn conv_init_as(strategy, cout, cin, kh, kw) {
+  let fan_in = cin * kh * kw
+  let scale = if strategy == "he" { sqrt(2.0 / fan_in) }
+              else if strategy == "xavier" { sqrt(1.0 / fan_in) }
+              else if strategy == "lecun" { sqrt(1.0 / fan_in) }
+              else { 0.0 / 0.0 }
+  if strategy == "uniform" {
+    let limit = sqrt(6.0 / (fan_in + cout))
+    [(rand(cout, cin, kh, kw) * 2.0 - 1.0) * limit, zeros(cout, 1, 1)]
+  } else {
+    [randn(cout, cin, kh, kw) * scale, zeros(cout, 1, 1)]
+  }
+}
+
+# ── Layers, in their bare form ──────────────────────────────────────────────
+#
+# These take their weights positionally and a single example. They are what the
+# existing examples call, and they are the clearest thing to read when the
+# question is what the arithmetic actually is.
+
+# Affine layer for one example: y = W @ x + b.
 fn dense(W, b, x) = W @ x + b
 
-# 2-D convolution layer. `layer` is [kernel, bias] where kernel is
-# [Cout, Cin, KH, KW] and bias is [Cout, 1, 1]; x is [Cin, H, W]. The bias
-# broadcasts across the spatial dimensions of the [Cout, OH, OW] output.
+# 2-D convolution. `layer` is [kernel, bias] with kernel [Cout, Cin, KH, KW] and
+# bias [Cout, 1, 1]; x is [Cin, H, W]. The bias broadcasts across the spatial
+# dimensions of the [Cout, OH, OW] output.
 fn conv(layer, x) = conv2d(x, layer[0]) + layer[1]
 
 # Embedding lookup: rows of `table` ([vocab, dim]) selected by integer `ids`.
-# Differentiable in the table — grad flows back through gather's scatter-add, so
-# the embeddings are learned.
+# Differentiable in the table, since gather's backward pass is a scatter-add, so
+# a token that appears twice in a sequence accumulates both gradients.
 fn embed(table, ids) = gather(table, ids)
 
-# Single-head self-attention over a sequence X ([T, dim]). Wq, Wk, Wv are each
-# [dim, dim]; the result is the attended sequence [T, dim]. This is the core
-# transformer operation, and `grad` differentiates all the way through it.
+# Single-head self-attention over a sequence X ([T, dim]).
 fn self_attention(Wq, Wk, Wv, X) {
   let dim = len(X[0])
   let scores = (X @ Wq) @ transpose(X @ Wk) / sqrt(dim)
   softmax(scores, 1) @ (X @ Wv)
 }
 
-# ---- activations ---------------------------------------------------------
-# relu, tanh, sigmoid, and softmax are builtins; these are a few extras.
+# ── Layers, in parameter-record form ────────────────────────────────────────
+#
+# Every one of these has the same shape of signature, `fn(p, x)`, parameters
+# first, activations second, so they can be put in a list and folded over. They
+# are batch-first where the underlying builtin allows it: x is [B, features],
+# because a per-example loop through a matmul is the slowest way to write any of
+# this.
+
+# Affine over a batch: x is [B, nin], p.W is [nout, nin], result [B, nout].
+#
+# The transpose is not an accident of taste. Storing W as [nout, nin] means row
+# i is the weights of output unit i, which is how every initialiser scales it
+# (fan-in along the row) and how the single-example `dense` above reads. The
+# batched form then needs W transposed, and doing it here rather than storing
+# the transpose keeps one layout in the parameter tree.
+fn dense_apply(p, x) = x @ transpose(p.W) + p.b
+
+fn dense_params(nout, nin, strategy) = { W: init(strategy, nout, nin), b: zeros(nout) }
+
+# Convolution over one [Cin, H, W] example. Unbatched, because `conv2d` is:
+# feeding it a batch means mapping over the batch axis, which `conv_batch` does.
+fn conv_apply(p, x) = conv2d(x, p.W) + p.b
+
+fn conv_params(cout, cin, kh, kw, strategy) {
+  let both = conv_init_as(strategy, cout, cin, kh, kw)
+  { W: both[0], b: both[1] }
+}
+
+# A convolution applied to every example of a [B, Cin, H, W] batch.
+#
+# Written as a stack of per-example results rather than as one call, since the
+# builtin takes rank-3 input. It is a loop over the batch and it is honest about
+# being one.
+fn conv_batch(p, x) {
+  let out = list()
+  for i in range(len(x)) {
+    out = append(out, unsqueeze_first(conv_apply(p, x[i])))
+  }
+  concat(out, 0)
+}
+
+fn unsqueeze_first(t) = reshape(t, concat_dims(list(1), shape(t)))
+
+fn concat_dims(a, b) = fold(fn(acc, d) = append(acc, d), a, b)
+
+# Non-overlapping k x k max pooling over each channel of a [C, H, W] tensor.
+# A thin name over the builtin, so a pooling step reads like the other layers
+# in a sequential rather than as the one raw call in the middle of them.
+fn maxpool(p, x, k) = maxpool2d(x, k)
+
+# Collapse every axis from `keep_leading` onward into one. The usual use is the
+# step between a convolution stack and a dense head, where a [C, H, W] feature
+# map has to become a [C*H*W] vector.
+fn flatten(x) = reshape(x, list(numel_of(x)))
+
+fn flatten_from(x, k) {
+  let s = shape(x)
+  let head = list()
+  let i = 0
+  let tail = 1
+  while i < len(s) {
+    if i < k { head = append(head, s[i]) } else { tail = tail * s[i] }
+    i = i + 1
+  }
+  reshape(x, append(head, tail))
+}
+
+fn numel_of(x) = fold(fn(a, d) = a * d, 1, shape(x))
+
+# Inverted dropout. Zeroes each element with probability `rate` and divides the
+# survivors by (1 - rate); `train` is 1 during training and 0 at inference.
+#
+# Two things are explicit here that most libraries hide. The mode is an
+# argument, not a flag on a global object, because a model left in training mode
+# at evaluation time is the single most common silent accuracy bug there is.
+# And the rescale happens during training rather than at inference, which is
+# what "inverted" means: it keeps the expected value of the output the same in
+# both modes, so the inference path is the plain network with no dropout term
+# in it at all.
+fn dropout(x, rate, train) {
+  if train == 0.0 {
+    x
+  } else {
+    let keep = greater_equal(rand(shape(x)), rate)
+    x * keep / (1.0 - rate)
+  }
+}
+
+# Layer normalisation over the last axis of x, with a learned scale and shift.
+#
+# Per-example, over the features, not over the batch. That is the entire
+# difference from batchnorm and the reason this is what sequence models use: the
+# statistics come from one example, so the result does not depend on which other
+# examples happen to share the batch, and a batch of one behaves identically to
+# a batch of 256.
+fn layernorm(p, x, eps) {
+  let axis = len(shape(x)) - 1
+  let mu = keepdim(mean(x, axis), x, axis)
+  let centred = x - mu
+  let vr = keepdim(mean(square(centred), axis), x, axis)
+  p.gamma * centred / sqrt(vr + eps) + p.beta
+}
+
+fn layernorm_params(dim) = { gamma: ones(dim), beta: zeros(dim) }
+
+# A reduction result put back at length 1 on the axis it reduced and expanded to
+# the original shape. Broadcasting aligns from the right, so a [B] mean will not
+# combine with a [B, D] tensor the way anyone intends; this is the fix.
+fn keepdim(r, x, axis) {
+  let s = shape(x)
+  let target = list()
+  for i in range(len(s)) {
+    target = append(target, if i == axis { 1 } else { s[i] })
+  }
+  broadcast_to(reshape(r, target), s)
+}
+
+# Batch normalisation over a [B, D] batch. State in, state out.
+#
+# Returns [y, running_mean, running_var]. Training normalises by the batch's own
+# statistics and folds them into the running averages with momentum; inference
+# (train == 0) uses the running averages and returns them unchanged. Nothing is
+# updated in place, so a forward pass has no side effect and a validation pass
+# cannot corrupt the statistics the next training step depends on, which is a
+# real bug in every framework that mutates the module.
+#
+# The batch variance is the biased (divide by B) one, matching what the
+# normalisation actually needs; the unbiased correction some implementations
+# apply to the *running* variance is left out, because with momentum smoothing
+# over hundreds of batches the difference is far below the noise it is averaging.
+fn batchnorm(p, x, running_mean, running_var, momentum, eps, train) {
+  if train == 0.0 {
+    let y = p.gamma * (x - running_mean) / sqrt(running_var + eps) + p.beta
+    [y, running_mean, running_var]
+  } else {
+    let mu = mean(x, 0)
+    let vr = mean(square(x - mu), 0)
+    let y = p.gamma * (x - mu) / sqrt(vr + eps) + p.beta
+    [y,
+     (1.0 - momentum) * running_mean + momentum * mu,
+     (1.0 - momentum) * running_var + momentum * vr]
+  }
+}
+
+fn batchnorm_params(dim) = { gamma: ones(dim), beta: zeros(dim) }
+
+fn batchnorm_state(dim) = [zeros(dim), ones(dim)]
+
+# Embedding lookup in record form: p.W is [vocab, dim], ids is a 1-D tensor or
+# list of integer row indices.
+fn embedding(p, ids) = gather(p.W, ids)
+
+fn embedding_params(vocab, dim) = { W: embedding_init(vocab, dim) }
+
+# ── Attention ───────────────────────────────────────────────────────────────
+
+# Multi-head self-attention over one sequence X ([T, dim]).
+#
+# p holds Wq, Wk, Wv and the output projection Wo, each [dim, dim]. `heads` must
+# divide dim; each head works in a dim/heads subspace, which is the point of the
+# thing: h heads of width dim/h cost the same arithmetic as one head of width
+# dim, and give the model h separate places to look rather than one averaged
+# one.
+#
+# The einsum spells the batching over heads because `@` is a single matmul.
+# "hti,hsi->hts" is, per head h, the [T, dh] queries against the [T, dh] keys,
+# contracting the feature axis i and leaving a [T, T] score matrix.
+#
+# The 1/sqrt(dh) scale divides by the head width, not the model width. The dot
+# product of two dh-dimensional vectors of unit-variance components has variance
+# dh, so without the scale the softmax input grows with head width and saturates
+#, gradients vanish, and the failure looks like a model that will not learn
+# rather than like a missing constant.
+fn attention_heads(p, X, heads) {
+  let T = len(X)
+  let dim = len(X[0])
+  let dh = dim / heads
+  let Q = split_heads(X @ p.Wq, T, heads, dh)
+  let K = split_heads(X @ p.Wk, T, heads, dh)
+  let V = split_heads(X @ p.Wv, T, heads, dh)
+  let scores = einsum("hti,hsi->hts", Q, K) / sqrt(dh)
+  let attn = softmax(scores, 2)
+  let ctx = einsum("hts,hsi->hti", attn, V)
+  merge_heads(ctx, T, dim) @ p.Wo
+}
+
+# Causal (masked) multi-head self-attention: position t may attend to positions
+# up to and including t, and no further.
+#
+# The mask is added to the scores before the softmax rather than multiplying the
+# weights after it. Multiplying afterwards leaves the denominator counting the
+# future positions, so the surviving weights no longer sum to 1 and every row
+# is scaled by an amount that depends on how much was masked. Adding a large
+# negative number before the exponential sends those terms to zero inside the
+# normalisation, where they belong.
+fn attention_causal(p, X, heads) {
+  let T = len(X)
+  let dim = len(X[0])
+  let dh = dim / heads
+  let Q = split_heads(X @ p.Wq, T, heads, dh)
+  let K = split_heads(X @ p.Wk, T, heads, dh)
+  let V = split_heads(X @ p.Wv, T, heads, dh)
+  let scores = einsum("hti,hsi->hts", Q, K) / sqrt(dh)
+  let attn = softmax(scores + causal_mask(T), 2)
+  let ctx = einsum("hts,hsi->hti", attn, V)
+  merge_heads(ctx, T, dim) @ p.Wo
+}
+
+# A [T, T] matrix, 0 on and below the diagonal and -1e9 above it. Broadcasts
+# against the [heads, T, T] scores.
+#
+# -1e9 rather than -inf: exp(-1e9) is 0 to every digit a float carries, and -inf
+# would make 0 * -inf appear in the backward pass, which is NaN.
+fn causal_mask(T) {
+  let idx = tensor(range(T))
+  let rows = reshape(idx, T, 1)
+  let cols = reshape(idx, 1, T)
+  greater(cols, rows) * -1000000000.0
+}
+
+fn attention_params(dim, strategy) = {
+  Wq: transpose(init(strategy, dim, dim)),
+  Wk: transpose(init(strategy, dim, dim)),
+  Wv: transpose(init(strategy, dim, dim)),
+  Wo: transpose(init(strategy, dim, dim))
+}
+
+# [T, dim] to [heads, T, dh]. The reshape splits the feature axis, and the
+# transpose moves the head axis in front so einsum can batch over it.
+fn split_heads(X, T, heads, dh) = transpose(reshape(X, T, heads, dh), 1, 0, 2)
+
+fn merge_heads(C, T, dim) = reshape(transpose(C, 1, 0, 2), T, dim)
+
+# ── Sequential ──────────────────────────────────────────────────────────────
+#
+# A network as a list of layers, applied in order.
+#
+# The structure and the parameters are kept in two parallel lists, and that
+# separation is the design. `grad(loss)(net.params)` returns a list of parameter
+# records with exactly the shape of `net.params`, and the optimizers walk it
+# with `map_leaves`, because it contains nothing but tensors. Put the functions
+# in the same tree, which is what an object-shaped layer would do, and both
+# stop working.
+#
+# A layer with no parameters carries an empty list, which walks to nothing.
+
+# Build a network from a list of layer specs, each of them `list(apply, params)`.
+fn sequential(specs) = {
+  fns: map(fn(s) = s[0], specs),
+  params: map(fn(s) = s[1], specs)
+}
+
+# Run x through the layers. `params` is passed separately rather than read from
+# the net, because the training loop holds the current parameters and the net's
+# copy is only the initial one.
+fn forward(net, params, x) {
+  let h = x
+  for i in range(len(net.fns)) {
+    h = net.fns[i](params[i], h)
+  }
+  h
+}
+
+# ── Layer specs ─────────────────────────────────────────────────────────────
+# Each returns `list(apply, params)` for `sequential`. Hyperparameters that are
+# not learned (a pooling size, a dropout rate, the number of heads) are captured
+# in the closure, which is where they belong: they are part of what the layer
+# computes, not part of what it learns.
+
+fn dense_layer(nout, nin, strategy) =
+  list(fn(p, x) = dense_apply(p, x), dense_params(nout, nin, strategy))
+
+fn conv_layer(cout, cin, kh, kw, strategy) =
+  list(fn(p, x) = conv_apply(p, x), conv_params(cout, cin, kh, kw, strategy))
+
+fn maxpool_layer(k) = list(fn(p, x) = maxpool2d(x, k), list())
+
+fn flatten_layer() = list(fn(p, x) = flatten(x), list())
+
+fn flatten_from_layer(k) = list(fn(p, x) = flatten_from(x, k), list())
+
+# The dropout rate and the mode are both fixed when the layer is built, so a
+# network used for both training and inference needs two of them over the same
+# parameters. That is clumsy on purpose: it makes the mode visible in the code
+# rather than in a mutable flag somewhere.
+fn dropout_layer(rate, train) = list(fn(p, x) = dropout(x, rate, train), list())
+
+fn layernorm_layer(dim, eps) =
+  list(fn(p, x) = layernorm(p, x, eps), layernorm_params(dim))
+
+fn embedding_layer(vocab, dim) =
+  list(fn(p, ids) = embedding(p, ids), embedding_params(vocab, dim))
+
+fn attention_layer(dim, heads, strategy) =
+  list(fn(p, x) = attention_heads(p, x, heads), attention_params(dim, strategy))
+
+fn causal_attention_layer(dim, heads, strategy) =
+  list(fn(p, x) = attention_causal(p, x, heads), attention_params(dim, strategy))
+
+# Activations as layers, so a sequential reads the way the network is drawn.
+fn relu_layer() = list(fn(p, x) = relu(x), list())
+fn tanh_layer() = list(fn(p, x) = tanh(x), list())
+fn sigmoid_layer() = list(fn(p, x) = sigmoid(x), list())
+fn gelu_layer() = list(fn(p, x) = gelu(x), list())
+fn silu_layer() = list(fn(p, x) = silu(x), list())
+fn softmax_layer(axis) = list(fn(p, x) = softmax(x, axis), list())
+
+# ── Activations ─────────────────────────────────────────────────────────────
+# relu, tanh, sigmoid, and softmax are builtins; these are the extras.
 
 fn softplus(x) = log(1.0 + exp(x))
 
@@ -41,8 +453,8 @@ fn leaky_relu(x) = relu(x) - 0.01 * relu(-x)
 # Tanh approximation of GELU.
 fn gelu(x) = 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
 
-# SiLU, also called swish. x * sigmoid(x): smooth, unbounded above, and the
-# activation most modern vision and language models reach for over relu.
+# SiLU, also called swish. Smooth, unbounded above, and the activation most
+# modern vision and language models reach for over relu.
 fn silu(x) = x * sigmoid(x)
 
 # Mish. Smoother than silu at the cost of another exp and a tanh, and slightly
@@ -50,7 +462,7 @@ fn silu(x) = x * sigmoid(x)
 fn mish(x) = x * tanh(softplus(x))
 
 # ELU. Negative inputs decay to -alpha rather than to zero, so a unit that has
-# gone negative still has a gradient and can come back — the dead-relu problem
+# gone negative still has a gradient and can come back, the dead-relu problem
 # leaky_relu attacks from the other direction.
 fn elu(x, alpha) = where(greater(x, 0.0), x, alpha * (exp(x) - 1.0))
 
@@ -66,78 +478,12 @@ fn softsign(x) = x / (1.0 + abs(x))
 #
 # That is the whole point of it existing. Taking the log of a softmax means
 # exponentiating first, and a logit around -800 underflows to exactly zero,
-# whose log is -inf and whose gradient is NaN. Subtracting logsumexp never
-# forms the small number in the first place.
-fn log_softmax(x, axis) = x - logsumexp(x, axis)
-
-# ---- initializers --------------------------------------------------------
-# He/Kaiming and Xavier/Glorot scaling for a (nout x nin) weight matrix.
-
-fn he_init(nout, nin) = randn(nout, nin) * sqrt(2.0 / nin)
-
-fn xavier_init(nout, nin) = randn(nout, nin) * sqrt(1.0 / nin)
-
-# A [vocab, dim] embedding table with small random init.
-fn embedding_init(vocab, dim) = randn(vocab, dim) * 0.1
-
-# He-initialized convolution layer: kernel [Cout, Cin, KH, KW] with fan-in
-# Cin*KH*KW, and a zero bias [Cout, 1, 1]. Returns the [kernel, bias] pair the
-# `conv` layer expects.
-fn conv_init(cout, cin, kh, kw) =
-  [randn(cout, cin, kh, kw) * sqrt(2.0 / (cin * kh * kw)), zeros(cout, 1, 1)]
-
-# ---- losses --------------------------------------------------------------
-
-fn mse(pred, target) = mean(square(pred - target))
-
-fn bce(pred, target) {
-  let eps = 0.0000001
-  let terms = target * log(pred + eps) + (1.0 - target) * log(1.0 - pred + eps)
-  0.0 - mean(terms)
-}
-
-# One-hot vector of length n with a 1 at index i.
-fn onehot(i, n) = equal(tensor(range(n)), i)
-
-# Softmax cross-entropy from raw logits (a length-C vector) and a one-hot
-# target. Uses logsumexp for numerical stability.
-fn cross_entropy(logits, target) = logsumexp(logits, 0) - sum(logits * target)
-
-# Mean absolute error. Unlike mse the penalty grows linearly, so a single wild
-# label pulls the fit far less than it would under a squared error.
-fn mae(pred, target) = mean(abs(pred - target))
-
-# Huber loss: squared within delta of the target, linear outside it.
+# whose log is -inf and whose gradient is NaN. Subtracting logsumexp never forms
+# the small number in the first place.
 #
-# The point is to be mse where the model is nearly right and mae where it is
-# not, so outliers stop dominating the gradient without giving up the smooth
-# curvature near the optimum that makes the easy part converge quickly.
-fn huber(pred, target, delta) {
-  let e = abs(pred - target)
-  mean(where(less_equal(e, delta), 0.5 * square(e), delta * (e - 0.5 * delta)))
-}
-
-# Binary cross-entropy straight from logits, without forming the probability.
-#
-# `bce` above takes probabilities, which means something has already called
-# sigmoid, and for a logit of -50 that returns exactly 0 — whose log is -inf.
-# The epsilon in `bce` hides the infinity and leaves the gradient wrong. This
-# form never creates the small number: written as
-# max(x,0) - x*target + log(1 + exp(-|x|)), every term is finite for any input.
-fn bce_with_logits(logits, target) {
-  let stable = relu(logits) - logits * target + log(1.0 + exp(0.0 - abs(logits)))
-  mean(stable)
-}
-
-# Hinge loss for a target in {-1, +1}. Zero once the example is on the right
-# side of the margin, so correct and confident predictions stop contributing
-# gradient at all — which is what makes it a margin loss rather than a
-# probability one.
-fn hinge(pred, target) = mean(relu(1.0 - target * pred))
-
-# KL divergence from q to p, both probability vectors. Not symmetric: it
-# measures the cost of using q to describe data that is really p.
-fn kl_div(p, q) {
-  let eps = 0.0000001
-  sum(p * (log(p + eps) - log(q + eps)))
-}
+# The reduced logsumexp is put back at length 1 before it is subtracted.
+# Broadcasting aligns from the right, so reducing axis 0 of a [B, C] gives a [C]
+# that happens to line up, and reducing axis 1 gives a [B] that does not, the
+# same shape trap `keepdim` exists for, and here it would silently produce the
+# wrong normalisation on the axis anyone actually reduces.
+fn log_softmax(x, axis) = x - keepdim(logsumexp(x, axis), x, axis)
