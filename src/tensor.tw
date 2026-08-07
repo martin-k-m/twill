@@ -1,39 +1,83 @@
 mode systems
 
-# tensor.tw: the tensor value model and the autodiff tape, in twill.
+# tensor.tw: the tensor value model, every kernel, and reverse-mode autodiff,
+# in twill.
 #
-# PARTIAL. Read this before reading the file.
+# The original version of this file stopped at the shape algebra and deferred
+# the arithmetic to a native core reached through NEEDS-25. There is no native
+# core: everything is twill. So the kernels are here, written plainly, and the
+# gradient rule for each one is written next to it.
 #
-# docs/self-hosting.md section 2.2 draws a line: everything that reads twill
-# source is twill, everything that executes it is not. The tensor engine is on
-# the far side of that line. It wants SIMD, an allocator and control over
-# layout, and adding those to twill would mean designing a second, lower systems
-# subset with pointers, which section 1.2 deliberately refused.
+# Nothing here can execute yet. What is missing is listed in docs/needs.md, and
+# every entry this file adds names the function that reaches for it. The code is
+# written as though the language were finished, because the alternative is a
+# specification that drifts from the implementation it is supposed to describe.
 #
-# So what is in this file is the part the front end genuinely needs and can
-# express:
+# internal/tensor/*.go is the specification this was ported from. Where the Go
+# has a fast path that only changes cost, this has the slow path only, and a
+# comment saying where the fast path would go. Where the Go has a fast path that
+# changes an *answer* (the scalar-by-scalar shortcut in broadcastBinary is the
+# one), the answer is reproduced.
 #
-#   - the shape algebra: broadcasting, strides, index arithmetic, the rules
-#     `src/check.tw` checks statically and the runtime enforces dynamically;
-#   - the einsum spec parser, in full, because `src/check.tw` calls it and a
-#     second implementation of it would be a second set of error messages;
-#   - the shape of the autodiff tape, so the emitter knows what it is emitting.
+# ---- the interface src/eval.tw calls --------------------------------------
 #
-# What is not in this file is every elementwise kernel, the matmul inner loop,
-# the convolution, the reductions, the scan primitives, the parallel executor
-# and the gradient rules for each op. Those are the native core. The calling
-# convention that would let this file reach them does not exist yet and is
-# NEEDS-25; until it does, the arithmetic below that needs a kernel says so
-# rather than pretending.
+# This is the whole surface. Everything else in this file is internal and may
+# move. Every fallible entry point returns Res[_, Str] and the Str is the exact
+# message the bootstrap produces for the same mistake.
+#
+# Values and shapes:
+#   Tensor { shape: Arr[I64], data: Arr[F64] }
+#   rank, is_scalar, element_count, strides_of, shape_string, shape_equal
+#   scalar(x), filled(shape, v), zeros_like(t), clone(t)
+#   broadcast_shape(a, b), matmul_shape(a, b)
+#
+# Elementwise, on the Op enum below:
+#   binary(op, a, b)        -> Res[Tensor, Str]   add sub mul div mod
+#                                                 max min gt lt ge le eq
+#   unary(op, a)            -> Tensor            neg relu exp log sin cos
+#                                                 sqrt tanh sigmoid square
+#   pow_scalar(a, p)        -> Tensor
+#   clip(a, lo, hi)         -> Tensor
+#   where(cond, a, b)       -> Res[Tensor, Str]
+#
+# Linear algebra:
+#   matmul(a, b)            -> Res[Tensor, Str]
+#   einsum(spec, inputs)    -> Res[Tensor, Str]
+#
+# Reductions (axis may be negative; keepdims variants insert a 1):
+#   sum_all, mean_all, max_all, min_all, prod_all, median_all  -> Tensor
+#   sum_axis, mean_axis, max_axis, min_axis, prod_axis,
+#   median_axis, argmax_axis, argmin_axis, logsumexp_axis      -> Res[Tensor, Str]
+#   reduce_axis_keep(t, axis, op)                              -> Res[Tensor, Str]
+#   softmax(t, axis)                                           -> Res[Tensor, Str]
+#
+# Shape:
+#   reshape(t, shape), transpose(t, axes), broadcast_to(t, shape),
+#   concat(ts, axis), split(t, sizes, axis), split_equal(t, n, axis),
+#   index_axis0(t, i), slice_axis0(t, start, end), gather(t, idx),
+#   flip_axis(t, axis), sort_axis(t, axis, desc), argsort_axis(t, axis, desc),
+#   topk_axis(t, k, axis, largest), argtopk_axis(t, k, axis, largest)
+#
+# Autodiff. The tape is built by the caller; every op above has a taped twin
+# named `t_<op>` that takes node indices and returns a node index:
+#   new_tape(), leaf(tp, t), value_of(tp, node),
+#   t_binary, t_unary, t_pow_scalar, t_clip, t_where, t_matmul, t_einsum,
+#   t_sum_all, t_mean_all, ... (one per differentiable op)
+#   backward(tp, root, seed) -> Res[Arr[Tensor], Str]
+#
+# The split between `binary` and `t_binary` is deliberate. eval.tw does most of
+# its arithmetic with nothing differentiating, and a taped op that is never
+# differentiated still costs a tape entry that pins its output alive. The
+# bootstrap makes the same split with its RequiresGrad flag; this makes it with
+# two entry points, because twill has no mutable flag on a value type.
 
 import "bytes.tw" as bytes
 
 # ---- the value ------------------------------------------------------------
 
 # A tensor is a flat float64 buffer plus a shape. Row-major, always dense, never
-# strided: internal/tensor/tensor.go made that choice and every kernel in the
-# core depends on it, so a twill-side view type would be a lie about what the
-# core can accept.
+# strided: internal/tensor/tensor.go made that choice and every kernel below
+# depends on it, so a view type would be a lie about what the kernels accept.
 #
 # Rank 0 is a scalar and is a real tensor rather than a special case. That is
 # what lets `x + 1` broadcast with no rule for scalars, and it is why `shape` of
@@ -94,6 +138,190 @@ fn shape_equal(a: Arr[I64], b: Arr[I64]) -> Bool {
     i = i + 1
   }
   true
+}
+
+fn copy_shape(s: Arr[I64]) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(s) {
+    push(out, s[i])
+    i = i + 1
+  }
+  out
+}
+
+# Every kernel below allocates its own output rather than writing into one the
+# caller supplied. Nothing in this file hands out an alias, which is the
+# property that lets `split` copy instead of view and lets the tape hold a
+# tensor without fearing a later write to it.
+fn alloc(n: I64) -> Arr[F64] {
+  let d: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(d, 0.0)
+    i = i + 1
+  }
+  d
+}
+
+fn scalar(x: F64) -> Tensor {
+  let d: Arr[F64] = arr_new()
+  push(d, x)
+  Tensor { shape: arr_new(), data: d }
+}
+
+fn filled(shape: Arr[I64], v: F64) -> Tensor {
+  let n: I64 = element_count(shape)
+  let d: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(d, v)
+    i = i + 1
+  }
+  Tensor { shape: copy_shape(shape), data: d }
+}
+
+fn zeros_like(t: Tensor) -> Tensor = filled(t.shape, 0.0)
+
+fn clone(t: Tensor) -> Tensor {
+  let d: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(t.data) {
+    push(d, t.data[i])
+    i = i + 1
+  }
+  Tensor { shape: copy_shape(t.shape), data: d }
+}
+
+# ---- float helpers --------------------------------------------------------
+#
+# NEEDS-54 supplies the transcendentals. These wrappers exist so that there is
+# exactly one place to change when they land, and so the NaN and signed-zero
+# rules below are written once rather than at every use.
+
+# Go's math.Max propagates NaN and prefers +0 over -0; a bare `if x >= y` does
+# neither. Both matter: a NaN that silently becomes a number turns a diverged
+# training run into a plausible-looking one, and the sign of a zero is
+# observable through a later division.
+fn f64_max(x: F64, y: F64) -> F64 {
+  # x + y is NaN whenever either operand is, which is the cheapest way to
+  # produce a NaN without a NaN literal in the language.
+  if x != x or y != y { return x + y }
+  if x == 0.0 and y == 0.0 {
+    if f64_signbit(x) { return y }
+    return x
+  }
+  if x >= y { return x }
+  y
+}
+
+fn f64_min(x: F64, y: F64) -> F64 {
+  if x != x or y != y { return x + y }
+  if x == 0.0 and y == 0.0 {
+    if f64_signbit(x) { return x }
+    return y
+  }
+  if x <= y { return x }
+  y
+}
+
+# ---- op codes -------------------------------------------------------------
+#
+# One enum rather than one function per op. The Go side passes the forward and
+# derivative closures into broadcastBinary; twill has function values, but a
+# closure per op means the gradient rule for `mul` lives at the call site of a
+# generic helper, and the point of this file is that the gradient rules are
+# readable in one place.
+
+enum Op {
+  OpAdd,
+  OpSub,
+  OpMul,
+  OpDiv,
+  OpMod,
+  OpMaximum,
+  OpMinimum,
+  OpGreater,
+  OpLess,
+  OpGreaterEqual,
+  OpLessEqual,
+  OpEqual,
+
+  OpNeg,
+  OpRelu,
+  OpExp,
+  OpLog,
+  OpSin,
+  OpCos,
+  OpSqrt,
+  OpTanh,
+  OpSigmoid,
+  OpSquare,
+  OpPow,
+  OpClip,
+
+  OpSum,
+  OpMean,
+  OpMax,
+  OpMin,
+  OpProd,
+  OpMedian,
+  OpArgmax,
+  OpArgmin,
+  OpLogSumExp,
+  OpSoftmax,
+
+  OpWhere,
+  OpMatMul,
+  OpEinsum,
+  OpReshape,
+  OpTranspose,
+  OpBroadcastTo,
+  OpConcat,
+  OpSplit,
+  OpIndex0,
+  OpSlice0,
+  OpGather,
+  OpFlip,
+  OpSort,
+  OpTopK,
+
+  OpLeaf,
+  OpConst,
+}
+
+fn op_name(op: Op) -> Str {
+  match op {
+    OpAdd => "add", OpSub => "sub", OpMul => "mul", OpDiv => "div",
+    OpMod => "mod", OpMaximum => "maximum", OpMinimum => "minimum",
+    OpGreater => "greater", OpLess => "less", OpGreaterEqual => "greater_equal",
+    OpLessEqual => "less_equal", OpEqual => "equal",
+    OpNeg => "neg", OpRelu => "relu", OpExp => "exp", OpLog => "log",
+    OpSin => "sin", OpCos => "cos", OpSqrt => "sqrt", OpTanh => "tanh",
+    OpSigmoid => "sigmoid", OpSquare => "square", OpPow => "pow",
+    OpClip => "clip",
+    OpSum => "sum", OpMean => "mean", OpMax => "max", OpMin => "min",
+    OpProd => "prod", OpMedian => "median", OpArgmax => "argmax",
+    OpArgmin => "argmin", OpLogSumExp => "logsumexp", OpSoftmax => "softmax",
+    OpWhere => "where", OpMatMul => "matmul", OpEinsum => "einsum",
+    OpReshape => "reshape", OpTranspose => "transpose",
+    OpBroadcastTo => "broadcast_to", OpConcat => "concat", OpSplit => "split",
+    OpIndex0 => "index0", OpSlice0 => "slice0", OpGather => "gather",
+    OpFlip => "flip", OpSort => "sort", OpTopK => "topk",
+    OpLeaf => "leaf", OpConst => "const",
+  }
+}
+
+# A comparison produces 1 or 0 and has a zero derivative everywhere it is
+# defined, so it is recorded on the tape as a value with no gradient path rather
+# than left off it: leaving it off would make a downstream op's input index
+# dangle.
+fn is_comparison(op: Op) -> Bool {
+  match op {
+    OpGreater => true, OpLess => true, OpGreaterEqual => true,
+    OpLessEqual => true, OpEqual => true,
+    _ => false,
+  }
 }
 
 # ---- broadcasting ----------------------------------------------------------
@@ -160,6 +388,293 @@ fn broadcast_offset(from: Arr[I64], idx: Arr[I64]) -> I64 {
   off
 }
 
+# eff_strides gives, per axis of `out_shape`, how far to step in `in_shape`'s
+# flat buffer when that axis advances by one. Zero where the input broadcasts,
+# which is the same "read the same element again" rule as broadcast_offset,
+# expressed incrementally so the odometer below never divides.
+fn eff_strides(in_shape: Arr[I64], out_shape: Arr[I64]) -> Arr[I64] {
+  let r_in: I64 = len(in_shape)
+  let r_out: I64 = len(out_shape)
+  let real: Arr[I64] = strides_of(in_shape)
+  let eff: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < r_out {
+    push(eff, 0)
+    i = i + 1
+  }
+  i = 0
+  while i < r_out {
+    let j: I64 = r_out - 1 - i
+    if i < r_in and in_shape[r_in - 1 - i] != 1 {
+      eff[j] = real[r_in - 1 - i]
+    } else {
+      eff[j] = 0
+    }
+    i = i + 1
+  }
+  eff
+}
+
+# ---- the odometer ---------------------------------------------------------
+#
+# Several kernels walk one index space while tracking an offset into each of
+# several differently shaped buffers: broadcast binary ops, `where`,
+# `broadcast_to`, and einsum. They all want the same loop, so it is written once.
+#
+# `offs[k]` is the current flat offset into buffer k, advanced incrementally.
+# Recomputing it by division per element is what the Go version avoids and what
+# a naive port does; doing it once here means no kernel below gets it wrong
+# separately.
+
+struct Odometer {
+  dims: Arr[I64],
+  coord: Arr[I64],
+  # contrib[k][d] is how far offs[k] moves when axis d advances.
+  contrib: Arr[Arr[I64]],
+  offs: Arr[I64],
+}
+
+fn odo_new(dims: Arr[I64], contrib: Arr[Arr[I64]]) -> Odometer {
+  let coord: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(dims) {
+    push(coord, 0)
+    i = i + 1
+  }
+  let offs: Arr[I64] = arr_new()
+  i = 0
+  while i < len(contrib) {
+    push(offs, 0)
+    i = i + 1
+  }
+  Odometer { dims: dims, coord: coord, contrib: contrib, offs: offs }
+}
+
+fn odo_step(o: Odometer) {
+  let d: I64 = len(o.dims) - 1
+  while d >= 0 {
+    o.coord[d] = o.coord[d] + 1
+    let k: I64 = 0
+    while k < len(o.offs) {
+      o.offs[k] = o.offs[k] + o.contrib[k][d]
+      k = k + 1
+    }
+    if o.coord[d] < o.dims[d] { return }
+    # This axis wrapped: undo the whole axis and carry into the next one out.
+    o.coord[d] = 0
+    k = 0
+    while k < len(o.offs) {
+      o.offs[k] = o.offs[k] - o.contrib[k][d] * o.dims[d]
+      k = k + 1
+    }
+    d = d - 1
+  }
+}
+
+# ---- elementwise -----------------------------------------------------------
+
+fn apply_binary(op: Op, x: F64, y: F64) -> F64 {
+  match op {
+    OpAdd => x + y,
+    OpSub => x - y,
+    OpMul => x * y,
+    OpDiv => x / y,
+    # Go's Mod here is the floored modulo, not math.Mod's truncated one. They
+    # differ in sign for a negative operand, and the floored answer is the one
+    # `%` means everywhere else in twill.
+    OpMod => x - f64_floor(x / y) * y,
+    OpMaximum => f64_max(x, y),
+    OpMinimum => f64_min(x, y),
+    OpGreater => bool_to_f64(x > y),
+    OpLess => bool_to_f64(x < y),
+    OpGreaterEqual => bool_to_f64(x >= y),
+    OpLessEqual => bool_to_f64(x <= y),
+    OpEqual => bool_to_f64(x == y),
+    _ => abort(bytes.concat("apply_binary: not a binary op: ", op_name(op))),
+  }
+}
+
+fn bool_to_f64(b: Bool) -> F64 {
+  if b { return 1.0 }
+  0.0
+}
+
+# d(out)/dx at (x, y), with the forward result `o` available because several
+# rules are cheaper in terms of it.
+#
+# Every rule here is local: the value of the op at one pair of elements depends
+# on that pair alone, so the chain rule contributes `d * upstream` at that
+# element and nothing else. What makes broadcasting hard is not this function,
+# it is *where the contribution lands*, and that is handled in the backward pass.
+fn d_binary_a(op: Op, x: F64, y: F64, o: F64) -> F64 {
+  match op {
+    OpAdd => 1.0,
+    OpSub => 1.0,
+    # d(xy)/dx = y.
+    OpMul => y,
+    # d(x/y)/dx = 1/y.
+    OpDiv => 1.0 / y,
+    # floored mod is x - floor(x/y)*y; floor is locally constant, so this is 1
+    # away from the wrap points and undefined on them. The bootstrap answers 1
+    # there too rather than NaN, and matching it matters more than being right
+    # on a measure-zero set nobody differentiates through on purpose.
+    OpMod => 1.0,
+    # A tie goes to the left operand, matching Go's `x >= y`. Some libraries
+    # split the gradient in half on a tie; that is defensible and it is not what
+    # the bootstrap does, and a gradient that differs between implementations is
+    # worse than one that is arbitrary but fixed.
+    OpMaximum => bool_to_f64(x >= y),
+    OpMinimum => bool_to_f64(x <= y),
+    _ => 0.0,
+  }
+}
+
+fn d_binary_b(op: Op, x: F64, y: F64, o: F64) -> F64 {
+  match op {
+    OpAdd => 1.0,
+    OpSub => 0.0 - 1.0,
+    OpMul => x,
+    # d(x/y)/dy = -x/y^2.
+    OpDiv => (0.0 - x) / (y * y),
+    # d(x - floor(x/y)*y)/dy = -floor(x/y), again treating floor as constant.
+    OpMod => 0.0 - f64_floor(x / y),
+    OpMaximum => bool_to_f64(x < y),
+    OpMinimum => bool_to_f64(x > y),
+    _ => 0.0,
+  }
+}
+
+# binary is the forward kernel: broadcast `a` against `b` and apply `op`.
+#
+# The Go version has three fast paths (equal shapes, scalar on the right, scalar
+# on the left) and a scalar-by-scalar shortcut before all of them. Only the
+# shortcut is semantically visible, and only because it returns before the
+# broadcast is computed; since two rank-0 shapes always broadcast to rank 0, the
+# general path returns the same tensor. So none of the four is reproduced. If
+# this ever needs to be fast, the equal-shape path is the one worth having,
+# because it is the one training loops spend their time in.
+fn binary(op: Op, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
+  let shape: Arr[I64] = broadcast_shape(a.shape, b.shape)?
+  let n: I64 = element_count(shape)
+  let out: Arr[F64] = alloc(n)
+
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(a.shape, shape))
+  push(contrib, eff_strides(b.shape, shape))
+  let odo: Odometer = odo_new(shape, contrib)
+
+  let o: I64 = 0
+  while o < n {
+    out[o] = apply_binary(op, a.data[odo.offs[0]], b.data[odo.offs[1]])
+    odo_step(odo)
+    o = o + 1
+  }
+  Ok(Tensor { shape: shape, data: out })
+}
+
+fn apply_unary(op: Op, x: F64, p0: F64, p1: F64) -> F64 {
+  match op {
+    OpNeg => 0.0 - x,
+    OpRelu => { if x > 0.0 { x } else { 0.0 } },
+    OpExp => f64_exp(x),
+    OpLog => f64_log(x),
+    OpSin => f64_sin(x),
+    OpCos => f64_cos(x),
+    OpSqrt => f64_sqrt(x),
+    OpTanh => f64_tanh(x),
+    OpSigmoid => 1.0 / (1.0 + f64_exp(0.0 - x)),
+    OpSquare => x * x,
+    OpPow => f64_pow(x, p0),
+    OpClip => f64_min(f64_max(x, p0), p1),
+    _ => abort(bytes.concat("apply_unary: not a unary op: ", op_name(op))),
+  }
+}
+
+# The derivative of a unary op at x, given the forward result o. Written in
+# terms of o where that is both cheaper and more accurate: exp' is exp, and
+# sqrt' is 0.5/sqrt(x), which is 0.5/o and avoids a second square root.
+fn d_unary(op: Op, x: F64, o: F64, p0: F64, p1: F64) -> F64 {
+  match op {
+    OpNeg => 0.0 - 1.0,
+    # Zero at exactly 0. Not a subgradient choice made lightly: it is what makes
+    # a dead relu stay dead, and every framework picks it.
+    OpRelu => { if x > 0.0 { 1.0 } else { 0.0 } },
+    OpExp => o,
+    OpLog => 1.0 / x,
+    OpSin => f64_cos(x),
+    OpCos => 0.0 - f64_sin(x),
+    OpSqrt => 0.5 / o,
+    # 1 - tanh(x)^2, in terms of the result.
+    OpTanh => 1.0 - o * o,
+    # s(1 - s), in terms of the result.
+    OpSigmoid => o * (1.0 - o),
+    OpSquare => 2.0 * x,
+    OpPow => p0 * f64_pow(x, p0 - 1.0),
+    # The gradient passes through the interior only. On the clamp the output is
+    # constant in x, so it is genuinely zero, not a convenience.
+    OpClip => { if x > p0 and x < p1 { 1.0 } else { 0.0 } },
+    _ => 0.0,
+  }
+}
+
+fn unary_p(op: Op, a: Tensor, p0: F64, p1: F64) -> Tensor {
+  let n: I64 = len(a.data)
+  let out: Arr[F64] = alloc(n)
+  let i: I64 = 0
+  while i < n {
+    out[i] = apply_unary(op, a.data[i], p0, p1)
+    i = i + 1
+  }
+  Tensor { shape: copy_shape(a.shape), data: out }
+}
+
+fn unary(op: Op, a: Tensor) -> Tensor = unary_p(op, a, 0.0, 0.0)
+
+fn pow_scalar(a: Tensor, p: F64) -> Tensor = unary_p(OpPow, a, p, 0.0)
+
+fn clip(a: Tensor, lo: F64, hi: F64) -> Tensor = unary_p(OpClip, a, lo, hi)
+
+# where selects from `a` where `cond` is non-zero and from `b` otherwise, with
+# all three broadcast together. Not differentiable through `cond`: it is a
+# selector, and an infinitesimal change to it changes nothing until it crosses
+# zero, at which point the output jumps.
+fn where_broadcast(x: Arr[I64], y: Arr[I64]) -> Res[Arr[I64], Str] {
+  match broadcast_shape(x, y) {
+    Ok(s) => Ok(s),
+    Err(_) => Err(bytes.concat("where: cannot broadcast ",
+      bytes.concat(shape_string(x), bytes.concat(" with ", shape_string(y))))),
+  }
+}
+
+fn where3(cond: Tensor, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
+  # `where` reports its own message rather than letting broadcast_shape's
+  # through, because the bootstrap does and the two texts differ.
+  let s1: Arr[I64] = where_broadcast(cond.shape, a.shape)?
+  let shape: Arr[I64] = where_broadcast(s1, b.shape)?
+  let n: I64 = element_count(shape)
+  let out: Arr[F64] = alloc(n)
+
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(cond.shape, shape))
+  push(contrib, eff_strides(a.shape, shape))
+  push(contrib, eff_strides(b.shape, shape))
+  let odo: Odometer = odo_new(shape, contrib)
+
+  let o: I64 = 0
+  while o < n {
+    if cond.data[odo.offs[0]] != 0.0 {
+      out[o] = a.data[odo.offs[1]]
+    } else {
+      out[o] = b.data[odo.offs[2]]
+    }
+    odo_step(odo)
+    o = o + 1
+  }
+  Ok(Tensor { shape: shape, data: out })
+}
+
+# ---- matmul ----------------------------------------------------------------
+
 # The matmul shape rule, matching src/check.tw's matmul_result. A rank-1 operand
 # is promoted, on the left to a row and on the right to a column, and the
 # promoted axis is dropped again from the result.
@@ -201,250 +716,74 @@ fn matmul_shape(a: Arr[I64], b: Arr[I64]) -> Res[Arr[I64], Str] {
   Ok(out)
 }
 
-# ---- einsum ----------------------------------------------------------------
-#
-# Complete, and complete on purpose: src/check.tw calls parse_einsum to validate
-# a literal spec, and a second implementation of the parser would mean a second
-# set of error messages for the same mistake. Sharing it is the reason the
-# checker's einsum diagnostics read the same as the runtime's.
-
-struct EinsumSpec {
-  inputs: Arr[Str],
-  output: Str,
-}
-
-# parse_einsum parses a spec like "ij,jk->ik" for n inputs. Without an explicit
-# "->", the output is the labels that appear exactly once, in sorted order,
-# which is the NumPy implicit convention. Repeated labels within a single input
-# subscript, which would mean a trace or a diagonal, are not supported.
-fn parse_einsum(spec_in: Str, n: I64) -> Res[EinsumSpec, Str] {
-  let spec: Str = remove_spaces(spec_in)
-  let in_part: Str = spec
-  let out_sub: Str = ""
-  let explicit: Bool = false
-  let arrow: I64 = bytes.index_of(spec, "->")
-  if arrow >= 0 {
-    in_part = spec[0:arrow]
-    out_sub = spec[arrow + 2:len(spec)]
-    explicit = true
-  }
-  let in_subs: Arr[Str] = split_on(in_part, 44)
-  if len(in_subs) != n {
-    return Err(bytes.concat("einsum: spec has ", bytes.concat(str(len(in_subs)),
-      bytes.concat(" operands but got ", str(n)))))
-  }
-
-  # counts is label to occurrence count across all operands. It decides the
-  # implicit output and validates an explicit one, so it is built first.
-  let counts: Dict[Str, I64] = dict_new()
-  let k: I64 = 0
-  while k < len(in_subs) {
-    let sub: Str = in_subs[k]
-    let seen: Dict[Str, Bool] = dict_new()
-    let i: I64 = 0
-    while i < len(sub) {
-      let ch: Str = sub[i:i + 1]
-      if sub[i] < 97 or sub[i] > 122 {
-        return Err(bytes.concat("einsum: labels must be lowercase letters, found ", quoted(ch)))
-      }
-      if dict_has(seen, ch) {
-        return Err(bytes.concat("einsum: repeated label ", bytes.concat(quoted(ch),
-          " within one operand is not supported")))
-      }
-      dict_set(seen, ch, true)
-      dict_set(counts, ch, dict_or(counts, ch, 0) + 1)
-      i = i + 1
-    }
-    k = k + 1
-  }
-
-  if not explicit {
-    # A label that appears once is a free index and survives; one that appears
-    # twice or more is summed over. Sorted so the result does not depend on the
-    # order the labels happened to be written in, which is the property that
-    # makes the implicit form usable at all.
-    let once: Arr[Str] = arr_new()
-    for ch in dict_keys(counts) {
-      if dict_must(counts, ch) == 1 {
-        push(once, ch)
-      }
-    }
-    sort_labels(once)
-    out_sub = bytes.join(once, "")
-  }
-
-  let oseen: Dict[Str, Bool] = dict_new()
-  let i: I64 = 0
-  while i < len(out_sub) {
-    let ch: Str = out_sub[i:i + 1]
-    if dict_or(counts, ch, 0) == 0 {
-      return Err(bytes.concat("einsum: output label ", bytes.concat(quoted(ch),
-        " does not appear in the inputs")))
-    }
-    if dict_has(oseen, ch) {
-      return Err(bytes.concat("einsum: repeated output label ", quoted(ch)))
-    }
-    dict_set(oseen, ch, true)
-    i = i + 1
-  }
-  Ok(EinsumSpec { inputs: in_subs, output: out_sub })
-}
-
-# einsum_output_dims resolves the output shape from the input shapes. A
-# dimension may be -1 for unknown, which is how the checker calls it; at run
-# time every dimension is known and the inconsistency check below is exact.
-fn einsum_output_dims(in_subs: Arr[Str], out_sub: Str, input_dims: Arr[Arr[I64]]) -> Res[Arr[I64], Str] {
-  let label_dim: Dict[Str, I64] = dict_new()
-  let k: I64 = 0
-  while k < len(in_subs) {
-    let sub: Str = in_subs[k]
-    if len(sub) != len(input_dims[k]) {
-      return Err(bytes.concat("einsum: operand ", bytes.concat(str(k),
-        bytes.concat(" has rank ", bytes.concat(str(len(input_dims[k])),
-        bytes.concat(" but subscript ", bytes.concat(quoted(sub),
-        bytes.concat(" has ", bytes.concat(str(len(sub)), " labels")))))))))
-    }
-    let a: I64 = 0
-    while a < len(sub) {
-      let ch: Str = sub[a:a + 1]
-      let d: I64 = input_dims[k][a]
-      match dict_get(label_dim, ch) {
-        Some(prev) => {
-          if prev >= 0 and d >= 0 and prev != d {
-            return Err(bytes.concat("einsum: label ", bytes.concat(quoted(ch),
-              bytes.concat(" has inconsistent sizes ", bytes.concat(str(prev),
-              bytes.concat(" and ", str(d)))))))
-          }
-          # An unknown recorded earlier is replaced by a known size found later,
-          # so the order the operands are written in does not change the answer.
-          if prev < 0 {
-            dict_set(label_dim, ch, d)
-          }
-        },
-        None => dict_set(label_dim, ch, d),
-      }
-      a = a + 1
-    }
-    k = k + 1
-  }
+# The promoted 2-D shape of a matmul operand: [1, k] for a left vector, [k, 1]
+# for a right vector, unchanged for a matrix. The gradient rules need it, so it
+# is a function rather than three lines repeated in four places.
+fn matmul_promote(s: Arr[I64], is_left: Bool) -> Arr[I64] {
+  if len(s) != 1 { return s }
   let out: Arr[I64] = arr_new()
-  let i: I64 = 0
-  while i < len(out_sub) {
-    push(out, dict_or(label_dim, out_sub[i:i + 1], -1))
-    i = i + 1
-  }
-  Ok(out)
-}
-
-fn remove_spaces(s: Str) -> Str {
-  let b: Bytes = bytes.new()
-  let i: I64 = 0
-  while i < len(s) {
-    if s[i] != 32 {
-      bytes.push(b, s[i])
-    }
-    i = i + 1
-  }
-  bytes.to_str(b)
-}
-
-# Split on a single byte, keeping empty fields. Empty fields matter: "ij,,k" has
-# three operands and the count check has to see all three, or the error names
-# the wrong number.
-fn split_on(s: Str, sep: I64) -> Arr[Str] {
-  let out: Arr[Str] = arr_new()
-  let start: I64 = 0
-  let i: I64 = 0
-  while i <= len(s) {
-    if i == len(s) or s[i] == sep {
-      push(out, s[start:i])
-      start = i + 1
-    }
-    i = i + 1
+  if is_left {
+    push(out, 1)
+    push(out, s[0])
+  } else {
+    push(out, s[0])
+    push(out, 1)
   }
   out
 }
 
-# Single-byte labels, so a bytewise insertion sort is a full sort. Same shape as
-# the one in check.tw and kept separate rather than shared, because a module
-# that both the checker and the runtime depend on for a two-line sort is a
-# dependency edge that buys nothing.
-fn sort_labels(xs: Arr[Str]) {
-  let i: I64 = 1
-  while i < len(xs) {
-    let v: Str = xs[i]
-    let j: I64 = i - 1
-    while j >= 0 and xs[j][0] > v[0] {
-      xs[j + 1] = xs[j]
-      j = j - 1
+# The textbook triple loop, over flat buffers, with the k loop outside the j
+# loop so the innermost access is contiguous in both b and c. Nothing else about
+# it is tuned: no blocking, no transposed copy, no parallel split. Those go here
+# and only here, because every other use of matmul below goes through this.
+fn mm(a: Arr[F64], m: I64, k: I64, b: Arr[F64], n: I64) -> Arr[F64] {
+  let c: Arr[F64] = alloc(m * n)
+  let i: I64 = 0
+  while i < m {
+    let p: I64 = 0
+    while p < k {
+      let aip: F64 = a[i * k + p]
+      # Skipping zeros is in the Go version and is kept, not for speed but
+      # because it is load-bearing for one case: a zero times an infinity is
+      # NaN, and a sparse matrix multiplied by a buffer holding an infinity
+      # would otherwise poison the whole row.
+      if aip != 0.0 {
+        let b_row: I64 = p * n
+        let c_row: I64 = i * n
+        let j: I64 = 0
+        while j < n {
+          c[c_row + j] = c[c_row + j] + aip * b[b_row + j]
+          j = j + 1
+        }
+      }
+      p = p + 1
     }
-    xs[j + 1] = v
     i = i + 1
   }
+  c
 }
 
-fn quoted(s: Str) -> Str = str_quote(s)
-
-# ---- autodiff --------------------------------------------------------------
-#
-# PARTIAL. The tape's shape is here because the emitter needs to know what it is
-# emitting; the gradient rules are not, because each one is a kernel.
-#
-# internal/tensor is reverse-mode over a taped graph: a forward pass records
-# each op with its inputs and its output, and the backward pass walks the tape
-# in reverse accumulating cotangents. That is the design this describes, and it
-# is the design the native core implements.
-
-# One recorded operation. `op` names the primitive, `inputs` are indices of
-# earlier tape entries or of leaves, and `out` is the value produced.
-#
-# Indices rather than handles: the tape is walked in reverse and an index is
-# comparable and printable, which makes a miscompiled tape debuggable. It also
-# keeps the tape a flat Arr, which is the only shape a bytecode emitter can
-# serialise without inventing a graph format.
-struct TapeEntry {
-  op: Str,
-  inputs: Arr[I64],
-  out: Tensor,
+fn transpose2d(a: Arr[F64], rows: I64, cols: I64) -> Arr[F64] {
+  let t: Arr[F64] = alloc(rows * cols)
+  let i: I64 = 0
+  while i < rows {
+    let j: I64 = 0
+    while j < cols {
+      t[j * rows + i] = a[i * cols + j]
+      j = j + 1
+    }
+    i = i + 1
+  }
+  t
 }
 
-struct Tape {
-  entries: Arr[TapeEntry],
-  # Leaves are the values gradients are taken with respect to, in the order the
-  # caller named them, because `grads(loss)(W, b)` returns a list in that order
-  # and the order is part of the contract.
-  leaves: Arr[Tensor],
+fn matmul(a: Tensor, b: Tensor) -> Res[Tensor, Str] {
+  let out_shape: Arr[I64] = matmul_shape(a.shape, b.shape)?
+  let a2: Arr[I64] = matmul_promote(a.shape, true)
+  let b2: Arr[I64] = matmul_promote(b.shape, false)
+  let data: Arr[F64] = mm(a.data, a2[0], a2[1], b.data, b2[1])
+  # The buffer is m*n either way; only the shape records that a promoted axis
+  # was dropped. That is why the backward pass can treat the incoming cotangent
+  # as flat regardless of the result's rank.
+  Ok(Tensor { shape: out_shape, data: data })
 }
-
-fn new_tape() -> Tape = Tape { entries: arr_new(), leaves: arr_new() }
-
-fn record(tp: Tape, op: Str, inputs: Arr[I64], out: Tensor) -> I64 {
-  push(tp.entries, TapeEntry { op: op, inputs: inputs, out: out })
-  len(tp.entries) - 1
-}
-
-# The backward pass, in outline. It is written out rather than left implicit
-# because the shape of the loop is the part the emitter has to reproduce, and it
-# is the part that is the same for every op.
-#
-# Not implemented: `vjp`, which is the per-op gradient rule and is one kernel
-# per primitive. That is NEEDS-25 and it is the whole of the missing half.
-#
-#   fn backward(tp: Tape, seed: Tensor) -> Arr[Tensor] {
-#     cotangents[last] = seed
-#     for i in reverse(range(len(tp.entries))) {
-#       let e = tp.entries[i]
-#       let g = cotangents[i]
-#       if g is unset { continue }        # this output did not reach the result
-#       for (k, contrib) in vjp(e.op, e.inputs, e.out, g) {
-#         cotangents[k] = accumulate(cotangents[k], contrib)
-#       }
-#     }
-#     collect the cotangents of the leaves, in leaf order
-#   }
-#
-# Two details in there are not obvious and are the ones a reimplementation gets
-# wrong. The skip on an unset cotangent is what keeps a dead branch of the graph
-# from costing a full backward pass. And `accumulate` adds rather than assigns,
-# because a value used twice receives a contribution from each use, and
-# assigning would silently drop one of them.
