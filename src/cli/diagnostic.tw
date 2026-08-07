@@ -1,0 +1,176 @@
+# diagnostic.tw - errors, warnings, and the shape mismatch.
+#
+# A diagnostic answers four questions in this order, because that is the order a
+# person asks them: what went wrong, where, what does the code look like there,
+# and what should I do. Anything that does not answer one of those is cut.
+#
+# Colour does one job here and it is not decoration: it points. The offending
+# span is coloured, the caret under it is coloured, and everything else is left
+# alone. A diagnostic where five things are coloured is a diagnostic where the
+# user has to work out which colour meant "here", and by then they have lost
+# more time than the colour saved.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/width" as w
+import "src/cli/theme" as th
+
+let SEV_ERROR: I64 = 0
+let SEV_WARNING: I64 = 1
+let SEV_NOTE: I64 = 2
+
+struct Span {
+  file: Str,
+  line: I64,        # 1-based
+  col: I64,         # 1-based, in bytes
+  len: I64,         # bytes covered, at least 1
+  text: Str,        # the source line itself, without its newline
+}
+
+struct Diagnostic {
+  severity: I64,
+  code: Str,        # "E0412", or "" when the class has no code yet
+  title: Str,       # one line, lower case, no trailing full stop
+  span: Span,
+  explain: Str,     # the paragraph under the caret, may be empty
+  help: Str,        # the concrete change to make, may be empty
+}
+
+let TAB: I64 = 8
+
+# ── The frame ───────────────────────────────────────────────────────────────
+
+fn render(c: cp.Caps, d: Diagnostic) -> Str {
+  header(c, d) + location(c, d.span) + source_block(c, d.span, sev_style(c, d.severity)) +
+    explanation(c, d) + "\n"
+}
+
+# `error[E0412]: shapes do not match`. The severity word carries the colour and
+# the title does not, so the title reads at the same weight as ordinary prose,
+# which is what it is.
+fn header(c: cp.Caps, d: Diagnostic) -> Str {
+  let word = sev_word(d.severity)
+  let tag = if d.code == "" { word } else { word + "[" + d.code + "]" }
+  ansi.paint(c, sev_style(c, d.severity), tag) +
+    ansi.paint(c, th.emphasis(), ": " + d.title) + "\n"
+}
+
+# The location line, indented under the header and introduced by an arrow so the
+# eye can find it in a wall of diagnostics. Hyperlinked where the terminal
+# supports it, and the label already contains the path, so nothing is lost when
+# it does not.
+fn location(c: cp.Caps, s: Span) -> Str {
+  let label = s.file + ":" + str(s.line) + ":" + str(s.col)
+  let url = "file://" + abs_path(s.file) + "#" + str(s.line)
+  "  " + ansi.paint(c, th.rule(), arrow(c)) + " " +
+    ansi.paint(c, th.muted(), ansi.link(c, url, label)) + "\n"
+}
+
+fn arrow(c: cp.Caps) -> Str = if c.unicode { "╭─" } else { "-->" }
+
+# ── The source line and its caret ───────────────────────────────────────────
+
+# Gutter width follows the line number, so a diagnostic at line 7 is not
+# indented as far as one at line 12000. The alternative, a fixed gutter, wastes
+# four columns of a narrow terminal on every diagnostic in every small file.
+fn gutter_width(line: I64) -> I64 = len(str(line))
+
+fn source_block(c: cp.Caps, s: Span, mark: ansi.Style) -> Str {
+  let gw = gutter_width(s.line)
+  let pipe = ansi.paint(c, th.rule(), if c.unicode { "│" } else { "|" })
+  let blank = "  " + w.spaces(gw) + " " + pipe + "\n"
+  blank +
+    "  " + ansi.paint(c, th.rule(), str(s.line)) + " " + pipe + " " + highlighted(c, s, mark) + "\n" +
+    "  " + w.spaces(gw) + " " + pipe + " " + caret_line(c, s, mark) + "\n"
+}
+
+# The source line with the offending span painted, and only the offending span.
+# Tabs are expanded first so that the line and the caret below it are measured
+# under the same rule; leaving the tab in and computing around it works until
+# someone's terminal has a tab stop that is not eight.
+fn highlighted(c: cp.Caps, s: Span, mark: ansi.Style) -> Str {
+  let line = w.expand_tabs(s.text, TAB)
+  let start = w.cells_before(s.text, s.col - 1, TAB)
+  let end = w.cells_before(s.text, s.col - 1 + span_len(s), TAB)
+  let before = cell_slice(line, 0, start)
+  let mid = cell_slice(line, start, end)
+  let after = cell_slice(line, end, w.display_width(line))
+  ansi.paint(c, th.code(), before) + ansi.paint(c, mark, mid) + ansi.paint(c, th.code(), after)
+}
+
+# A run of carets exactly as wide as the span, never a single caret under a
+# multi-character token. The width of the underline is information: it is how
+# the reader knows whether the compiler blamed the operator or the whole
+# expression, and a one-character caret throws that away.
+fn caret_line(c: cp.Caps, s: Span, mark: ansi.Style) -> Str {
+  let start = w.cells_before(s.text, s.col - 1, TAB)
+  let end = w.cells_before(s.text, s.col - 1 + span_len(s), TAB)
+  let n = if end - start < 1 { 1 } else { end - start }
+  w.spaces(start) + ansi.paint(c, mark, w.repeat(caret_glyph(c), n))
+}
+
+# A heavy underline rather than a circumflex where unicode allows. It sits on
+# the baseline under the token instead of floating below it, which makes the
+# association unambiguous when two diagnostics are stacked.
+fn caret_glyph(c: cp.Caps) -> Str = if c.unicode { "━" } else { "^" }
+
+fn span_len(s: Span) -> I64 = if s.len < 1 { 1 } else { s.len }
+
+# Slice by display cell rather than byte, for text already known to be free of
+# escapes (the source line is user code, not styled output).
+fn cell_slice(line: Str, from_cell: I64, to_cell: I64) -> Str {
+  let out: Str = ""
+  let cell: I64 = 0
+  let i: I64 = 0
+  while i < len(line) {
+    let cpv = w.decode_at(line, i)
+    let cw = w.cell_width(cpv.value)
+    if cell >= from_cell && cell < to_cell { out = out + slice(line, i, i + cpv.size) }
+    cell = cell + cw
+    i = i + cpv.size
+  }
+  out
+}
+
+# ── The prose ───────────────────────────────────────────────────────────────
+
+# Explanation and help, wrapped and indented to line up under the source rather
+# than under the header. Help is separated by its own label because it is the
+# only part the reader can act on, and burying an actionable sentence at the end
+# of a paragraph is how it gets skipped.
+fn explanation(c: cp.Caps, d: Diagnostic) -> Str {
+  let width = cp.text_width(c)
+  let out: Str = ""
+  if d.explain != "" {
+    out = out + block(c, "", d.explain, width, th.body())
+  }
+  if d.help != "" {
+    out = out + block(c, ansi.paint(c, th.success(), "help: "), d.help, width, th.body())
+  }
+  out
+}
+
+fn block(c: cp.Caps, label: Str, text: Str, width: I64, st: ansi.Style) -> Str {
+  let indent = w.spaces(6 + w.display_width(label))
+  let lines = w.wrap(text, width - 6, indent)
+  let out: Str = ""
+  let i: I64 = 0
+  while i < len(lines) {
+    let head = if i == 0 { "      " + label } else { "" }
+    out = out + head + ansi.paint(c, st, lines[i]) + "\n"
+    i = i + 1
+  }
+  out
+}
+
+fn sev_word(s: I64) -> Str {
+  if s == SEV_ERROR { "error" } else if s == SEV_WARNING { "warning" } else { "note" }
+}
+
+fn sev_style(c: cp.Caps, s: I64) -> ansi.Style {
+  if s == SEV_ERROR { th.error() } else if s == SEV_WARNING { th.warning() } else { th.rule() }
+}
+
+fn abs_path(p: Str) -> Str = p

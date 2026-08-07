@@ -1,0 +1,207 @@
+# progress.tw - the determinate bar, for compilation and training loops.
+#
+# A progress bar is worth having only when the total is known and the wait is
+# long enough to plan around. When either is false, use the spinner. A bar that
+# jumps from 0 to 100 in one repaint has told the user nothing and cost them a
+# line of scrollback.
+#
+# What the bar is actually for is the estimate, not the fill. Someone watching a
+# 400-epoch training run wants to know whether to wait or go and do something
+# else, and the fill alone never answers that. So the rate and the remaining
+# time are given equal weight with the bar, not tucked behind it.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/frame" as fr
+import "src/term/width" as w
+import "src/cli/theme" as th
+
+struct Progress {
+  frame: fr.Frame,
+  caps: cp.Caps,
+  label: Str,
+  unit: Str,          # "epochs", "files", "steps"
+  total: I64,
+  done: I64,
+  start_ms: I64,
+  last_ms: I64,
+  # A smoothed rate. The instantaneous rate of a training loop swings by an
+  # order of magnitude between steps, and an estimate computed from it flickers
+  # between "12s" and "4m" twice a second, which is worse than showing nothing.
+  rate_x1000: I64,
+  # Percentage last reported on the non-interactive path, so the milestone log
+  # emits each decade once.
+  logged_decade: I64,
+}
+
+# Exponential smoothing weight, in thousandths. 0.15 is slow enough to be steady
+# through a stall and fast enough to catch a genuine change of pace within a
+# few seconds.
+let SMOOTH: I64 = 150
+
+fn new(c: cp.Caps, label: Str, unit: Str, total: I64, now_ms: I64) -> Progress = Progress {
+  frame: fr.new(c),
+  caps: c,
+  label: label,
+  unit: unit,
+  total: total,
+  done: 0,
+  start_ms: now_ms,
+  last_ms: now_ms,
+  rate_x1000: 0,
+  logged_decade: 0 - 1,
+}
+
+# Advance by `n` and return what to write. Safe to call every iteration: the
+# frame's own rate limit decides whether anything is rendered, so the cost in a
+# tight loop is an add and a compare.
+fn advance(p: Progress, n: I64, now_ms: I64) -> Str {
+  p.done = p.done + n
+  if p.done > p.total { p.done = p.total }
+  update_rate(p, n, now_ms)
+  if !p.frame.live { milestone(p) }
+  else if !fr.due(p.frame, now_ms) { "" }
+  else {
+    let prefix = if p.frame.open { "" } else { fr.open(p.frame) }
+    prefix + fr.paint(p.frame, body(p, now_ms), now_ms)
+  }
+}
+
+fn update_rate(p: Progress, n: I64, now_ms: I64) {
+  let dt = now_ms - p.last_ms
+  # Under a millisecond the division is meaningless and the sample is dropped
+  # rather than clamped, which would bias the average upward on fast steps.
+  if dt > 0 {
+    let inst = n * 1000000 / dt                       # units per second, x1000
+    if p.rate_x1000 == 0 { p.rate_x1000 = inst }
+    else { p.rate_x1000 = p.rate_x1000 + (inst - p.rate_x1000) * SMOOTH / 1000 }
+    p.last_ms = now_ms
+  }
+}
+
+# ── Rendering ───────────────────────────────────────────────────────────────
+
+fn body(p: Progress, now_ms: I64) -> Str {
+  let stats = " " + counts(p) + "  " + ansi.paint(p.caps, th.muted(), rate_text(p) + eta_text(p, now_ms))
+  # The bar takes whatever is left after the label and the numbers, floored so
+  # that a narrow terminal drops the bar rather than squeezing it into three
+  # cells of noise.
+  let fixed = w.display_width(p.label) + w.display_width(stats) + 6
+  let barw = p.caps.width - fixed
+  if barw < 12 { "  " + p.label + stats }
+  else { "  " + p.label + "  " + bar(p, barw) + stats }
+}
+
+# The fill uses one-eighth blocks so the bar advances smoothly rather than in
+# whole cells. On a 40-cell bar that is 320 distinct states, which is why the
+# bar reads as moving continuously even though it repaints thirty times a
+# second.
+fn bar(p: Progress, cells: I64) -> Str {
+  let eighths = if p.total <= 0 { 0 } else { p.done * cells * 8 / p.total }
+  let full = eighths / 8
+  let part = eighths % 8
+  let out: Str = ""
+  let i: I64 = 0
+  while i < full {
+    out = out + ansi.paint_fg(p.caps, th.fill_ramp(i, cells), block(p.caps, 8))
+    i = i + 1
+  }
+  if part > 0 && full < cells {
+    out = out + ansi.paint_fg(p.caps, th.fill_ramp(full, cells), block(p.caps, part))
+    i = full + 1
+  }
+  # The empty track is drawn, not left blank. A bar with no track has no visible
+  # end, so a 90% bar and a 100% bar look the same until the very last cell.
+  let track = w.repeat(track_glyph(p.caps), cells - i)
+  out + ansi.paint(p.caps, th.rule(), track)
+}
+
+fn block(c: cp.Caps, eighths: I64) -> Str {
+  if !c.unicode { "#" }
+  else if eighths >= 8 { "█" }
+  else if eighths == 7 { "▉" }
+  else if eighths == 6 { "▊" }
+  else if eighths == 5 { "▋" }
+  else if eighths == 4 { "▌" }
+  else if eighths == 3 { "▍" }
+  else if eighths == 2 { "▎" }
+  else { "▏" }
+}
+
+fn track_glyph(c: cp.Caps) -> Str = if c.unicode { "─" } else { "." }
+
+# Right-aligned against the total's own width, so the counter does not shift the
+# text after it as the numbers grow. A jittering line is the fastest way to make
+# a careful layout look careless.
+fn counts(p: Progress) -> Str {
+  let t = str(p.total)
+  ansi.paint(p.caps, th.emphasis(), w.pad_left(str(p.done), len(t))) +
+    ansi.paint(p.caps, th.muted(), "/" + t)
+}
+
+fn rate_text(p: Progress) -> Str {
+  if p.rate_x1000 <= 0 { "" }
+  else {
+    let r = p.rate_x1000 / 1000
+    # Below one a second, invert it: "1.4s/epoch" is how a person thinks about a
+    # slow training loop, and "0.7 epochs/s" is the same fact made harder.
+    if r < 1 { "  " + fmt_thousandths(1000000 / p.rate_x1000) + "s/" + singular(p.unit) }
+    else { "  " + str(r) + " " + p.unit + "/s" }
+  }
+}
+
+fn eta_text(p: Progress, now_ms: I64) -> Str {
+  let left = p.total - p.done
+  if left <= 0 { "" }
+  # No estimate until the rate has settled. A number that is wrong by a factor
+  # of ten in the first second teaches people to ignore the number.
+  else if p.rate_x1000 <= 0 || now_ms - p.start_ms < 1500 { "" }
+  else { "  " + fmt_secs(left * 1000 / p.rate_x1000) + " left" }
+}
+
+# ── Ending ──────────────────────────────────────────────────────────────────
+
+# Leave the completed bar on screen. Unlike a spinner, a finished bar carries
+# the total and the elapsed time, which is worth keeping in the scrollback.
+fn finish(p: Progress, now_ms: I64) -> Str {
+  let took = fmt_secs((now_ms - p.start_ms) / 1000)
+  let line = "  " + ansi.paint(p.caps, th.success(), th.mark_ok(p.caps)) + "  " + p.label +
+    "  " + ansi.paint(p.caps, th.muted(), str(p.total) + " " + p.unit + " in " + took)
+  if !p.frame.live { line + "\n" }
+  else { fr.paint(p.frame, line, now_ms) + fr.close(p.frame, true) }
+}
+
+# ── The non-interactive path ────────────────────────────────────────────────
+
+# Piped or redirected, the bar becomes one line per ten percent. Not per step,
+# which would bury the build log under ten thousand lines, and not nothing,
+# because a CI job that has printed nothing for six minutes is indistinguishable
+# from one that has hung.
+fn milestone(p: Progress) -> Str {
+  if p.total <= 0 { "" }
+  else {
+    let d = p.done * 10 / p.total
+    if d <= p.logged_decade { "" }
+    else {
+      p.logged_decade = d
+      p.label + ": " + str(d * 10) + "% (" + str(p.done) + "/" + str(p.total) + ")\n"
+    }
+  }
+}
+
+# ── Formatting ──────────────────────────────────────────────────────────────
+
+fn fmt_secs(s: I64) -> Str {
+  if s < 60 { str(s) + "s" }
+  else if s < 3600 { str(s / 60) + "m " + str(s % 60) + "s" }
+  else { str(s / 3600) + "h " + str(s % 3600 / 60) + "m" }
+}
+
+fn fmt_thousandths(v: I64) -> Str = str(v / 1000) + "." + str(v % 1000 / 100)
+
+fn singular(unit: Str) -> Str {
+  let n = len(unit)
+  if n > 1 && unit[n - 1] == 115 { slice(unit, 0, n - 1) } else { unit }
+}

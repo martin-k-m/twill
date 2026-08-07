@@ -1,0 +1,147 @@
+# spinner.tw - the indeterminate indicator.
+#
+# Two decisions worth defending, because a spinner is where CLI design usually
+# goes wrong.
+#
+# The glyph is a rotating line, not dots. The mark is a ribbon; a ribbon turning
+# on its long axis is seen edge-on as a line whose angle sweeps, and that is a
+# four-frame animation that is exactly the brand and costs nothing to read. The
+# braille dot spinner everyone uses is a wheel, and a wheel means nothing here.
+#
+# It is slow. 120ms a frame, so the line turns a half circle a second. Fast
+# spinners read as panic, and a tool that panics at you while it compiles is
+# tiring by the tenth run. The liveness that a fast spinner is reaching for is
+# carried instead by the shimmer travelling along the label, which is a much
+# quieter signal because it moves without flashing.
+#
+# And the rule above both: this only ever appears in front of work that takes
+# time. An operation that finishes in 40ms prints its result. A spinner that
+# appears and vanishes within one frame is worse than no spinner, because the
+# eye catches the flash and has nothing to attach it to.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/color" as col
+import "src/term/frame" as fr
+import "src/term/width" as w
+import "src/cli/theme" as th
+
+let FRAME_MS: I64 = 120
+
+# Below this, do not start. Chosen just above the threshold where a person
+# registers a delay: under it they read the result as instant and the spinner as
+# a glitch.
+let MIN_DELAY_MS: I64 = 90
+
+struct Spinner {
+  frame: fr.Frame,
+  caps: cp.Caps,
+  label: Str,
+  start_ms: I64,
+  shown: Bool,      # the first frame has been painted
+  tick: I64,
+}
+
+fn new(c: cp.Caps, label: Str, now_ms: I64) -> Spinner = Spinner {
+  frame: fr.new(c),
+  caps: c,
+  label: label,
+  start_ms: now_ms,
+  shown: false,
+  tick: 0,
+}
+
+# The rotation. A half turn of four steps, which is a full cycle of a line: the
+# other half is indistinguishable from the first, so animating it would double
+# the period for no visible difference.
+fn glyphs(c: cp.Caps) -> Arr[Str] {
+  if c.unicode { arr("│", "╱", "─", "╲") } else { arr("|", "/", "-", "\\") }
+}
+
+# Called from inside the work. Returns what to write, usually nothing.
+fn step(s: Spinner, now_ms: I64) -> Str {
+  # The delay gate. Held until the work has proven itself slow, so a fast path
+  # through a command produces no animation at all and no cursor games.
+  if !s.shown && now_ms - s.start_ms < MIN_DELAY_MS { "" }
+  else if !fr.due(s.frame, now_ms) && s.shown { "" }
+  else {
+    let prefix = if s.shown { "" } else { fr.open(s.frame) }
+    s.shown = true
+    s.tick = (now_ms - s.start_ms) / FRAME_MS
+    prefix + fr.paint(s.frame, body(s), now_ms)
+  }
+}
+
+fn body(s: Spinner) -> Str {
+  let g = glyphs(s.caps)
+  let mark = ansi.paint_fg(s.caps, th.accent(), g[s.tick % len(g)])
+  "  " + mark + "  " + shimmer(s.caps, s.label, s.tick)
+}
+
+# ── The shimmer ─────────────────────────────────────────────────────────────
+
+# A soft highlight travelling left to right along the label, wrapping round with
+# a pause. It is the ribbon catching the light, and it is the part that makes
+# the tool feel alive without anything blinking, because no character ever
+# changes and no character ever goes dark: only the hue moves.
+#
+# It needs per-character colour, so it is the one effect that genuinely requires
+# truecolor. At 256 colours the band would quantise into visible steps and read
+# as a defect, so below truecolor the label is simply mint.
+fn shimmer(c: cp.Caps, label: Str, tick: I64) -> Str {
+  if c.level < cp.LEVEL_TRUECOLOR { ansi.paint(c, th.body(), label) }
+  else {
+    let n = len(label)
+    # The travel is longer than the label so there is a beat of stillness
+    # between passes. A shimmer with no rest is a strobe.
+    let period = n + 12
+    let head = tick % period
+    let out: Str = ""
+    let i: I64 = 0
+    while i < n {
+      out = out + ansi.paint_fg(c, shimmer_colour(i, head), slice(label, i, i + 1))
+      i = i + 1
+    }
+    out
+  }
+}
+
+# Distance from the highlight's head decides how far along the mint-to-pale ramp
+# a character sits. A four-character falloff: wide enough to be a gradient, tight
+# enough that most of the label is at rest at any moment.
+fn shimmer_colour(i: I64, head: I64) -> col.Rgb {
+  let d = if i > head { i - head } else { head - i }
+  if d >= 4 { th.mint() }
+  else { col.lerp(th.pale(), th.mint(), d * 250) }
+}
+
+# ── Ending ──────────────────────────────────────────────────────────────────
+
+# Replace the spinner with its outcome, on the same line it occupied. The
+# spinner itself is discarded: "was loading" is not information, but "took 2.3s"
+# sometimes is, so the elapsed time survives when it was long enough to care
+# about.
+fn done(s: Spinner, c: cp.Caps, message: Str, now_ms: I64) -> Str {
+  let took = now_ms - s.start_ms
+  let tail = if took >= 1000 { "  " + ansi.paint(c, th.muted(), fmt_ms(took)) } else { "" }
+  let line = "  " + ansi.paint(c, th.success(), th.mark_ok(c)) + "  " + message + tail
+  fr.paint(s.frame, line, now_ms) + fr.close(s.frame, true) + non_tty(s, line)
+}
+
+fn failed(s: Spinner, c: cp.Caps, message: Str, now_ms: I64) -> Str {
+  let line = "  " + ansi.paint(c, th.error(), th.mark_err(c)) + "  " + message
+  fr.paint(s.frame, line, now_ms) + fr.close(s.frame, true) + non_tty(s, line)
+}
+
+# Without a tty the frame swallows every paint, so the outcome line is written
+# here instead. This is the whole non-interactive experience: no spinner, no
+# repainting, one line per completed step, which is what a CI log should be.
+fn non_tty(s: Spinner, line: Str) -> Str = if s.frame.live { "" } else { line + "\n" }
+
+fn fmt_ms(ms: I64) -> Str {
+  if ms < 1000 { str(ms) + "ms" }
+  else if ms < 60000 { str(ms / 1000) + "." + str(ms % 1000 / 100) + "s" }
+  else { str(ms / 60000) + "m" + str(ms % 60000 / 1000) + "s" }
+}

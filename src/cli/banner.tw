@@ -1,0 +1,145 @@
+# banner.tw - the ribbon mark, drawn rather than pasted.
+#
+# The mark is a twisted ribbon, so it is computed from the twist instead of
+# being stored as a block of glyphs someone once typed. Two edges swing past
+# each other and the band between them is filled; where they cross, the ribbon
+# is edge-on and narrows to nothing. That is the whole shape, in one equation,
+# and it means the mark can be redrawn at another size without redrawing it by
+# hand.
+#
+# It is printed on exactly two occasions: a bare `twill`, and `twill --help`.
+# Not on `twill build`, not on `twill run`, and never on a command whose output
+# might be piped. A banner on a command someone runs a hundred times a day is
+# the single most common way a good-looking CLI becomes an irritating one.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/color" as col
+import "src/term/width" as w
+import "src/cli/theme" as th
+
+# Dots, not cells. Braille packs 2 across and 4 down into one cell, so this is a
+# 12-by-2 cell mark: small enough to sit on two lines beside the version, which
+# is the size constraint that set every number here.
+let DOT_W: I64 = 24
+let DOT_H: I64 = 8
+
+# ── The shape ───────────────────────────────────────────────────────────────
+
+# Vertical position of the ribbon's two edges at horizontal position `x`, in
+# dot rows. One full period across the mark, which puts two crossings inside it:
+# enough to read as a twist, few enough that at this size it stays a ribbon
+# rather than turning into a zigzag.
+fn edge_offset(x: I64) -> F64 {
+  let t = 6.283185307 * f64(x) / f64(DOT_W)
+  # 2.6 dot rows of amplitude against a 8-row field leaves a row of air top and
+  # bottom, so the mark never touches the text above it.
+  2.6 * cos(t)
+}
+
+fn mid_row() -> F64 = f64(DOT_H - 1) / 2.0
+
+# True when dot (x, y) is inside the band between the two edges.
+fn ribbon_hit(x: I64, y: I64) -> Bool {
+  let a = mid_row() - edge_offset(x)
+  let b = mid_row() + edge_offset(x)
+  let lo = if a < b { a } else { b }
+  let hi = if a < b { b } else { a }
+  let fy = f64(y)
+  # Half a dot of tolerance keeps the band continuous through the crossings,
+  # where its true thickness falls below one dot and it would otherwise break
+  # into two disconnected halves.
+  fy >= lo - 0.5 && fy <= hi + 0.5
+}
+
+# ── Braille packing ─────────────────────────────────────────────────────────
+
+# Bit for the dot at (col, row) within a cell, in the 8-dot braille layout where
+# the fourth row was bolted on later and so is not contiguous with the first
+# three.
+fn dot_bit(c: I64, r: I64) -> I64 {
+  if c == 0 {
+    if r == 0 { 1 } else if r == 1 { 2 } else if r == 2 { 4 } else { 64 }
+  } else {
+    if r == 0 { 8 } else if r == 1 { 16 } else if r == 2 { 32 } else { 128 }
+  }
+}
+
+# U+2800 + mask, encoded by hand. The block is entirely within the three-byte
+# range, so the encoding is a constant lead byte and two computed ones, and
+# doing it here avoids needing a codepoint-to-string builtin for one use.
+fn braille(mask: I64) -> Str =
+  chr(226) + chr(128 + (2048 + mask) / 64 % 64) + chr(128 + mask % 64)
+
+# ── Rendering ───────────────────────────────────────────────────────────────
+
+# The mark as `DOT_H / 4` lines, each cell coloured by its position along the
+# ribbon. The gradient runs left to right rather than following the twist: a
+# gradient that followed the curve would be more faithful and, at twelve cells
+# wide, completely illegible.
+fn mark_lines(c: cp.Caps) -> Arr[Str] {
+  let cells_w = DOT_W / 2
+  let rows = DOT_H / 4
+  let out: Arr[Str] = arr()
+  let cy: I64 = 0
+  while cy < rows {
+    let line: Str = ""
+    let cx: I64 = 0
+    while cx < cells_w {
+      let mask = cell_mask(cx, cy)
+      if mask == 0 {
+        line = line + " "
+      } else {
+        line = line + ansi.paint_fg(c, th.ramp(cx, cells_w), braille(mask))
+      }
+      cx = cx + 1
+    }
+    push(out, line)
+    cy = cy + 1
+  }
+  out
+}
+
+fn cell_mask(cx: I64, cy: I64) -> I64 {
+  let mask: I64 = 0
+  let r: I64 = 0
+  while r < 4 {
+    let c2: I64 = 0
+    while c2 < 2 {
+      if ribbon_hit(cx * 2 + c2, cy * 4 + r) { mask = mask + dot_bit(c2, r) }
+      c2 = c2 + 1
+    }
+    r = r + 1
+  }
+  mask
+}
+
+# ── The banner ──────────────────────────────────────────────────────────────
+
+# Wordmark and version beside the mark. Two lines of art, two lines of text: the
+# name on the first, the version and tagline on the second, so the block reads
+# as one object rather than a picture with a caption.
+fn render(c: cp.Caps, version: Str) -> Str {
+  if !can_draw(c) { plain(version) }
+  else {
+    let art = mark_lines(c)
+    let name = ansi.paint(c, th.emphasis(), "twill")
+    let ver = ansi.paint(c, th.muted(), version)
+    let tag = ansi.paint(c, th.muted(), "a language for shapes")
+    let l0 = "  " + art[0] + "   " + name + "  " + ver
+    let l1 = "  " + art[1] + "   " + tag
+    l0 + "\n" + l1 + "\n"
+  }
+}
+
+# The mark needs braille and it needs colour to be a gradient rather than a
+# smudge. Without either, the honest answer is a line of text, not a degraded
+# picture. A monochrome braille blob is not a logo, it is dirt on the screen.
+fn can_draw(c: cp.Caps) -> Bool = c.unicode && cp.coloured(c) && c.tty && c.width >= 40
+
+# The whole degradation, and it is one line on purpose: everything the banner
+# was carrying (what this is, what version) with none of what it was carrying it
+# with.
+fn plain(version: Str) -> Str = "twill " + version + "\n"

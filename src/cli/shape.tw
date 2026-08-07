@@ -1,0 +1,215 @@
+# shape.tw - the shape mismatch, rendered properly.
+#
+# Shape errors are what twill exists to catch, so this is the error the whole
+# tool is judged on. A message reading "cannot broadcast [32, 128, 64] with
+# [32, 64, 64]" is technically complete and practically useless: the reader has
+# to count along both lists with a finger to find the axis that differs, and
+# with four or five axes they will get it wrong.
+#
+# So the two shapes are laid out as a table, one axis per column, aligned from
+# the right. Right, not left, because that is how broadcasting aligns them, and
+# a rendering that aligns them the other way is drawing a different relation
+# from the one being checked. Once they are aligned, the disagreeing axis is
+# directly above the disagreeing axis, and the answer is where the eye already
+# is.
+#
+# The colour rule is strict: agreeing axes are quiet teal, the one that
+# disagrees is the only loud thing in the message, and there is a caret under it
+# so the answer survives NO_COLOR intact.
+
+mode systems
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/width" as w
+import "src/cli/theme" as th
+import "src/cli/diagnostic" as dg
+
+struct ShapeOp {
+  op: Str,          # "+", "@", "concat", the operation that could not proceed
+  left_name: Str,   # what the left operand is called in the source, or ""
+  right_name: Str,
+  left: Arr[I64],
+  right: Arr[I64],
+  span: dg.Span,
+}
+
+# A dimension of -1 means "absent": the shorter shape's missing leading axes.
+# Absent is not the same as 1. Broadcasting treats them identically, but a
+# missing axis and a length-1 axis are different mistakes and the rendering must
+# not merge them, or the user fixes the wrong one.
+let ABSENT: I64 = 0 - 1
+
+# ── Alignment ───────────────────────────────────────────────────────────────
+
+# Both shapes padded on the left to a common rank, so column `i` of one lines up
+# with column `i` of the other under the broadcasting rule.
+fn align(a: Arr[I64], b: Arr[I64]) -> Arr[Arr[I64]] {
+  let n = if len(a) > len(b) { len(a) } else { len(b) }
+  arr(pad_left_absent(a, n), pad_left_absent(b, n))
+}
+
+fn pad_left_absent(dims: Arr[I64], n: I64) -> Arr[I64] {
+  let out: Arr[I64] = arr()
+  let pad = n - len(dims)
+  let i: I64 = 0
+  while i < pad {
+    push(out, ABSENT)
+    i = i + 1
+  }
+  let j: I64 = 0
+  while j < len(dims) {
+    push(out, dims[j])
+    j = j + 1
+  }
+  out
+}
+
+# Two aligned dimensions broadcast when they are equal, or either is 1, or
+# either is absent. Anything else is the mismatch.
+fn compatible(x: I64, y: I64) -> Bool =
+  x == y || x == 1 || y == 1 || x == ABSENT || y == ABSENT
+
+# Index of the first column that does not broadcast, or -1 when they all do.
+# First rather than all: reporting five failing axes at once reads as five
+# problems, and it is almost always one transposition producing all of them.
+fn first_bad(a: Arr[I64], b: Arr[I64]) -> I64 {
+  let i: I64 = 0
+  let bad: I64 = 0 - 1
+  while i < len(a) && bad < 0 {
+    if !compatible(a[i], b[i]) { bad = i }
+    i = i + 1
+  }
+  bad
+}
+
+# ── Rendering ───────────────────────────────────────────────────────────────
+
+fn render(c: cp.Caps, s: ShapeOp) -> Str {
+  let both = align(s.left, s.right)
+  let a = both[0]
+  let b = both[1]
+  let bad = first_bad(a, b)
+  let widths = column_widths(a, b)
+  let lname = label_of(s.left_name, "left")
+  let rname = label_of(s.right_name, "right")
+  let lw = max2(w.display_width(lname), w.display_width(rname))
+
+  let d = dg.Diagnostic {
+    severity: dg.SEV_ERROR,
+    code: "E0301",
+    title: title(s, bad),
+    span: s.span,
+    explain: "",
+    help: help_for(s, a, b, bad),
+  }
+
+  dg.header(c, d) + dg.location(c, s.span) +
+    dg.source_block(c, s.span, th.error()) +
+    "\n" +
+    shape_row(c, lname, lw, a, b, widths, bad) +
+    shape_row(c, rname, lw, b, a, widths, bad) +
+    caret_row(c, lw, widths, bad) +
+    dg.explanation(c, d)
+}
+
+fn label_of(name: Str, fallback: Str) -> Str = if name == "" { fallback } else { name }
+
+# Every column is as wide as the widest dimension in it, from either shape, so
+# the two rows line up character for character. This is the entire reason the
+# rendering works, and it is why the widths are computed across both shapes
+# rather than per row.
+fn column_widths(a: Arr[I64], b: Arr[I64]) -> Arr[I64] {
+  let out: Arr[I64] = arr()
+  let i: I64 = 0
+  while i < len(a) {
+    push(out, max2(len(dim_text(a[i])), len(dim_text(b[i]))))
+    i = i + 1
+  }
+  out
+}
+
+fn dim_text(d: I64) -> Str = if d == ABSENT { "·" } else { str(d) }
+
+# One shape, as `name  [ 32, 128,  64 ]`. `other` is the shape it is being
+# compared against, which is what decides each column's colour: a dimension is
+# not right or wrong on its own, only against its opposite number.
+fn shape_row(c: cp.Caps, name: Str, name_w: I64, dims: Arr[I64], other: Arr[I64],
+             widths: Arr[I64], bad: I64) -> Str {
+  let out = "      " + ansi.paint(c, th.muted(), w.pad_right(name, name_w)) + "  " +
+    ansi.paint(c, th.rule(), "[")
+  let i: I64 = 0
+  while i < len(dims) {
+    if i > 0 { out = out + ansi.paint(c, th.rule(), ",") }
+    let cell = w.pad_left(dim_text(dims[i]), widths[i] + 1)
+    let st = if i == bad { th.axis_bad() }
+             else if dims[i] == ABSENT { th.muted() }
+             else if dims[i] == 1 && other[i] != 1 { th.warning() }   # will stretch
+             else { th.axis_ok() }
+    out = out + ansi.paint(c, st, cell)
+    i = i + 1
+  }
+  out + " " + ansi.paint(c, th.rule(), "]") + "\n"
+}
+
+# The caret under the failing column, plus the axis number. Redundant with the
+# colour on purpose: this is the line that carries the answer when colour is off
+# or the reader is colourblind, and it is cheap.
+fn caret_row(c: cp.Caps, name_w: I64, widths: Arr[I64], bad: I64) -> Str {
+  if bad < 0 { "" }
+  else {
+    let lead: I64 = 6 + name_w + 3                    # indent, name, space, "["
+    let i: I64 = 0
+    while i < bad {
+      lead = lead + widths[i] + 2                     # cell, plus its comma
+      i = i + 1
+    }
+    let mark = w.repeat(if c.unicode { "━" } else { "^" }, widths[bad] + 1)
+    w.spaces(lead) + ansi.paint(c, th.axis_bad(), mark) + " " +
+      ansi.paint(c, th.error(), "axis " + str(bad)) + "\n"
+  }
+}
+
+# ── Words ───────────────────────────────────────────────────────────────────
+
+fn title(s: ShapeOp, bad: I64) -> Str {
+  if bad < 0 { "shapes are not valid for " + op_name(s.op) }
+  else { "shapes disagree on axis " + str(bad) }
+}
+
+# The help line is the whole point of the diagnostic, so it names the change to
+# make rather than restating the problem. Three cases cover almost every real
+# occurrence, and the fallback says less rather than guessing.
+fn help_for(s: ShapeOp, a: Arr[I64], b: Arr[I64], bad: I64) -> Str {
+  if bad < 0 { "" }
+  else {
+    let x = a[bad]
+    let y = b[bad]
+    # A transposition is the overwhelmingly common cause, and it is detectable:
+    # the two dimensions that disagree here each appear on the other side, one
+    # axis over. Saying so turns a five-minute hunt into a one-line fix.
+    if is_transposed(a, b, bad) {
+      "axis " + str(bad) + " and axis " + str(bad + 1) + " look swapped. " +
+        "Try transpose on the " + label_of(s.right_name, "right") + " operand."
+    } else if x == ABSENT || y == ABSENT {
+      "the shorter shape has no axis " + str(bad) + ", so broadcasting lines it up " +
+        "against a different one. Add a length-1 axis with unsqueeze to place it."
+    } else {
+      "axis " + str(bad) + " is " + str(x) + " on one side and " + str(y) + " on the " +
+        "other. They broadcast only when they are equal, or one of them is 1."
+    }
+  }
+}
+
+fn is_transposed(a: Arr[I64], b: Arr[I64], bad: I64) -> Bool {
+  if bad + 1 >= len(a) { false }
+  else { a[bad] == b[bad + 1] && a[bad + 1] == b[bad] }
+}
+
+fn op_name(op: Str) -> Str {
+  if op == "@" { "matrix multiplication" }
+  else if op == "concat" { "concatenation" }
+  else { "the " + op + " operation" }
+}
+
+fn max2(a: I64, b: I64) -> I64 = if a > b { a } else { b }

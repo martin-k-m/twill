@@ -1,0 +1,108 @@
+# theme.tw - the palette, and the meaning attached to each colour.
+#
+# The palette comes from the mark: a glowing twisted mint ribbon. Nothing in
+# this CLI names a colour directly. Call sites name a role, and this file is the
+# only place that decides what a role looks like, which is what stops the tool
+# drifting into a rainbow one command at a time.
+#
+# The governing rule: colour carries meaning, never decoration. Mint is success
+# and structure. Warm is warning, and it is the same warm as Spool, the sibling
+# package manager, so a package-shaped concern looks like one. Red is for a real
+# error and nothing else, and it appears at most once per message.
+
+mode systems
+
+import "src/term/color" as col
+import "src/term/ansi" as ansi
+import "src/term/caps" as cp
+
+# ── The ribbon ──────────────────────────────────────────────────────────────
+
+fn pale() -> col.Rgb = col.rgb(210, 240, 228)   # D2F0E4, the ribbon's lit edge
+fn mint() -> col.Rgb = col.rgb(168, 220, 203)   # A8DCCB, its body
+fn accent() -> col.Rgb = col.rgb(127, 227, 196) # 7FE3C4, the glow at the twist
+fn teal() -> col.Rgb = col.rgb(79, 183, 155)    # 4FB79B, its shaded face
+fn deep() -> col.Rgb = col.rgb(18, 51, 44)      # 12332C
+fn ink() -> col.Rgb = col.rgb(11, 21, 18)       # 0B1512
+
+# Spool's warm counterpart. Used only where twill is talking about packages, and
+# borrowed for warnings because a second hue is needed and inventing a third
+# family would make the two tools look unrelated.
+fn spool_warm() -> col.Rgb = col.rgb(227, 167, 111)  # E3A76F
+fn spool_pale() -> col.Rgb = col.rgb(242, 220, 198)  # F2DCC6
+fn spool_deep() -> col.Rgb = col.rgb(51, 35, 26)     # 33231A
+
+# The one colour not in the brand. An error has to leave the palette or it does
+# not read as an error; a mint error is a design that has stopped meaning
+# anything. Desaturated so it sits beside mint without shouting.
+fn danger() -> col.Rgb = col.rgb(214, 106, 96)
+
+# ── Roles ───────────────────────────────────────────────────────────────────
+#
+# Four levels of emphasis and no more. Every piece of text in the tool picks one
+# of these, and the discipline of having only four is what makes the output look
+# composed rather than assembled.
+
+# Headings, the mark, anything that is the structure of the page rather than its
+# content. Deliberately not bold: the colour already separates it, and bold on
+# top of colour is the visual equivalent of shouting a heading.
+fn heading() -> ansi.Style = ansi.fg(accent())
+
+# The default. Left unstyled rather than set to a near-white, so it inherits the
+# user's own foreground colour and sits correctly on a light theme, which no
+# hardcoded colour can do.
+fn body() -> ansi.Style = ansi.plain_style()
+
+# Secondary: units, counts, the parts of a path that are not the filename.
+# Present but not competing.
+fn muted() -> ansi.Style = ansi.dim(ansi.plain_style())
+
+# The one thing on the line that matters. Used sparingly enough that it works.
+fn emphasis() -> ansi.Style = ansi.bold(ansi.fg(pale()))
+
+# ── Semantics ───────────────────────────────────────────────────────────────
+
+fn success() -> ansi.Style = ansi.fg(mint())
+fn warning() -> ansi.Style = ansi.fg(spool_warm())
+fn error() -> ansi.Style = ansi.fg(danger())
+fn package_name() -> ansi.Style = ansi.fg(spool_warm())
+
+# Structural glyphs: rules, tree branches, the bar's empty track. Always the
+# quietest thing on screen, because a rule that competes with the text it
+# separates has failed at the one job it has.
+fn rule() -> ansi.Style = ansi.fg(teal())
+
+# Source code quoted back at the user, in a diagnostic or the REPL.
+fn code() -> ansi.Style = ansi.fg(pale())
+
+# The axis of a shape that does not match. This is the single most important
+# colour in the tool, because a shape error is what twill is for, and finding
+# the offending axis at a glance is the entire value of rendering it.
+fn axis_bad() -> ansi.Style = ansi.bold(ansi.fg(danger()))
+fn axis_ok() -> ansi.Style = ansi.fg(teal())
+
+# ── Marks ───────────────────────────────────────────────────────────────────
+#
+# Each returns a unicode glyph, or an ASCII stand-in when the terminal cannot
+# render one. Never a coloured block with no shape: the glyph has to survive
+# NO_COLOR, so meaning cannot live in the colour alone.
+
+fn mark_ok(c: cp.Caps) -> Str = if c.unicode { "✓" } else { "ok" }
+fn mark_warn(c: cp.Caps) -> Str = if c.unicode { "▲" } else { "!" }
+fn mark_err(c: cp.Caps) -> Str = if c.unicode { "✕" } else { "x" }
+
+# The ribbon glyph, used as the REPL prompt and as the bullet on a heading. A
+# half-twist of tape, which is as close as one cell gets to the mark.
+fn glyph(c: cp.Caps) -> Str = if c.unicode { "❯" } else { ">" }
+fn ribbon_glyph(c: cp.Caps) -> Str = if c.unicode { "⧗" } else { "*" }
+
+# ── Ramps ───────────────────────────────────────────────────────────────────
+
+# The gradient every animated thing travels along, and the one the banner is
+# drawn in. Three stops rather than two so the middle lifts, which is what makes
+# it read as a highlight on a curved surface rather than a linear fade.
+fn ramp(i: I64, n: I64) -> col.Rgb = col.ramp3_at(teal(), accent(), pale(), i, n)
+
+# The progress bar's fill, running the other way: it starts pale and deepens as
+# it fills, so a bar near completion is visually heavier than an empty one.
+fn fill_ramp(i: I64, n: I64) -> col.Rgb = col.ramp3_at(pale(), accent(), teal(), i, n)
