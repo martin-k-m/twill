@@ -1,0 +1,3 @@
+fn bil(a, b) = sum(a * b)
+let g = grads(bil)([1.0, 2.0], [10.0, 20.0])
+g[0][1]

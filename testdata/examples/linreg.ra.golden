@@ -1,0 +1,20 @@
+exit 0
+--- stdout ---
+step 0 loss 13.27542
+step 100 loss 0.007887
+step 200 loss 0.002127
+step 300 loss 0.000574
+
+learned w = tensor([2.012419, -2.988378], shape=[2])   (target [2, -3])
+learned b = 0.454043   (target 0.5)
+final loss = 0.000157
+# canonical v1
+_result = unit
+X = tensor shape=[5, 2] data=[0x1p+00 0x1p+00 0x1p+01 0x1p+00 0x1p+00 0x1.8p+01 0x1.8p+01 0x1p+01 0x0p+00 0x1p+02]
+b = num 0x1.d0f0854dd6754p-02
+loss = fn loss/2
+lr = num 0x1.999999999999ap-05
+predict = fn predict/3
+w = tensor shape=[2] data=[0x1.0196f38e7d4b6p+01 -0x1.7e83277a927e6p+01]
+y = tensor shape=[5] data=[-0x1p-01 0x1.8p+00 -0x1.ap+02 0x1p-01 -0x1.7p+03]
+--- stderr ---

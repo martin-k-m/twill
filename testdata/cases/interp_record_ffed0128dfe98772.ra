@@ -1,0 +1,2 @@
+fn triple(x) = x * 3.0
+let k = 7.0

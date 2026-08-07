@@ -1,0 +1,2 @@
+let a = zeros(2, 3)
+print(concat([a, a], 9))

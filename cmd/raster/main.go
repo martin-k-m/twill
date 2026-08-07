@@ -46,6 +46,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: raster run <file>")
 			os.Exit(2)
 		}
+		if hasFlag(args, canonicalDumpFlag) {
+			os.Exit(runFileCanonical(args[1], !hasFlag(args, "--no-check")))
+		}
 		os.Exit(runFile(args[1], !hasFlag(args, "--no-check")))
 	case "repl":
 		repl()
@@ -53,6 +56,9 @@ func main() {
 		if strings.HasPrefix(args[0], "-") {
 			fmt.Fprintf(os.Stderr, "raster: unknown flag %q\n", args[0])
 			os.Exit(2)
+		}
+		if hasFlag(args, canonicalDumpFlag) {
+			os.Exit(runFileCanonical(args[0], !hasFlag(args, "--no-check")))
 		}
 		os.Exit(runFile(args[0], !hasFlag(args, "--no-check")))
 	}
@@ -245,6 +251,7 @@ Usage:
   raster <file.ra>            Shape-check, then run a program
   raster run <file.ra>        Same as above
   raster run <file> --no-check   Run without the static shape check
+  raster run <file> --dump=canonical   Run, then dump top-level bindings exactly
   raster check <file.ra>      Shape-check only, no execution
   raster fmt <file.ra>        Print canonically formatted source
   raster fmt <file> --write   Format the file in place

@@ -1,0 +1,4 @@
+import "lib.ra" as p
+import "lib.ra" as q
+print(columns(p))
+print(columns(q))

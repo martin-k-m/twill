@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:2: shape error: unknown name "nope"
+  2 | print(nope + x)
+raster: 1 shape error(s); not running (use --no-check to run anyway)

@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+dense = fn dense/3
+--- stderr ---

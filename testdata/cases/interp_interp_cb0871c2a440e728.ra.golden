@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = num 0x1.6p+04
+z = list [list [num 0x1p+00, num 0x1.4p+03], list [num 0x1p+01, num 0x1.4p+04]]
+--- stderr ---

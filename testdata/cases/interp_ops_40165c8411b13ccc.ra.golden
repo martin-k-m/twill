@@ -1,0 +1,5 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = num 0x1.70c3e5f682bdap-57
+--- stderr ---

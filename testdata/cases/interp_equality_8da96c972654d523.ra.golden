@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = bool true
+f = fn anonymous/1
+g = fn anonymous/1
+--- stderr ---

@@ -1,0 +1,15 @@
+exit 0
+--- stdout ---
+position value: 30000 USD
+interest accrued: 9 USD
+total: 30009 USD
+# canonical v1
+_result = unit
+accrued = num 0x1.2p+03
+interest = fn interest/2
+notional = fn notional/2
+price = num 0x1.2cp+07
+quantity = num 0x1.9p+07
+total = num 0x1.d4e4p+14
+value = num 0x1.d4cp+14
+--- stderr ---

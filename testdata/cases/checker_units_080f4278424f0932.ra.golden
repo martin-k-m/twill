@@ -1,0 +1,12 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown unit "USD" (declare it with `unit USD`)
+  1 | fn notional(px: USD/share, qty: share) -> USD { px * qty }
+case.ra:1: shape error: unknown unit "share" (declare it with `unit share`)
+  1 | fn notional(px: USD/share, qty: share) -> USD { px * qty }
+case.ra:2: shape error: unknown type "share" on parameter "qty"
+  2 | let n = notional(150.0, 100.0)
+case.ra:2: shape error: function returns unit USD*share^-1 but its signature declares USD
+  2 | let n = notional(150.0, 100.0)
+raster: 4 shape error(s); not running (use --no-check to run anyway)

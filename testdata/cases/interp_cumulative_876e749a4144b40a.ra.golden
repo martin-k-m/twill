@@ -1,0 +1,5 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: runtime error: range step cannot be 0
+  1 | for i in range(0, 5, 0) { print(i) }

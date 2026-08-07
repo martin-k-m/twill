@@ -1,0 +1,4 @@
+let zeta = 1.0
+fn mid(x) = x
+let alpha = 3.0
+let beta = 4.0

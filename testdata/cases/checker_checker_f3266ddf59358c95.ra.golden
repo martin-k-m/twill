@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown name "inner"
+  1 | inner 2 != 3
+raster: 1 shape error(s); not running (use --no-check to run anyway)

@@ -1,0 +1,48 @@
+# records.ra — a model held in a record (named fields) instead of a list,
+# trained with a namespaced import of the nn library.
+#
+# `grad` flows through the record, so grad(loss)(model) returns a record with
+# the same fields holding each parameter's gradient.
+
+import "std/nn" as nn
+
+let X = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+let Y = [0.0, 1.0, 1.0, 0.0]
+
+fn forward(m, x) {
+  let h = tanh(nn.dense(m.w1, m.b1, x))
+  sigmoid(nn.dense(m.w2, m.b2, h))
+}
+
+fn loss(m) {
+  let total = 0.0
+  for i in range(4) {
+    total = total + nn.bce(forward(m, X[i]), Y[i])
+  }
+  total / 4.0
+}
+
+let model = { w1: nn.he_init(4, 2), b1: zeros(4),
+              w2: nn.he_init(1, 4), b2: zeros(1) }
+# Adam optimizer state, shaped like the model. The optimizer walks the record's
+# fields for us, so there's no per-parameter update to write by hand.
+let m = nn.zeros_like(model)
+let v = nn.zeros_like(model)
+let lr = 0.05
+
+for step in range(2000) {
+  let g = grad(loss)(model)
+  let out = nn.adam_step(model, g, m, v, step + 1, lr, 0.9, 0.999, 0.00000001)
+  model = out[0]
+  m = out[1]
+  v = out[2]
+  if step % 500 == 0 {
+    print("step", step, "loss", loss(model))
+  }
+}
+
+print("")
+print("predictions (want 0, 1, 1, 0):")
+for i in range(4) {
+  print("  ", X[i], "->", forward(model, X[i]))
+}

@@ -1,0 +1,5 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: runtime error: a standard-library import names a module, not a file: write "std/nn", not "std/nn.ra"
+  1 | import "std/nn.ra"

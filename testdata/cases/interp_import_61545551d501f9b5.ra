@@ -1,0 +1,2 @@
+import "x.ra" as m
+print(columns(m))

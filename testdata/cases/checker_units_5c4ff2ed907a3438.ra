@@ -1,0 +1,6 @@
+unit USD
+unit year
+fn interest(rate: USD/year, t: year) -> USD { rate * t }
+fn rms(a: USD, b: USD) -> USD { sqrt(a * a + b * b) }
+let x = interest(5.0, 2.0)
+let y = rms(3.0, 4.0)

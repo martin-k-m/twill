@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+k = num 0x1.cp+02
+triple = fn triple/1
+--- stderr ---

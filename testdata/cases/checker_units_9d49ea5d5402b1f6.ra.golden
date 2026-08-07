@@ -1,0 +1,12 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown unit "USD" (declare it with `unit USD`)
+  1 | fn wrong(px: USD/share, qty: share) -> share { px * qty }
+case.ra:1: shape error: unknown unit "share" (declare it with `unit share`)
+  1 | fn wrong(px: USD/share, qty: share) -> share { px * qty }
+case.ra:2: shape error: unknown type "share" on parameter "qty"
+  2 | let r = wrong(1.0, 2.0)
+case.ra:2: shape error: function returns unit USD*share^-1 but its signature declares share
+  2 | let r = wrong(1.0, 2.0)
+raster: 4 shape error(s); not running (use --no-check to run anyway)

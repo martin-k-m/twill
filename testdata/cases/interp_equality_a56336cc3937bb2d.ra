@@ -1,0 +1,2 @@
+let u = if false { 1.0 }
+u == 0.0

@@ -1,0 +1,19 @@
+# einsum.ra — Einstein summation, a single primitive for many tensor ops.
+#
+# `einsum(spec, ...tensors)` contracts and sums over repeated indices. It's
+# differentiable, so it composes with grad like any other op.
+
+let A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]     # [2, 3]
+let B = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]   # [3, 2]
+
+print("A @ B     =", einsum("ij,jk->ik", A, B))  # matrix multiply
+print("transpose =", einsum("ij->ji", A))        # [3, 2]
+print("row sums  =", einsum("ij->i", A))         # sum over j
+print("total     =", einsum("ij->", A))          # sum everything
+
+# A bilinear form x' W y, differentiated with respect to x.
+let W = [[1.0, 2.0], [3.0, 4.0]]
+fn bilinear(x) = einsum("i,ij,j->", x, W, [1.0, 1.0])
+print("")
+print("bilinear([1, 1]) =", bilinear([1.0, 1.0]))
+print("grad             =", grad(bilinear)([1.0, 1.0]))

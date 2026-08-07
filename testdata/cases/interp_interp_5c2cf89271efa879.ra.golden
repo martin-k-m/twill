@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = num 0x1.7fffffffffffep+01
+loss = fn loss/1
+w = num 0x1.7fffffffffffep+01
+--- stderr ---

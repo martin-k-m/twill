@@ -1,0 +1,8 @@
+exit 0
+--- stdout ---
+1
+2.5
+-3
+# canonical v1
+_result = unit
+--- stderr ---

@@ -1,0 +1,10 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+X = tensor shape=[5, 2] data=[0x1p+00 0x1p+00 0x1p+01 0x1p+00 0x1p+00 0x1.8p+01 0x1.8p+01 0x1p+01 0x0p+00 0x1p+02]
+b = num 0x1.601b80c7536dp-03
+loss = fn loss/2
+w = tensor shape=[2] data=[0x1.0b591107f282dp+01 -0x1.75614a599f18fp+01]
+y = tensor shape=[5] data=[-0x1p-01 0x1.8p+00 -0x1.ap+02 0x1p-01 -0x1.7p+03]
+--- stderr ---

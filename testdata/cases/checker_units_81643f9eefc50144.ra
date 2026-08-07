@@ -1,0 +1,2 @@
+fn f(px: USD) -> USD { log(px) }
+let r = f(100.0)

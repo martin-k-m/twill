@@ -1,0 +1,2 @@
+fn f(a: USD, b: share) { if a > b { print("x") } }
+let r = f(1.0, 2.0)

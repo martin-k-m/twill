@@ -1,0 +1,6 @@
+let w = [0.0, 0.0]
+fn loss(w) = mean(w * w)
+for step in range(10) {
+	let g = grad(loss)(w)
+	w = w - g * 0.1
+}

@@ -1,0 +1,2 @@
+fn f(m: Nope) = m
+let r = f({ a: 1.0 })

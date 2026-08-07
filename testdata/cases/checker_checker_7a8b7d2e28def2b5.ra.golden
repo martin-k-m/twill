@@ -1,0 +1,9 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+A = tensor shape=[2, 2] data=[0x1p+00 0x1p+01 0x1.8p+01 0x1p+02]
+s = num 0x1.12p+05
+x = tensor shape=[2] data=[0x1p+00 0x1p+00]
+y = tensor shape=[2] data=[0x1.cp+01 0x1.ep+02]
+--- stderr ---

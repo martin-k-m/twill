@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+m = record {apply_standardize: fn apply_standardize/3, shuffle: fn shuffle/2, standardize: fn standardize/1, train_test_split: fn train_test_split/3}
+--- stderr ---

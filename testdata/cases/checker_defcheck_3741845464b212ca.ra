@@ -1,0 +1,1 @@
+fn dense(w, b, x) = w @ x + b

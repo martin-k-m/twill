@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+3
+# canonical v1
+_result = unit
+fs = list [fn anonymous/0, fn anonymous/0, fn anonymous/0]
+--- stderr ---

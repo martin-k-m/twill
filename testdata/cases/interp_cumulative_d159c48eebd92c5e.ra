@@ -1,0 +1,2 @@
+let f = fn(x) { x * x }
+print(grad(grad(f))(2.0))

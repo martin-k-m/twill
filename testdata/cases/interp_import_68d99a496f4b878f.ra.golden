@@ -1,0 +1,9 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = tensor shape=[2] data=[0x0p+00 0x0p+00]
+adam_step = fn adam_step/9
+momentum_step = fn momentum_step/5
+sgd_step = fn sgd_step/3
+zeros_like = fn zeros_like/1
+--- stderr ---

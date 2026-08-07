@@ -1,0 +1,2 @@
+fn notional(px: USD/share, qty: share) -> USD { px * qty }
+let n = notional(150.0, 100.0)

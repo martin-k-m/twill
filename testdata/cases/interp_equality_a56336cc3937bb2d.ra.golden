@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = bool false
+u = unit
+--- stderr ---

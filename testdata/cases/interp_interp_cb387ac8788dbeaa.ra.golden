@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = num 0x1.4p+04
+bil = fn bil/2
+g = list [tensor shape=[2] data=[0x1.4p+03 0x1.4p+04], tensor shape=[2] data=[0x1p+00 0x1p+01]]
+--- stderr ---

@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+leaked = num 0x1p+00
+--- stderr ---

@@ -1,0 +1,13 @@
+import "std/optim"
+fn loss(model) = sum(model.w * model.w) + model.b * model.b
+let model = { w: [3.0, -4.0], b: 2.0 }
+let m = zeros_like(model)
+let v = zeros_like(model)
+for step in range(400) {
+	let g = grad(loss)(model)
+	let out = adam_step(model, g, m, v, step + 1, 0.1, 0.9, 0.999, 0.00000001)
+	model = out[0]
+	m = out[1]
+	v = out[2]
+}
+loss(model)

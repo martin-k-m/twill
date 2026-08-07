@@ -1,0 +1,4 @@
+# Driver for the std/num module: importing it under a namespace snapshots every
+# name the module defines, so the dump of `m` is a listing of the module's
+# whole surface. A name that changes kind, arity or value shows up here.
+import "std/num" as m

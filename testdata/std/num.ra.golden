@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+m = record {argmin: fn argmin/1, argmin_axis: fn argmin_axis/2, corr: fn corr/2, corr_s: fn corr_s/2, cov: fn cov/2, cov_s: fn cov_s/2, keep: fn keep/3, mae: fn mae/2, minmax: fn minmax/1, mse: fn mse/2, norm: fn norm/1, norm1: fn norm1/1, norm_axis: fn norm_axis/2, numel: fn numel/1, rank: fn rank/1, rms: fn rms/1, sh: record {as_col: fn as_col/1, as_row: fn as_row/1, axis_of: fn axis_of/3, drop_dim: fn drop_dim/2, drop_go: fn drop_go/4, flatten: fn flatten/1, flatten_from: fn flatten_from/2, flatten_go: fn flatten_go/4, insert_dim: fn insert_dim/3, insert_go: fn insert_go/5, numel: fn numel/1, prod_dims: fn prod_dims/2, rank: fn rank/1, squeeze_at: fn squeeze_at/2, stack: fn stack/2, stack_cols: fn stack_cols/1, stack_rows: fn stack_rows/1, unsqueeze: fn unsqueeze/2}, std: fn std/1, std_axis: fn std_axis/2, std_s: fn std_s/1, std_s_axis: fn std_s_axis/2, var: fn var/1, var_axis: fn var_axis/2, var_s: fn var_s/1, var_s_axis: fn var_s_axis/2, zscore: fn zscore/1}
+--- stderr ---

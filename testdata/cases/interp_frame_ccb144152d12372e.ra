@@ -1,0 +1,1 @@
+print(len(df.a), sum(df.a), sum(df.b))

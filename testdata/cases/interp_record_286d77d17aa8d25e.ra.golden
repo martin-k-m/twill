@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+{z: 1, a: 2}
+# canonical v1
+_result = unit
+--- stderr ---

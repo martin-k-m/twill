@@ -1,0 +1,3 @@
+fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
+let partial = { w: [[1.0,2.0],[3.0,4.0],[5.0,6.0]] }
+let r = predict(partial, [1.0, 1.0])

@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+matvec = fn matvec/2
+--- stderr ---

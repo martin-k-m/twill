@@ -1,0 +1,20 @@
+exit 0
+--- stdout ---
+Hessian of xᵀAx  (equals A + Aᵀ):
+tensor([[4, 1], [1, 12]], shape=[2, 2])
+step 0   t = 1.5   f'(t) = 5.5
+step 1   t = 1.238095   f'(t) = 1.162833
+step 2   t = 1.144277   f'(t) = 0.127467
+step 3   t = 1.131153   f'(t) = 0.002356
+step 4   t = 1.130901   f'(t) = 0.000001
+step 5   t = 1.130901   f'(t) = 0
+converged to a minimum where f'(t) is ~0
+Hessian of (x0-x1)² + x1²:
+tensor([[2, -2], [-2, 4]], shape=[2, 2])
+# canonical v1
+_result = unit
+A = tensor shape=[2, 2] data=[0x1p+01 0x1p-01 0x1p-01 0x1.8p+02]
+f = fn f/1
+g = fn g/1
+t = num 0x1.2182bc68b49d7p+00
+--- stderr ---

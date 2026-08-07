@@ -1,0 +1,2 @@
+import "std/backtest" as bt
+grad(fn(eq) = bt.max_drawdown(eq))([1.0, 1.2, 0.9, 1.5, 1.1])

@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+tensor([0, 0, 0], shape=[3])
+# canonical v1
+_result = unit
+x = tensor shape=[2, 3] data=[0x0p+00 0x0p+00 0x0p+00 0x0p+00 0x0p+00 0x0p+00]
+--- stderr ---

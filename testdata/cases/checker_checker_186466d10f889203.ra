@@ -1,0 +1,3 @@
+import "std/nn"
+let x = 1.0
+print(whatever_nn_defines + x)

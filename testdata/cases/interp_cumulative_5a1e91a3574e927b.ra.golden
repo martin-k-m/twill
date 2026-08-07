@@ -1,0 +1,18 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown name "an"
+  1 | an out-of-range axis was accepted
+case.ra:1: shape error: unknown name "out"
+  1 | an out-of-range axis was accepted
+case.ra:1: shape error: unknown name "of"
+  1 | an out-of-range axis was accepted
+case.ra:1: shape error: operator "-" needs numbers/tensors
+  1 | an out-of-range axis was accepted
+case.ra:1: shape error: unknown name "axis"
+  1 | an out-of-range axis was accepted
+case.ra:1: shape error: unknown name "was"
+  1 | an out-of-range axis was accepted
+case.ra:1: shape error: unknown name "accepted"
+  1 | an out-of-range axis was accepted
+raster: 7 shape error(s); not running (use --no-check to run anyway)

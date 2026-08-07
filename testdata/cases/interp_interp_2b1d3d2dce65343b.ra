@@ -1,0 +1,3 @@
+fn adder(n) = fn(x) = x + n
+let add5 = adder(5)
+add5(37)

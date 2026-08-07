@@ -1,0 +1,2 @@
+import "x.ra"
+let b = 2.0

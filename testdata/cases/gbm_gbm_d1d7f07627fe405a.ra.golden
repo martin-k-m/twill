@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown name "math"
+  1 | math/rand
+case.ra:1: shape error: operator "/" needs numbers/tensors
+  1 | math/rand
+raster: 2 shape error(s); not running (use --no-check to run anyway)

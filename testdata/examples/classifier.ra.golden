@@ -1,0 +1,53 @@
+exit 0
+--- stdout ---
+step 0 loss 1.626244
+step 100 loss 0.001942
+step 200 loss 0.000986
+step 300 loss 0.000602
+
+train accuracy: 1
+# canonical v1
+_result = unit
+C = num 0x1.8p+01
+H = num 0x1p+03
+N = num 0x1.2p+04
+X = tensor shape=[18, 2] data=[0x1.999999999999ap-04 0x0p+00 -0x1.999999999999ap-03 0x1.3333333333333p-02 0x1.999999999999ap-03 -0x1.999999999999ap-04 0x0p+00 0x1.999999999999ap-03 -0x1.999999999999ap-04 -0x1.999999999999ap-03 0x1.3333333333333p-02 0x1.999999999999ap-04 0x1.8cccccccccccdp+01 0x1.999999999999ap-04 0x1.6666666666666p+01 -0x1.999999999999ap-03 0x1.999999999999ap+01 0x1.3333333333333p-02 0x1.8p+01 -0x1.999999999999ap-04 0x1.7333333333333p+01 0x1.999999999999ap-03 0x1.a666666666666p+01 0x0p+00 0x0p+00 0x1.8cccccccccccdp+01 0x1.999999999999ap-03 0x1.6666666666666p+01 -0x1.999999999999ap-04 0x1.999999999999ap+01 0x1.999999999999ap-04 0x1.8p+01 -0x1.999999999999ap-03 0x1.7333333333333p+01 0x1.3333333333333p-02 0x1.8cccccccccccdp+01]
+adam_step = fn adam_step/9
+bce = fn bce/2
+bce_with_logits = fn bce_with_logits/2
+conv = fn conv/2
+conv_init = fn conv_init/4
+correct = num 0x1.2p+04
+cross_entropy = fn cross_entropy/2
+dense = fn dense/3
+elu = fn elu/2
+embed = fn embed/2
+embedding_init = fn embedding_init/2
+gelu = fn gelu/1
+he_init = fn he_init/2
+hinge = fn hinge/2
+huber = fn huber/3
+kl_div = fn kl_div/2
+leaky_relu = fn leaky_relu/1
+log_softmax = fn log_softmax/2
+logits = fn logits/2
+loss = fn loss/1
+lr = num 0x1.999999999999ap-05
+m = list [tensor shape=[8, 2] data=[0x1.1ac851a2c237ap-20 0x1.4c9c9079d2e62p-14 0x1.b40de31b9fbbp-17 -0x1.ece5fee8132c5p-21 0x1.dcfa475641e84p-19 -0x1.c6309318eaad6p-17 -0x1.3b98689dfe6e2p-18 -0x1.5bccec0c2acbep-21 -0x1.a28fc5727d34fp-20 -0x1.038b9b6d780afp-17 0x1.682151b351d24p-19 -0x1.7f79252ae6f22p-18 0x1.fc67414312969p-19 0x1.6bc82494daca2p-14 -0x1.8d0e712b66b5ap-18 0x1.61a15a0736fccp-20], tensor shape=[8] data=[-0x1.2e84371cc7a2p-13 -0x1.9e928ab1db06fp-14 0x1.bbdfc8fa626dap-16 0x1.0ad4def372156p-15 0x1.bb228422512b9p-15 0x1.8792ebfffaa43p-15 0x1.2fb68cdae60aep-15 0x1.362d18350b792p-14], tensor shape=[3, 8] data=[-0x1.5b9fcd620f89cp-12 -0x1.5a6b53df74b03p-13 0x1.466aedf5c5db2p-14 0x1.ce70a9d937066p-14 0x1.bb7c7de7230e3p-14 0x1.04c682fbf72afp-13 -0x1.766bdde1c34cdp-16 0x1.66b14c6a733c2p-13 0x1.d697b9dbe734p-13 0x1.1fa136af13332p-12 0x1.421f5a8fbfab5p-14 0x1.c1b1d4fd5c157p-15 0x1.df26a0486f3fbp-15 -0x1.d363ea248759ep-15 -0x1.fcc2b51cc04a1p-15 -0x1.250e01153ffd3p-12 0x1.c14fc1d06fae3p-14 -0x1.c9ae32fd63434p-14 -0x1.44452442c2a46p-13 -0x1.57a4ca2bf268ap-13 -0x1.5587e705ad371p-13 -0x1.1fdb10e5aaacbp-14 0x1.5bfc5206d0cf7p-14 0x1.c6d56b801954fp-14], tensor shape=[3] data=[0x1.2edf97071704cp-14 -0x1.cb707674fbe63p-17 -0x1.eae31070ef177p-15]]
+mae = fn mae/2
+mish = fn mish/1
+momentum_step = fn momentum_step/5
+mse = fn mse/2
+onehot = fn onehot/2
+p = list [tensor shape=[8, 2] data=[-0x1.25574c9534a0ap+00 -0x1.e8697a5147befp-01 -0x1.5bc398ef7a875p+00 0x1.237a5bf2e94cbp+00 -0x1.fbccc73e2cb29p-02 0x1.196b8ab351b76p+00 -0x1.5d7324b573ad7p-02 0x1.89214d63d795p+00 -0x1.3dfd7b9283b76p-01 0x1.67d342aaaa9bbp+00 0x1.ef80283d68922p+00 0x1.ef9d39469b494p-02 0x1.cd48dee6c42c2p+00 -0x1.d9ddb47f2ae85p-02 0x1.7e8d9940304d7p+00 -0x1.b14095bb442fbp-01], tensor shape=[8] data=[0x1.16b2ae74f319fp+00 0x1.7d493d5a93a01p+00 -0x1.c2a996015a8aep-01 -0x1.827a805407a0dp+00 -0x1.6853442b4a687p+00 0x1.285ed643f9e4cp-01 0x1.c6961264702ccp-01 -0x1.adb5d0ee0cae6p+00], tensor shape=[3, 8] data=[0x1.9149657e25a4fp+00 0x1.6d6d79fc90cb8p+00 -0x1.555ea0232a50ap-02 -0x1.b89693d4f1406p+00 -0x1.b54213b1df6bcp+00 0x1.291ae10f2a57p-02 0x1.d7a507c981f77p-07 -0x1.d4c530dd0a1ddp+00 -0x1.4c589e747bd4fp-01 -0x1.bc19c325c8858p+00 -0x1.67560dcba625p-02 -0x1.0927b682c7de2p+00 -0x1.7cefb9dc28299p-01 0x1.cf128c7730ec5p-01 0x1.16a74d8002c4ep-02 0x1.59b9cac6f5c27p+00 -0x1.6091d393d5577p+00 0x1.96e6a20ee8a3ep-05 0x1.5467e469352b6p+00 0x1.46ec130edf70cp-02 0x1.6fade311c0555p+00 0x1.8c70366733194p-01 -0x1.12aa76f39e6d3p-02 -0x1.34c793822c45fp+00], tensor shape=[3] data=[-0x1.ac1fb46d992c8p-05 0x1.f6bcb7bb3fc1p-04 -0x1.3616fbc9df282p-05]]
+relu6 = fn relu6/1
+self_attention = fn self_attention/4
+sgd_step = fn sgd_step/3
+silu = fn silu/1
+softplus = fn softplus/1
+softsign = fn softsign/1
+v = list [tensor shape=[8, 2] data=[0x1.5ca15ca93bd3ap-21 0x1.85e2a522c97efp-14 0x1.ae5b4db44744p-18 0x1.2631120bd3f6cp-26 0x1.c524957dc5e0fp-11 0x1.ea4d4b9a3037ap-19 0x1.d24fe2f8dd1fp-15 0x1.16a0c5d5aaf5ep-23 0x1.9ab269954a95bp-24 0x1.1065044caa329p-19 0x1.9189d39dce889p-26 0x1.7f7d144c66c7fp-22 0x1.2a59858b90a7fp-24 0x1.6f43bf44f130dp-15 0x1.04cb20a78c4c2p-20 0x1.79534b855f16dp-27], tensor shape=[8] data=[0x1.06a27548acfa6p-13 0x1.9ce4cc6a6ba4ep-14 0x1.de555fd1af325p-18 0x1.ddb00ccd789e9p-16 0x1.93475c06ddba8p-14 0x1.3d1b09dbc2714p-15 0x1.21aa6ef787629p-14 0x1.b81b5ba2babebp-16], tensor shape=[3, 8] data=[0x1.36d08b2d61ef8p-12 0x1.0db3e2d64ed3fp-14 0x1.99fdf51045019p-12 0x1.3851102f2b556p-12 0x1.063c02ea47d8cp-15 0x1.0876936723fa9p-11 0x1.eb44692477bfdp-12 0x1.d7bcb3759d3e4p-15 0x1.8da4a9488e88cp-13 0x1.203000fd16f36p-12 0x1.4410cee2ea81ep-14 0x1.8f4fcfc0f248bp-16 0x1.c5b70f72205ffp-13 0x1.781e392e5c34dp-13 0x1.80e862b67749ap-13 0x1.4091d12744d73p-12 0x1.b3375e3264208p-17 0x1.148acadc4abebp-12 0x1.07a50ce6486ebp-13 0x1.99f1d63dab496p-13 0x1.508f636d79f74p-12 0x1.6d6b3a721ec76p-14 0x1.2e2547499998bp-14 0x1.237c864879c84p-12], tensor shape=[3] data=[0x1.350eec9908cb8p-12 0x1.b5e833044e19ep-14 0x1.cf48c650780ffp-15]]
+xavier_init = fn xavier_init/2
+y = tensor shape=[18] data=[0x0p+00 0x0p+00 0x0p+00 0x0p+00 0x0p+00 0x0p+00 0x1p+00 0x1p+00 0x1p+00 0x1p+00 0x1p+00 0x1p+00 0x1p+01 0x1p+01 0x1p+01 0x1p+01 0x1p+01 0x1p+01]
+zeros_like = fn zeros_like/1
+--- stderr ---

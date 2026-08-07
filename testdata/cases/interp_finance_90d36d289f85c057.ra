@@ -1,0 +1,11 @@
+seed(42)
+let Z = randn(200000)
+fn call(S0, K, r, sig, T) {
+	let d = (r - 0.5 * sig * sig) * T
+	let ST = S0 * exp(d + sig * sqrt(T) * Z)
+	exp(-r * T) * mean(relu(ST - K))
+}
+let price = call(100.0, 100.0, 0.05, 0.2, 1.0)
+let delta = grad(fn(s) = call(s, 100.0, 0.05, 0.2, 1.0))(100.0)
+let vega = grad(fn(v) = call(100.0, 100.0, 0.05, v, 1.0))(0.2)
+[price, delta, vega]

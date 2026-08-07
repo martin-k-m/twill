@@ -1,0 +1,3 @@
+let s = 7.0
+for i in range(0) { s = 0.0 }
+print(s)

@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown name "df"
+  1 | print(len(df.a), sum(df.a), sum(df.b))
+raster: 1 shape error(s); not running (use --no-check to run anyway)

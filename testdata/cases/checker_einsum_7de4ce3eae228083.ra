@@ -1,0 +1,1 @@
+let y = einsum("ij,jk->ik", [[1.0,2.0]])

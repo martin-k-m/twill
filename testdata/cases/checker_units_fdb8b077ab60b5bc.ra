@@ -1,0 +1,2 @@
+fn bad(px: USD/share, qty: share) -> USD { px + qty }
+let r = bad(150.0, 100.0)

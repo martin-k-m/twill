@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = num 0x1.cp+02
+p = record {a: num 0x1.8p+01, b: num 0x1p+02}
+--- stderr ---

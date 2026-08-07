@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:2: shape error: operator "+" needs numbers/tensors
+  2 | let x = r + 1.0
+raster: 1 shape error(s); not running (use --no-check to run anyway)

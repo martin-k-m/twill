@@ -1,0 +1,3 @@
+let f = fn(x) = x
+let g = f
+f == g

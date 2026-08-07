@@ -1,0 +1,2 @@
+type M = { w: [2] }
+fn f(m: M) = sum(m.wrong)

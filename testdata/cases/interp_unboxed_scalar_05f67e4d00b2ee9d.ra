@@ -1,0 +1,5 @@
+let acc = 0.0
+for i in range(4) {
+  acc = acc + 1.0
+}
+grad(fn(x) { x * acc })(3.0)

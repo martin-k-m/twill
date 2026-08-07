@@ -1,0 +1,2 @@
+fn loss(m) = sum(m.w) + m.b
+grad(loss)({ w: [1.0, 2.0], b: 0.5 }).b

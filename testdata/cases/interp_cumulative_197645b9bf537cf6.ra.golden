@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = tensor shape=[1, 1] data=[0x1p+01]
+f = fn anonymous/1
+--- stderr ---

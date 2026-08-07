@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = num 0x1p+02
+acc = num 0x1p+02
+--- stderr ---

@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown name "x"
+  1 | [x, y] 6 60
+case.ra:1: shape error: unknown name "y"
+  1 | [x, y] 6 60
+raster: 2 shape error(s); not running (use --no-check to run anyway)

@@ -1,0 +1,16 @@
+exit 0
+--- stdout ---
+A @ B     = tensor([[4, 5], [10, 11]], shape=[2, 2])
+transpose = tensor([[1, 4], [2, 5], [3, 6]], shape=[3, 2])
+row sums  = tensor([6, 15], shape=[2])
+total     = 21
+
+bilinear([1, 1]) = 10
+grad             = tensor([3, 7], shape=[2])
+# canonical v1
+_result = unit
+A = tensor shape=[2, 3] data=[0x1p+00 0x1p+01 0x1.8p+01 0x1p+02 0x1.4p+02 0x1.8p+02]
+B = tensor shape=[3, 2] data=[0x1p+00 0x0p+00 0x0p+00 0x1p+00 0x1p+00 0x1p+00]
+W = tensor shape=[2, 2] data=[0x1p+00 0x1p+01 0x1.8p+01 0x1p+02]
+bilinear = fn bilinear/1
+--- stderr ---

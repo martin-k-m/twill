@@ -1,0 +1,9 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+interest = fn interest/2
+rms = fn rms/2
+x = num 0x1.4p+03
+y = num 0x1.4p+02
+--- stderr ---

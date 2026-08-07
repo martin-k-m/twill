@@ -1,0 +1,4 @@
+let df = { x: [1.0, 2.0, 3.0], y: [10.0, 20.0, 30.0] }
+write_frame(df, "out.csv")
+let df2 = read_frame("out.csv")
+print(columns(df2), sum(df2.x), sum(df2.y))

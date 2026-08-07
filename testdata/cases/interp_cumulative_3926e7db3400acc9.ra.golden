@@ -1,0 +1,5 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = tensor shape=[4] data=[0x1p+01 0x1.8p+01 0x1p+02 0x1p+00]
+--- stderr ---

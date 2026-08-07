@@ -1,0 +1,7 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+loss = fn loss/1
+w = tensor shape=[2] data=[0x0p+00 0x0p+00]
+--- stderr ---

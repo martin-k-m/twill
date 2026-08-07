@@ -1,0 +1,55 @@
+# mlp.ra — a tiny 2-layer neural network learning XOR.
+#
+# Shows composition of tensor ops, `tanh`/`sigmoid` nonlinearities, and
+# training a multi-parameter model with `grads`.
+
+# XOR dataset: 4 samples, 2 features each.
+let X = [[0.0, 0.0],
+         [0.0, 1.0],
+         [1.0, 0.0],
+         [1.0, 1.0]]
+let Y = [0.0, 1.0, 1.0, 0.0]
+
+# Forward pass for a single input vector x (length 2).
+#   h = tanh(W1 @ x + b1)   (hidden size 4)
+#   o = sigmoid(W2 @ h + b2)
+fn forward(W1, b1, W2, b2, x) {
+  let h = tanh(W1 @ x + b1)
+  sigmoid(W2 @ h + b2)
+}
+
+# Mean binary cross-entropy over the 4 samples.
+fn loss(W1, b1, W2, b2) {
+  let total = 0.0
+  for i in range(4) {
+    let p = forward(W1, b1, W2, b2, X[i])
+    let target = Y[i]
+    let eps = 0.0000001
+    total = total - (target * log(p + eps) + (1.0 - target) * log(1.0 - p + eps))
+  }
+  sum(total) / 4.0
+}
+
+# Initialize parameters.
+let W1 = randn(4, 2)
+let b1 = zeros(4)
+let W2 = randn(1, 4)
+let b2 = zeros(1)
+let lr = 0.5
+
+for step in range(2000) {
+  let g = grads(loss)(W1, b1, W2, b2)
+  W1 = W1 - g[0] * lr
+  b1 = b1 - g[1] * lr
+  W2 = W2 - g[2] * lr
+  b2 = b2 - g[3] * lr
+  if step % 500 == 0 {
+    print("step", step, "loss", loss(W1, b1, W2, b2))
+  }
+}
+
+print("")
+print("predictions (want 0, 1, 1, 0):")
+for i in range(4) {
+  print("  input", X[i], "->", forward(W1, b1, W2, b2, X[i]))
+}

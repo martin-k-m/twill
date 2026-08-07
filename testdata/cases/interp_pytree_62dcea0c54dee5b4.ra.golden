@@ -1,0 +1,4 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:0: runtime error: zip_leaves: trees have different structures

@@ -1,0 +1,11 @@
+exit 0
+--- stdout ---
+[zeros_like, sgd_step, momentum_step, adam_step, dense, conv, embed, self_attention, softplus, leaky_relu, gelu, silu, mish, elu, relu6, softsign, log_softmax, he_init, xavier_init, embedding_init, conv_init, mse, bce, onehot, cross_entropy, mae, huber, bce_with_logits, hinge, kl_div]
+# canonical v1
+_result = unit
+adam_step = fn adam_step/9
+momentum_step = fn momentum_step/5
+nn = record {adam_step: fn adam_step/9, bce: fn bce/2, bce_with_logits: fn bce_with_logits/2, conv: fn conv/2, conv_init: fn conv_init/4, cross_entropy: fn cross_entropy/2, dense: fn dense/3, elu: fn elu/2, embed: fn embed/2, embedding_init: fn embedding_init/2, gelu: fn gelu/1, he_init: fn he_init/2, hinge: fn hinge/2, huber: fn huber/3, kl_div: fn kl_div/2, leaky_relu: fn leaky_relu/1, log_softmax: fn log_softmax/2, mae: fn mae/2, mish: fn mish/1, momentum_step: fn momentum_step/5, mse: fn mse/2, onehot: fn onehot/2, relu6: fn relu6/1, self_attention: fn self_attention/4, sgd_step: fn sgd_step/3, silu: fn silu/1, softplus: fn softplus/1, softsign: fn softsign/1, xavier_init: fn xavier_init/2, zeros_like: fn zeros_like/1}
+sgd_step = fn sgd_step/3
+zeros_like = fn zeros_like/1
+--- stderr ---

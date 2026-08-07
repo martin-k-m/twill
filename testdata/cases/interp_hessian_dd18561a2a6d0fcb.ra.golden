@@ -1,0 +1,5 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = tensor shape=[2, 2] data=[0x1.a61298e1e069cp+00 0x0p+00 0x0p+00 0x1.78b56362cef38p-02]
+--- stderr ---

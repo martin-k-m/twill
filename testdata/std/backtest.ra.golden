@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+# canonical v1
+_result = unit
+m = record {ann_vol: fn ann_vol/2, cagr: fn cagr/2, equity: fn equity/1, log_returns: fn log_returns/1, max_drawdown: fn max_drawdown/1, returns: fn returns/1, sharpe: fn sharpe/2, sma: fn sma/2, sortino: fn sortino/2, total_return: fn total_return/1}
+--- stderr ---

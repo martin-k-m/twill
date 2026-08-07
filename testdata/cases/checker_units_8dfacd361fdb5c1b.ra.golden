@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:2: shape error: unknown type "USD" on parameter "a"
+  2 | let r = f(1.0, 2.0)
+case.ra:2: shape error: unknown type "share" on parameter "b"
+  2 | let r = f(1.0, 2.0)
+raster: 2 shape error(s); not running (use --no-check to run anyway)

@@ -1,0 +1,2 @@
+fn wrong(px: USD/share, qty: share) -> share { px * qty }
+let r = wrong(1.0, 2.0)

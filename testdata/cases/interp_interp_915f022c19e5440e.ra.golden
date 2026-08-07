@@ -1,0 +1,6 @@
+exit 0
+--- stdout ---
+v = tensor([1, 2], shape=[2])
+# canonical v1
+_result = unit
+--- stderr ---

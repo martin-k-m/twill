@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:1: shape error: unknown name "write"
+  1 | write "std/nn"
+raster: 1 shape error(s); not running (use --no-check to run anyway)

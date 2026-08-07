@@ -1,0 +1,6 @@
+fn f(x) {
+  let a = x[0:1] * x[1:2]
+  let b = x[1:2] * x[2:3]
+  concat([a, b], 0)
+}
+jacobian(f)([2.0, 3.0, 4.0])

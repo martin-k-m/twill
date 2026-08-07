@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.ra:3: shape error: concat: shapes differ on axis 1: [2, 3] and [4, 5]
+  3 | print(concat([a, b], 0))
+raster: 1 shape error(s); not running (use --no-check to run anyway)

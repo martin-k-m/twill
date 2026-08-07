@@ -1,0 +1,2 @@
+let x = zeros(2, 3)
+print(reshape(x, 3, 2))

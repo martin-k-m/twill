@@ -1,0 +1,2 @@
+import "lib.ra"
+print(triple(4.0))

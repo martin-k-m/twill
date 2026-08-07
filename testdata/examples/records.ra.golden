@@ -1,0 +1,24 @@
+exit 0
+--- stdout ---
+step 0 loss 0.842536
+step 500 loss 0.002041
+step 1000 loss 0.000669
+step 1500 loss 0.000335
+
+predictions (want 0, 1, 1, 0):
+   tensor([0, 0], shape=[2]) -> tensor([0.000007], shape=[1])
+   tensor([0, 1], shape=[2]) -> tensor([0.999687], shape=[1])
+   tensor([1, 0], shape=[2]) -> tensor([0.999802], shape=[1])
+   tensor([1, 1], shape=[2]) -> tensor([0.000275], shape=[1])
+# canonical v1
+_result = unit
+X = tensor shape=[4, 2] data=[0x0p+00 0x0p+00 0x0p+00 0x1p+00 0x1p+00 0x0p+00 0x1p+00 0x1p+00]
+Y = tensor shape=[4] data=[0x0p+00 0x1p+00 0x1p+00 0x0p+00]
+forward = fn forward/2
+loss = fn loss/1
+lr = num 0x1.999999999999ap-05
+m = record {b1: tensor shape=[4] data=[0x1.87511c3a2f25ap-25 -0x1.6a244361a5b83p-22 0x1.5a21dc00f11a1p-19 -0x1.4d1a91c68712ep-20], b2: tensor shape=[1] data=[-0x1.e57e497f6ea41p-15], w1: tensor shape=[4, 2] data=[0x1.20ba8ef51d268p-19 -0x1.4db1123ab856cp-18 0x1.9ca9a03bf8ae9p-19 -0x1.03889e2fe38e5p-19 0x1.a140c3f81ea62p-17 -0x1.30a807d975c12p-17 -0x1.1f5b78fff61c7p-19 -0x1.7bc7a0f1287eap-19], w2: tensor shape=[1, 4] data=[0x1.568a7530f080bp-15 0x1.51c1b37842671p-15 -0x1.97b52b720a0edp-14 -0x1.fb8d727eb498ep-15]}
+model = record {b1: tensor shape=[4] data=[0x1.60fe610f5f7e4p+00 0x1.5328305ba8d6p-01 -0x1.c8051b13dc71p-02 -0x1.112631f8ba03dp+00], b2: tensor shape=[1] data=[0x1.5791856fb74c9p+01], w1: tensor shape=[4, 2] data=[-0x1.f22d0fb897d11p+01 0x1.57ea062463c3p+02 -0x1.8641155abaaf4p+01 0x1.5ac8254f5b78fp+02 -0x1.3fc994a61b9b2p+02 0x1.6b3bddc9587fcp+01 0x1.0d6f3ebbc2c36p+02 0x1.132fc56a03904p+02], w2: tensor shape=[1, 4] data=[-0x1.5f8df7147bd56p+02 -0x1.814f12e30eb3fp+01 0x1.08f662e052956p+03 0x1.70c705349151p+02]}
+nn = record {adam_step: fn adam_step/9, bce: fn bce/2, bce_with_logits: fn bce_with_logits/2, conv: fn conv/2, conv_init: fn conv_init/4, cross_entropy: fn cross_entropy/2, dense: fn dense/3, elu: fn elu/2, embed: fn embed/2, embedding_init: fn embedding_init/2, gelu: fn gelu/1, he_init: fn he_init/2, hinge: fn hinge/2, huber: fn huber/3, kl_div: fn kl_div/2, leaky_relu: fn leaky_relu/1, log_softmax: fn log_softmax/2, mae: fn mae/2, mish: fn mish/1, momentum_step: fn momentum_step/5, mse: fn mse/2, onehot: fn onehot/2, relu6: fn relu6/1, self_attention: fn self_attention/4, sgd_step: fn sgd_step/3, silu: fn silu/1, softplus: fn softplus/1, softsign: fn softsign/1, xavier_init: fn xavier_init/2, zeros_like: fn zeros_like/1}
+v = record {b1: tensor shape=[4] data=[0x1.3c74ac10f32d9p-20 0x1.dc2baf302d1dp-22 0x1.70f0e2751abc9p-17 0x1.4cedfed2a4484p-18], b2: tensor shape=[1] data=[0x1.0541551b432b4p-15], w1: tensor shape=[4, 2] data=[0x1.0d632033bbc3bp-20 0x1.6f03303fa256fp-20 0x1.d49fca98a1449p-21 0x1.177ea622972cdp-23 0x1.c7d9b9a6c45d9p-18 0x1.051092e5567afp-17 0x1.e1cea93fbb85ep-20 0x1.1571f5f0a2083p-18], w2: tensor shape=[1, 4] data=[0x1.a7c2b27d30bf5p-17 0x1.820133cec44cdp-16 0x1.904cabb70fe9fp-16 0x1.55ee75b598a64p-15]}
+--- stderr ---
