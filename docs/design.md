@@ -90,6 +90,45 @@ them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
 `grad`, loops that reshape, or values read at runtime. Those are left unknown.
 
+## Two modes, and where they disagree
+
+`mode systems` (designed in `docs/self-hosting.md`) is not a second language. It
+is the same grammar and the same interpreter with a different set of rules made
+mandatory. But three of those rules genuinely differ from numeric mode's, and a
+difference that is not written down is a trap rather than a design. The
+normative statements are in `docs/language-guide.md`; this is why they are what
+they are.
+
+**A scalar is a rank-0 tensor in numeric mode and is not one in systems mode.**
+Principle 1 above is a numeric-mode principle and it earns its place there:
+uniform scalars are what make autodiff, broadcasting and printing one mechanism
+instead of two. Systems mode has no tensors, so it has nothing to be uniform
+with, and the cost of pretending otherwise is measurable. A metric accumulator
+running `total = total + x` once per training step would allocate a tensor and a
+tape node per step if `F64` were a rank-0 tensor, and an epoch would build a
+chain of them. `F64` is a machine word. The seam between the two is `f64()` and
+`i64()` and nothing crosses it implicitly.
+
+**Aggregates are handles and mutation through a parameter is visible to the
+caller.** This is the rule the six ecosystem codebases were already built on,
+and it is a genuine risk sitting next to `grad`, which walks a record's
+structure and is correct only because records do not alias. The resolution is
+that `struct` and `Record` are separate types and stay separate: mutation is
+never retrofitted onto `Record`. The reason to state the rule rather than leave
+it to the implementation is asymmetric failure. If aggregates copied, a training
+framework would obviously not work, but `src/tensor.tw`'s reverse pass would
+quietly return zeros, and a zero gradient is not an error. It is a model that
+does not learn.
+
+**`%` is floored in numeric mode and truncating in systems mode.** On tensor
+data a modulo is almost always a wrap into a range, where a negative result is
+the bug; on `I64` it is digit extraction and packing, ported from integer code
+that assumes C's rule and the identity `(a / b) * b + a % b == a`. Neither
+answer is right for both, and one rule chosen for consistency would be silently
+wrong in whichever half did not get it. The related edge is that `shr` is
+`floor(a / 2^k)` while `/` truncates, so replacing a division by a power of two
+with a shift is valid only for a non-negative dividend.
+
 ## Known limitations (v0.8)
 
 Deliberate, for a prototype:

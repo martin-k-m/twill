@@ -85,7 +85,13 @@ models them as `tList` and `tRecord` with no element type.
 
 ## NEEDS-5: `struct`: nominal, mutable, reference semantics
 
-**Status:** blocking. `src/lex.tw:198` `Lexer` is a cursor that advances.
+**Status:** the semantics are now decided and written down; the implementation
+is still blocking. `src/lex.tw:198` `Lexer` is a cursor that advances. **The
+normative text is `docs/language-guide.md`, `struct`, and what a parameter is.**
+It states reference semantics for `struct`, `Arr`, `Dict` and `Bytes` together,
+including mutation through a field of another struct, and it says that copying
+is always explicit. `docs/design.md`, Two modes, and where they disagree, has
+the reason the rule is stated rather than left to the implementation.
 
 Fields typed, mutable in place, passed by handle. `advance(lx)` at
 `src/lex.tw:240` mutates `lx.i`, `lx.line` and `lx.col` and the caller sees it.
@@ -183,7 +189,12 @@ errors.
 
 ## NEEDS-12: `continue` in `while` and `for`
 
-**Status:** blocking. `src/lex.tw:305` and the whole scanner loop.
+**Status:** specified; the parser and interpreter change is still blocking.
+`src/lex.tw:305` and the whole scanner loop. **The normative text is
+`docs/language-guide.md`, Control flow → `break` and `continue`**, which covers
+`break` as well: innermost loop only, no labels, statements rather than
+expressions, no crossing a function boundary, and keywords in systems mode only
+so that a numeric-mode `let break = 3` keeps working.
 
 The Go lexer's main loop is a chain of `continue`s and the twill port is the
 same shape. Rewriting it as nested `else` would nest eight deep.
@@ -204,7 +215,10 @@ no source syntax.
 
 ## NEEDS-14: a `Bool` type name in annotations
 
-**Status:** blocking, trivially.
+**Status:** specified; the parser change is still blocking, trivially. **The
+normative text is `docs/language-guide.md`, Systems-mode types → `Bool`.**
+`Bool` is a type name in systems mode, legal anywhere a type is, with no
+conversion to or from `I64` in either direction.
 
 `src/lex.tw:61` annotates a struct field `trailing: Bool`. The parser currently
 reads a bare name after `:` as a record type or a unit
@@ -318,7 +332,13 @@ Go's `v, ok := m[k]` is two returns; twill has one. `Opt` is the whole reason
 
 ## NEEDS-23: sorting a `Arr[Str]`
 
-**Status:** blocking. `src/check.tw` `unit_string`.
+**Status:** the ordering is specified; a `sort` builtin is still open.
+`src/check.tw` `unit_string`. **The normative text is
+`docs/language-guide.md`, Strings → Ordering**, which pins bytewise-unsigned
+lexicographic order, shorter-is-smaller on a shared prefix, so that the eleven
+hand-written sorts in the ecosystem agree with `sort.Strings` and with each
+other. It also records that `<` stays undefined on `Str`, which is why
+`str_greater` is a function.
 
 `internal/checker/checker.go` `unitString` calls `sort.Strings` on the unit's
 base names before joining, so that `USD*year^-1` renders the same regardless of
@@ -333,7 +353,12 @@ comparator question that the subset does not need to answer yet.
 
 ## NEEDS-24: integer division and modulo on `I64`
 
-**Status:** blocking. `src/check.tw` `unit_sqrt` (`v % 2`, `v / 2`).
+**Status:** specified; the implementation is still blocking. `src/check.tw`
+`unit_sqrt` (`v % 2`, `v / 2`). **The normative text is
+`docs/language-guide.md`, Operators → Integer division and modulo on `I64`**,
+and NEEDS-44 is the same entry filed twice. `/` truncates toward zero, `%` takes
+the sign of the dividend, `MIN_I64 / -1` wraps to `MIN_I64`, and a zero divisor
+aborts with a diagnostic rather than returning a `Res`.
 
 Float division would give `1.5` where the checker needs a failure. Defined
 behaviour on division by zero as an error value, per
@@ -574,7 +599,12 @@ byte anyway.
 
 ## NEEDS-35 - `Str` concatenation with `+`
 
-**Status:** blocking. Every renderer builds its output by concatenation.
+**Status:** specified; the implementation is still blocking. Every renderer
+builds its output by concatenation. **The normative text is
+`docs/language-guide.md`, Strings → Concatenation.** `Str + Str` exists and
+produces a new `Str`; `+` between a `Str` and a non-`Str` is an error with no
+coercion; and the quadratic cost of building in a loop is stated there along
+with the `src/bytes.tw` builder that is the answer to it.
 
 `docs/self-hosting.md` gives `Bytes` a `concat` and gives `Str` length, byte
 indexing and slicing, but never says `Str + Str`. The CLI is almost entirely
@@ -674,7 +704,17 @@ only needed by whatever drives the loop.
 
 ## NEEDS-40 - `F64` in systems mode, with `cos` and the conversions
 
-**Status:** blocking for `src/cli/banner.tw` and `src/cli/tensor.tw`.
+**Status:** the type question is answered; `cos` and `sin` on it are still
+blocking for `src/cli/banner.tw` and `src/cli/tensor.tw`. **The normative text
+is `docs/language-guide.md`, Systems-mode types → `F64`, and what a
+systems-mode scalar is.**
+
+The answer to the second half of this entry, which is the half that was worth
+asking: a systems-mode scalar is **not** a rank-0 tensor. `F64` is a machine
+word with no shape, no tape entry and no allocation, so loom's `Meter.total`
+does not allocate per step. The float math builtins are entry 15 of
+`docs/roadmap.md` and are still open; what is now fixed is that they will take
+and return `F64` rather than a rank-0 tensor.
 
 `docs/self-hosting.md` says systems mode has no tensors, and is right, but it
 does not say what a plain float is in systems mode. Two files need one:
@@ -709,8 +749,11 @@ slice, so this is an exposure rather than an implementation.
 
 ## NEEDS-42 - struct field mutation through a handle
 
-**Status:** blocking for `src/term/frame.tw`, `src/cli/spinner.tw`,
-`src/cli/progress.tw`, `src/cli/repl.tw`.
+**Status:** specified; the implementation is still blocking for
+`src/term/frame.tw`, `src/cli/spinner.tw`, `src/cli/progress.tw`,
+`src/cli/repl.tw`. **The normative text is `docs/language-guide.md`, `struct`,
+and what a parameter is**, and it covers the case this entry adds: mutation is
+visible through a field of another struct, to any depth.
 
 Reference semantics for structs, as specified in `docs/self-hosting.md` section
 1.2. Every stateful widget is a struct whose fields a function mutates and whose
@@ -734,8 +777,14 @@ place to add the continuation indent.
 
 ## NEEDS-44 - integer division and modulo on `I64`
 
-**Status:** blocking, and it is a semantics question rather than a missing
-operator.
+**Status:** the semantics question is answered; the implementation is still
+blocking. **The normative text is `docs/language-guide.md`, Operators → Integer
+division and modulo on `I64`.** It records the answer this entry asked for,
+truncation toward zero with `%` taking the sign of the dividend, and adds the
+two things this entry did not ask about and that a caller needs: numeric mode's
+`%` is floored and therefore disagrees, and `shr` is `floor(a / 2^k)` and
+therefore also disagrees for a negative dividend. See NEEDS-24, which is this
+entry under an earlier number.
 
 `/` and `%` exist, but on tensors they are float operations. On `I64` they must
 truncate toward zero, and `%` must take the sign of the dividend. The 256-colour
@@ -748,19 +797,35 @@ which section 1.2 already specifies.
 
 ## NEEDS-45 - `str()` on `I64`
 
-**Status:** blocking.
+**Status:** specified; the implementation is still blocking. **The normative
+text is `docs/language-guide.md`, Standard library → `str` on a number.**
 
 `str(n)` for an `I64` must produce the digits with no decimal point and no
 exponent. Today `str` on a scalar goes through the tensor printer, and a
 trailing `.0` would land in every line number, every column count and every axis
 index in every diagnostic.
 
+*Measured, because the entry reads as though it had been:* the Go bootstrap
+does not emit the trailing `.0`. `internal/value.FormatNumber` returns
+`strconv.FormatInt` for any float that is integral, so `str(3)`, `str(scalar(3))`,
+`str(sum([1.0, 2.0]))` and `str(len(range(3)))` all print `3`, and `twill fmt`
+rewrites the literal `3.0` to `3`. The hazard is real but it is prospective: it
+is what a systems-mode `str` would do if it were routed through the tensor
+printer, which is what the entry is asking not to happen. The guide also pins
+the `F64` rendering and the boundary between the two, since `src/fmt.tw`
+`format_number` sends an integral `F64` to `str(k)` on an `I64` and the two
+renderings have to agree there.
+
 *Reaches for it:* everywhere. `src/cli/diagnostic.tw` alone uses it for the
 line, the column and the gutter width.
 
 ## NEEDS-46 - `Str` equality must survive the `Str` rewrite
 
-**Status:** not a new feature. Recorded as a constraint.
+**Status:** specified, and still a constraint rather than a feature. **The
+normative text is `docs/language-guide.md`, Strings → Equality**, which states
+it as bytes with no case folding, no normalization and no locale, and Strings →
+Ordering, which says that `<` and friends stay undefined on `Str` and pins the
+bytewise order the hand-written comparisons implement.
 
 `==` and `!=` on `Str` already work by the deep-equality rule in
 `docs/language-guide.md`, and `src/term/caps.tw` leans on it for every
@@ -1209,8 +1274,11 @@ are two tables, this is that they already disagree.
 
 ## NEEDS-67: mutating a struct through a parameter
 
-**Status:** open, and it is a semantics question, not a task.
-`src/eval.tw` `gbm_opts_from_record`.
+**Status:** answered. It was a semantics question, not a task, and the answer is
+handle semantics, which is what `src/` already assumed. **The normative text is
+`docs/language-guide.md`, `struct`, and what a parameter is.** `src/eval.tw`
+`gbm_opts_from_record` is correct as written and does not have to return the
+params.
 
 That function takes a `GbmParams` and assigns to its fields, and the caller
 expects to see the changes. Whether it does depends on whether a struct is
@@ -1292,8 +1360,12 @@ lookup is one hash.
 
 ## NEEDS-71: an `Arr` parameter aliases the caller's array
 
-**Status:** blocking for `src/tensor.tw`. `accumulate`, `odo_step`,
-`sort_offsets`, and every kernel that fills a buffer it was handed.
+**Status:** answered; the implementation is still blocking for `src/tensor.tw`.
+`accumulate`, `odo_step`, `sort_offsets`, and every kernel that fills a buffer
+it was handed. **The normative text is `docs/language-guide.md`, `struct`, and
+what a parameter is**, which states the `Arr` rule and the `struct` rule in one
+place precisely because `Odometer` is mutated through both at once. An `Arr`
+parameter aliases; the backward pass does not return zeros.
 
 `accumulate(cot, touched, node, buf)` mutates `cot[node].data` and expects the
 caller to see it. `odo_step(odo)` advances a struct's arrays in place. If an
@@ -1524,8 +1596,15 @@ does not exist there at all, which is why this cost is new rather than ported.
 
 ## NEEDS-82: file-level state that is mutated in place
 
-**Status:** blocking for `src/eval.tw`. `TAPES`, and the three functions around
-it: `tape_push`, `tape_pop`, `tape_current`.
+**Status:** half answered, and still blocking for `src/eval.tw`. `TAPES`, and
+the three functions around it: `tape_push`, `tape_pop`, `tape_current`.
+
+The aliasing half is settled: **`docs/language-guide.md`, `struct`, and what a
+parameter is** says an `Arr` is a handle and copying is always explicit, so
+pushing to `TAPES` from anywhere mutates the one array. The other half, whether
+a file-level `let` may be initialised by a call and whether that call runs once,
+is not answered here and is the same question as weft's entry 9 (`docs/roadmap.md`
+entry 28).
 
 `let TAPES: Arr[tensor.Tape] = arr_new()` at file level, pushed and popped for
 the dynamic extent of a differentiated call. Two things have to be true for it
@@ -1987,7 +2066,12 @@ lines each and neither has a design question in it.
 
 ## NEEDS-99: string concatenation
 
-**Status:** open, and it pushes work onto callers. `std/frame.tw` `one_hot`.
+**Status:** specified; the implementation is still open, and until it lands this
+pushes work onto callers. `std/frame.tw` `one_hot`. **The normative text is
+`docs/language-guide.md`, Strings → Concatenation** for `+`, and Standard
+library → `str` on a number for the round-tripping rendering this entry pairs
+with it. Once both exist, `one_hot` builds `colour_0` itself and stops taking
+the output names as an argument.
 
 One-hot encoding a column called `colour` over the categories 0, 1, 2 should
 produce columns called `colour_0`, `colour_1` and `colour_2`. There is no `+`
