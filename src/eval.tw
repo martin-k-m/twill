@@ -1246,15 +1246,15 @@ fn bi_print(args: Arr[Value]) -> Res[Value, RuntimeError] {
 
 fn bi_unary_math(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
-  if bytes.equal(name, "relu") { return Ok(VTensor(tensor.unary(tensor.OpRelu, t))) }
-  if bytes.equal(name, "exp") { return Ok(VTensor(tensor.unary(tensor.OpExp, t))) }
-  if bytes.equal(name, "log") { return Ok(VTensor(tensor.unary(tensor.OpLog, t))) }
-  if bytes.equal(name, "sin") { return Ok(VTensor(tensor.unary(tensor.OpSin, t))) }
-  if bytes.equal(name, "cos") { return Ok(VTensor(tensor.unary(tensor.OpCos, t))) }
-  if bytes.equal(name, "tanh") { return Ok(VTensor(tensor.unary(tensor.OpTanh, t))) }
-  if bytes.equal(name, "sigmoid") { return Ok(VTensor(tensor.unary(tensor.OpSigmoid, t))) }
-  if bytes.equal(name, "sqrt") { return Ok(VTensor(tensor.unary(tensor.OpSqrt, t))) }
-  Ok(VTensor(tensor.unary(tensor.OpSquare, t)))
+  if bytes.equal(name, "relu") { return Ok(VTensor(tr_unary(tensor.OpRelu, t))) }
+  if bytes.equal(name, "exp") { return Ok(VTensor(tr_unary(tensor.OpExp, t))) }
+  if bytes.equal(name, "log") { return Ok(VTensor(tr_unary(tensor.OpLog, t))) }
+  if bytes.equal(name, "sin") { return Ok(VTensor(tr_unary(tensor.OpSin, t))) }
+  if bytes.equal(name, "cos") { return Ok(VTensor(tr_unary(tensor.OpCos, t))) }
+  if bytes.equal(name, "tanh") { return Ok(VTensor(tr_unary(tensor.OpTanh, t))) }
+  if bytes.equal(name, "sigmoid") { return Ok(VTensor(tr_unary(tensor.OpSigmoid, t))) }
+  if bytes.equal(name, "sqrt") { return Ok(VTensor(tr_unary(tensor.OpSqrt, t))) }
+  Ok(VTensor(tr_unary(tensor.OpSquare, t)))
 }
 
 # |x| = relu(x) + relu(-x), keeping it differentiable. Written as two relus
@@ -1262,15 +1262,15 @@ fn bi_unary_math(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
 # has the subgradient 0 at the origin, which is the conventional choice.
 fn bi_abs(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let t: tensor.Tensor = arg_tensor(args[0], "abs", line)?
-  let pos: tensor.Tensor = tensor.unary(tensor.OpRelu, t)
-  let neg: tensor.Tensor = tensor.unary(tensor.OpRelu, tensor.unary(tensor.OpNeg, t))
-  lift_v(tensor.binary(tensor.OpAdd, pos, neg), line)
+  let pos: tensor.Tensor = tr_unary(tensor.OpRelu, t)
+  let neg: tensor.Tensor = tr_unary(tensor.OpRelu, tr_unary(tensor.OpNeg, t))
+  lift_v(tr_binary(tensor.OpAdd, pos, neg), line)
 }
 
 fn bi_pow(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let base: tensor.Tensor = arg_tensor(args[0], "pow", line)?
   let p: F64 = scalar_of(args[1], "pow", line)?
-  Ok(VTensor(tensor.pow_scalar(base, p)))
+  lift_v(tr_pow_scalar(base, p), line)
 }
 
 fn bi_binary(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -1279,24 +1279,24 @@ fn bi_binary(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError]
   # dot is matmul under a second name, not an inner product: on two vectors the
   # matmul rule already gives the scalar, and on matrices `dot` meaning
   # something else would surprise every caller who wrote it for readability.
-  if in_words("matmul dot", name) { return lift_v(tensor.matmul(x, y), line) }
-  if bytes.equal(name, "conv2d") { return lift_v(tensor.conv2d(x, y), line) }
-  if bytes.equal(name, "maximum") { return lift_v(tensor.binary(tensor.OpMaximum, x, y), line) }
-  if bytes.equal(name, "minimum") { return lift_v(tensor.binary(tensor.OpMinimum, x, y), line) }
-  if bytes.equal(name, "greater") { return lift_v(tensor.binary(tensor.OpGreater, x, y), line) }
-  if bytes.equal(name, "less") { return lift_v(tensor.binary(tensor.OpLess, x, y), line) }
-  if bytes.equal(name, "greater_equal") { return lift_v(tensor.binary(tensor.OpGreaterEqual, x, y), line) }
-  if bytes.equal(name, "less_equal") { return lift_v(tensor.binary(tensor.OpLessEqual, x, y), line) }
+  if in_words("matmul dot", name) { return lift_v(tr_matmul(x, y), line) }
+  if bytes.equal(name, "conv2d") { return lift_v(tr_conv2d(x, y), line) }
+  if bytes.equal(name, "maximum") { return lift_v(tr_binary(tensor.OpMaximum, x, y), line) }
+  if bytes.equal(name, "minimum") { return lift_v(tr_binary(tensor.OpMinimum, x, y), line) }
+  if bytes.equal(name, "greater") { return lift_v(tr_binary(tensor.OpGreater, x, y), line) }
+  if bytes.equal(name, "less") { return lift_v(tr_binary(tensor.OpLess, x, y), line) }
+  if bytes.equal(name, "greater_equal") { return lift_v(tr_binary(tensor.OpGreaterEqual, x, y), line) }
+  if bytes.equal(name, "less_equal") { return lift_v(tr_binary(tensor.OpLessEqual, x, y), line) }
   # equal_op, not equal: this is the elementwise 0/1 mask, a different question
   # from the `==` operator's single deep-equality answer.
-  lift_v(tensor.binary(tensor.OpEqual, x, y), line)
+  lift_v(tr_binary(tensor.OpEqual, x, y), line)
 }
 
 # maxpool2d(x, k): non-overlapping k by k max pooling over each channel.
 fn bi_maxpool2d(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let x: tensor.Tensor = arg_tensor(args[0], "maxpool2d", line)?
   let k: I64 = int_of(args[1], "maxpool2d", line)?
-  lift_v(tensor.maxpool2d(x, k), line)
+  lift_v(tr_maxpool2d(x, k), line)
 }
 
 # gather(x, indices): select rows of x (first axis) by an index list or 1-D
@@ -1304,21 +1304,21 @@ fn bi_maxpool2d(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
 fn bi_gather(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let x: tensor.Tensor = arg_tensor(args[0], "gather", line)?
   let idx: Arr[I64] = indices_of(args[1], "gather", line)?
-  lift_v(tensor.gather(x, idx), line)
+  lift_v(tr_gather(x, idx), line)
 }
 
 fn bi_where(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let c: tensor.Tensor = arg_tensor(args[0], "where", line)?
   let x: tensor.Tensor = arg_tensor(args[1], "where", line)?
   let y: tensor.Tensor = arg_tensor(args[2], "where", line)?
-  lift_v(tensor.where3(c, x, y), line)
+  lift_v(tr_where(c, x, y), line)
 }
 
 fn bi_clip(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let t: tensor.Tensor = arg_tensor(args[0], "clip", line)?
   let lo: F64 = scalar_of(args[1], "clip", line)?
   let hi: F64 = scalar_of(args[2], "clip", line)?
-  Ok(VTensor(tensor.clip(t, lo, hi)))
+  lift_v(tr_clip(t, lo, hi), line)
 }
 
 # ---- reductions ------------------------------------------------------------
@@ -1340,20 +1340,20 @@ fn bi_reduce(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError]
   }
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
   if len(args) == 1 {
-    if bytes.equal(name, "sum") { return Ok(VTensor(tensor.sum_all(t))) }
-    if bytes.equal(name, "mean") { return Ok(VTensor(tensor.mean_all(t))) }
-    if bytes.equal(name, "max") { return Ok(VTensor(tensor.max_all(t))) }
-    if bytes.equal(name, "min") { return Ok(VTensor(tensor.min_all(t))) }
-    if bytes.equal(name, "prod") { return Ok(VTensor(tensor.prod_all(t))) }
-    return Ok(VTensor(tensor.median_all(t)))
+    if bytes.equal(name, "sum") { return lift_v(tr_reduce_all(tensor.OpSum, t), line) }
+    if bytes.equal(name, "mean") { return lift_v(tr_reduce_all(tensor.OpMean, t), line) }
+    if bytes.equal(name, "max") { return lift_v(tr_reduce_all(tensor.OpMax, t), line) }
+    if bytes.equal(name, "min") { return lift_v(tr_reduce_all(tensor.OpMin, t), line) }
+    if bytes.equal(name, "prod") { return lift_v(tr_reduce_all(tensor.OpProd, t), line) }
+    return lift_v(tr_reduce_all(tensor.OpMedian, t), line)
   }
   let ax: I64 = int_of(args[1], name, line)?
-  if bytes.equal(name, "sum") { return lift_v(tensor.sum_axis(t, ax), line) }
-  if bytes.equal(name, "mean") { return lift_v(tensor.mean_axis(t, ax), line) }
-  if bytes.equal(name, "max") { return lift_v(tensor.max_axis(t, ax), line) }
-  if bytes.equal(name, "min") { return lift_v(tensor.min_axis(t, ax), line) }
-  if bytes.equal(name, "prod") { return lift_v(tensor.prod_axis(t, ax), line) }
-  lift_v(tensor.median_axis(t, ax), line)
+  if bytes.equal(name, "sum") { return lift_v(tr_reduce_axis(tensor.OpSum, t, ax), line) }
+  if bytes.equal(name, "mean") { return lift_v(tr_reduce_axis(tensor.OpMean, t, ax), line) }
+  if bytes.equal(name, "max") { return lift_v(tr_reduce_axis(tensor.OpMax, t, ax), line) }
+  if bytes.equal(name, "min") { return lift_v(tr_reduce_axis(tensor.OpMin, t, ax), line) }
+  if bytes.equal(name, "prod") { return lift_v(tr_reduce_axis(tensor.OpProd, t, ax), line) }
+  lift_v(tr_reduce_axis(tensor.OpMedian, t, ax), line)
 }
 
 # sort/argsort take an optional axis and an optional "desc" flag, so `sort(t)`,
@@ -1369,7 +1369,12 @@ fn bi_sorting(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError
   if len(args) >= 2 { axis = int_of(args[1], name, line)? }
   let descending: Bool = false
   if len(args) == 3 { descending = scalar_of(args[2], name, line)? != 0.0 }
-  if bytes.equal(name, "sort") { return lift_v(tensor.sort_axis(t, axis, descending), line) }
+  if bytes.equal(name, "sort") { return lift_v(tr_sort_axis(t, axis, descending), line) }
+  # argsort, argtopk, argmax and argmin stay on the pure kernel even under a
+  # tape. They return positions, not values, and a position has no derivative,
+  # so recording them would put a node on the tape that severs the chain at the
+  # first arithmetic done with the result. The bootstrap does the same by
+  # returning a tensor with RequiresGrad clear.
   lift_v(tensor.argsort_axis(t, axis, descending), line)
 }
 
@@ -1386,7 +1391,7 @@ fn bi_topping(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError
   if len(args) >= 3 { axis = int_of(args[2], name, line)? }
   let largest: Bool = true
   if len(args) == 4 { largest = scalar_of(args[3], name, line)? == 0.0 }
-  if bytes.equal(name, "topk") { return lift_v(tensor.topk_axis(t, k, axis, largest), line) }
+  if bytes.equal(name, "topk") { return lift_v(tr_topk_axis(t, k, axis, largest), line) }
   lift_v(tensor.argtopk_axis(t, k, axis, largest), line)
 }
 
@@ -1400,8 +1405,8 @@ fn bi_last_axis(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeErr
   if len(args) == 2 { axis = int_of(args[1], name, line)? }
   if bytes.equal(name, "argmax") { return lift_v(tensor.argmax_axis(t, axis), line) }
   if bytes.equal(name, "argmin") { return lift_v(tensor.argmin_axis(t, axis), line) }
-  if bytes.equal(name, "flip") { return lift_v(tensor.flip_axis(t, axis), line) }
-  lift_v(tensor.diff_axis(t, axis), line)
+  if bytes.equal(name, "flip") { return lift_v(tr_flip_axis(t, axis), line) }
+  lift_v(tr_diff_axis(t, axis), line)
 }
 
 # roll takes the shift first, since that is the argument nobody omits.
@@ -1413,7 +1418,7 @@ fn bi_roll(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let shift: I64 = int_of(args[1], "roll", line)?
   let axis: I64 = len(t.shape) - 1
   if len(args) == 3 { axis = int_of(args[2], "roll", line)? }
-  lift_v(tensor.roll_axis(t, shift, axis), line)
+  lift_v(tr_roll_axis(t, shift, axis), line)
 }
 
 # softmax and logsumexp default to the last axis. They have no count check on
@@ -1427,8 +1432,8 @@ fn bi_last_axis_op(name: Str, args: Arr[Value], line: I64) -> Res[Value, Runtime
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
   let axis: I64 = len(t.shape) - 1
   if len(args) == 2 { axis = int_of(args[1], name, line)? }
-  if bytes.equal(name, "softmax") { return lift_v(tensor.softmax(t, axis), line) }
-  lift_v(tensor.logsumexp_axis(t, axis), line)
+  if bytes.equal(name, "softmax") { return lift_v(tr_softmax(t, axis), line) }
+  lift_v(tr_logsumexp_axis(t, axis), line)
 }
 
 # ---- shape ----------------------------------------------------------------
@@ -1439,8 +1444,8 @@ fn bi_reshaping(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeErr
   }
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
   let shape: Arr[I64] = shape_from_args(rest(args, 1), name, line)?
-  if bytes.equal(name, "reshape") { return lift_v(tensor.reshape(t, shape), line) }
-  lift_v(tensor.broadcast_to(t, shape), line)
+  if bytes.equal(name, "reshape") { return lift_v(tr_reshape(t, shape), line) }
+  lift_v(tr_broadcast_to(t, shape), line)
 }
 
 fn bi_transpose(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -1456,7 +1461,7 @@ fn bi_transpose(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
     push(axes, int_of(args[i], "transpose", line)?)
     i = i + 1
   }
-  lift_v(tensor.transpose(t, axes), line)
+  lift_v(tr_transpose(t, axes), line)
 }
 
 fn bi_einsum(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -1474,7 +1479,7 @@ fn bi_einsum(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
     push(ts, arg_tensor(args[i], "einsum", line)?)
     i = i + 1
   }
-  lift_v(tensor.einsum(spec, ts), line)
+  lift_v(tr_einsum(spec, ts), line)
 }
 
 fn bi_concat(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -1486,7 +1491,7 @@ fn bi_concat(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
     i = i + 1
   }
   let axis: I64 = int_of(args[1], "concat", line)?
-  lift_v(tensor.concat(ts, axis), line)
+  lift_v(tr_concat(ts, axis), line)
 }
 
 # split(t, n | sizes[, axis]): the inverse of concat, returning a list. A scalar
@@ -1512,10 +1517,10 @@ fn bi_split(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let pieces: Arr[tensor.Tensor] = arr_new()
   if not is_list and is_scalar_value(args[1]) {
     let n: I64 = int_of(args[1], "split", line)?
-    pieces = lift_pieces(tensor.split_equal(t, n, axis), line)?
+    pieces = lift_pieces(tr_split_equal(t, n, axis), line)?
   } else {
     let sizes: Arr[I64] = indices_of(args[1], "split", line)?
-    pieces = lift_pieces(tensor.split(t, sizes, axis), line)?
+    pieces = lift_pieces(tr_split(t, sizes, axis), line)?
   }
   let items: Arr[Value] = arr_new()
   let i: I64 = 0
@@ -1549,16 +1554,16 @@ fn bi_scan(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   }
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
   if len(args) == 1 {
-    if bytes.equal(name, "cumsum") { return Ok(VTensor(tensor.cumsum(t))) }
-    if bytes.equal(name, "cumprod") { return Ok(VTensor(tensor.cumprod(t))) }
-    if bytes.equal(name, "cummax") { return Ok(VTensor(tensor.cummax(t))) }
-    return Ok(VTensor(tensor.cummin(t)))
+    if bytes.equal(name, "cumsum") { return lift_v(tr_scan_all(tensor.OpCumSum, t), line) }
+    if bytes.equal(name, "cumprod") { return lift_v(tr_scan_all(tensor.OpCumProd, t), line) }
+    if bytes.equal(name, "cummax") { return lift_v(tr_scan_all(tensor.OpCumMax, t), line) }
+    return lift_v(tr_scan_all(tensor.OpCumMin, t), line)
   }
   let axis: I64 = int_of(args[1], name, line)?
-  if bytes.equal(name, "cumsum") { return lift_v(tensor.cumsum_axis(t, axis), line) }
-  if bytes.equal(name, "cumprod") { return lift_v(tensor.cumprod_axis(t, axis), line) }
-  if bytes.equal(name, "cummax") { return lift_v(tensor.cummax_axis(t, axis), line) }
-  lift_v(tensor.cummin_axis(t, axis), line)
+  if bytes.equal(name, "cumsum") { return lift_v(tr_scan_axis(tensor.OpCumSum, t, axis), line) }
+  if bytes.equal(name, "cumprod") { return lift_v(tr_scan_axis(tensor.OpCumProd, t, axis), line) }
+  if bytes.equal(name, "cummax") { return lift_v(tr_scan_axis(tensor.OpCumMax, t, axis), line) }
+  lift_v(tr_scan_axis(tensor.OpCumMin, t, axis), line)
 }
 
 # Elementwise rounding, forward-only, handy for turning random draws into
@@ -1588,6 +1593,425 @@ fn rest(args: Arr[Value], from: I64) -> Arr[Value] {
     i = i + 1
   }
   out
+}
+
+# ---- the tape seam ---------------------------------------------------------
+#
+# NEEDS-75. src/tensor.tw splits every differentiable op in two: `binary(op, a,
+# b)` computes, and `t_binary(tp, op, a, b)` computes and records, returning a
+# node index. `grad(f)` differentiates an *interpreted* f, whose arithmetic
+# happens in the builtins above as this file evaluates f's body. Something has
+# to make those builtins take the taped twin while f is running and the pure
+# kernel the rest of the time. This section is that something.
+#
+# The shape is the bootstrap's. internal/tensor/jet.go carries a package-level
+# `recordJets` that internal/interp/builtins.go turns on immediately before it
+# builds the graph a Hessian will differentiate and off again after, so ordinary
+# evaluation never pays for the wiring. Here the flag is a stack of tapes rather
+# than a bool, for the reason NEEDS-75 gives: a single slot would let an inner
+# grad steal the outer one's recording, and `jacobian(f)` running f once per
+# output element, or a `grad` inside a function passed to `map`, are both legal.
+#
+# Why the tape has dynamic extent rather than being threaded through eval as a
+# parameter. Whether an op records is a property of *who called it*, not of
+# where it was written. f's body is arbitrary interpreted twill: it calls other
+# interpreted functions, and it calls closures that were built before grad
+# existed and captured an environment that has no tape in it. A threaded
+# parameter is lexical, so a closure created outside the grad and called inside
+# it would carry the tape it was born with, which is none, and its arithmetic
+# would silently vanish from the graph. That is the exact bug the split into
+# `binary` and `t_binary` was made to avoid. Dynamic extent gets it right for
+# free: the closure's environment stays lexical, which is what NEEDS-26 is
+# about, and the tape stays dynamic, which is what recording is about. It would
+# also mean every eval_* function, every Closure and all ninety-five builtin
+# signatures grew a parameter that all but five of them ignore.
+#
+# The cost outside a grad is one length check on an empty array per arithmetic
+# builtin, and no allocation. That is the "ordinary evaluation does not pay for
+# it" requirement, and it is why the shims below test the stack first and return
+# the pure kernel's result unchanged.
+
+# The installed tapes, innermost last. File-level and mutated in place: the
+# evaluator is single-threaded, exactly as the bootstrap's package-level flag
+# assumes.
+let TAPES: Arr[tensor.Tape] = arr_new()
+
+# Make tp the tape ops record on. Pairs with tape_pop, always.
+fn tape_push(tp: tensor.Tape) {
+  push(TAPES, tp)
+}
+
+# Restore the previous tape, or none. Tolerates an empty stack rather than
+# aborting: the one caller pops on the error path too, and an abort there would
+# replace a runtime error from inside f with a less useful one from here.
+fn tape_pop() {
+  if len(TAPES) > 0 {
+    pop(TAPES)
+  }
+}
+
+fn tape_installed() -> Bool = len(TAPES) > 0
+
+fn tape_current() -> tensor.Tape = TAPES[len(TAPES) - 1]
+
+# The node a traced value came from, on the innermost installed tape.
+#
+# Identity, not equality. Two tensors holding equal data are different graph
+# nodes, and `internal/tensor` gets this for free because a *Tensor pointer is
+# the node. Here the association has to be looked up, and the thing that makes
+# it sound is that a taped op hands back `value_of(tp, n)`, which is the very
+# handle stored in the entry, so the value flowing through f is the node.
+#
+# Backwards, because the answer is the most recent node with that handle and
+# the loop should stop at it rather than walk the whole tape every time.
+#
+# OPTIMISATION, not taken: this is a linear scan per operand, so a forward pass
+# over a tape of n entries is O(n^2). The fix is a dict keyed by value identity
+# rather than by string, which is NEEDS-81. A scan is written here because it is
+# obviously correct and because the identity-keyed dict does not exist yet.
+fn tape_node_in(tp: tensor.Tape, v: Value) -> Opt[I64] {
+  match as_tensor(v) {
+    Some(t) => tape_node_of_tensor(tp, t),
+    None => None,
+  }
+}
+
+fn tape_node_of(v: Value) -> Opt[I64] {
+  if not tape_installed() {
+    return None
+  }
+  tape_node_in(tape_current(), v)
+}
+
+fn tape_node_of_tensor(tp: tensor.Tape, t: tensor.Tensor) -> Opt[I64] {
+  let i: I64 = len(tp.entries) - 1
+  while i >= 0 {
+    if is_same(tp.entries[i].out, t) {
+      return Some(i)
+    }
+    i = i - 1
+  }
+  None
+}
+
+# The node to name an operand by. A tensor that is already on the tape is that
+# node; anything else is a constant that arrived from outside f, and it goes on
+# as a const so the entry that names it has a valid input index. `konst` is not
+# a leaf, so it collects a cotangent nobody reads and reports no gradient, which
+# is the right answer for a literal.
+fn tr_node(tp: tensor.Tape, t: tensor.Tensor) -> I64 {
+  match tape_node_of_tensor(tp, t) {
+    Some(n) => n,
+    None => tensor.konst(tp, t),
+  }
+}
+
+# ---- the routed arithmetic -------------------------------------------------
+#
+# One shim per differentiable kernel. Each is the same three lines: if no tape
+# is installed call the pure kernel and return, otherwise lift the operands to
+# nodes, call the taped twin, and return that node's value.
+#
+# Returning `value_of(tp, n)` rather than the kernel's own result is the part
+# that carries the association forward, and it is the one line in this section
+# that is not mechanical. A clone here would break tape_node_of for every
+# downstream op and the gradient would come back all zeros, which reads as a
+# modelling mistake rather than a plumbing one.
+#
+# Comparisons are recorded like everything else rather than skipped, because
+# src/tensor.tw's `is_comparison` comment states the rule: a comparison is a
+# node with no gradient path, and leaving it off the tape would make a
+# downstream entry's input index dangle.
+
+fn tr_unary(op: tensor.Op, a: tensor.Tensor) -> tensor.Tensor {
+  if not tape_installed() {
+    return tensor.unary(op, a)
+  }
+  let tp: tensor.Tape = tape_current()
+  tensor.value_of(tp, tensor.t_unary(tp, op, tr_node(tp, a)))
+}
+
+fn tr_pow_scalar(a: tensor.Tensor, p: F64) -> tensor.Tensor {
+  if not tape_installed() {
+    return tensor.pow_scalar(a, p)
+  }
+  let tp: tensor.Tape = tape_current()
+  tensor.value_of(tp, tensor.t_pow_scalar(tp, tr_node(tp, a), p))
+}
+
+fn tr_clip(a: tensor.Tensor, lo: F64, hi: F64) -> tensor.Tensor {
+  if not tape_installed() {
+    return tensor.clip(a, lo, hi)
+  }
+  let tp: tensor.Tape = tape_current()
+  tensor.value_of(tp, tensor.t_clip(tp, tr_node(tp, a), lo, hi))
+}
+
+fn tr_binary(op: tensor.Op, a: tensor.Tensor, b: tensor.Tensor) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.binary(op, a, b)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_binary(tp, op, tr_node(tp, a), tr_node(tp, b))?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_where(c: tensor.Tensor, a: tensor.Tensor, b: tensor.Tensor) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.where3(c, a, b)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_where(tp, tr_node(tp, c), tr_node(tp, a), tr_node(tp, b))?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_matmul(a: tensor.Tensor, b: tensor.Tensor) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.matmul(a, b)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_matmul(tp, tr_node(tp, a), tr_node(tp, b))?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_einsum(spec: Str, inputs: Arr[tensor.Tensor]) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.einsum(spec, inputs)
+  }
+  let tp: tensor.Tape = tape_current()
+  let nodes: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(inputs) {
+    push(nodes, tr_node(tp, inputs[i]))
+    i = i + 1
+  }
+  let n: I64 = tensor.t_einsum(tp, spec, nodes)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_reduce_all(op: tensor.Op, a: tensor.Tensor) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.reduce_all_by(a, op)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_reduce_all(tp, op, tr_node(tp, a))?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_reduce_axis(op: tensor.Op, a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.reduce_axis_by(a, axis, op)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_reduce_axis(tp, op, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_reduce_axis_keep(op: tensor.Op, a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.reduce_axis_keep(a, axis, op)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_reduce_axis_keep(tp, op, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_softmax(a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.softmax(a, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_softmax(tp, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_logsumexp_axis(a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.logsumexp_axis(a, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_logsumexp_axis(tp, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_reshape(a: tensor.Tensor, shape: Arr[I64]) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.reshape(a, shape)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_reshape(tp, tr_node(tp, a), shape)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_transpose(a: tensor.Tensor, axes: Arr[I64]) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.transpose(a, tensor.resolve_perm(len(a.shape), axes)?)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_transpose(tp, tr_node(tp, a), axes)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_broadcast_to(a: tensor.Tensor, shape: Arr[I64]) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.broadcast_to(a, shape)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_broadcast_to(tp, tr_node(tp, a), shape)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_concat(ts: Arr[tensor.Tensor], axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.concat(ts, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let nodes: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(ts) {
+    push(nodes, tr_node(tp, ts[i]))
+    i = i + 1
+  }
+  let n: I64 = tensor.t_concat(tp, nodes, axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_split(a: tensor.Tensor, sizes: Arr[I64], axis: I64) -> Res[Arr[tensor.Tensor], Str] {
+  if not tape_installed() {
+    return tensor.split(a, sizes, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let nodes: Arr[I64] = tensor.t_split(tp, tr_node(tp, a), sizes, axis)?
+  let out: Arr[tensor.Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(nodes) {
+    push(out, tensor.value_of(tp, nodes[i]))
+    i = i + 1
+  }
+  Ok(out)
+}
+
+fn tr_index_axis0(a: tensor.Tensor, idx: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.index_axis0(a, idx)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_index_axis0(tp, tr_node(tp, a), idx)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_slice_axis0(a: tensor.Tensor, start: I64, end: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.slice_axis0(a, start, end)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_slice_axis0(tp, tr_node(tp, a), start, end)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_gather(a: tensor.Tensor, idx: Arr[I64]) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.gather(a, idx)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_gather(tp, tr_node(tp, a), idx)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_flip_axis(a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.flip_axis(a, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_flip_axis(tp, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_sort_axis(a: tensor.Tensor, axis: I64, descending: Bool) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.sort_axis(a, axis, descending)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_sort_axis(tp, tr_node(tp, a), axis, descending)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_topk_axis(a: tensor.Tensor, k: I64, axis: I64, largest: Bool) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.topk_axis(a, k, axis, largest)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_topk_axis(tp, tr_node(tp, a), k, axis, largest)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_conv2d(x: tensor.Tensor, k: tensor.Tensor) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.conv2d(x, k)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_conv2d(tp, tr_node(tp, x), tr_node(tp, k))?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_maxpool2d(x: tensor.Tensor, k: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.maxpool2d(x, k)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_maxpool2d(tp, tr_node(tp, x), k)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_scan_axis(op: tensor.Op, a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.scan_axis_by(a, axis, op)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_scan_axis(tp, op, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_scan_all(op: tensor.Op, a: tensor.Tensor) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.scan_all_by(a, op)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_scan_all(tp, op, tr_node(tp, a))?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_split_equal(a: tensor.Tensor, parts: I64, axis: I64) -> Res[Arr[tensor.Tensor], Str] {
+  if not tape_installed() {
+    return tensor.split_equal(a, parts, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let nodes: Arr[I64] = tensor.t_split_equal(tp, tr_node(tp, a), parts, axis)?
+  let out: Arr[tensor.Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(nodes) {
+    push(out, tensor.value_of(tp, nodes[i]))
+    i = i + 1
+  }
+  Ok(out)
+}
+
+fn tr_diff_axis(a: tensor.Tensor, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.diff_axis(a, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_diff_axis(tp, tr_node(tp, a), axis)?
+  Ok(tensor.value_of(tp, n))
+}
+
+fn tr_roll_axis(a: tensor.Tensor, shift: I64, axis: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.roll_axis(a, shift, axis)
+  }
+  let tp: tensor.Tape = tape_current()
+  let n: I64 = tensor.t_roll_axis(tp, tr_node(tp, a), shift, axis)?
+  Ok(tensor.value_of(tp, n))
 }
 
 # ---- automatic differentiation ---------------------------------------------
@@ -1676,30 +2100,14 @@ fn bi_derived(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, RuntimeE
   do_hessian(f, args[0], line)
 }
 
-# The tape seam.
+# The tape seam, from grad's side. The seam itself is the section above:
+# tape_push, tape_pop and tape_node_of are written, and the arithmetic in the
+# builtins is routed through the tr_ shims, so an op that runs while f is being
+# differentiated records and the same op outside a grad does not.
 #
-# src/tensor.tw splits every op in two: `binary(op, a, b)` computes, and
-# `t_binary(tp, op, a, b)` computes and records on a tape, returning a node
-# index. That split is the right one, and it is why grad is not simply a matter
-# of calling the kernels: the arithmetic that has to be recorded happens inside
-# f, in interpreted twill, in code this file evaluates but does not write.
-#
-# So something has to make the ops that run during f record on tp. Three
-# functions stand for it, and they are the whole of NEEDS-75:
-#
-#   tape_push(tp)              make tp the tape ops record on
-#   tape_pop()                 restore the previous one, or none
-#   tape_node_of(v) -> Opt[I64]  the node a traced value came from
-#
-# The Go bootstrap needs none of this because a *tensor.Tensor carries its own
-# graph edges, so a value is its own node. Here a Tensor is a shape and a
-# buffer, and node identity lives in the tape, so the two have to be associated
-# somewhere. tape_node_of is that somewhere, and until it exists grad has a hole
-# in the middle rather than a wrong answer, which is the right way round.
-#
-# What is *not* deferred is the leaf order, the tree shape of the result, and
-# the arity and error handling below, because those are what the corpus checks
-# and they are decided here rather than in the tape.
+# What is decided here rather than there is the leaf order, the tree shape of
+# the result, the seeding, and the arity and error handling, because those are
+# what the corpus checks.
 
 # A traced argument: the value handed to f, and the tree of leaf node indices to
 # read the gradients back out of afterwards. The tree has the same shape as the
@@ -1859,7 +2267,10 @@ struct TracedRun {
 #
 # The pop happens before the result is inspected rather than after, because
 # there is no `defer` here and an early return through `?` would otherwise leave
-# a finished tape installed for the rest of the program. NEEDS-75.
+# a finished tape installed for the rest of the program. That is also why the
+# node lookup below names tp explicitly instead of going through tape_node_of:
+# by then the tape is no longer installed, and an outer grad's tape would be,
+# so the convenient form would answer about the wrong tape.
 fn run_traced(f: Value, args: Arr[Value], tp: tensor.Tape, line: I64) -> Res[TracedRun, RuntimeError] {
   tape_push(tp)
   # Line 0, and it is deliberate: the call comes from inside grad, not from a
@@ -1868,7 +2279,7 @@ fn run_traced(f: Value, args: Arr[Value], tp: tensor.Tape, line: I64) -> Res[Tra
   let out: Res[Value, RuntimeError] = apply(f, args, 0)
   tape_pop()
   let v: Value = out?
-  match tape_node_of(v) {
+  match tape_node_in(tp, v) {
     Some(n) => Ok(TracedRun { value: v, node: n }),
     # f ignored its arguments and returned a constant. The derivative of a
     # constant is zero, and that is an answer rather than an error, so an empty

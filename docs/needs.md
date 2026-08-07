@@ -1395,3 +1395,48 @@ stderr byte for byte, so a command the reference binary does not have would make
 `dump_tokens` stays in `src/lex.tw` and the lexer's differential check should
 call it directly rather than through the CLI. If a token dump is wanted from the
 command line, it has to be added to the Go binary first.
+
+## NEEDS-81: a map keyed by value identity
+
+**Status:** open, a workaround is in place and it is quadratic.
+`src/eval.tw` `tape_node_of_tensor`.
+
+The tape seam has to answer "which node did this tensor come from", and the
+answer has to be by identity: two tensors holding equal data are different graph
+nodes, and NEEDS-27's deep equality is the wrong question. The workaround is a
+backwards linear scan of `tp.entries` calling `is_same`, so a forward pass over
+a tape of n entries costs O(n^2) identity comparisons.
+
+What is wanted is a `Dict` whose key is the identity of a heap value, the thing
+NEEDS-21's `is_same` compares, rather than a `Str`. NEEDS-79 asks the adjacent
+question for `I64` keys; the two want the same relaxation of the key type from
+one concrete type to any type with an equality.
+
+Recorded rather than fixed because the scan is obviously correct and a wrong
+answer here does not fail loudly: it returns the wrong node and the gradient
+comes back plausible and wrong.
+
+*Go bootstrap:* none needed. A `*tensor.Tensor` is its own node, so the lookup
+does not exist there at all, which is why this cost is new rather than ported.
+
+## NEEDS-82: file-level state that is mutated in place
+
+**Status:** blocking for `src/eval.tw`. `TAPES`, and the three functions around
+it: `tape_push`, `tape_pop`, `tape_current`.
+
+`let TAPES: Arr[tensor.Tape] = arr_new()` at file level, pushed and popped for
+the dynamic extent of a differentiated call. Two things have to be true for it
+and `docs/self-hosting.md` says neither: a file-level `let` may be initialised
+by a call rather than only by a literal, and pushing to a file-level `Arr`
+mutates the one array rather than a per-reference copy. The existing file-level
+bindings in `src/eval.tw` are all `Str` literals, so nothing has tested either.
+
+The alternative, threading the tape through every `eval_*` function and every
+builtin, is rejected in the comment above `TAPES` and the reason is semantic
+rather than ergonomic: a threaded tape is lexical, and a closure captured before
+the `grad` would then carry no tape and record nothing.
+
+*Go bootstrap:* `internal/tensor/jet.go`'s package-level `recordJets`, set and
+cleared by `internal/interp/builtins.go` around the graph build. Same lifetime,
+same single-threaded assumption; a stack rather than a bool because grad nests
+and `SetRecordJets` does not have to.
