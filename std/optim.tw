@@ -1,24 +1,89 @@
-# optim.tw — optimizers over a model's parameters.
+# optim.tw: optimizers, schedules and gradient clipping.
 #
-# A model is a "tree": a tensor, or a list or record nesting tensors. The
-# optimizers use map_leaves / zip_leaves, so the same code works whether the
+# A model is a "tree": a tensor, or a list or record nesting tensors. Everything
+# here uses map_leaves / zip_leaves, so the same code works whether the
 # parameters live in a positional list or a named record.
+#
+# Optimizer state is explicit. Every stateful step takes its state as arguments
+# and returns the new state alongside the new parameters, and nothing is stored
+# on an optimizer object anywhere.
+#
+# That is the opposite of what `opt.step()` trains you to expect, and the reason
+# is reproducibility rather than taste. Hidden state is state you cannot save,
+# cannot compare, and cannot resume from: a run interrupted at step 40,000 comes
+# back with Adam's moments zeroed, which is a different optimizer for the next
+# few hundred steps and a loss curve with a kink in it that nobody can explain
+# six months later. Here the moments are ordinary values. `save` writes them
+# next to the weights, `load` brings them back, and two runs from the same seed
+# and the same state produce the same numbers. It also means a step function is
+# a pure function of its inputs, so it can be tested by calling it once and
+# checking the answer, which is exactly what std/tests/optim_test.tw does.
+#
+# The cost is that a training loop has to thread the state through by hand. That
+# is three lines per step, and the examples all pay it.
 
-# A tree of zero tensors shaped like `params` (handy for optimizer state).
+# A tree of zero tensors shaped like `params`. Optimizer state starts here.
 fn zeros_like(params) = map_leaves(fn(p) = p * 0.0, params)
 
-# Plain stochastic gradient descent.
+# ── Steps ───────────────────────────────────────────────────────────────────
+
+# Plain stochastic gradient descent. Stateless, so it returns the parameters
+# alone rather than a pair.
 fn sgd_step(params, grads, lr) =
   zip_leaves(fn(z) = z[0] - z[1] * lr, [params, grads])
 
 # SGD with momentum. Returns [new_params, new_velocity].
+#
+# The velocity is a running average of past gradients, so the update keeps
+# moving along directions the gradient agrees about and cancels the ones it
+# flip-flops on. That is what gets it down a narrow valley, where plain SGD
+# bounces between the walls and creeps along the floor.
 fn momentum_step(params, grads, velocity, lr, mu) {
   let v2 = zip_leaves(fn(z) = mu * z[0] - lr * z[1], [velocity, grads])
   let p2 = zip_leaves(fn(z) = z[0] + z[1], [params, v2])
   [p2, v2]
 }
 
+# Nesterov accelerated gradient. Returns [new_params, new_velocity].
+#
+# The difference from plain momentum is where the gradient is measured: at the
+# point momentum is about to carry the parameters to, rather than where they are
+# now. Approaching a minimum too fast, the look-ahead gradient already points
+# back up the far wall and brakes in the same step, instead of overshooting and
+# correcting on the next one.
+#
+# Written in the standard rearranged form, which measures the gradient at the
+# current parameters and applies the correction to the update, so no second
+# forward pass at a shifted point is needed.
+fn nesterov_step(params, grads, velocity, lr, mu) {
+  let v2 = zip_leaves(fn(z) = mu * z[0] - lr * z[1], [velocity, grads])
+  let p2 = zip_leaves(fn(z) = z[0] + mu * z[1] - lr * z[2],
+                      [params, v2, grads])
+  [p2, v2]
+}
+
+# SGD with momentum, Nesterov or not, chosen by a flag. `nesterov` is 1 or 0.
+fn sgd_momentum_step(params, grads, velocity, lr, mu, nesterov) {
+  if nesterov == 0.0 {
+    momentum_step(params, grads, velocity, lr, mu)
+  } else {
+    nesterov_step(params, grads, velocity, lr, mu)
+  }
+}
+
 # Adam. `t` is the 1-based step count. Returns [new_params, new_m, new_v].
+#
+# m is a running mean of the gradient and v a running mean of its square, so
+# each parameter gets a step size divided by how big its own gradients have
+# been. A rarely-touched embedding row and a busy first-layer weight then move
+# at comparable rates, which is what a single global learning rate cannot do.
+#
+# The bias correction is the `1 - b^t` division, and it is not optional. m and v
+# start at zero, so with b2 = 0.999 the raw v after one step is a thousandth of
+# the true mean square, its square root is thirty times too small, and the first
+# update is thirty times too large. That is where "Adam blew up in the first ten
+# steps" comes from. t must therefore start at 1, not 0: at t = 0 the correction
+# divides by zero.
 fn adam_step(params, grads, m, v, t, lr, b1, b2, eps) {
   let bc1 = 1.0 - pow(b1, t)
   let bc2 = 1.0 - pow(b2, t)
@@ -28,3 +93,178 @@ fn adam_step(params, grads, m, v, t, lr, b1, b2, eps) {
                       [params, m2, v2])
   [p2, m2, v2]
 }
+
+# AdamW: Adam with decoupled weight decay. Returns [new_params, new_m, new_v].
+#
+# The decay is applied straight to the parameters, not added to the gradient,
+# and the distinction is the whole paper. Adding `wd * p` to the gradient sends
+# the penalty through m and v, so it gets divided by sqrt(v) like everything
+# else: a parameter with large gradients is barely decayed and a quiet one is
+# decayed hard, which is not a regulariser anyone chose. Decoupled decay shrinks
+# every weight by the same factor per step, independent of its gradient history.
+#
+# The decay is scaled by lr, so a learning-rate schedule anneals the decay along
+# with the step and the ratio between them stays fixed.
+fn adamw_step(params, grads, m, v, t, lr, b1, b2, eps, wd) {
+  let bc1 = 1.0 - pow(b1, t)
+  let bc2 = 1.0 - pow(b2, t)
+  let m2 = zip_leaves(fn(z) = b1 * z[0] + (1.0 - b1) * z[1], [m, grads])
+  let v2 = zip_leaves(fn(z) = b2 * z[0] + (1.0 - b2) * z[1] * z[1], [v, grads])
+  let p2 = zip_leaves(
+    fn(z) = z[0] - lr * (z[1] / bc1) / (sqrt(z[2] / bc2) + eps) - lr * wd * z[0],
+    [params, m2, v2])
+  [p2, m2, v2]
+}
+
+# RMSProp. Returns [new_params, new_sq].
+#
+# Adam's second moment without the first: divide by the root of a running mean
+# square gradient. No bias correction, matching the original, so the first few
+# steps are larger than the steady-state ones; that is a known property of it
+# rather than an omission here.
+fn rmsprop_step(params, grads, sq, lr, decay, eps) {
+  let s2 = zip_leaves(fn(z) = decay * z[0] + (1.0 - decay) * z[1] * z[1],
+                      [sq, grads])
+  let p2 = zip_leaves(fn(z) = z[0] - lr * z[1] / (sqrt(z[2]) + eps),
+                      [params, grads, s2])
+  [p2, s2]
+}
+
+# RMSProp with momentum. Returns [new_params, new_sq, new_velocity].
+fn rmsprop_momentum_step(params, grads, sq, velocity, lr, decay, eps, mu) {
+  let s2 = zip_leaves(fn(z) = decay * z[0] + (1.0 - decay) * z[1] * z[1],
+                      [sq, grads])
+  let v2 = zip_leaves(fn(z) = mu * z[0] + lr * z[1] / (sqrt(z[2]) + eps),
+                      [velocity, grads, s2])
+  let p2 = zip_leaves(fn(z) = z[0] - z[1], [params, v2])
+  [p2, s2, v2]
+}
+
+# Adagrad. Returns [new_params, new_sum_sq].
+#
+# The accumulator only ever grows, so the effective learning rate only ever
+# falls. That is exactly right for sparse features and exactly wrong for a long
+# run, where the step eventually reaches zero whether or not the model has
+# converged. RMSProp is Adagrad with the sum replaced by a decaying average, for
+# precisely this reason.
+fn adagrad_step(params, grads, sum_sq, lr, eps) {
+  let s2 = zip_leaves(fn(z) = z[0] + z[1] * z[1], [sum_sq, grads])
+  let p2 = zip_leaves(fn(z) = z[0] - lr * z[1] / (sqrt(z[2]) + eps),
+                      [params, grads, s2])
+  [p2, s2]
+}
+
+# ── Gradient clipping ───────────────────────────────────────────────────────
+
+# The total L2 norm of a gradient tree: the norm of every leaf concatenated into
+# one long vector, not the mean or the max of the per-leaf norms.
+#
+# The accumulation goes through a closure that `map_leaves` calls once per leaf,
+# because there is no fold over a tree's leaves; both tree walkers return trees,
+# and a tree of scalars still has to be collapsed by something.
+fn global_norm(grads) {
+  let total = 0.0
+  map_leaves(fn(g) { total = total + sum(square(g)); g }, grads)
+  sqrt(total + 0.00000001)
+}
+
+# Scale a whole gradient tree down so its global norm is at most `max_norm`.
+#
+# Rescaling rather than truncating is the point. Clipping each element to a
+# range changes the direction of the update, which is the one thing about a
+# gradient worth keeping; scaling by a single factor shortens the step and
+# leaves the direction alone. When the norm is already under the limit the
+# factor is 1 and nothing happens at all, so this is safe to leave on.
+#
+# One global factor over the whole tree rather than one per layer, because the
+# relative sizes between layers are also information. A per-layer clip
+# renormalises the layers against each other, which quietly changes the model.
+fn clip_by_global_norm(grads, max_norm) {
+  let n = global_norm(grads)
+  let scale = if n > max_norm { max_norm / n } else { 1.0 }
+  map_leaves(fn(g) = g * scale, grads)
+}
+
+# Clip every element of every leaf into [-v, v].
+#
+# Cheaper than the norm clip, and cruder: it does change the direction of the
+# update. It is the right tool for one specific failure, a single bad batch
+# producing one enormous component while the rest of the gradient is fine, and
+# the wrong one for controlling overall step size.
+fn clip_by_value(grads, v) = map_leaves(fn(g) = clip(g, -v, v), grads)
+
+# Clip each leaf independently to its own norm limit. Included because it is
+# what some published training recipes specify; `clip_by_global_norm` is the
+# better default for the reason above.
+fn clip_by_leaf_norm(grads, max_norm) =
+  map_leaves(fn(g) {
+    let n = sqrt(sum(square(g)) + 0.00000001)
+    if n > max_norm { g * (max_norm / n) } else { g }
+  }, grads)
+
+# ── Learning-rate schedules ─────────────────────────────────────────────────
+#
+# Each is a plain function of the step number, returning the learning rate to
+# use at that step. Not a stateful object with its own step counter, for the
+# same reason the optimizers have no hidden state: given the step, the rate is
+# always the same number, so a resumed run is not a different run.
+#
+# `step` is 0-based here, unlike Adam's `t`. A schedule asks "how far in are
+# we", and at the start the answer is none of the way, so step 0 gives the base
+# rate.
+
+# Constant. Included so a training loop can always call a schedule and the
+# choice of "none" is written down rather than implied.
+fn const_schedule(base, step) = base
+
+# Step decay: multiply by `gamma` every `every` steps.
+fn step_schedule(base, step, every, gamma) = base * pow(gamma, floor(step / every))
+
+# Exponential decay, the smooth version of the above.
+fn exp_schedule(base, step, rate) = base * exp(-rate * step)
+
+# Inverse-time decay: base / (1 + rate * step). Falls off far more slowly than
+# exponential in the tail, which is what the classic convergence proofs for SGD
+# assume.
+fn inv_time_schedule(base, step, rate) = base / (1.0 + rate * step)
+
+# Cosine annealing from `base` down to `final` over `total` steps.
+#
+# The shape is the reason it is used: it leaves the rate high for most of the
+# run and then brings it down smoothly, with no discontinuity for the optimizer
+# to react to, unlike a step schedule where the loss visibly jumps at each drop.
+# Past `total` it holds at `final` rather than continuing into the next half
+# cycle and rising again, which is not what a caller who overran meant.
+fn cosine_schedule(base, step, total, final) {
+  let t = if step > total { total } else { step }
+  final + 0.5 * (base - final) * (1.0 + cos(3.141592653589793 * t / total))
+}
+
+# Linear warmup: 0 to `base` over `warmup` steps, then `base`.
+#
+# Warmup exists because of the adaptive optimizers. Adam's v is a poor estimate
+# of the gradient scale until it has seen a few dozen batches, and the variance
+# of its update is largest at the very start, exactly when the parameters are
+# random and a large step is least recoverable. A few hundred small steps cost
+# nothing and remove that.
+fn warmup_schedule(base, step, warmup) =
+  if step >= warmup { base } else { base * (step + 1.0) / warmup }
+
+# Warmup into a cosine decay, the standard transformer schedule.
+#
+# `total` counts from step 0 including the warmup, so the decay runs over
+# total - warmup steps. Written this way because `total` is the length of the
+# run, which is the number a caller actually has.
+fn warmup_cosine_schedule(base, step, warmup, total, final) {
+  if step < warmup {
+    base * (step + 1.0) / warmup
+  } else {
+    cosine_schedule(base, step - warmup, total - warmup, final)
+  }
+}
+
+# One cycle: warm up over the first `pct` of the run, cosine down over the rest.
+# The same schedule as above with the warmup expressed as a fraction, which is
+# how it is usually reported.
+fn one_cycle_schedule(base, step, total, pct, final) =
+  warmup_cosine_schedule(base, step, floor(pct * total), total, final)

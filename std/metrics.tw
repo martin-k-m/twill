@@ -1,0 +1,411 @@
+# metrics.tw: how well did it do.
+#
+# Two conventions, both stated rather than assumed.
+#
+# 1. Averaging is never chosen for you. Every per-class score comes in three
+#    forms and each has its own function name: `_macro`, `_micro`, `_weighted`.
+#    They answer different questions and on imbalanced data they disagree by a
+#    lot, which is why a bare `f1(y, p)` that quietly picked one would be the
+#    most misleading function in this file. What each means is written on
+#    `f1_macro` below.
+#
+# 2. A zero denominator gives zero, not NaN. A class the model never predicted
+#    has no precision defined; reporting 0 for it is the convention every other
+#    library settled on, and the alternative is a NaN that propagates into the
+#    average and destroys every other class's number too.
+#
+# Labels and predictions are class indices in a 1-D tensor, in [0, classes).
+# Where a function wants scores instead of labels it says so in its name or its
+# first line.
+
+# ── Counting ────────────────────────────────────────────────────────────────
+
+# Confusion matrix: [classes, classes], rows indexed by the true class and
+# columns by the predicted one, so entry [i, j] counts examples of class i
+# called j and the diagonal is what went right.
+#
+# Rows-true / columns-predicted is the more common orientation but not the only
+# one in use, so it is worth pinning down: `sum(confusion(y, p, k), 1)` is the
+# number of examples of each class, and `sum(..., 0)` is the number of
+# predictions of each class.
+#
+# Computed as a matmul of the two one-hot matrices rather than by a loop over
+# examples. T is [N, classes] with one 1 per row, likewise P, and transpose(T)
+# @ P sums exactly one contribution per example into the cell naming its (true,
+# predicted) pair.
+fn confusion(labels, preds, classes) {
+  let T = onehot_rows(labels, classes)
+  let P = onehot_rows(preds, classes)
+  transpose(T) @ P
+}
+
+# [N] class indices to an [N, classes] one-hot matrix.
+fn onehot_rows(labels, classes) =
+  equal(reshape(labels, len(labels), 1), reshape(tensor(range(classes)), 1, classes))
+
+# The diagonal of a square matrix, as a vector.
+fn diagonal(M) = sum(M * eye(len(M)), 1)
+
+# A safe divisor: the denominator, with 1 added exactly where it is zero.
+#
+# Wherever the denominator is zero the numerator is too, since it is a count of
+# a subset of the same thing, so 0/1 gives the 0 the convention above asks for
+# and every other entry is untouched. `maximum(d, 1)` would do the same job for
+# counts and quietly ruin it for a ratio: the denominators in `f1_per_class` are
+# sums of two numbers below 1, and flooring those at 1 shrinks the score.
+#
+# `where` is not used because it evaluates both arms, so the division by zero
+# happens and produces the NaN before anything can choose against it.
+fn safe_den(d) = d + equal(d, 0.0)
+
+# ── Overall ─────────────────────────────────────────────────────────────────
+
+# Fraction of predictions that match the label.
+#
+# Worth remembering what it hides: on a 99:1 split, always predicting the
+# majority scores 0.99 and is useless. `balanced_accuracy` is the version that
+# notices.
+fn accuracy(labels, preds) = mean(equal(labels, preds))
+
+# Mean of the per-class recalls, so every class counts equally regardless of how
+# many examples it has. The always-predict-the-majority model scores 0.5 on two
+# classes rather than 0.99.
+fn balanced_accuracy(labels, preds, classes) = mean(recall_per_class(labels, preds, classes))
+
+# Was the true class among the k highest-scoring? `scores` is [N, classes].
+#
+# The comparison is against the k-th largest score in the row, so ties at the
+# boundary all count as inside the top k. That is the generous reading, and it
+# is the one that keeps the metric monotone in k.
+fn top_k_accuracy(labels, scores, k) {
+  let kth = topk(scores, k, 1)
+  let cut = min(kth, 1)
+  let true_score = sum(scores * onehot_rows(labels, len(scores[0])), 1)
+  mean(greater_equal(true_score, cut))
+}
+
+# Cohen's kappa: accuracy corrected for the agreement two random labellers with
+# the same marginal frequencies would reach by chance. 1 is perfect, 0 is chance,
+# negative is worse than chance.
+fn cohen_kappa(labels, preds, classes) {
+  let C = confusion(labels, preds, classes)
+  let n = sum(C)
+  let po = sum(diagonal(C)) / n
+  let pe = sum(sum(C, 1) * sum(C, 0)) / (n * n)
+  (po - pe) / safe_den_scalar(1.0 - pe)
+}
+
+fn safe_den_scalar(d) = if d == 0.0 { 1.0 } else { d }
+
+# Matthews correlation coefficient for two classes, from the four counts.
+#
+# It is the Pearson correlation between the true and predicted labels treated as
+# 0/1 variables, which is what makes it the one binary summary that stays honest
+# under class imbalance: it can only be high if both classes are handled well.
+fn mcc(labels, preds) {
+  let C = confusion(labels, preds, 2)
+  let tn = C[0][0]
+  let fpos = C[0][1]
+  let fneg = C[1][0]
+  let tp = C[1][1]
+  let den = sqrt((tp + fpos) * (tp + fneg) * (tn + fpos) * (tn + fneg))
+  (tp * tn - fpos * fneg) / safe_den_scalar(den)
+}
+
+# ── Per class ───────────────────────────────────────────────────────────────
+
+# Precision per class: of the examples predicted to be class k, what fraction
+# really were. The denominator is the column sum of the confusion matrix.
+fn precision_per_class(labels, preds, classes) {
+  let C = confusion(labels, preds, classes)
+  diagonal(C) / safe_den(sum(C, 0))
+}
+
+# Recall per class: of the examples that really were class k, what fraction were
+# found. The denominator is the row sum, which is the class's support.
+fn recall_per_class(labels, preds, classes) {
+  let C = confusion(labels, preds, classes)
+  diagonal(C) / safe_den(sum(C, 1))
+}
+
+# Specificity per class: of the examples that were not class k, what fraction
+# were correctly not called k. The other half of the picture from recall, and
+# the axis a ROC curve is drawn against.
+fn specificity_per_class(labels, preds, classes) {
+  let C = confusion(labels, preds, classes)
+  let support = sum(C, 1)
+  let predicted = sum(C, 0)
+  let tp = diagonal(C)
+  let n = sum(C)
+  let fp = predicted - tp
+  let tn = n - support - fp
+  tn / safe_den(tn + fp)
+}
+
+# The four binary counts, as a tensor in the order [tn, fp, fn, tp].
+fn binary_counts(labels, preds) {
+  let C = confusion(labels, preds, 2)
+  tensor(list(C[0][0], C[0][1], C[1][0], C[1][1]))
+}
+
+# F1 per class: the harmonic mean of precision and recall.
+#
+# Harmonic rather than arithmetic, because the harmonic mean is dragged down by
+# the smaller of the two. A model with precision 1.0 and recall 0.0 averages
+# 0.5 arithmetically, which flatters a model that found nothing; its F1 is 0.
+fn f1_per_class(labels, preds, classes) {
+  let p = precision_per_class(labels, preds, classes)
+  let r = recall_per_class(labels, preds, classes)
+  2.0 * p * r / safe_den(p + r)
+}
+
+# Fbeta per class. beta > 1 weights recall more heavily, beta < 1 precision;
+# beta = 1 is F1. The usual reason to move it is that the two errors cost
+# different amounts, which no metric can know on its own.
+fn fbeta_per_class(labels, preds, classes, beta) {
+  let p = precision_per_class(labels, preds, classes)
+  let r = recall_per_class(labels, preds, classes)
+  let b2 = beta * beta
+  (1.0 + b2) * p * r / safe_den(b2 * p + r)
+}
+
+# The number of true examples of each class.
+fn support_per_class(labels, classes) = sum(onehot_rows(labels, classes), 0)
+
+# ── Averaged ────────────────────────────────────────────────────────────────
+#
+# The three conventions, and what makes them differ:
+#
+#   macro     the unweighted mean of the per-class scores. Every class counts
+#             the same, so a rare class the model ignores drags the number down
+#             as hard as a common one would. Use it when the rare classes are
+#             the point.
+#
+#   micro     pool the counts across classes first, then compute one score. Each
+#             *example* counts the same, so the common classes dominate. For
+#             single-label classification, where every example has exactly one
+#             true class and gets exactly one prediction, micro precision, micro
+#             recall and micro F1 are all equal to plain accuracy. They are here
+#             anyway, because that identity stops holding the moment the problem
+#             is multi-label, and because a number that agrees with accuracy is
+#             a useful thing to be able to check.
+#
+#   weighted  the mean of the per-class scores weighted by support. Every
+#             example counts the same, like micro, but each class's score is
+#             computed on its own first. It is the one to report next to
+#             accuracy when the classes are imbalanced and you still want the
+#             per-class behaviour to show through.
+
+fn precision_macro(labels, preds, classes) = mean(precision_per_class(labels, preds, classes))
+
+fn recall_macro(labels, preds, classes) = mean(recall_per_class(labels, preds, classes))
+
+fn f1_macro(labels, preds, classes) = mean(f1_per_class(labels, preds, classes))
+
+fn fbeta_macro(labels, preds, classes, beta) =
+  mean(fbeta_per_class(labels, preds, classes, beta))
+
+fn precision_micro(labels, preds, classes) {
+  let C = confusion(labels, preds, classes)
+  sum(diagonal(C)) / safe_den(sum(sum(C, 0)))
+}
+
+fn recall_micro(labels, preds, classes) {
+  let C = confusion(labels, preds, classes)
+  sum(diagonal(C)) / safe_den(sum(sum(C, 1)))
+}
+
+fn f1_micro(labels, preds, classes) {
+  let p = precision_micro(labels, preds, classes)
+  let r = recall_micro(labels, preds, classes)
+  2.0 * p * r / safe_den_scalar(p + r)
+}
+
+fn precision_weighted(labels, preds, classes) =
+  weighted_mean(precision_per_class(labels, preds, classes), support_per_class(labels, classes))
+
+fn recall_weighted(labels, preds, classes) =
+  weighted_mean(recall_per_class(labels, preds, classes), support_per_class(labels, classes))
+
+fn f1_weighted(labels, preds, classes) =
+  weighted_mean(f1_per_class(labels, preds, classes), support_per_class(labels, classes))
+
+fn weighted_mean(values, weights) = sum(values * weights) / safe_den_scalar(sum(weights))
+
+# ── Binary shortcuts ────────────────────────────────────────────────────────
+# Class 1 is the positive class, which is the only convention that makes
+# "positive" mean anything.
+
+fn precision(labels, preds) = precision_per_class(labels, preds, 2)[1]
+
+fn recall(labels, preds) = recall_per_class(labels, preds, 2)[1]
+
+fn specificity(labels, preds) = specificity_per_class(labels, preds, 2)[1]
+
+fn f1(labels, preds) = f1_per_class(labels, preds, 2)[1]
+
+fn fbeta(labels, preds, beta) = fbeta_per_class(labels, preds, 2, beta)[1]
+
+# Turn scores into 0/1 predictions at a threshold. Separate from the metrics so
+# the threshold is visible in the calling code; 0.5 is a choice, not a law, and
+# on imbalanced data it is usually the wrong one.
+fn threshold(scores, t) = greater_equal(scores, t)
+
+# ── Ranking ─────────────────────────────────────────────────────────────────
+
+# ROC curve for binary scores. Returns [fpr, tpr, thresholds], each 1-D and the
+# same length: one point per example, in order of decreasing score, with the
+# origin prepended so the curve starts at (0, 0).
+#
+# The construction is the sorted running count: sweep the threshold down through
+# the sorted scores, and after i examples the true positives so far are the
+# positives among them and the false positives the rest. cumsum does both in one
+# pass, which is why no explicit loop over thresholds appears here.
+#
+# One point is emitted per *distinct* score, not per example, and that is the
+# difference between a curve and a curve that depends on the order the rows
+# arrived in. A block of tied scores is one threshold: a classifier using it
+# takes all of those examples or none, so the curve must jump straight from one
+# end of the block to the other. Keeping the intermediate points instead traces
+# a staircase whose shape is decided by the sort's tie-breaking, and the area
+# under it changes if the rows are shuffled.
+#
+# The prepended threshold is one above the highest score, the point at which
+# nothing has been called positive yet. Some libraries put infinity there; a
+# finite value is used instead so the returned thresholds can be arithmetic on
+# without special cases.
+fn roc_curve(labels, scores) {
+  let order = argsort(-scores)
+  let y = gather(labels, order)
+  let s = gather(scores, order)
+  let pos = sum(labels)
+  let neg = len(labels) - pos
+  let ends = block_ends(s)
+  let tp = gather(cumsum(y), ends)
+  let fp = gather(cumsum(1.0 - y), ends)
+  let first = tensor(list(max(scores) + 1.0))
+  list(concat([[0.0], fp / safe_den_scalar(neg)], 0),
+       concat([[0.0], tp / safe_den_scalar(pos)], 0),
+       concat([first, gather(s, ends)], 0))
+}
+
+# The index of the last element of each run of equal values in a sorted vector.
+fn block_ends(s) {
+  let out = list()
+  let n = len(s)
+  for i in range(n) {
+    if i == n - 1 or s[i] != s[i + 1] { out = append(out, i) }
+  }
+  out
+}
+
+# Area under a curve by the trapezoid rule. `x` must be non-decreasing.
+fn auc(x, y) {
+  let n = len(x)
+  let dx = x[1:n] - x[0:n - 1]
+  sum(dx * (y[1:n] + y[0:n - 1]) * 0.5)
+}
+
+# Area under the ROC curve: the probability that a randomly chosen positive
+# scores above a randomly chosen negative.
+#
+# Ties are handled correctly by the trapezoid and not by accident. A block of
+# equal scores contributes a straight diagonal segment of the curve, whose
+# trapezoid area is exactly the half-credit that the rank-based Mann-Whitney
+# form assigns to a tie. A step-function (rectangle) integration would instead
+# give the block full or no credit depending on the sort order, which is how an
+# AUC ends up depending on the order rows arrived in.
+fn auc_roc(labels, scores) {
+  let c = roc_curve(labels, scores)
+  auc(c[0], c[1])
+}
+
+# Precision-recall curve. Returns [recall, precision, thresholds].
+#
+# Worth preferring to ROC when positives are rare: the false-positive rate that
+# ROC plots has the large negative count in its denominator, so a model can
+# produce many more false positives than true ones and still trace a flattering
+# curve. Precision has the predicted-positive count in the denominator instead,
+# which is exactly the quantity that goes bad.
+#
+# One point per distinct score, for the reason given on `roc_curve`.
+fn pr_curve(labels, scores) {
+  let order = argsort(-scores)
+  let y = gather(labels, order)
+  let s = gather(scores, order)
+  let pos = sum(labels)
+  let ends = block_ends(s)
+  let tp = gather(cumsum(y), ends)
+  let k = gather(tensor(range(len(labels))) + 1.0, ends)
+  list(tp / safe_den_scalar(pos), tp / k, gather(s, ends))
+}
+
+# Average precision: the PR curve summarised as the mean precision at each
+# threshold where a new positive is found.
+#
+# Deliberately not the trapezoid area under the PR curve. Precision is not
+# monotone in recall, and interpolating between two of its points implies a
+# model that does not exist; this step-wise sum, each precision weighted by the
+# recall it gained, is what the information retrieval literature means by AP and
+# what makes it comparable across papers. It runs over the deduplicated curve,
+# so a block of tied scores contributes its own precision once rather than a
+# staircase decided by the sort.
+fn average_precision(labels, scores) {
+  let c = pr_curve(labels, scores)
+  let r = c[0]
+  let p = c[1]
+  let n = len(r)
+  let gained = concat([r[0:1], r[1:n] - r[0:n - 1]], 0)
+  sum(gained * p)
+}
+
+# ── Regression ──────────────────────────────────────────────────────────────
+
+# Coefficient of determination: the fraction of the target's variance the model
+# accounts for.
+#
+# 1 is exact, 0 is as good as predicting the mean, and negative is worse than
+# that, which is a real result and not a bug: nothing constrains a model fitted
+# elsewhere to beat a constant on this data. The denominator uses the mean of
+# *these* targets, so r2 is not comparable across datasets with different
+# spreads.
+fn r2(y, pred) {
+  let ss_res = sum(square(y - pred))
+  let ss_tot = sum(square(y - mean(y)))
+  1.0 - ss_res / safe_den_scalar(ss_tot)
+}
+
+# Adjusted r2: r2 penalised for the number of predictors, since adding any
+# feature at all can only raise plain r2, whether or not it means anything.
+fn r2_adjusted(y, pred, features) {
+  let n = len(y)
+  1.0 - (1.0 - r2(y, pred)) * (n - 1.0) / safe_den_scalar(n - features - 1.0)
+}
+
+fn mse(y, pred) = mean(square(y - pred))
+
+fn rmse(y, pred) = sqrt(mean(square(y - pred)))
+
+fn mae(y, pred) = mean(abs(y - pred))
+
+# Mean absolute percentage error, as a fraction rather than a percentage.
+#
+# Undefined wherever the target is zero, and the epsilon floor here returns a
+# very large finite number instead rather than a NaN. That is deliberately not a
+# fix: MAPE is the wrong metric for a series that crosses zero, and the enormous
+# value is the signal that it is being misapplied.
+fn mape(y, pred) = mean(abs((y - pred) / maximum(abs(y), 0.00000001)))
+
+# Symmetric MAPE, which bounds the per-point error at 2 and so cannot be
+# dominated by a single near-zero target the way MAPE can.
+fn smape(y, pred) = mean(2.0 * abs(y - pred) / maximum(abs(y) + abs(pred), 0.00000001))
+
+# Explained variance. Differs from r2 only in that it ignores a constant bias in
+# the predictions, so comparing the two is a direct test for whether a model is
+# systematically off by an offset.
+fn explained_variance(y, pred) {
+  let e = y - pred
+  1.0 - variance_of(e) / safe_den_scalar(variance_of(y))
+}
+
+fn variance_of(x) = mean(square(x - mean(x)))
