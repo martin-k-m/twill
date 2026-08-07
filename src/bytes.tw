@@ -1,0 +1,105 @@
+mode systems
+
+# bytes.tw — the string-building primitives the rest of the compiler is written
+# against.
+#
+# Every function here is one line over a runtime primitive, and that is the
+# point: it is the single place the compiler touches the byte-level surface of
+# the systems subset. When a primitive is renamed, or when `Bytes` grows a
+# method form, one file changes instead of six. It also makes the dependency
+# visible: docs/needs.md can point at this file and say exactly which runtime
+# operations the self-hosted compiler cannot be written without.
+
+# An empty growable byte buffer. Compiler output is built by appending, never by
+# repeated concatenation, because a compiler emitting a megabyte of diagnostics
+# one `+` at a time is quadratic and the quadratic term is invisible until the
+# input is large.
+fn new() -> Bytes = bytes_new()
+
+fn push(b: Bytes, c: I64) {
+  bytes_push(b, c)
+}
+
+fn push_text(b: Bytes, s: Str) {
+  let i: I64 = 0
+  while i < len(s) {
+    bytes_push(b, s[i])
+    i = i + 1
+  }
+}
+
+fn to_str(b: Bytes) -> Str = bytes_to_str(b)
+
+fn of_str(s: Str) -> Bytes {
+  let b: Bytes = bytes_new()
+  push_text(b, s)
+  b
+}
+
+# Two strings joined. Str is immutable, so this allocates, and callers joining
+# more than a few pieces should build a Bytes instead.
+fn concat(a: Str, b: Str) -> Str {
+  let buf: Bytes = bytes_new()
+  push_text(buf, a)
+  push_text(buf, b)
+  bytes_to_str(buf)
+}
+
+# join is concat over a list, with a separator. Written once here because the
+# alternative is the same three lines in the parser, the checker and the
+# formatter, differing in whether the separator trails.
+fn join(parts: Arr[Str], sep: Str) -> Str {
+  let buf: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(parts) {
+    if i > 0 {
+      push_text(buf, sep)
+    }
+    push_text(buf, parts[i])
+    i = i + 1
+  }
+  bytes_to_str(buf)
+}
+
+fn equal(a: Str, b: Str) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn has_prefix(s: Str, p: Str) -> Bool {
+  if len(p) > len(s) { return false }
+  equal(s[0:len(p)], p)
+}
+
+fn has_suffix(s: Str, p: Str) -> Bool {
+  if len(p) > len(s) { return false }
+  equal(s[len(s) - len(p):len(s)], p)
+}
+
+# The index of the first occurrence of `needle`, or -1. Naive, and deliberately
+# so: the longest needle the compiler searches for is an import path, and a
+# Boyer-Moore table would cost more to build than the scan it saves.
+fn index_of(s: Str, needle: Str) -> I64 {
+  if len(needle) == 0 { return 0 }
+  let i: I64 = 0
+  while i + len(needle) <= len(s) {
+    if equal(s[i:i + len(needle)], needle) { return i }
+    i = i + 1
+  }
+  -1
+}
+
+fn repeat(s: Str, n: I64) -> Str {
+  let buf: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < n {
+    push_text(buf, s)
+    i = i + 1
+  }
+  bytes_to_str(buf)
+}

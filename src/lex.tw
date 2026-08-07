@@ -1,0 +1,560 @@
+mode systems
+
+# lex.tw — the twill lexer, written in twill.
+#
+# This is a port of internal/lexer/lexer.go, not a reinterpretation of it. The
+# token stream is compared against the Go lexer's over every .tw file in the
+# tree (docs/self-hosting.md section 5), so every decision here is made to match
+# that lexer's output rather than to be the nicest scanner it could be.
+#
+# The one structural difference is the cursor. The Go lexer converts the source
+# to []rune up front and indexes runes; this one walks bytes, because Str in the
+# systems subset is a byte string and decoding UTF-8 to get a lexer going would
+# be a decoder in front of a scanner that does not need one. The columns still
+# have to agree, so `advance` counts a column only for a byte that starts a
+# character. See the comment there.
+
+import "bytes.tw" as bytes
+
+# ---- token kinds -----------------------------------------------------------
+#
+# These are the values of lexer.Kind in Go and they must stay in this order: the
+# differential harness compares kinds numerically, and reordering them would
+# silently turn every NUMBER into a STRING on one side of the comparison.
+#
+# A named I64 rather than an enum, deliberately, and the ugliness is
+# information: docs/self-hosting.md milestone 1 excludes sum types, and a token
+# kind is the first place their absence is felt. NEEDS-3.
+
+let KIND_NUMBER: I64 = 0
+let KIND_STRING: I64 = 1
+let KIND_IDENT: I64 = 2
+let KIND_KEYWORD: I64 = 3
+let KIND_OP: I64 = 4
+let KIND_PUNCT: I64 = 5
+let KIND_EOF: I64 = 6
+
+fn kind_name(k: I64) -> Str {
+  if k == KIND_NUMBER { return "NUMBER" }
+  if k == KIND_STRING { return "STRING" }
+  if k == KIND_IDENT { return "IDENT" }
+  if k == KIND_KEYWORD { return "KEYWORD" }
+  if k == KIND_OP { return "OP" }
+  if k == KIND_PUNCT { return "PUNCT" }
+  if k == KIND_EOF { return "EOF" }
+  abort("kind_name: unknown token kind")
+}
+
+struct Token {
+  kind: I64,
+  value: Str,
+  line: I64,
+  col: I64,
+}
+
+# Comment is a source comment, kept so the formatter can put it back. Trailing
+# is true when code precedes it on the same line, which is how the formatter
+# decides between a comment on its own line and one hanging off a statement.
+struct Comment {
+  line: I64,
+  text: Str,
+  trailing: Bool,
+}
+
+# SyntaxError carries a position because a lexer error with no position is a
+# worse diagnostic than no diagnostic. The rendering matches
+# lexer.SyntaxError.Error: "line L:C: msg".
+struct SyntaxError {
+  msg: Str,
+  line: I64,
+  col: I64,
+}
+
+fn error_text(e: SyntaxError) -> Str {
+  bytes.concat("line ", bytes.concat(str(e.line), bytes.concat(":",
+    bytes.concat(str(e.col), bytes.concat(": ", e.msg)))))
+}
+
+# Result of a successful scan. Tokenize in Go returns (toks, comments, err);
+# twill has no multiple return, so the two halves that survive travel together.
+struct Scan {
+  tokens: Arr[Token],
+  comments: Arr[Comment],
+}
+
+# ---- byte constants --------------------------------------------------------
+#
+# Spelled as one-byte strings rather than decimal so a reader does not have to
+# hold an ASCII table. There is no character literal in twill and there should
+# not be one for this; NEEDS-9 records the cost.
+
+fn ch(s: Str) -> I64 = s[0]
+
+let C_TAB: I64 = ch("\t")
+let C_LF: I64 = ch("\n")
+let C_CR: I64 = ch("\r")
+let C_SPACE: I64 = ch(" ")
+let C_HASH: I64 = ch("#")
+let C_QUOTE: I64 = ch("\"")
+let C_BACKSLASH: I64 = ch("\\")
+let C_DOT: I64 = ch(".")
+let C_PLUS: I64 = ch("+")
+let C_MINUS: I64 = ch("-")
+let C_ZERO: I64 = ch("0")
+let C_NINE: I64 = ch("9")
+let C_UPPER_A: I64 = ch("A")
+let C_UPPER_E: I64 = ch("E")
+let C_UPPER_Z: I64 = ch("Z")
+let C_LOWER_A: I64 = ch("a")
+let C_LOWER_E: I64 = ch("e")
+let C_LOWER_N: I64 = ch("n")
+let C_LOWER_R: I64 = ch("r")
+let C_LOWER_T: I64 = ch("t")
+let C_LOWER_Z: I64 = ch("z")
+let C_UNDERSCORE: I64 = ch("_")
+
+# The single-character operator and punctuation sets, in the Go lexer's order.
+# Kept as strings so a token's value can be a one-byte slice of this constant
+# rather than a freshly built string: the scanner allocates enough as it is.
+let OP_CHARS: Str = "+-*/%@^<>=!"
+let PUNCT_CHARS: Str = "()[]{},:;."
+
+fn is_digit(c: I64) -> Bool = c >= C_ZERO and c <= C_NINE
+
+fn is_ident_start(c: I64) -> Bool =
+  c == C_UNDERSCORE or (c >= C_LOWER_A and c <= C_LOWER_Z) or (c >= C_UPPER_A and c <= C_UPPER_Z)
+
+fn is_ident_part(c: I64) -> Bool = is_ident_start(c) or is_digit(c)
+
+# A UTF-8 continuation byte is 10xxxxxx. It is not a character, it is the tail
+# of one, and the column counter has to skip it. See advance.
+fn is_utf8_continuation(c: I64) -> Bool = and(c, 192) == 128
+
+fn index_of_byte(s: Str, c: I64) -> I64 {
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == c { return i }
+    i = i + 1
+  }
+  -1
+}
+
+# ---- keywords --------------------------------------------------------------
+#
+# Insertion-ordered Dict, so this table is not a source of nondeterminism even
+# though nothing iterates it today. docs/self-hosting.md section 2.4 wants the
+# compiler to have no ordering-dependent state at all, and the cheapest way to
+# hold that line is to never introduce any.
+
+fn keyword_table() -> Dict[Str, Bool] {
+  let d: Dict[Str, Bool] = dict_new()
+  dict_set(d, "let", true)
+  dict_set(d, "fn", true)
+  dict_set(d, "if", true)
+  dict_set(d, "else", true)
+  dict_set(d, "while", true)
+  dict_set(d, "for", true)
+  dict_set(d, "in", true)
+  dict_set(d, "return", true)
+  dict_set(d, "import", true)
+  dict_set(d, "type", true)
+  dict_set(d, "unit", true)
+  dict_set(d, "true", true)
+  dict_set(d, "false", true)
+  dict_set(d, "and", true)
+  dict_set(d, "or", true)
+  dict_set(d, "not", true)
+  d
+}
+
+let KEYWORDS: Dict[Str, Bool] = keyword_table()
+
+fn is_keyword(name: Str) -> Bool {
+  match dict_get(KEYWORDS, name) {
+    Some(_) => true,
+    None => false,
+  }
+}
+
+# multiOps are matched greedily before single-character operators, and the order
+# does not matter because no two of them share a first byte with a different
+# second byte that would make the match ambiguous.
+fn multi_ops() -> Arr[Str] {
+  let a: Arr[Str] = arr_new()
+  push(a, "==")
+  push(a, "!=")
+  push(a, "<=")
+  push(a, ">=")
+  push(a, "->")
+  push(a, "&&")
+  push(a, "||")
+  a
+}
+
+let MULTI_OPS: Arr[Str] = multi_ops()
+
+# ---- the cursor ------------------------------------------------------------
+
+struct Lexer {
+  src: Str,
+  n: I64,
+  i: I64,
+  line: I64,
+  col: I64,
+  tokens: Arr[Token],
+  comments: Arr[Comment],
+}
+
+fn new_lexer(src: Str) -> Lexer {
+  Lexer {
+    src: src,
+    n: len(src),
+    i: 0,
+    line: 1,
+    col: 1,
+    tokens: arr_new(),
+    comments: arr_new(),
+  }
+}
+
+# peek returns the byte `o` positions ahead, or 0 past the end. Zero doubles as
+# "no byte" exactly as it does in the Go lexer: a NUL byte in twill source is
+# rejected by the unexpected-character path either way, so the two readings of 0
+# can never disagree about a real file.
+fn peek(lx: Lexer, o: I64) -> I64 {
+  if lx.i + o < lx.n { return lx.src[lx.i + o] }
+  0
+}
+
+# advance consumes one byte and maintains the position.
+#
+# The column counts characters, not bytes, because the Go lexer counts runes and
+# the two token streams are compared including columns. Incrementing on every
+# byte would put every token after a multi-byte character in a string literal or
+# comment at the wrong column, and nothing else in the file would look wrong.
+# A continuation byte is the second, third or fourth byte of one character, so
+# skipping it is exactly rune counting without a decoder.
+fn advance(lx: Lexer) -> I64 {
+  let c: I64 = lx.src[lx.i]
+  lx.i = lx.i + 1
+  if c == C_LF {
+    lx.line = lx.line + 1
+    lx.col = 1
+  } else {
+    if not is_utf8_continuation(c) {
+      lx.col = lx.col + 1
+    }
+  }
+  c
+}
+
+fn emit(lx: Lexer, kind: I64, value: Str, line: I64, col: I64) {
+  push(lx.tokens, Token { kind: kind, value: value, line: line, col: col })
+}
+
+fn last_token_line(lx: Lexer) -> I64 {
+  if len(lx.tokens) == 0 { return -1 }
+  lx.tokens[len(lx.tokens) - 1].line
+}
+
+# ---- the scanner -----------------------------------------------------------
+
+# tokenize scans src into tokens, ending with an EOF token.
+fn tokenize(src: Str) -> Res[Arr[Token], SyntaxError] {
+  let sc: Scan = tokenize_with_comments(src)?
+  Ok(sc.tokens)
+}
+
+# tokenize_with_comments is tokenize but also returning the comments found.
+fn tokenize_with_comments(src: Str) -> Res[Scan, SyntaxError] {
+  let lx: Lexer = new_lexer(src)
+
+  while lx.i < lx.n {
+    let c: I64 = lx.src[lx.i]
+
+    if c == C_SPACE or c == C_TAB or c == C_CR or c == C_LF {
+      advance(lx)
+      continue
+    }
+
+    if c == C_HASH {
+      scan_comment(lx)
+      continue
+    }
+
+    let start_line: I64 = lx.line
+    let start_col: I64 = lx.col
+
+    # A number, or a leading-dot number like `.5`. The dot case has to be
+    # decided here rather than in the punctuation branch, because `.` is also
+    # field access and the only thing that separates the two is the byte after.
+    if is_digit(c) or (c == C_DOT and is_digit(peek(lx, 1))) {
+      scan_number(lx, start_line, start_col)
+      continue
+    }
+
+    if is_ident_start(c) {
+      scan_ident(lx, start_line, start_col)
+      continue
+    }
+
+    if c == C_QUOTE {
+      scan_string(lx, start_line, start_col)?
+      continue
+    }
+
+    if scan_multi_op(lx, start_line, start_col) {
+      continue
+    }
+
+    if index_of_byte(OP_CHARS, c) >= 0 {
+      let k: I64 = index_of_byte(OP_CHARS, c)
+      advance(lx)
+      emit(lx, KIND_OP, OP_CHARS[k:k + 1], start_line, start_col)
+      continue
+    }
+
+    # '.' is field access here; number literals like 3.14 and .5 were already
+    # handled by the number branch above.
+    if index_of_byte(PUNCT_CHARS, c) >= 0 {
+      let k: I64 = index_of_byte(PUNCT_CHARS, c)
+      advance(lx)
+      emit(lx, KIND_PUNCT, PUNCT_CHARS[k:k + 1], start_line, start_col)
+      continue
+    }
+
+    return Err(SyntaxError {
+      msg: bytes.concat("unexpected character ", quote_char(lx.src, lx.i)),
+      line: start_line,
+      col: start_col,
+    })
+  }
+
+  emit(lx, KIND_EOF, "", lx.line, lx.col)
+  Ok(Scan { tokens: lx.tokens, comments: lx.comments })
+}
+
+# A comment runs to the end of the line and the newline is not consumed here,
+# so the whitespace branch handles the line break and the line counter stays in
+# one place.
+fn scan_comment(lx: Lexer) {
+  let cl: I64 = lx.line
+  advance(lx)
+  let start: I64 = lx.i
+  while lx.i < lx.n and peek(lx, 0) != C_LF {
+    advance(lx)
+  }
+  let text: Str = trim_space(lx.src[start:lx.i])
+  push(lx.comments, Comment { line: cl, text: text, trailing: last_token_line(lx) == cl })
+}
+
+# The number grammar is: digits, optional fraction, optional exponent. It is
+# deliberately permissive about a trailing `e` with no digits after it, because
+# the Go lexer is: `1e` lexes as a NUMBER and the parser rejects it when
+# ParseFloat fails, which puts the error on the parser's line-and-column rather
+# than inventing a second wording for it here.
+fn scan_number(lx: Lexer, line: I64, col: I64) {
+  let start: I64 = lx.i
+  while lx.i < lx.n and is_digit(peek(lx, 0)) {
+    advance(lx)
+  }
+  if peek(lx, 0) == C_DOT {
+    advance(lx)
+    while lx.i < lx.n and is_digit(peek(lx, 0)) {
+      advance(lx)
+    }
+  }
+  if peek(lx, 0) == C_LOWER_E or peek(lx, 0) == C_UPPER_E {
+    advance(lx)
+    if peek(lx, 0) == C_PLUS or peek(lx, 0) == C_MINUS {
+      advance(lx)
+    }
+    while lx.i < lx.n and is_digit(peek(lx, 0)) {
+      advance(lx)
+    }
+  }
+  emit(lx, KIND_NUMBER, lx.src[start:lx.i], line, col)
+}
+
+fn scan_ident(lx: Lexer, line: I64, col: I64) {
+  let start: I64 = lx.i
+  while lx.i < lx.n and is_ident_part(peek(lx, 0)) {
+    advance(lx)
+  }
+  let name: Str = lx.src[start:lx.i]
+  let kind: I64 = KIND_IDENT
+  if is_keyword(name) {
+    kind = KIND_KEYWORD
+  }
+  emit(lx, kind, name, line, col)
+}
+
+# A string literal's value is the unescaped contents, with the quotes removed.
+#
+# Escapes are resolved byte by byte and a multi-byte character after a backslash
+# is passed through unchanged, which is what the Go lexer does too: it unescapes
+# one rune and the default arm returns it as it stands. The bytes that follow
+# are copied by the ordinary path, so the two agree.
+fn scan_string(lx: Lexer, line: I64, col: I64) -> Res[Unit, SyntaxError] {
+  advance(lx)
+  let buf: Bytes = bytes.new()
+  while lx.i < lx.n and peek(lx, 0) != C_QUOTE {
+    let c: I64 = advance(lx)
+    if c == C_BACKSLASH {
+      # A backslash at the very end of the file has nothing to escape. Go's
+      # advance would panic on it; the loop condition below catches it as an
+      # unterminated string, which is the right diagnosis anyway.
+      if lx.i >= lx.n {
+        return Err(SyntaxError { msg: "unterminated string", line: line, col: col })
+      }
+      bytes.push(buf, unescape(advance(lx)))
+    } else {
+      bytes.push(buf, c)
+    }
+  }
+  if lx.i >= lx.n {
+    return Err(SyntaxError { msg: "unterminated string", line: line, col: col })
+  }
+  advance(lx)
+  emit(lx, KIND_STRING, bytes.to_str(buf), line, col)
+  Ok(unit)
+}
+
+# scan_multi_op matches a two-byte operator greedily and reports whether it did.
+# Greedy is load-bearing: `<=` has to win over `<`, and `!=` over `!`, or the
+# parser sees two tokens where the source has one.
+fn scan_multi_op(lx: Lexer, line: I64, col: I64) -> Bool {
+  let b1: I64 = peek(lx, 1)
+  if b1 == 0 { return false }
+  let b0: I64 = peek(lx, 0)
+  let k: I64 = 0
+  while k < len(MULTI_OPS) {
+    let op: Str = MULTI_OPS[k]
+    if op[0] == b0 and op[1] == b1 {
+      advance(lx)
+      advance(lx)
+      emit(lx, KIND_OP, op, line, col)
+      return true
+    }
+    k = k + 1
+  }
+  false
+}
+
+fn unescape(c: I64) -> I64 {
+  if c == C_LOWER_N { return C_LF }
+  if c == C_LOWER_T { return C_TAB }
+  if c == C_LOWER_R { return C_CR }
+  c
+}
+
+fn trim_space(s: Str) -> Str {
+  let a: I64 = 0
+  let b: I64 = len(s)
+  while a < b and is_space(s[a]) {
+    a = a + 1
+  }
+  while b > a and is_space(s[b - 1]) {
+    b = b - 1
+  }
+  s[a:b]
+}
+
+# The set Go's strings.TrimSpace treats as space, restricted to the ASCII
+# members. The non-ASCII ones (NEL, NBSP) cannot appear in a twill comment
+# without the file already being unusual, and matching them would need a
+# decoder here for no gain. NEEDS-11 records the divergence.
+fn is_space(c: I64) -> Bool =
+  c == C_SPACE or c == C_TAB or c == C_LF or c == C_CR or c == 11 or c == 12
+
+# quote_char renders the character starting at byte `i` the way Go's %q verb
+# does, for the one error message that needs it. A printable ASCII byte is
+# wrapped in quotes with `"` and `\` escaped; a multi-byte character is passed
+# through whole, which is what %q does for a printable rune.
+fn quote_char(src: Str, i: I64) -> Str {
+  let width: I64 = utf8_width(src[i])
+  if i + width > len(src) {
+    width = 1
+  }
+  let raw: Str = src[i:i + width]
+  let buf: Bytes = bytes.new()
+  bytes.push(buf, C_QUOTE)
+  let k: I64 = 0
+  while k < width {
+    let c: I64 = raw[k]
+    if c == C_QUOTE or c == C_BACKSLASH {
+      bytes.push(buf, C_BACKSLASH)
+    }
+    bytes.push(buf, c)
+    k = k + 1
+  }
+  bytes.push(buf, C_QUOTE)
+  bytes.to_str(buf)
+}
+
+# The length in bytes of the character whose first byte is c, by the UTF-8 lead
+# byte pattern. A continuation byte or an invalid lead is one byte, which is the
+# only answer that cannot walk off the end of a string.
+fn utf8_width(c: I64) -> I64 {
+  if and(c, 128) == 0 { return 1 }
+  if and(c, 224) == 192 { return 2 }
+  if and(c, 240) == 224 { return 3 }
+  if and(c, 248) == 240 { return 4 }
+  1
+}
+
+# ---- the differential dump -------------------------------------------------
+#
+# One line per token, in the format tools/diff/ compares. It exists here rather
+# than in the harness because the harness compares two strings and both sides
+# have to agree on the rendering; putting it next to the lexer means a new token
+# kind changes one file.
+fn dump_tokens(toks: Arr[Token]) -> Str {
+  let buf: Bytes = bytes.new()
+  let i: I64 = 0
+  while i < len(toks) {
+    let t: Token = toks[i]
+    bytes.push_text(buf, kind_name(t.kind))
+    bytes.push_text(buf, "\t")
+    bytes.push_text(buf, quote_value(t.value))
+    bytes.push_text(buf, "\t")
+    bytes.push_text(buf, str(t.line))
+    bytes.push_text(buf, ":")
+    bytes.push_text(buf, str(t.col))
+    bytes.push_text(buf, "\n")
+    i = i + 1
+  }
+  bytes.to_str(buf)
+}
+
+# A token's value can contain a newline or a tab (a string literal carries the
+# unescaped byte), and the dump is line-oriented, so the value is re-escaped.
+fn quote_value(s: Str) -> Str {
+  let buf: Bytes = bytes.new()
+  bytes.push(buf, C_QUOTE)
+  let i: I64 = 0
+  while i < len(s) {
+    let c: I64 = s[i]
+    if c == C_QUOTE or c == C_BACKSLASH {
+      bytes.push(buf, C_BACKSLASH)
+      bytes.push(buf, c)
+    } else {
+      if c == C_LF {
+        bytes.push_text(buf, "\\n")
+      } else {
+        if c == C_TAB {
+          bytes.push_text(buf, "\\t")
+        } else {
+          if c == C_CR {
+            bytes.push_text(buf, "\\r")
+          } else {
+            bytes.push(buf, c)
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+  bytes.push(buf, C_QUOTE)
+  bytes.to_str(buf)
+}
