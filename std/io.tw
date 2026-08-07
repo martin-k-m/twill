@@ -1,0 +1,465 @@
+mode systems
+
+# io.tw: files, lines and paths.
+#
+# WHAT THIS IS WRITTEN AGAINST
+#
+# The runtime surface named in `docs/self-hosting.md` section 1.2 and recorded
+# in `docs/needs.md` NEEDS-28, and nothing else:
+#
+#   read_file(path) -> Res[Bytes, Str]
+#   write_file(path, Bytes) -> Res[Unit, Str]
+#   list_dir(path) -> Res[Arr[Str], Str]
+#   env(name) -> Opt[Str]
+#   args() -> Arr[Str]
+#   write_out(Bytes), write_err(Bytes), exit(I64)
+#
+# "Nothing else" is the constraint that shapes this file. There is no `stat`, no
+# `open`, no seek, no append mode, no streaming read, and no way to create or
+# remove a directory. Everything below is those primitives plus string handling,
+# and where that costs something the cost is stated at the function rather than
+# hidden. The alternative would have been to invent the primitives I wanted and
+# leave a file that cannot be implemented; the primitives that are genuinely
+# missing are recorded in `docs/needs.md` instead, and named where they bite.
+#
+# WHOLE FILES ONLY
+#
+# `read_file` returns the whole file. There is no line-at-a-time reader here
+# because there is no streaming primitive to build one on, so `read_lines` on a
+# ten-gigabyte log allocates ten gigabytes and then allocates the lines. That is
+# fine for the configuration files, CSVs and source files this is for, and it is
+# not a general file library. If a program needs to process a file larger than
+# memory, this file cannot do it and pretending otherwise with a convenient
+# signature would be worse than saying so.
+
+import "std/text" as text
+
+# ---- reading ---------------------------------------------------------------
+
+# The whole file as text.
+#
+# `Res` rather than `Opt`, so the operating system's message survives. "no such
+# file" and "permission denied" send a user to two different places, and a
+# `None` sends them to the wrong one half the time. `read_csv` in the evaluator
+# discards the message and `docs/needs.md` NEEDS-59 argues for an `Opt` on that
+# basis; the argument holds for that caller and not for a general reader, so
+# this keeps the error and `read_text_or` below is for callers that want a
+# default.
+#
+# No encoding is assumed or validated. The bytes are handed back as a `Str`,
+# which is what a `Str` is. Call `text.char_valid` if the file has to be UTF-8.
+fn read_text(path: Str) -> Res[Str, Str] {
+  let b: Bytes = read_file(path)?
+  Ok(bytes_to_str(b))
+}
+
+# The file's contents, or `dflt` if it cannot be read for any reason.
+#
+# For the case where absence is expected and normal: an optional config file, a
+# cache. Distinct from `read_text` because collapsing a missing file and an
+# unreadable one into a default is right there and wrong nearly everywhere else.
+fn read_text_or(path: Str, dflt: Str) -> Str {
+  match read_file(path) {
+    Ok(b) => bytes_to_str(b),
+    Err(_) => dflt,
+  }
+}
+
+# The file split into lines, LF or CRLF, with no trailing empty line.
+#
+# The CRLF handling is not optional politeness: a file written on Windows and
+# read on Linux has a carriage return at the end of every line, and a comparison
+# against an expected value fails for a reason invisible in every printout of
+# both strings. `text.lines` strips it. See that function for the exact rule.
+fn read_lines(path: Str) -> Res[Arr[Str], Str] {
+  let s: Str = read_text(path)?
+  Ok(text.lines(s))
+}
+
+# ---- writing ---------------------------------------------------------------
+
+# Replace the file's contents.
+#
+# Replace, not append: there is no append primitive, and simulating one by
+# reading the file and writing it back is O(n) per line and silently loses
+# concurrent writes. `append_text` below does exactly that and says so.
+#
+# The write is not atomic. A crash partway through leaves a truncated file, and
+# the usual fix (write to a temporary name and rename) needs a rename primitive
+# that does not exist. For anything where a half-written file would be a
+# disaster, write beside the target and move it once the runtime can.
+fn write_text(path: Str, contents: Str) -> Res[Unit, Str] {
+  write_file(path, bytes_of_str(contents))
+}
+
+fn bytes_of_str(s: Str) -> Bytes {
+  let b: Bytes = bytes_new()
+  text.push_str(b, s)
+  b
+}
+
+# The lines joined with a single LF, and a trailing LF after the last one.
+#
+# The trailing newline is there because a text file conventionally ends with
+# one: without it, `cat` runs the last line into the shell prompt, `wc -l`
+# reports one line fewer than there are, and a later append starts mid-line.
+# `text.lines` does not produce an empty final field from it, so
+# `write_lines` and `read_lines` round-trip.
+fn write_lines(path: Str, lines: Arr[Str]) -> Res[Unit, Str] {
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(lines) {
+    text.push_str(b, lines[i])
+    bytes_push(b, 10)
+    i = i + 1
+  }
+  write_file(path, b)
+}
+
+# Read, concatenate, write.
+#
+# Quadratic over a sequence of appends and not atomic in any sense: two
+# processes appending at once lose one of the writes entirely, where a real
+# append with O_APPEND would not. It is here because appending to a log or a
+# results file is a genuine need and this is what the available primitives
+# allow. Do not use it in a loop.
+fn append_text(path: Str, extra: Str) -> Res[Unit, Str] {
+  let existing: Str = read_text_or(path, "")
+  write_text(path, text.concat(existing, extra))
+}
+
+# ---- existence -------------------------------------------------------------
+
+# Whether the path names something that exists.
+#
+# There is no `stat` in the runtime surface, so this is assembled from the two
+# primitives that are there, and both halves are needed:
+#
+#   - `read_file` succeeding proves a readable file exists. It fails for a
+#     directory and for a file whose permissions deny the read, both of which
+#     exist.
+#   - `list_dir` on the parent, looking for the base name, covers those two
+#     cases and directories generally.
+#
+# The cost is the honest part: the first branch reads the entire file to answer
+# a yes-or-no question, and the second lists a whole directory. On a large file
+# or a directory with a hundred thousand entries that is absurd, and it is what
+# the available primitives allow. `docs/needs.md` NEEDS-91 asks for the `stat`
+# that would make this one call.
+#
+# It is also inherently racy, as every existence check is in every language: the
+# file can be gone by the time the caller acts on the answer. Prefer attempting
+# the operation and handling its error to asking first.
+fn exists(path: Str) -> Bool {
+  match read_file(path) {
+    Ok(_) => return true,
+    Err(_) => unit,
+  }
+  let parent: Str = dir_name(path)
+  let base: Str = base_name(path)
+  if base == "" { return false }
+  match list_dir(if parent == "" { "." } else { parent }) {
+    Ok(entries) => {
+      let i: I64 = 0
+      while i < len(entries) {
+        if text.equal(entries[i], base) { return true }
+        i = i + 1
+      }
+      false
+    },
+    Err(_) => false,
+  }
+}
+
+# Whether the path names a directory.
+#
+# `list_dir` succeeding is the test, since it is the one primitive that
+# distinguishes the two. A directory that exists but cannot be listed reports
+# false, which is a wrong answer this cannot avoid without a `stat`.
+fn is_dir(path: Str) -> Bool {
+  match list_dir(path) {
+    Ok(_) => true,
+    Err(_) => false,
+  }
+}
+
+# ---- paths -----------------------------------------------------------------
+#
+# Pure string handling, byte-oriented throughout. No path here touches the
+# filesystem, which is deliberate: a path function that resolved symlinks or
+# checked existence would be doing two things and would fail for reasons that
+# have nothing to do with the string it was given.
+#
+# THE SEPARATOR, ASYMMETRICALLY
+#
+# Joining always emits a forward slash. Splitting accepts both a forward slash
+# and a backslash.
+#
+# That asymmetry is the right one and not a compromise. Every Windows API
+# accepts a forward slash, so emitting one is portable output; meanwhile a path
+# that came from a Windows environment variable, a command line, or a file
+# written on Windows contains backslashes, so refusing to split on one would
+# fail to find the base name of a real path. Producing one form and accepting
+# both is what makes a program written on either platform work on the other.
+#
+# What this cannot do without knowing the platform: decide whether `C:\x` is
+# absolute (it is, on Windows, and is a relative path named `C:\x` on Linux) or
+# whether `A.txt` and `a.txt` are the same file. `is_abs` below handles the
+# drive-letter form because recognising it is unambiguous; case folding is not
+# attempted, because guessing wrong in either direction corrupts something.
+
+let SLASH: I64 = 47
+let BACKSLASH: I64 = 92
+
+fn is_sep(c: I64) -> Bool = c == SLASH or c == BACKSLASH
+
+# Join path components with a single separator between them.
+#
+# Empty components are skipped rather than producing a doubled separator, and a
+# separator already at the end of a component is not doubled either. Both
+# matter because the components usually come from configuration, where a
+# trailing slash on a directory is a coin flip, and `a/` joined to `b` must be
+# `a/b` and not `a//b`. (A doubled slash is harmless on Unix and is a UNC path
+# on Windows, which is not harmless.)
+fn join(parts: Arr[Str]) -> Str {
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(parts) {
+    let p: Str = parts[i]
+    if len(p) > 0 {
+      if len(b) > 0 and not is_sep(p[0]) {
+        bytes_push(b, SLASH)
+      }
+      # Drop a trailing separator from the component so the next iteration adds
+      # exactly one.
+      let stop: I64 = len(p)
+      while stop > 1 and is_sep(p[stop - 1]) { stop = stop - 1 }
+      text.push_str(b, text.slice(p, 0, stop))
+    }
+    i = i + 1
+  }
+  bytes_to_str(b)
+}
+
+fn join2(a: Str, b: Str) -> Str {
+  let parts: Arr[Str] = arr_new()
+  push(parts, a)
+  push(parts, b)
+  join(parts)
+}
+
+# The index of the last separator, or -1.
+fn last_sep(path: Str) -> I64 {
+  let i: I64 = len(path) - 1
+  while i >= 0 {
+    if is_sep(path[i]) { return i }
+    i = i - 1
+  }
+  -1
+}
+
+# Everything before the last separator.
+#
+# `dir_name("a/b")` is "a", `dir_name("a")` is "", and `dir_name("/a")` is "/".
+# The last case is why the root is special-cased: stripping the separator would
+# give "", which names the current directory and is a different place.
+fn dir_name(path: Str) -> Str {
+  let at: I64 = last_sep(path)
+  if at < 0 { return "" }
+  if at == 0 { return "/" }
+  text.slice(path, 0, at)
+}
+
+# Everything after the last separator.
+#
+# A trailing separator is stripped first, so `base_name("a/b/")` is "b" and not
+# "". A path that is nothing but separators has no base name and gives "".
+fn base_name(path: Str) -> Str {
+  let stop: I64 = len(path)
+  while stop > 0 and is_sep(path[stop - 1]) { stop = stop - 1 }
+  if stop == 0 { return "" }
+  let trimmed: Str = text.slice(path, 0, stop)
+  let at: I64 = last_sep(trimmed)
+  text.slice(trimmed, at + 1, len(trimmed))
+}
+
+# The extension including its dot, or "".
+#
+# The **last** dot of the base name, and only when it is not the first character
+# of it. So `ext("archive.tar.gz")` is ".gz" and `ext(".gitignore")` is "",
+# because a leading dot marks a hidden file rather than an extension. Searching
+# the base name rather than the whole path is what stops `ext("v1.2/readme")`
+# from returning ".2/readme".
+fn ext(path: Str) -> Str {
+  let base: Str = base_name(path)
+  let i: I64 = len(base) - 1
+  while i > 0 {
+    if base[i] == 46 { return text.slice(base, i, len(base)) }
+    i = i - 1
+  }
+  ""
+}
+
+# The base name with its extension removed.
+fn stem(path: Str) -> Str {
+  let base: Str = base_name(path)
+  let e: Str = ext(base)
+  text.slice(base, 0, len(base) - len(e))
+}
+
+# The path with its extension replaced. `new_ext` should include the dot; a
+# missing dot is added, because forgetting it produces `filejson` rather than
+# an error and that is not a mistake worth letting through.
+fn with_ext(path: Str, new_ext: Str) -> Str {
+  let e: Str = ext(path)
+  let base: Str = text.slice(path, 0, len(path) - len(e))
+  if len(new_ext) > 0 and new_ext[0] != 46 {
+    return text.concat(base, text.concat(".", new_ext))
+  }
+  text.concat(base, new_ext)
+}
+
+# The path split into its components, with empty ones dropped.
+#
+# The leading separator of an absolute path is not preserved as a component, so
+# `split("/a/b")` and `split("a/b")` give the same list. Use `is_abs` to ask the
+# question the components no longer answer; keeping an empty first element to
+# encode it is the representation that gets dropped by the first filter someone
+# writes over the list.
+fn split(path: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  let n: I64 = len(path)
+  while i < n {
+    while i < n and is_sep(path[i]) { i = i + 1 }
+    if i >= n { return out }
+    let start: I64 = i
+    while i < n and not is_sep(path[i]) { i = i + 1 }
+    push(out, text.slice(path, start, i))
+  }
+  out
+}
+
+# Whether the path is absolute.
+#
+# A leading separator, or a drive letter followed by a colon and a separator
+# (`C:/x` or `C:\x`). The drive form is recognised on every platform: a path
+# that looks like that came from Windows and is absolute there, and treating it
+# as relative would join it onto a working directory and produce nonsense.
+fn is_abs(path: Str) -> Bool {
+  if len(path) == 0 { return false }
+  if is_sep(path[0]) { return true }
+  if len(path) >= 3 and path[1] == 58 and is_sep(path[2]) {
+    return text.is_alpha(path[0])
+  }
+  false
+}
+
+# The path with `.` components removed and `..` resolved against the component
+# before it, lexically.
+#
+# Lexically, which is the important word: this does not look at the filesystem,
+# so if `a` is a symlink to somewhere else then `a/../b` is not the same
+# directory as `b` and this will say it is. That is the same caveat every
+# lexical normaliser carries, and it is the reason no shell resolves paths this
+# way when it matters.
+#
+# A `..` with nothing before it is kept, since dropping it would turn a path
+# that escapes its starting directory into one that does not, which is a
+# security-relevant difference rather than a cosmetic one.
+fn normalize(path: Str) -> Str {
+  let parts: Arr[Str] = split(path)
+  let out: Arr[Str] = arr_new()
+  let absolute: Bool = is_abs(path)
+  let i: I64 = 0
+  while i < len(parts) {
+    let p: Str = parts[i]
+    if text.equal(p, ".") {
+      i = i + 1
+    } else {
+      if text.equal(p, "..") {
+        if len(out) > 0 and not text.equal(out[len(out) - 1], "..") {
+          # No `pop` primitive (docs/needs.md NEEDS-93), so the stack is
+          # rebuilt one element shorter. O(n^2) over a path with many `..`
+          # components, which no real path has.
+          let shorter: Arr[Str] = arr_new()
+          let k: I64 = 0
+          while k < len(out) - 1 {
+            push(shorter, out[k])
+            k = k + 1
+          }
+          out = shorter
+        } else {
+          if not absolute { push(out, p) }
+        }
+      } else {
+        push(out, p)
+      }
+      i = i + 1
+    }
+  }
+  let joined: Str = text.join(out, "/")
+  if absolute { return text.concat("/", joined) }
+  if joined == "" { return "." }
+  joined
+}
+
+# ---- directories -----------------------------------------------------------
+
+# The entries of a directory, base names only, in whatever order the runtime
+# gives them.
+#
+# The order is not specified and must not be relied on. `docs/self-hosting.md`
+# section 2.4 wants the compiler to have no ordering-dependent state at all, and
+# a directory listing is the classic place one arrives from outside: the order
+# differs between filesystems and between two runs on the same filesystem after
+# a file is deleted. Sort it if the output depends on it.
+fn entries(path: Str) -> Res[Arr[Str], Str] = list_dir(path)
+
+# The entries whose name ends with `suffix`, as full paths.
+#
+# Suffix matching rather than a glob. A glob needs a pattern matcher, and the
+# only glob anyone writes against a directory listing is `*.ext`, which is this.
+fn entries_with_ext(path: Str, suffix: Str) -> Res[Arr[Str], Str] {
+  let all: Arr[Str] = list_dir(path)?
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(all) {
+    if text.ends_with(all[i], suffix) {
+      push(out, join2(path, all[i]))
+    }
+    i = i + 1
+  }
+  Ok(out)
+}
+
+# ---- standard streams ------------------------------------------------------
+
+# Write to stdout with no trailing newline, and with one.
+#
+# Deliberately thin. `print` in numeric mode joins its arguments with spaces and
+# adds a newline through a sink the interpreter owns (`docs/needs.md`
+# NEEDS-56); these are the systems-mode equivalents, and the difference is that
+# the line ending is the caller's here. A file being written a piece at a time
+# needs that.
+fn out(s: Str) {
+  write_out(bytes_of_str(s))
+}
+
+fn outln(s: Str) {
+  let b: Bytes = bytes_of_str(s)
+  bytes_push(b, 10)
+  write_out(b)
+}
+
+# Write to stderr. Diagnostics go here and results go to stdout, so that a
+# program's output can be redirected without its complaints going with it.
+fn err(s: Str) {
+  write_err(bytes_of_str(s))
+}
+
+fn errln(s: Str) {
+  let b: Bytes = bytes_of_str(s)
+  bytes_push(b, 10)
+  write_err(b)
+}

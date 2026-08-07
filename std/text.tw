@@ -1,0 +1,679 @@
+mode systems
+
+# text.tw: string handling over `Str`.
+#
+# BYTES OR CHARACTERS: READ THIS BEFORE USING ANYTHING BELOW
+#
+# A `Str` in twill is an immutable sequence of bytes (docs/self-hosting.md
+# section 1.2: "there is no character type, no rune, and no unicode
+# normalization anywhere"). Indexing gives an I64 byte, and `len` counts bytes.
+# That is the substrate, and this file does not pretend otherwise.
+#
+# So every function here is one of two kinds, and each says which in its first
+# line. The distinction is not pedantry: `pad_left("café", 6)` gives a string
+# that prints five characters wide if padding counts bytes, and `upper` applied
+# to a multi-byte sequence one byte at a time corrupts it. Mixing the two kinds
+# without noticing is the single largest source of bugs in string code, so the
+# names are chosen to make the kind visible where it can be:
+#
+#   BYTE-ORIENTED   indices, lengths and boundaries are byte positions.
+#                   Fast, exact, and correct for ASCII data and for structural
+#                   work (splitting on a comma, matching a prefix) regardless of
+#                   encoding, because a UTF-8 continuation byte can never be
+#                   mistaken for an ASCII delimiter.
+#
+#   CHARACTER-ORIENTED  works in whole UTF-8 sequences. Named with `char` in it,
+#                   without exception. Slower, and correct for anything a human
+#                   will look at: display width, truncation, reversal.
+#
+# Why byte-oriented is the default rather than the other way round: splitting a
+# CSV, finding a newline, and testing a prefix are all correct on bytes and
+# would only be slower on characters, and a UTF-8 stream has the property that
+# no ASCII byte ever appears inside a multi-byte sequence. Making the safe
+# operations pay for the unsafe ones would be the wrong trade.
+#
+# WHAT IS NOT HERE, AND WILL NOT BE
+#
+# Case conversion is **ASCII only**, and this is a decision rather than a
+# limitation to be fixed later. Correct Unicode case folding is locale-dependent
+# (Turkish dotless i), context-dependent (Greek final sigma), and not
+# length-preserving (German sharp s uppercases to two characters). A library
+# that did a partial job would be worse than one that is clear about doing an
+# ASCII job, because partial case folding fails on exactly the inputs nobody
+# tests. If you need real case folding you need a Unicode table, and that is a
+# data file, not a function.
+#
+# There is no regular expression engine, and `tokens` below is the deliberate
+# alternative. See the comment there.
+
+# ---- byte classification ---------------------------------------------------
+#
+# Written as decimal byte values with the character in the comment. A one-byte
+# string literal would read better and would need indexing a literal, which is
+# a call and an allocation in the middle of the hottest loops here.
+
+let SPACE: I64 = 32
+let TAB: I64 = 9
+let LF: I64 = 10
+let CR: I64 = 13
+let VTAB: I64 = 11
+let FORM_FEED: I64 = 12
+
+# BYTE-ORIENTED. True for the six ASCII whitespace bytes.
+#
+# ASCII only, matching Go's `unicode.IsSpace` restricted to the ASCII range and
+# not extending to U+00A0 or U+2028. docs/needs.md NEEDS-61 records the same gap
+# on the evaluator's `trim_space` and the same reasoning applies: a non-breaking
+# space is whitespace to a reader and specifically not whitespace to a parser,
+# and silently trimming it changes data.
+fn is_space(c: I64) -> Bool =
+  c == SPACE or c == TAB or c == LF or c == CR or c == VTAB or c == FORM_FEED
+
+fn is_digit(c: I64) -> Bool = c >= 48 and c <= 57
+
+fn is_upper(c: I64) -> Bool = c >= 65 and c <= 90
+
+fn is_lower(c: I64) -> Bool = c >= 97 and c <= 122
+
+fn is_alpha(c: I64) -> Bool = is_upper(c) or is_lower(c)
+
+fn is_alnum(c: I64) -> Bool = is_alpha(c) or is_digit(c)
+
+# ---- construction ----------------------------------------------------------
+
+# A `Str` of one byte. The building block for everything that assembles a string
+# a byte at a time.
+fn from_byte(c: I64) -> Str {
+  let b: Bytes = bytes_new()
+  bytes_push(b, c)
+  bytes_to_str(b)
+}
+
+fn push_str(b: Bytes, s: Str) {
+  let i: I64 = 0
+  while i < len(s) {
+    bytes_push(b, s[i])
+    i = i + 1
+  }
+}
+
+# Two strings joined.
+#
+# `Str` is immutable, so this allocates. A caller assembling more than a few
+# pieces should build a `Bytes` with `push_str` and convert once: repeated
+# concatenation is quadratic, and the quadratic term is invisible until the
+# string is large, which is exactly when it hurts.
+fn concat(a: Str, b: Str) -> Str {
+  let buf: Bytes = bytes_new()
+  push_str(buf, a)
+  push_str(buf, b)
+  bytes_to_str(buf)
+}
+
+# BYTE-ORIENTED. The substring from byte `start` up to but not including `stop`.
+#
+# Bounds are clamped rather than checked, so an out-of-range slice gives the
+# empty string or a truncated one. That is the wrong choice for an index and the
+# right one here: every caller below computes its bounds from a `find` that may
+# have returned -1 or from a length arithmetic that may have gone one past the
+# end, and an abort in a trimming routine is worse than an empty result.
+#
+# On a multi-byte sequence, slicing between its bytes produces an invalid UTF-8
+# string. Nothing detects that. Use `char_slice` when the boundaries come from
+# anywhere other than a byte-oriented search.
+fn slice(s: Str, start: I64, stop: I64) -> Str {
+  let a: I64 = if start < 0 { 0 } else { start }
+  let b: I64 = if stop > len(s) { len(s) } else { stop }
+  if a >= b { return "" }
+  s[a:b]
+}
+
+# ---- searching -------------------------------------------------------------
+
+# BYTE-ORIENTED. The byte index of the first occurrence of `needle`, or -1.
+#
+# Naive O(n*m) scanning, not Boyer-Moore or KMP. The needles this file is used
+# with are one to a few bytes long, where the preprocessing of a smarter
+# algorithm costs more than the search it saves. It is worth knowing the failure
+# mode: a long needle that nearly matches a long haystack repeatedly (a
+# thousand a's searched for a thousand a's followed by a b) degrades to the
+# product of the lengths.
+#
+# An empty needle is found at 0, which is the convention everywhere and makes
+# `replace` with an empty pattern terminate rather than loop.
+fn find(s: Str, needle: Str) -> I64 = find_from(s, needle, 0)
+
+fn find_from(s: Str, needle: Str, from: I64) -> I64 {
+  let n: I64 = len(s)
+  let m: I64 = len(needle)
+  if m == 0 { return if from > n { n } else { from } }
+  let i: I64 = if from < 0 { 0 } else { from }
+  while i + m <= n {
+    let j: I64 = 0
+    while j < m and s[i + j] == needle[j] {
+      j = j + 1
+    }
+    if j == m { return i }
+    i = i + 1
+  }
+  -1
+}
+
+# BYTE-ORIENTED. The byte index of the last occurrence, or -1.
+fn rfind(s: Str, needle: Str) -> I64 {
+  let m: I64 = len(needle)
+  if m == 0 { return len(s) }
+  let i: I64 = len(s) - m
+  while i >= 0 {
+    let j: I64 = 0
+    while j < m and s[i + j] == needle[j] {
+      j = j + 1
+    }
+    if j == m { return i }
+    i = i - 1
+  }
+  -1
+}
+
+fn contains(s: Str, needle: Str) -> Bool = find(s, needle) >= 0
+
+# BYTE-ORIENTED. True when `s` begins with `prefix`.
+#
+# Byte comparison, which is correct for UTF-8 without decoding: two strings
+# share a prefix as characters exactly when they share it as bytes, because
+# UTF-8 is a prefix-free encoding. This is one of the places where the
+# byte-oriented answer is not an approximation of the character-oriented one,
+# it is the same answer more cheaply.
+fn starts_with(s: Str, prefix: Str) -> Bool {
+  if len(prefix) > len(s) { return false }
+  let i: I64 = 0
+  while i < len(prefix) {
+    if s[i] != prefix[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn ends_with(s: Str, suffix: Str) -> Bool {
+  let off: I64 = len(s) - len(suffix)
+  if off < 0 { return false }
+  let i: I64 = 0
+  while i < len(suffix) {
+    if s[off + i] != suffix[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn equal(a: Str, b: Str) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+# ---- splitting and joining -------------------------------------------------
+
+# BYTE-ORIENTED. Split on every occurrence of `sep`.
+#
+# The separator is not kept, adjacent separators produce an empty field, and a
+# leading or trailing separator produces an empty field at that end. That is the
+# behaviour a CSV parser needs: "a,,b" is three fields, one of them blank, and
+# collapsing it to two would silently shift every column after it.
+#
+# An empty separator is an error rather than a per-byte split, because the
+# per-byte split of a UTF-8 string is a list of broken fragments and anyone
+# asking for it wants `chars`.
+fn split(s: Str, sep: Str) -> Arr[Str] {
+  if len(sep) == 0 { abort("text.split: empty separator, use chars") }
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let at: I64 = find_from(s, sep, 0)
+  while at >= 0 {
+    push(out, slice(s, start, at))
+    start = at + len(sep)
+    at = find_from(s, sep, start)
+  }
+  push(out, slice(s, start, len(s)))
+  out
+}
+
+# BYTE-ORIENTED. Split on runs of whitespace, discarding empty fields.
+#
+# Deliberately not the same as `split(s, " ")`, and the difference is the whole
+# reason both exist. Splitting on a single space treats "a  b" as three fields
+# with a blank in the middle; this treats a run of whitespace as one separator
+# and never returns a blank, which is what splitting a line of human-written
+# input means. Leading and trailing whitespace produce no fields at all.
+fn split_whitespace(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  let n: I64 = len(s)
+  while i < n {
+    while i < n and is_space(s[i]) { i = i + 1 }
+    if i >= n { return out }
+    let start: I64 = i
+    while i < n and not is_space(s[i]) { i = i + 1 }
+    push(out, slice(s, start, i))
+  }
+  out
+}
+
+# BYTE-ORIENTED. Split into lines, accepting both LF and CRLF endings.
+#
+# A trailing newline does not produce a final empty line, because a text file
+# conventionally ends with one and reporting a phantom last line is how a
+# line-counting loop ends up processing an empty record. A file that genuinely
+# ends with a blank line ends with two newlines and gets it.
+fn lines(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let i: I64 = 0
+  let n: I64 = len(s)
+  while i < n {
+    if s[i] == LF {
+      let stop: I64 = i
+      if stop > start and s[stop - 1] == CR { stop = stop - 1 }
+      push(out, slice(s, start, stop))
+      start = i + 1
+    }
+    i = i + 1
+  }
+  if start < n {
+    let stop: I64 = n
+    if stop > start and s[stop - 1] == CR { stop = stop - 1 }
+    push(out, slice(s, start, stop))
+  }
+  out
+}
+
+# Join with a separator between neighbours, not after the last.
+fn join(parts: Arr[Str], sep: Str) -> Str {
+  let buf: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(parts) {
+    if i > 0 { push_str(buf, sep) }
+    push_str(buf, parts[i])
+    i = i + 1
+  }
+  bytes_to_str(buf)
+}
+
+# ---- trimming --------------------------------------------------------------
+
+# BYTE-ORIENTED. ASCII whitespace removed from both ends. See `is_space` for
+# what counts and what deliberately does not.
+fn trim(s: Str) -> Str {
+  let a: I64 = 0
+  let b: I64 = len(s)
+  while a < b and is_space(s[a]) { a = a + 1 }
+  while b > a and is_space(s[b - 1]) { b = b - 1 }
+  slice(s, a, b)
+}
+
+fn trim_start(s: Str) -> Str {
+  let a: I64 = 0
+  while a < len(s) and is_space(s[a]) { a = a + 1 }
+  slice(s, a, len(s))
+}
+
+fn trim_end(s: Str) -> Str {
+  let b: I64 = len(s)
+  while b > 0 and is_space(s[b - 1]) { b = b - 1 }
+  slice(s, 0, b)
+}
+
+# BYTE-ORIENTED. One occurrence of `prefix` removed if it is there, otherwise
+# the string unchanged.
+#
+# One occurrence, not all of them: repeated stripping turns "//a" into "a" when
+# the caller asked to remove one path separator, and the difference matters
+# whenever the string is structured rather than padded.
+fn trim_prefix(s: Str, prefix: Str) -> Str {
+  if starts_with(s, prefix) { return slice(s, len(prefix), len(s)) }
+  s
+}
+
+fn trim_suffix(s: Str, suffix: Str) -> Str {
+  if ends_with(s, suffix) { return slice(s, 0, len(s) - len(suffix)) }
+  s
+}
+
+# ---- case ------------------------------------------------------------------
+
+# BYTE-ORIENTED, **ASCII only**. See the header for why this is not a partial
+# implementation of something better.
+#
+# Bytes outside the ASCII letter ranges pass through untouched, which includes
+# every byte of every multi-byte UTF-8 sequence: both the lead byte (>= 0xC0)
+# and the continuation bytes (0x80..0xBF) are above 127 and therefore outside
+# a..z and A..Z. So this cannot corrupt UTF-8, it simply does not case-convert
+# it. That is the property that makes an ASCII-only implementation safe rather
+# than merely incomplete.
+fn upper(s: Str) -> Str {
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(s) {
+    let c: I64 = s[i]
+    if is_lower(c) { c = c - 32 }
+    bytes_push(b, c)
+    i = i + 1
+  }
+  bytes_to_str(b)
+}
+
+fn lower(s: Str) -> Str {
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(s) {
+    let c: I64 = s[i]
+    if is_upper(c) { c = c + 32 }
+    bytes_push(b, c)
+    i = i + 1
+  }
+  bytes_to_str(b)
+}
+
+# ---- padding ---------------------------------------------------------------
+
+# CHARACTER-ORIENTED. Pad on the left to a width measured in characters.
+#
+# Characters and not bytes, because padding exists to line columns up on a
+# screen and a byte count does not line anything up once the data is not ASCII.
+# The byte-oriented version would be faster and would misalign every table
+# containing an accented name, which is not a hypothetical class of data.
+#
+# It is still not display width: an East Asian character occupies two terminal
+# columns and a combining accent occupies none. That needs a width table
+# (`src/term/width.tw` has one for the CLI), and this file does not have one.
+# Characters is the right unit for ASCII-plus-Latin-1 text and an approximation
+# beyond it, which is stated here rather than discovered later.
+#
+# A string already at or over the width is returned unchanged rather than
+# truncated: silently cutting data to fit a column is how a report loses the
+# last digit of a number.
+fn pad_left(s: Str, width: I64, fill: Str) -> Str {
+  let have: I64 = char_len(s)
+  if have >= width or len(fill) == 0 { return s }
+  let b: Bytes = bytes_new()
+  let k: I64 = 0
+  while k < width - have {
+    push_str(b, fill)
+    k = k + 1
+  }
+  push_str(b, s)
+  bytes_to_str(b)
+}
+
+fn pad_right(s: Str, width: I64, fill: Str) -> Str {
+  let have: I64 = char_len(s)
+  if have >= width or len(fill) == 0 { return s }
+  let b: Bytes = bytes_new()
+  push_str(b, s)
+  let k: I64 = 0
+  while k < width - have {
+    push_str(b, fill)
+    k = k + 1
+  }
+  bytes_to_str(b)
+}
+
+# `n` copies of `s`, concatenated.
+fn repeat(s: Str, n: I64) -> Str {
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < n {
+    push_str(b, s)
+    i = i + 1
+  }
+  bytes_to_str(b)
+}
+
+# ---- replacement -----------------------------------------------------------
+
+# BYTE-ORIENTED. Every occurrence of `old` replaced by `new`.
+#
+# The scan continues after the *replacement*, not from one byte past the match
+# start. That is what makes `replace("aaa", "aa", "a")` give "aa" and not "a":
+# the first match consumes two a's and the search resumes at the third. The
+# other convention re-examines the text it just produced and can loop forever
+# when `new` contains `old`.
+#
+# An empty `old` returns the string unchanged rather than interleaving `new`
+# between every byte, which is what the alternative reading would do and is
+# never what anyone means.
+fn replace(s: Str, old: Str, new: Str) -> Str {
+  if len(old) == 0 { return s }
+  let b: Bytes = bytes_new()
+  let start: I64 = 0
+  let at: I64 = find_from(s, old, 0)
+  while at >= 0 {
+    push_str(b, slice(s, start, at))
+    push_str(b, new)
+    start = at + len(old)
+    at = find_from(s, old, start)
+  }
+  push_str(b, slice(s, start, len(s)))
+  bytes_to_str(b)
+}
+
+# ---- the tokeniser ---------------------------------------------------------
+
+# BYTE-ORIENTED. Split into runs of alphanumerics, discarding everything else.
+#
+# This is the regex-free tokeniser, and the point of it is that it is not a
+# regular expression engine and is not the first step towards one. A regex
+# engine is a parser, a compiler and a backtracking or automaton-based matcher,
+# it is the most common source of accidental quadratic behaviour in any
+# language's standard library, and every question this file is actually asked
+# ("split a sentence into words", "pull the identifiers out of a line") is
+# answered by a classification predicate and a loop.
+#
+# The rule: a token is a maximal run of bytes for which `is_alnum` holds.
+# Everything else is a separator and is dropped. So "foo_bar-1" gives
+# ["foo", "bar", "1"], because an underscore is not alphanumeric.
+#
+# Bytes above 127 are not alphanumeric under an ASCII classifier, so accented
+# words are split at their accents. That is a real limitation of a tokeniser
+# with no Unicode tables and is why this is named `tokens` rather than `words`.
+# For a word split that keeps such text together, use `split_whitespace`.
+fn tokens(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  let n: I64 = len(s)
+  while i < n {
+    while i < n and not is_alnum(s[i]) { i = i + 1 }
+    if i >= n { return out }
+    let start: I64 = i
+    while i < n and is_alnum(s[i]) { i = i + 1 }
+    push(out, slice(s, start, i))
+  }
+  out
+}
+
+# BYTE-ORIENTED. Split on a caller-supplied set of separator bytes, keeping no
+# empty fields. The general form of `split_whitespace`, for the cases where the
+# separators are punctuation of some particular kind.
+fn split_any(s: Str, seps: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  let n: I64 = len(s)
+  while i < n {
+    while i < n and byte_in(s[i], seps) { i = i + 1 }
+    if i >= n { return out }
+    let start: I64 = i
+    while i < n and not byte_in(s[i], seps) { i = i + 1 }
+    push(out, slice(s, start, i))
+  }
+  out
+}
+
+fn byte_in(c: I64, set: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(set) {
+    if set[i] == c { return true }
+    i = i + 1
+  }
+  false
+}
+
+# ---- UTF-8 -----------------------------------------------------------------
+#
+# The one part of this file that decodes. Everything below is
+# CHARACTER-ORIENTED and says so.
+
+# The length in bytes of the UTF-8 sequence beginning with byte `c`.
+#
+# 1 for an invalid lead byte, which is how the iteration below makes progress
+# over malformed input instead of stopping or looping. Treating an invalid byte
+# as one character is the same recovery every decoder uses, and it means a
+# corrupt file is still iterable.
+fn char_size(c: I64) -> I64 {
+  if and(c, 128) == 0 { return 1 }
+  if and(c, 224) == 192 { return 2 }
+  if and(c, 240) == 224 { return 3 }
+  if and(c, 248) == 240 { return 4 }
+  1
+}
+
+# CHARACTER-ORIENTED. The number of characters, which is at most `len(s)` and
+# equal to it exactly when the string is pure ASCII.
+#
+# O(n) and not cached, so a loop over `char_len` inside another loop is
+# quadratic. Take it once.
+fn char_len(s: Str) -> I64 {
+  let count: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    i = i + char_size(s[i])
+    count = count + 1
+  }
+  count
+}
+
+# CHARACTER-ORIENTED. The string as an array of one-character strings.
+#
+# One-character `Str` values rather than code points, because there is no
+# character type to return one as, and because the overwhelmingly common use is
+# to put the pieces back together. A caller that needs the code point can decode
+# with `char_code` below.
+#
+# Allocates one string per character, so it is the wrong tool for a hot loop
+# over a large document; `char_starts` gives the byte offsets without copying.
+fn chars(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(s) {
+    let w: I64 = char_size(s[i])
+    let stop: I64 = if i + w > len(s) { len(s) } else { i + w }
+    push(out, slice(s, i, stop))
+    i = stop
+  }
+  out
+}
+
+# CHARACTER-ORIENTED. The byte offset at which each character starts, plus a
+# final entry equal to `len(s)`.
+#
+# The sentinel at the end is what makes character k's bytes exactly
+# `starts[k]` to `starts[k+1]` with no special case for the last one, and
+# leaving it out is where the off-by-one in every hand-rolled version lives.
+fn char_starts(s: Str) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(s) {
+    push(out, i)
+    i = i + char_size(s[i])
+  }
+  push(out, len(s))
+  out
+}
+
+# CHARACTER-ORIENTED. The substring from character `start` up to character
+# `stop`, never splitting a character in half.
+fn char_slice(s: Str, start: I64, stop: I64) -> Str {
+  let starts: Arr[I64] = char_starts(s)
+  let count: I64 = len(starts) - 1
+  let a: I64 = if start < 0 { 0 } else { start }
+  let b: I64 = if stop > count { count } else { stop }
+  if a >= b { return "" }
+  slice(s, starts[a], starts[b])
+}
+
+# CHARACTER-ORIENTED. The Unicode code point of the character starting at byte
+# `at`.
+#
+# Malformed input returns the lead byte itself rather than the replacement
+# character U+FFFD. Returning the byte keeps the operation reversible: a caller
+# round-tripping a corrupt file through this and back gets the same bytes out,
+# where U+FFFD would destroy them. It does mean a caller who wants strict
+# validation has to check separately, which `char_valid` does.
+fn char_code(s: Str, at: I64) -> I64 {
+  let c: I64 = s[at]
+  let w: I64 = char_size(c)
+  if w == 1 { return c }
+  if at + w > len(s) { return c }
+  let masks: I64 = if w == 2 { 31 } else { if w == 3 { 15 } else { 7 } }
+  let code: I64 = and(c, masks)
+  let k: I64 = 1
+  while k < w {
+    let cc: I64 = s[at + k]
+    # A continuation byte is 10xxxxxx. Anything else means the sequence is
+    # truncated or corrupt, and the lead byte alone is the honest answer.
+    if and(cc, 192) != 128 { return c }
+    code = or(shl(code, 6), and(cc, 63))
+    k = k + 1
+  }
+  code
+}
+
+# CHARACTER-ORIENTED. True when the whole string is well-formed UTF-8.
+#
+# Checks the structure (lead byte followed by the right number of continuation
+# bytes) and rejects the two lead-byte values that can only introduce an
+# overlong encoding, 0xC0 and 0xC1. It does not reject every overlong form, nor
+# surrogates, nor code points above U+10FFFF. Full validation needs the range
+# checks per lead byte and is a table; this catches truncation and byte-level
+# corruption, which is what actually happens to files.
+fn char_valid(s: Str) -> Bool {
+  let i: I64 = 0
+  let n: I64 = len(s)
+  while i < n {
+    let c: I64 = s[i]
+    if c == 192 or c == 193 { return false }
+    if and(c, 192) == 128 { return false }
+    let w: I64 = char_size(c)
+    if c >= 128 and w == 1 { return false }
+    if i + w > n { return false }
+    let k: I64 = 1
+    while k < w {
+      if and(s[i + k], 192) != 128 { return false }
+      k = k + 1
+    }
+    i = i + w
+  }
+  true
+}
+
+# CHARACTER-ORIENTED. The characters in reverse order.
+#
+# Reversing bytes would produce invalid UTF-8 for anything non-ASCII, which is
+# why there is no byte-oriented counterpart to this: it has no correct use.
+#
+# Even this is not "reverse the text": a combining accent that followed its
+# base character now precedes it, and an emoji built from a zero-width-joiner
+# sequence comes apart. Reversing human text is not an operation that has a
+# correct implementation without grapheme clustering.
+fn char_reverse(s: Str) -> Str {
+  let cs: Arr[Str] = chars(s)
+  let b: Bytes = bytes_new()
+  let i: I64 = len(cs) - 1
+  while i >= 0 {
+    push_str(b, cs[i])
+    i = i - 1
+  }
+  bytes_to_str(b)
+}

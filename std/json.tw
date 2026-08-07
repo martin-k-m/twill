@@ -1,0 +1,634 @@
+mode systems
+
+# json.tw: parsing and rendering JSON.
+#
+# THE VALUE MODEL
+#
+# A JSON document is one `Json`, and the enum below is the whole model:
+#
+#   JNull            the literal null
+#   JBool(Bool)      true or false
+#   JNumber(F64)     every JSON number, integer or not. See below.
+#   JString(Str)     a UTF-8 string, unescaped, with the quotes removed
+#   JArray(Arr[Json])
+#   JObject(Dict[Str, Json])
+#
+# Six cases, because JSON has six types. There is no separate integer case and
+# that is the first thing to know about this model: RFC 8259 has one number
+# type and says nothing about how it is stored, so `1` and `1.0` parse to the
+# same value here and render back as `1`. A document using 64-bit identifiers
+# above 2^53 will lose the low bits, silently, in both directions. That is a
+# property of representing JSON numbers as doubles, it is what JavaScript
+# itself does, and it is why every API that has been bitten by it sends large
+# ids as strings. If your document has them, they are strings; keep them that
+# way through this file.
+#
+# Objects are a `Dict[Str, Json]`, which is insertion-ordered (`src/lex.tw`
+# relies on the same property), so a parsed document renders back with its keys
+# in their original order rather than sorted or hashed. JSON says object order
+# is not significant; preserving it anyway means a config file round-trips
+# through this module without a diff, which is worth more than the freedom to
+# reorder. Duplicate keys are legal in the grammar and last one wins here,
+# matching every mainstream parser.
+#
+# WHAT IS DELIBERATELY REFUSED
+#
+# The parser is strict: no trailing commas, no comments, no unquoted keys, no
+# single quotes, no NaN or Infinity literals, no leading plus, no leading zeros
+# on a number, no control characters unescaped inside a string. Every one of
+# those is a common extension and every one of them makes a document that some
+# other parser rejects. A tolerant reader paired with a strict writer is a
+# reasonable design for a browser and the wrong one for a data format used to
+# move records between programs: the first tool in the chain that accepts a
+# trailing comma guarantees the fourth one downstream fails on a file the first
+# three were happy with.
+
+import "std/text" as text
+
+# ---- the model -------------------------------------------------------------
+
+enum Json {
+  JNull,
+  JBool(Bool),
+  JNumber(F64),
+  JString(Str),
+  JArray(Arr[Json]),
+  JObject(Dict[Str, Json]),
+}
+
+# Constructors, so that building a document does not need the variant names
+# spelled at every site and so that the two container cases start from an empty
+# container rather than a shared one.
+fn null() -> Json = JNull
+
+fn boolean(b: Bool) -> Json = JBool(b)
+
+fn number(x: F64) -> Json = JNumber(x)
+
+fn string(s: Str) -> Json = JString(s)
+
+fn array() -> Json = JArray(arr_new())
+
+fn object() -> Json = JObject(dict_new())
+
+# ---- accessors -------------------------------------------------------------
+#
+# Each returns an `Opt`, never a default. A missing field and a field whose
+# value is `0` are different facts about a document, and an accessor that
+# returned 0.0 for both would make them indistinguishable at exactly the point
+# where the difference matters (a config with an absent timeout and one set to
+# zero).
+
+fn as_number(v: Json) -> Opt[F64] {
+  match v {
+    JNumber(x) => Some(x),
+    _ => None,
+  }
+}
+
+fn as_string(v: Json) -> Opt[Str] {
+  match v {
+    JString(s) => Some(s),
+    _ => None,
+  }
+}
+
+fn as_bool(v: Json) -> Opt[Bool] {
+  match v {
+    JBool(b) => Some(b),
+    _ => None,
+  }
+}
+
+fn as_array(v: Json) -> Opt[Arr[Json]] {
+  match v {
+    JArray(a) => Some(a),
+    _ => None,
+  }
+}
+
+fn as_object(v: Json) -> Opt[Dict[Str, Json]] {
+  match v {
+    JObject(d) => Some(d),
+    _ => None,
+  }
+}
+
+fn is_null(v: Json) -> Bool {
+  match v {
+    JNull => true,
+    _ => false,
+  }
+}
+
+# One field of an object, or None if the value is not an object or the field is
+# absent. The two are not distinguished, deliberately: a caller reaching for
+# `.name` on something that turned out to be an array has the same recovery as
+# one whose object had no `name`.
+fn field(v: Json, key: Str) -> Opt[Json] {
+  match v {
+    JObject(d) => dict_get(d, key),
+    _ => None,
+  }
+}
+
+fn at(v: Json, i: I64) -> Opt[Json] {
+  match v {
+    JArray(a) => if i >= 0 and i < len(a) { Some(a[i]) } else { None },
+    _ => None,
+  }
+}
+
+# Mutating builders. They mutate in place and return nothing, matching the
+# `Arr` and `Dict` primitives rather than pretending to be functional over
+# containers that are not.
+fn push_item(v: Json, item: Json) {
+  match v {
+    JArray(a) => push(a, item),
+    _ => abort("json.push_item: not an array"),
+  }
+}
+
+fn set_field(v: Json, key: Str, item: Json) {
+  match v {
+    JObject(d) => dict_set(d, key, item),
+    _ => abort("json.set_field: not an object"),
+  }
+}
+
+# ---- parsing ---------------------------------------------------------------
+
+struct ParseError {
+  msg: Str,
+  offset: I64,
+}
+
+# The cursor. Byte offsets rather than line and column: JSON is not written by
+# hand often enough to justify tracking a position through every escape, and an
+# offset is exact where a column would have to decide whether a tab is one
+# column or eight.
+struct Parser {
+  src: Str,
+  n: I64,
+  pos: I64,
+}
+
+# Parse a whole document.
+#
+# Trailing content after the top-level value is an error, not ignored. A file
+# containing two concatenated objects is a real thing (JSON Lines) and it is a
+# different format; accepting the first value and dropping the rest would turn a
+# format mismatch into missing data.
+fn parse(src: Str) -> Res[Json, ParseError] {
+  let p: Parser = Parser { src: src, n: len(src), pos: 0 }
+  skip_space(p)
+  let v: Json = parse_value(p)?
+  skip_space(p)
+  if p.pos != p.n {
+    return Err(ParseError { msg: "trailing content after the top-level value", offset: p.pos })
+  }
+  Ok(v)
+}
+
+# The four whitespace bytes JSON allows: space, tab, newline, carriage return.
+# Not `text.is_space`, which also accepts vertical tab and form feed. The
+# grammar lists four and this accepts four.
+fn skip_space(p: Parser) {
+  while p.pos < p.n {
+    let c: I64 = p.src[p.pos]
+    if c == 32 or c == 9 or c == 10 or c == 13 {
+      p.pos = p.pos + 1
+    } else {
+      return unit
+    }
+  }
+}
+
+fn fail(p: Parser, msg: Str) -> ParseError = ParseError { msg: msg, offset: p.pos }
+
+fn peek(p: Parser) -> I64 {
+  if p.pos >= p.n { return -1 }
+  p.src[p.pos]
+}
+
+fn parse_value(p: Parser) -> Res[Json, ParseError] {
+  let c: I64 = peek(p)
+  if c == -1 { return Err(fail(p, "unexpected end of input")) }
+  if c == 123 { return parse_object(p) }
+  if c == 91 { return parse_array(p) }
+  if c == 34 {
+    let s: Str = parse_string(p)?
+    return Ok(JString(s))
+  }
+  if c == 116 { return parse_literal(p, "true", JBool(true)) }
+  if c == 102 { return parse_literal(p, "false", JBool(false)) }
+  if c == 110 { return parse_literal(p, "null", JNull) }
+  if c == 45 or (c >= 48 and c <= 57) { return parse_number(p) }
+  Err(fail(p, "unexpected character"))
+}
+
+fn parse_literal(p: Parser, word: Str, v: Json) -> Res[Json, ParseError] {
+  let i: I64 = 0
+  while i < len(word) {
+    if p.pos + i >= p.n or p.src[p.pos + i] != word[i] {
+      return Err(fail(p, "invalid literal"))
+    }
+    i = i + 1
+  }
+  p.pos = p.pos + len(word)
+  Ok(v)
+}
+
+fn parse_array(p: Parser) -> Res[Json, ParseError] {
+  p.pos = p.pos + 1
+  let out: Arr[Json] = arr_new()
+  skip_space(p)
+  if peek(p) == 93 {
+    p.pos = p.pos + 1
+    return Ok(JArray(out))
+  }
+  while true {
+    skip_space(p)
+    let item: Json = parse_value(p)?
+    push(out, item)
+    skip_space(p)
+    let c: I64 = peek(p)
+    if c == 44 {
+      p.pos = p.pos + 1
+      # A comma must be followed by a value. Checking here rather than letting
+      # `parse_value` fail on `]` is what turns "[1,]" into a message about a
+      # trailing comma instead of one about an unexpected bracket.
+      skip_space(p)
+      if peek(p) == 93 { return Err(fail(p, "trailing comma in array")) }
+    } else if c == 93 {
+      p.pos = p.pos + 1
+      return Ok(JArray(out))
+    } else {
+      return Err(fail(p, "expected a comma or a closing bracket"))
+    }
+  }
+  Err(fail(p, "unreachable"))
+}
+
+fn parse_object(p: Parser) -> Res[Json, ParseError] {
+  p.pos = p.pos + 1
+  let out: Dict[Str, Json] = dict_new()
+  skip_space(p)
+  if peek(p) == 125 {
+    p.pos = p.pos + 1
+    return Ok(JObject(out))
+  }
+  while true {
+    skip_space(p)
+    if peek(p) != 34 { return Err(fail(p, "expected a quoted key")) }
+    let key: Str = parse_string(p)?
+    skip_space(p)
+    if peek(p) != 58 { return Err(fail(p, "expected a colon after the key")) }
+    p.pos = p.pos + 1
+    skip_space(p)
+    let v: Json = parse_value(p)?
+    dict_set(out, key, v)
+    skip_space(p)
+    let c: I64 = peek(p)
+    if c == 44 {
+      p.pos = p.pos + 1
+      skip_space(p)
+      if peek(p) == 125 { return Err(fail(p, "trailing comma in object")) }
+    } else if c == 125 {
+      p.pos = p.pos + 1
+      return Ok(JObject(out))
+    } else {
+      return Err(fail(p, "expected a comma or a closing brace"))
+    }
+  }
+  Err(fail(p, "unreachable"))
+}
+
+# ---- strings ---------------------------------------------------------------
+
+fn hex_value(c: I64) -> I64 {
+  if c >= 48 and c <= 57 { return c - 48 }
+  if c >= 97 and c <= 102 { return c - 87 }
+  if c >= 65 and c <= 70 { return c - 55 }
+  -1
+}
+
+# A quoted string, with escapes resolved and the result held as UTF-8.
+#
+# The six single-character escapes, plus \uXXXX. Surrogate pairs are combined:
+# a JSON encoder that cannot emit non-BMP characters directly writes them as a
+# high surrogate followed by a low one, and a parser that decoded each half
+# separately would produce two invalid three-byte sequences where one four-byte
+# character belongs. That is the escape handling most hand-rolled parsers get
+# wrong, and it only shows up on emoji and on historic scripts.
+#
+# An unpaired surrogate is encoded as-is rather than rejected or replaced. It is
+# not valid UTF-8, and the alternatives are worse: rejecting makes a document
+# unreadable over one bad character in a field nobody uses, and substituting
+# U+FFFD destroys data irreversibly.
+fn parse_string(p: Parser) -> Res[Str, ParseError] {
+  p.pos = p.pos + 1
+  let b: Bytes = bytes_new()
+  while true {
+    if p.pos >= p.n { return Err(fail(p, "unterminated string")) }
+    let c: I64 = p.src[p.pos]
+    if c == 34 {
+      p.pos = p.pos + 1
+      return Ok(bytes_to_str(b))
+    }
+    if c == 92 {
+      p.pos = p.pos + 1
+      if p.pos >= p.n { return Err(fail(p, "unterminated escape")) }
+      let e: I64 = p.src[p.pos]
+      p.pos = p.pos + 1
+      if e == 34 { bytes_push(b, 34) }
+      else if e == 92 { bytes_push(b, 92) }
+      else if e == 47 { bytes_push(b, 47) }
+      else if e == 98 { bytes_push(b, 8) }
+      else if e == 102 { bytes_push(b, 12) }
+      else if e == 110 { bytes_push(b, 10) }
+      else if e == 114 { bytes_push(b, 13) }
+      else if e == 116 { bytes_push(b, 9) }
+      else if e == 117 {
+        let hi: I64 = parse_hex4(p)?
+        let code: I64 = hi
+        # A high surrogate (D800..DBFF) followed by a low one (DC00..DFFF) is
+        # one character split across two escapes.
+        if hi >= 55296 and hi <= 56319 and p.pos + 1 < p.n
+          and p.src[p.pos] == 92 and p.src[p.pos + 1] == 117 {
+          let save: I64 = p.pos
+          p.pos = p.pos + 2
+          let lo: I64 = parse_hex4(p)?
+          if lo >= 56320 and lo <= 57343 {
+            code = 65536 + shl(hi - 55296, 10) + (lo - 56320)
+          } else {
+            # Not a low surrogate after all: put it back and encode both
+            # escapes independently.
+            p.pos = save
+          }
+        }
+        push_utf8(b, code)
+      } else {
+        return Err(fail(p, "unknown escape"))
+      }
+    } else if c < 32 {
+      # The grammar forbids a raw control character inside a string. Accepting
+      # one would let a literal newline through, and a JSON string containing a
+      # newline is the difference between a valid document and one that other
+      # parsers reject.
+      return Err(fail(p, "unescaped control character in string"))
+    } else {
+      bytes_push(b, c)
+      p.pos = p.pos + 1
+    }
+  }
+  Err(fail(p, "unreachable"))
+}
+
+fn parse_hex4(p: Parser) -> Res[I64, ParseError] {
+  if p.pos + 4 > p.n { return Err(fail(p, "truncated \\u escape")) }
+  let v: I64 = 0
+  let k: I64 = 0
+  while k < 4 {
+    let d: I64 = hex_value(p.src[p.pos + k])
+    if d < 0 { return Err(fail(p, "invalid hex digit in \\u escape")) }
+    v = v * 16 + d
+    k = k + 1
+  }
+  p.pos = p.pos + 4
+  Ok(v)
+}
+
+# Encode a code point as UTF-8. The four length cases, by range.
+fn push_utf8(b: Bytes, code: I64) {
+  if code < 128 {
+    bytes_push(b, code)
+  } else if code < 2048 {
+    bytes_push(b, or(192, shr(code, 6)))
+    bytes_push(b, or(128, and(code, 63)))
+  } else if code < 65536 {
+    bytes_push(b, or(224, shr(code, 12)))
+    bytes_push(b, or(128, and(shr(code, 6), 63)))
+    bytes_push(b, or(128, and(code, 63)))
+  } else {
+    bytes_push(b, or(240, shr(code, 18)))
+    bytes_push(b, or(128, and(shr(code, 12), 63)))
+    bytes_push(b, or(128, and(shr(code, 6), 63)))
+    bytes_push(b, or(128, and(code, 63)))
+  }
+}
+
+# ---- numbers ---------------------------------------------------------------
+
+# A JSON number, scanned against the grammar and then converted once.
+#
+# The scan is separate from the conversion on purpose. Scanning enforces the
+# grammar exactly: an optional minus, an integer part that is either `0` or a
+# nonzero digit followed by digits, an optional fraction with at least one
+# digit, and an optional exponent with at least one digit. `f64_of_str` accepts
+# a wider language than that (hex floats, `inf`, a leading plus; see
+# docs/needs.md NEEDS-60), so handing it the raw input and trusting it would
+# accept documents that are not JSON. Scanning first and converting the scanned
+# span means the grammar is decided here and the arithmetic there, which is the
+# only division that lets both be right.
+#
+# Leading zeros are rejected because the grammar rejects them: `01` is not a
+# JSON number. That looks like pedantry until a document written by a tool that
+# zero-pads dates parses to something different in two libraries.
+fn parse_number(p: Parser) -> Res[Json, ParseError] {
+  let start: I64 = p.pos
+  if peek(p) == 45 { p.pos = p.pos + 1 }
+  if p.pos >= p.n { return Err(fail(p, "number has no digits")) }
+  let c: I64 = p.src[p.pos]
+  if c == 48 {
+    p.pos = p.pos + 1
+  } else if c >= 49 and c <= 57 {
+    while p.pos < p.n and text.is_digit(p.src[p.pos]) { p.pos = p.pos + 1 }
+  } else {
+    return Err(fail(p, "number has no digits"))
+  }
+  if p.pos < p.n and p.src[p.pos] == 46 {
+    p.pos = p.pos + 1
+    if p.pos >= p.n or not text.is_digit(p.src[p.pos]) {
+      return Err(fail(p, "fraction has no digits"))
+    }
+    while p.pos < p.n and text.is_digit(p.src[p.pos]) { p.pos = p.pos + 1 }
+  }
+  if p.pos < p.n and (p.src[p.pos] == 101 or p.src[p.pos] == 69) {
+    p.pos = p.pos + 1
+    if p.pos < p.n and (p.src[p.pos] == 43 or p.src[p.pos] == 45) { p.pos = p.pos + 1 }
+    if p.pos >= p.n or not text.is_digit(p.src[p.pos]) {
+      return Err(fail(p, "exponent has no digits"))
+    }
+    while p.pos < p.n and text.is_digit(p.src[p.pos]) { p.pos = p.pos + 1 }
+  }
+  Ok(JNumber(f64_of_str(text.slice(p.src, start, p.pos))))
+}
+
+# ---- rendering -------------------------------------------------------------
+
+# A document as compact JSON: no spaces, no newlines.
+#
+# Compact rather than pretty by default, because the default consumer of a
+# rendered document is another program. `render_indent` is the human form.
+fn render(v: Json) -> Str {
+  let b: Bytes = bytes_new()
+  write_value(b, v, -1, 0)
+  bytes_to_str(b)
+}
+
+# A document as JSON indented by `indent` spaces per level.
+#
+# Two spaces is the usual choice; four and eight are also usual, so it is an
+# argument. An indent of 0 still emits the newlines, which is what a caller
+# diffing two documents line by line wants.
+fn render_indent(v: Json, indent: I64) -> Str {
+  let b: Bytes = bytes_new()
+  write_value(b, v, indent, 0)
+  bytes_to_str(b)
+}
+
+fn write_newline(b: Bytes, indent: I64, depth: I64) {
+  if indent < 0 { return unit }
+  bytes_push(b, 10)
+  let k: I64 = 0
+  while k < indent * depth {
+    bytes_push(b, 32)
+    k = k + 1
+  }
+}
+
+fn write_value(b: Bytes, v: Json, indent: I64, depth: I64) {
+  match v {
+    JNull => text.push_str(b, "null"),
+    JBool(x) => text.push_str(b, if x { "true" } else { "false" }),
+    JNumber(x) => text.push_str(b, number_str(x)),
+    JString(s) => write_string(b, s),
+    JArray(a) => write_array(b, a, indent, depth),
+    JObject(d) => write_object(b, d, indent, depth),
+  }
+}
+
+fn write_array(b: Bytes, a: Arr[Json], indent: I64, depth: I64) {
+  bytes_push(b, 91)
+  let i: I64 = 0
+  while i < len(a) {
+    if i > 0 { bytes_push(b, 44) }
+    write_newline(b, indent, depth + 1)
+    write_value(b, a[i], indent, depth + 1)
+    i = i + 1
+  }
+  if len(a) > 0 { write_newline(b, indent, depth) }
+  bytes_push(b, 93)
+}
+
+fn write_object(b: Bytes, d: Dict[Str, Json], indent: I64, depth: I64) {
+  bytes_push(b, 123)
+  # `dict_keys` in insertion order, which is what makes a document round-trip
+  # with its fields where the author put them.
+  let keys: Arr[Str] = dict_keys(d)
+  let i: I64 = 0
+  while i < len(keys) {
+    if i > 0 { bytes_push(b, 44) }
+    write_newline(b, indent, depth + 1)
+    write_string(b, keys[i])
+    bytes_push(b, 58)
+    if indent >= 0 { bytes_push(b, 32) }
+    write_value(b, dict_must(d, keys[i]), indent, depth + 1)
+    i = i + 1
+  }
+  if len(keys) > 0 { write_newline(b, indent, depth) }
+  bytes_push(b, 125)
+}
+
+let HEX_DIGITS: Str = "0123456789abcdef"
+
+# A string, quoted and escaped.
+#
+# What is escaped: the quote, the backslash, and every byte below 0x20. The
+# short forms (\n, \t, \r, \b, \f) are used where they exist and \u00XX
+# otherwise, because the short form is half the bytes and is what a human
+# reading the output expects to see.
+#
+# What is **not** escaped, and this is the decision worth stating: the forward
+# slash, and every byte above 0x7F. The forward slash may be escaped and never
+# has to be; the habit comes from embedding JSON inside HTML script tags, which
+# is an HTML problem and should be solved where it occurs rather than by making
+# every URL in every document unreadable. Non-ASCII characters are emitted as
+# their UTF-8 bytes rather than as \u escapes, because RFC 8259 specifies UTF-8
+# and the escaped form triples the size of any document not written in English
+# while making it unreadable to a human.
+#
+# The input is assumed to be valid UTF-8 and is copied through byte for byte.
+# An invalid sequence in gives an invalid sequence out; `text.char_valid` is
+# the check, if the source of the string is not trusted.
+fn write_string(b: Bytes, s: Str) {
+  bytes_push(b, 34)
+  let i: I64 = 0
+  while i < len(s) {
+    let c: I64 = s[i]
+    if c == 34 {
+      bytes_push(b, 92)
+      bytes_push(b, 34)
+    } else if c == 92 {
+      bytes_push(b, 92)
+      bytes_push(b, 92)
+    } else if c == 10 {
+      bytes_push(b, 92)
+      bytes_push(b, 110)
+    } else if c == 13 {
+      bytes_push(b, 92)
+      bytes_push(b, 114)
+    } else if c == 9 {
+      bytes_push(b, 92)
+      bytes_push(b, 116)
+    } else if c == 8 {
+      bytes_push(b, 92)
+      bytes_push(b, 98)
+    } else if c == 12 {
+      bytes_push(b, 92)
+      bytes_push(b, 102)
+    } else if c < 32 {
+      bytes_push(b, 92)
+      bytes_push(b, 117)
+      bytes_push(b, 48)
+      bytes_push(b, 48)
+      bytes_push(b, HEX_DIGITS[shr(c, 4)])
+      bytes_push(b, HEX_DIGITS[and(c, 15)])
+    } else {
+      bytes_push(b, c)
+    }
+    i = i + 1
+  }
+  bytes_push(b, 34)
+}
+
+# A number as JSON.
+#
+# The requirement is round-tripping: rendering a parsed document and parsing it
+# back must give the same doubles, which needs the shortest decimal that reads
+# back exactly. `str(x)` is not that. It is `internal/value.FormatNumber`, which
+# renders with a precision of 6 and trims (`src/float.tw` documents the three
+# renderings and their differences), so `str(1.0 / 3.0)` is "0.333333" and a
+# document that goes through this module twice is not the document it started
+# as. See docs/needs.md NEEDS-89.
+#
+# Until that primitive exists this calls `f64_shortest`, which is the algorithm
+# `src/float.tw` implements for the source formatter and the one that has the
+# round-trip property. Two things it must do that a general float renderer need
+# not: never emit `NaN` or `Inf`, which are not JSON and are refused by the
+# constructor below, and never emit an integer-valued double as "1e+06", which
+# is legal JSON but reads as a mistake in a document of counts.
+fn number_str(x: F64) -> Str = f64_shortest(x)
+
+# A number that is known to be finite, refusing the two values JSON cannot
+# represent.
+#
+# NaN and the infinities have no JSON syntax. Every library that emits `NaN`
+# anyway produces a document that only its own parser reads. Refusing at
+# construction puts the error where the bad value was computed instead of in the
+# renderer, several thousand records later, with no way to tell which record.
+fn checked_number(x: F64) -> Json {
+  if x != x { abort("json.checked_number: NaN has no JSON representation") }
+  JNumber(x)
+}
