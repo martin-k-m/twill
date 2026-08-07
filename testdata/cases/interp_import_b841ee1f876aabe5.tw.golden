@@ -1,5 +1,5 @@
 exit 1
 --- stdout ---
 --- stderr ---
-case.tw:1: runtime error: no standard-library module "nope" (the library has backtest, data, nn, num, optim, shapes)
+case.tw:1: runtime error: no standard-library module "nope" (the library has backtest, batch, data, frame, io, json, linalg, loss, metrics, nn, num, optim, random, shapes, stats, text)
   1 | import "std/nope"

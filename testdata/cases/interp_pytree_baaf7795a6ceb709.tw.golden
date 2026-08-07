@@ -2,12 +2,30 @@ exit 0
 --- stdout ---
 # canonical v1
 _result = num 0x1.d69474953078ep-56
+adagrad_step = fn adagrad_step/5
 adam_step = fn adam_step/9
+adamw_step = fn adamw_step/10
+clip_by_global_norm = fn clip_by_global_norm/2
+clip_by_leaf_norm = fn clip_by_leaf_norm/2
+clip_by_value = fn clip_by_value/2
+const_schedule = fn const_schedule/2
+cosine_schedule = fn cosine_schedule/4
+exp_schedule = fn exp_schedule/3
+global_norm = fn global_norm/1
+inv_time_schedule = fn inv_time_schedule/3
 loss = fn loss/1
 m = record {b: num -0x1.faf6b2cd9f92fp-30, w: tensor shape=[2] data=[-0x1.f437b444a8c38p-29 -0x1.c1387365f504ep-28]}
 model = record {b: num -0x1.5f1dee04bad1ep-31, w: tensor shape=[2] data=[0x1.19f424f551bd4p-30 -0x1.5101b9643b3f7p-28]}
 momentum_step = fn momentum_step/5
+nesterov_step = fn nesterov_step/5
+one_cycle_schedule = fn one_cycle_schedule/5
+rmsprop_momentum_step = fn rmsprop_momentum_step/8
+rmsprop_step = fn rmsprop_step/6
+sgd_momentum_step = fn sgd_momentum_step/6
 sgd_step = fn sgd_step/3
+step_schedule = fn step_schedule/4
 v = record {b: num 0x1.5429b79301c14p-04, w: tensor shape=[2] data=[0x1.14fe3d07dec1cp-02 0x1.4888ec9da9f73p-01]}
+warmup_cosine_schedule = fn warmup_cosine_schedule/5
+warmup_schedule = fn warmup_schedule/3
 zeros_like = fn zeros_like/1
 --- stderr ---

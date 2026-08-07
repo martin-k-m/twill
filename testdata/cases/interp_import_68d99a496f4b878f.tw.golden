@@ -2,8 +2,26 @@ exit 0
 --- stdout ---
 # canonical v1
 _result = tensor shape=[2] data=[0x0p+00 0x0p+00]
+adagrad_step = fn adagrad_step/5
 adam_step = fn adam_step/9
+adamw_step = fn adamw_step/10
+clip_by_global_norm = fn clip_by_global_norm/2
+clip_by_leaf_norm = fn clip_by_leaf_norm/2
+clip_by_value = fn clip_by_value/2
+const_schedule = fn const_schedule/2
+cosine_schedule = fn cosine_schedule/4
+exp_schedule = fn exp_schedule/3
+global_norm = fn global_norm/1
+inv_time_schedule = fn inv_time_schedule/3
 momentum_step = fn momentum_step/5
+nesterov_step = fn nesterov_step/5
+one_cycle_schedule = fn one_cycle_schedule/5
+rmsprop_momentum_step = fn rmsprop_momentum_step/8
+rmsprop_step = fn rmsprop_step/6
+sgd_momentum_step = fn sgd_momentum_step/6
 sgd_step = fn sgd_step/3
+step_schedule = fn step_schedule/4
+warmup_cosine_schedule = fn warmup_cosine_schedule/5
+warmup_schedule = fn warmup_schedule/3
 zeros_like = fn zeros_like/1
 --- stderr ---
