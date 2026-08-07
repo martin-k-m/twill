@@ -134,3 +134,33 @@ func TestMatMulShapeMismatch(t *testing.T) {
 		t.Fatal("expected a shape-mismatch error")
 	}
 }
+
+// The scalar fast path skips the broadcast machinery, so these check it agrees
+// with the path it skips.
+func TestScalarFastPathMatchesTheGeneralOne(t *testing.T) {
+	plain := Scalar(3)
+	other := Scalar(4)
+	sum, err := Add(plain, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.IsScalar() || sum.Data[0] != 7 {
+		t.Errorf("3 + 4 = %v (shape %v)", sum.Data, sum.Shape)
+	}
+}
+
+func TestScalarGradientsStillFlow(t *testing.T) {
+	// The gate: anything requiring a gradient must take the general path, which
+	// is where the backward closure lives.
+	x := Leaf([]float64{2}, []int{})
+	sq, err := Mul(x, x)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sq.Backward(); err != nil {
+		t.Fatal(err)
+	}
+	if x.Grad[0] != 4 {
+		t.Errorf("d(x*x)/dx at 2 = %v, want 4", x.Grad[0])
+	}
+}

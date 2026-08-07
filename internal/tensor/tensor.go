@@ -304,6 +304,18 @@ func effStrides(inShape, outShape []int) []int {
 func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	da func(x, y, o float64) float64, db func(x, y, o float64) float64,
 	daa, dab, dbb func(x, y, o float64) float64) (*Tensor, error) {
+	// Two scalars with nothing to differentiate is what an interpreted loop is
+	// made of, and the general path charges it a broadcast computation, a
+	// parallelFor over a single element, and a slice for that element. Doing the
+	// arithmetic is cheaper than deciding how to do it.
+	//
+	// Gated on gradients and jets being off rather than handled here, because
+	// the backward closure is the part worth having exactly one copy of.
+	if !recordJets && !a.RequiresGrad && !b.RequiresGrad &&
+		len(a.Shape) == 0 && len(b.Shape) == 0 {
+		return Scalar(f(a.Data[0], b.Data[0])), nil
+	}
+
 	shape, ok := BroadcastShape(a.Shape, b.Shape)
 	if !ok {
 		return nil, fmt.Errorf("shape mismatch: cannot broadcast %v with %v", a.Shape, b.Shape)

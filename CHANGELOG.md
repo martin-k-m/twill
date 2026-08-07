@@ -4,6 +4,16 @@
 
 ### Changed
 
+- **Two scalars with no gradient take a direct path.** The general binary op
+  charged a scalar addition a broadcast computation, a `parallelFor` over one
+  element, and a slice allocation for that element. Doing the arithmetic is
+  cheaper than deciding how to do it. 736 ms to 655 ms, 288 MB and three million
+  allocations fewer.
+
+  Gated on gradients and forward-mode both being off, so there is still exactly
+  one copy of the backward closure. Gradients go through the path they always
+  did.
+
 - **A scope holds its first four bindings inline.** Every scope allocated a map
   on its first binding, and an interpreted loop makes a scope per iteration, so
   the map was 36% of the allocations in a scalar loop while holding one name.
