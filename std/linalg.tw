@@ -1,0 +1,1171 @@
+mode systems
+
+# linalg.tw: dense linear algebra over F64 matrices.
+#
+# WHY SYSTEMS MODE AND A FLAT Arr[F64] RATHER THAN A TENSOR
+#
+# Every factorisation here is an in-place elimination: LU overwrites its input
+# with both triangles, Householder overwrites the column it just reflected, and
+# Jacobi rotates two columns of a working copy several thousand times. Numeric
+# twill's tensors are values that produce new values, which is exactly right for
+# a model and exactly wrong for this: expressing a sweep of Jacobi rotations as
+# a chain of whole-matrix operations allocates an m-by-n copy per rotation and
+# turns an O(n^3) algorithm into an O(n^5) one.
+#
+# So a `Mat` is a row-major `Arr[F64]` with its dimensions, and the routines
+# mutate working copies they own. None of it is differentiable and none of it
+# tries to be: a gradient through a pivoted LU is a research question, not a
+# missing feature.
+#
+# WHAT "STABLE" MEANS IN THE COMMENTS BELOW
+#
+# Backward stable: the computed answer is the exact answer to a problem within
+# rounding of the one asked. It does not mean the answer is close to the true
+# one. If the matrix is ill-conditioned the true answer is sensitive to the
+# input, and no algorithm rescues that; a backward stable one merely does not
+# add to it. Every routine here says which of the two it gives you, because
+# "numerically stable" used without that distinction is how people end up
+# trusting the sixth digit of a solve on a matrix with condition number 1e12.
+
+# ---- scalar helpers --------------------------------------------------------
+#
+# `abs`, `max` and `min` are tensor builtins in numeric mode and do not apply to
+# an F64 here.
+
+fn fabs(x: F64) -> F64 = if x < 0.0 { 0.0 - x } else { x }
+
+fn fmax(a: F64, b: F64) -> F64 = if a > b { a } else { b }
+
+fn fmin(a: F64, b: F64) -> F64 = if a < b { a } else { b }
+
+# The sign, with sign(0) = 1 rather than 0. Householder below needs a nonzero
+# sign for a zero pivot column, and a sign of 0 there would build a reflector
+# that is the identity and silently skip the elimination.
+fn fsign(x: F64) -> F64 = if x < 0.0 { -1.0 } else { 1.0 }
+
+# The spacing between 1.0 and the next representable double. Every tolerance in
+# this file is a multiple of this and a size, never an absolute number like
+# 1e-10: an absolute tolerance is wrong by many orders of magnitude as soon as
+# the data is measured in nanometres or in dollars of market cap.
+let EPS: F64 = 0.0000000000000002220446049250313
+
+# ---- the matrix type -------------------------------------------------------
+
+# Row-major: element (i, j) lives at i * cols + j.
+#
+# Row-major rather than column-major even though most of the classical
+# algorithms are written column-wise, because every other indexed thing in twill
+# is row-major (a `[2, 3]` tensor, a list of rows, a CSV) and one convention
+# across the language is worth more than the cache behaviour of the inner loop
+# of a QR.
+struct Mat {
+  rows: I64,
+  cols: I64,
+  data: Arr[F64],
+}
+
+fn zeros(rows: I64, cols: I64) -> Mat {
+  let d: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < rows * cols {
+    push(d, 0.0)
+    i = i + 1
+  }
+  Mat { rows: rows, cols: cols, data: d }
+}
+
+fn identity(n: I64) -> Mat {
+  let m: Mat = zeros(n, n)
+  let i: I64 = 0
+  while i < n {
+    set(m, i, i, 1.0)
+    i = i + 1
+  }
+  m
+}
+
+fn get(m: Mat, i: I64, j: I64) -> F64 = m.data[i * m.cols + j]
+
+fn set(m: Mat, i: I64, j: I64, v: F64) {
+  m.data[i * m.cols + j] = v
+}
+
+# A matrix from a flat row-major array. The length must be exactly rows * cols;
+# a short array would otherwise read past the end of the last row into whatever
+# the next allocation holds, which is the failure that produces plausible
+# garbage rather than an error.
+fn of_rows(rows: I64, cols: I64, data: Arr[F64]) -> Mat {
+  if len(data) != rows * cols { abort("linalg.of_rows: data length is not rows * cols") }
+  let d: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < len(data) {
+    push(d, data[i])
+    i = i + 1
+  }
+  Mat { rows: rows, cols: cols, data: d }
+}
+
+fn copy(m: Mat) -> Mat = of_rows(m.rows, m.cols, m.data)
+
+fn transpose(m: Mat) -> Mat {
+  let t: Mat = zeros(m.cols, m.rows)
+  let i: I64 = 0
+  while i < m.rows {
+    let j: I64 = 0
+    while j < m.cols {
+      set(t, j, i, get(m, i, j))
+      j = j + 1
+    }
+    i = i + 1
+  }
+  t
+}
+
+# The textbook triple loop, i-k-j ordered so the inner loop walks both `b` and
+# the output along their rows. No blocking and no Strassen: blocking is a
+# constant factor that depends on a cache size the language cannot see, and
+# Strassen loses the backward error bound that makes every routine below
+# predictable.
+fn matmul(a: Mat, b: Mat) -> Mat {
+  if a.cols != b.rows { abort("linalg.matmul: inner dimensions differ") }
+  let c: Mat = zeros(a.rows, b.cols)
+  let i: I64 = 0
+  while i < a.rows {
+    let k: I64 = 0
+    while k < a.cols {
+      let aik: F64 = get(a, i, k)
+      if aik != 0.0 {
+        let j: I64 = 0
+        while j < b.cols {
+          set(c, i, j, get(c, i, j) + aik * get(b, k, j))
+          j = j + 1
+        }
+      }
+      k = k + 1
+    }
+    i = i + 1
+  }
+  c
+}
+
+# A column of `m` as a plain array, and its inverse. Right-hand sides and
+# solutions are n-by-1 matrices everywhere in this file rather than a separate
+# vector type, so that `solve` has one signature and multiple right-hand sides
+# cost nothing extra.
+fn column(m: Mat, j: I64) -> Arr[F64] {
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < m.rows {
+    push(out, get(m, i, j))
+    i = i + 1
+  }
+  out
+}
+
+fn col_vec(xs: Arr[F64]) -> Mat = of_rows(len(xs), 1, xs)
+
+# ---- LU with partial pivoting ----------------------------------------------
+
+# The factorisation P A = L U, with L unit lower triangular.
+#
+# `lu` holds both triangles in one matrix: the strict lower part is L without
+# its implicit unit diagonal, the upper part including the diagonal is U. That
+# is the LAPACK layout and it is used here for the same reason, which is that
+# the two triangles never overlap so there is nothing to gain from two arrays.
+#
+# `perm` is the row permutation: `perm[i]` is the original row now sitting in
+# row i. `sign` is +1 or -1 according to whether an even or odd number of row
+# swaps was made, and exists so `det` does not have to count them again.
+#
+# `singular` is set when a pivot came out exactly zero. It is a flag rather than
+# an abort because a singular matrix is a fine thing to detect and a bad thing
+# to crash on: `det` wants to return 0.0 and `matrix_rank` wants to keep going.
+struct LU {
+  lu: Mat,
+  perm: Arr[I64],
+  sign: I64,
+  singular: Bool,
+}
+
+# METHOD: Doolittle elimination with partial (row) pivoting.
+#
+# Partial pivoting means: before eliminating column k, swap in the row whose
+# entry in column k is largest in magnitude. Without it, Gaussian elimination is
+# catastrophically unstable on ordinary matrices, not just contrived ones: a
+# tiny pivot divides the whole remaining submatrix and the multipliers grow
+# without bound. With it, every multiplier is at most 1 in magnitude.
+#
+# STABILITY, precisely: this is backward stable in practice and not in theory.
+# The bound involves a growth factor that can reach 2^(n-1) on a specific
+# adversarial matrix (Wilkinson's), and on real matrices essentially never
+# exceeds a small multiple of n. Complete pivoting removes the theoretical case
+# and costs a search over the whole submatrix at every step, which is why no
+# production library does it and this one does not either.
+#
+# Where it is not enough: a matrix that is nearly singular gives an answer whose
+# error is proportional to its condition number, and nothing here detects that.
+# `matrix_rank` and the singular values from `svd` are what tell you.
+fn lu(a: Mat) -> LU {
+  if a.rows != a.cols { abort("linalg.lu: matrix must be square") }
+  let n: I64 = a.rows
+  let m: Mat = copy(a)
+  let perm: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(perm, i)
+    i = i + 1
+  }
+  let sign: I64 = 1
+  let singular: Bool = false
+
+  let k: I64 = 0
+  while k < n {
+    # Find the pivot row.
+    let best: I64 = k
+    let best_val: F64 = fabs(get(m, k, k))
+    let r: I64 = k + 1
+    while r < n {
+      let v: F64 = fabs(get(m, r, k))
+      if v > best_val {
+        best_val = v
+        best = r
+      }
+      r = r + 1
+    }
+
+    if best_val == 0.0 {
+      # The whole remaining column is zero. There is nothing to eliminate and
+      # no pivot to divide by; the factorisation is still well defined, the
+      # matrix is just singular.
+      singular = true
+    } else {
+      if best != k {
+        swap_rows(m, k, best)
+        let t: I64 = perm[k]
+        perm[k] = perm[best]
+        perm[best] = t
+        sign = 0 - sign
+      }
+      let pivot: F64 = get(m, k, k)
+      let row: I64 = k + 1
+      while row < n {
+        let factor: F64 = get(m, row, k) / pivot
+        set(m, row, k, factor)
+        if factor != 0.0 {
+          let col: I64 = k + 1
+          while col < n {
+            set(m, row, col, get(m, row, col) - factor * get(m, k, col))
+            col = col + 1
+          }
+        }
+        row = row + 1
+      }
+    }
+    k = k + 1
+  }
+  LU { lu: m, perm: perm, sign: sign, singular: singular }
+}
+
+fn swap_rows(m: Mat, a: I64, b: I64) {
+  let j: I64 = 0
+  while j < m.cols {
+    let t: F64 = get(m, a, j)
+    set(m, a, j, get(m, b, j))
+    set(m, b, j, t)
+    j = j + 1
+  }
+}
+
+# Solve A X = B for X, one column of B at a time.
+#
+# METHOD: LU with partial pivoting, then forward substitution through L and back
+# substitution through U.
+#
+# This is the function to reach for. It is backward stable, it costs n^3/3 plus
+# n^2 per right-hand side, and it never forms an inverse. See the comment on
+# `inv` for why that matters.
+fn solve(a: Mat, b: Mat) -> Mat {
+  if a.rows != b.rows { abort("linalg.solve: A and B have different row counts") }
+  let f: LU = lu(a)
+  if f.singular { abort("linalg.solve: matrix is singular") }
+  lu_solve(f, b)
+}
+
+# Solve with a factorisation already computed. Separate from `solve` because
+# refactorising for each of a series of right-hand sides is the second classic
+# waste after forming an inverse, and it is invisible unless the two steps have
+# separate names.
+fn lu_solve(f: LU, b: Mat) -> Mat {
+  let n: I64 = f.lu.rows
+  let x: Mat = zeros(n, b.cols)
+  let c: I64 = 0
+  while c < b.cols {
+    # Apply the row permutation while copying the right-hand side in.
+    let y: Arr[F64] = arr_new()
+    let i: I64 = 0
+    while i < n {
+      push(y, get(b, f.perm[i], c))
+      i = i + 1
+    }
+    # Forward substitution through L, whose diagonal is an implicit 1.
+    i = 1
+    while i < n {
+      let s: F64 = y[i]
+      let j: I64 = 0
+      while j < i {
+        s = s - get(f.lu, i, j) * y[j]
+        j = j + 1
+      }
+      y[i] = s
+      i = i + 1
+    }
+    # Back substitution through U.
+    i = n - 1
+    while i >= 0 {
+      let s: F64 = y[i]
+      let j: I64 = i + 1
+      while j < n {
+        s = s - get(f.lu, i, j) * y[j]
+        j = j + 1
+      }
+      y[i] = s / get(f.lu, i, i)
+      i = i - 1
+    }
+    i = 0
+    while i < n {
+      set(x, i, c, y[i])
+      i = i + 1
+    }
+    c = c + 1
+  }
+  x
+}
+
+# The determinant.
+#
+# METHOD: the product of U's diagonal from the LU, times the permutation sign.
+#
+# Not cofactor expansion, which is O(n!) and is unusable past about n = 12. The
+# LU is O(n^3) and gives the same answer.
+#
+# Where it is not stable, and this is worth knowing: the determinant is a
+# terrible measure of singularity. Scaling a 100-by-100 matrix by 0.1 divides
+# its determinant by 1e100 without changing how hard it is to solve with at all.
+# The product of n diagonal entries also overflows or underflows for quite
+# ordinary matrices. If the question is "is this matrix invertible", the answer
+# is `matrix_rank` or the ratio of the largest to the smallest singular value,
+# never this.
+fn det(a: Mat) -> F64 {
+  if a.rows != a.cols { abort("linalg.det: matrix must be square") }
+  let f: LU = lu(a)
+  if f.singular { return 0.0 }
+  let d: F64 = f64_of_i64(f.sign)
+  let i: I64 = 0
+  while i < a.rows {
+    d = d * get(f.lu, i, i)
+    i = i + 1
+  }
+  d
+}
+
+# The inverse.
+#
+# USE `solve` INSTEAD, unless you genuinely want the inverse matrix as an
+# object. If what you want is x with A x = b, then `solve(a, b)` is
+# - more accurate: forming the inverse and multiplying by it does the work twice
+#   and accumulates the error of both steps, and the result is not backward
+#   stable even though the solve is,
+# - three times cheaper: n^3/3 against n^3 plus a matmul,
+# - and it does not break down on a matrix that is merely ill-conditioned,
+#   where the explicit inverse has entries that are pure rounding noise.
+#
+# The habit comes from writing x = A^-1 b on paper, where it is correct notation
+# and not an instruction. This is the single most common numerical mistake in
+# code written by people who know linear algebra well.
+#
+# It is here because it is occasionally the right answer: a covariance matrix's
+# inverse is the precision matrix and its individual entries mean something,
+# and an inverse reused against thousands of right-hand sides in an inner loop
+# can pay for itself.
+#
+# METHOD: one LU, then a solve against each column of the identity.
+fn inv(a: Mat) -> Mat {
+  if a.rows != a.cols { abort("linalg.inv: matrix must be square") }
+  let f: LU = lu(a)
+  if f.singular { abort("linalg.inv: matrix is singular") }
+  lu_solve(f, identity(a.rows))
+}
+
+# ---- Cholesky --------------------------------------------------------------
+
+# The factorisation A = L L^T for a symmetric positive definite A, with L lower
+# triangular.
+#
+# METHOD: the Cholesky-Banachiewicz recurrence, row by row.
+#
+# STABILITY: unconditionally backward stable, with no pivoting needed at all.
+# That is not a small remark. It is the only common factorisation with that
+# property, and the reason is that positive definiteness bounds the growth
+# factor by 1 for free. Where LU needs a pivot search to be safe, Cholesky is
+# safe by the structure of the problem.
+#
+# Half the work of an LU, so use it whenever the matrix qualifies: a covariance
+# matrix, a Gram matrix A^T A, a normal-equations system, a kernel matrix.
+#
+# A negative value under the square root means the matrix is not positive
+# definite, and this reports it rather than returning a matrix of NaNs. That
+# failure is useful information: attempted Cholesky is the standard *test* for
+# positive definiteness, and it is cheaper and more reliable than computing
+# eigenvalues and checking their signs.
+#
+# The symmetry of the input is not checked and only the lower triangle is read.
+# Checking would cost an O(n^2) pass to reject matrices that are asymmetric in
+# the last bit through no fault of the caller, which is what a Gram matrix
+# computed by matmul usually is.
+fn cholesky(a: Mat) -> Mat {
+  if a.rows != a.cols { abort("linalg.cholesky: matrix must be square") }
+  let n: I64 = a.rows
+  let l: Mat = zeros(n, n)
+  let i: I64 = 0
+  while i < n {
+    let j: I64 = 0
+    while j <= i {
+      let s: F64 = get(a, i, j)
+      let k: I64 = 0
+      while k < j {
+        s = s - get(l, i, k) * get(l, j, k)
+        k = k + 1
+      }
+      if i == j {
+        if s <= 0.0 { abort("linalg.cholesky: matrix is not positive definite") }
+        set(l, i, j, f64_sqrt(s))
+      } else {
+        set(l, i, j, s / get(l, j, j))
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  l
+}
+
+# Solve A X = B where A is symmetric positive definite, given its Cholesky
+# factor. Forward substitution through L, then back substitution through L^T.
+fn cholesky_solve(l: Mat, b: Mat) -> Mat {
+  let n: I64 = l.rows
+  let x: Mat = zeros(n, b.cols)
+  let c: I64 = 0
+  while c < b.cols {
+    let y: Arr[F64] = arr_new()
+    let i: I64 = 0
+    while i < n {
+      let s: F64 = get(b, i, c)
+      let j: I64 = 0
+      while j < i {
+        s = s - get(l, i, j) * y[j]
+        j = j + 1
+      }
+      push(y, s / get(l, i, i))
+      i = i + 1
+    }
+    i = n - 1
+    while i >= 0 {
+      let s: F64 = y[i]
+      let j: I64 = i + 1
+      while j < n {
+        s = s - get(l, j, i) * y[j]
+        j = j + 1
+      }
+      y[i] = s / get(l, i, i)
+      i = i - 1
+    }
+    i = 0
+    while i < n {
+      set(x, i, c, y[i])
+      i = i + 1
+    }
+    c = c + 1
+  }
+  x
+}
+
+# ---- QR by Householder reflections -----------------------------------------
+
+# The factorisation A = Q R with Q orthogonal (m by m) and R upper triangular
+# (m by n).
+struct QR {
+  q: Mat,
+  r: Mat,
+}
+
+# METHOD: Householder reflections, n of them, each zeroing everything below the
+# diagonal of one column at once.
+#
+# Householder rather than Gram-Schmidt, and this is the choice that matters
+# most in this file. Classical Gram-Schmidt loses orthogonality completely on
+# ill-conditioned input: the computed Q^T Q drifts from the identity in
+# proportion to the square of the condition number, so for a matrix with
+# condition 1e8 the columns of Q are not orthogonal at all in double precision.
+# Modified Gram-Schmidt improves that to first order in the condition number and
+# is still worse than Householder, which produces a Q orthogonal to machine
+# precision regardless of the conditioning of A. Householder also costs less
+# once Q is wanted explicitly.
+#
+# Givens rotations are the other stable choice and are better when A is sparse
+# or already nearly triangular, because a Givens rotation touches two rows
+# instead of the whole trailing block. For a dense matrix Householder is half
+# the work.
+#
+# STABILITY: backward stable unconditionally. The computed Q is orthogonal to
+# within a small multiple of machine epsilon no matter what A was.
+#
+# The sign convention: the reflector is built to send the column to
+# -sign(a_kk)*||a|| rather than +||a||. Choosing the sign that moves the vector
+# *further* avoids subtracting two nearly equal numbers when the column already
+# points nearly along e_k, which is the one place a naive Householder loses
+# precision and does so silently.
+fn qr(a: Mat) -> QR {
+  let m: I64 = a.rows
+  let n: I64 = a.cols
+  let r: Mat = copy(a)
+  let q: Mat = identity(m)
+
+  let k: I64 = 0
+  let steps: I64 = if n < m - 1 { n } else { m - 1 }
+  while k < steps {
+    # The norm of the column below and including the diagonal.
+    let nrm: F64 = 0.0
+    let i: I64 = k
+    while i < m {
+      let v: F64 = get(r, i, k)
+      nrm = nrm + v * v
+      i = i + 1
+    }
+    nrm = f64_sqrt(nrm)
+    if nrm > 0.0 {
+      let alpha: F64 = 0.0 - fsign(get(r, k, k)) * nrm
+      # v = x - alpha * e_k, then normalised. Stored as a plain array indexed
+      # from k, since the entries above k are zero by construction.
+      let v: Arr[F64] = arr_new()
+      i = 0
+      while i < m {
+        push(v, 0.0)
+        i = i + 1
+      }
+      i = k
+      while i < m {
+        v[i] = get(r, i, k)
+        i = i + 1
+      }
+      v[k] = v[k] - alpha
+      let vnorm: F64 = 0.0
+      i = k
+      while i < m {
+        vnorm = vnorm + v[i] * v[i]
+        i = i + 1
+      }
+      # A zero v means the column was already a multiple of e_k and there is
+      # nothing to reflect. Dividing by it would be the NaN this guards.
+      if vnorm > 0.0 {
+        vnorm = f64_sqrt(vnorm)
+        i = k
+        while i < m {
+          v[i] = v[i] / vnorm
+          i = i + 1
+        }
+        apply_householder_left(r, v, k)
+        # Q accumulates the reflectors in reverse: Q = H_0 H_1 ... and each H is
+        # its own inverse, so applying from the right in order builds Q rather
+        # than Q^T.
+        apply_householder_right(q, v, k)
+      }
+    }
+    k = k + 1
+  }
+  # The entries below the diagonal of R are zero mathematically and are rounding
+  # noise numerically. They are cleared so that a caller reading R gets a
+  # triangular matrix rather than one with 1e-17 in the corners, which reads as
+  # a bug in every printout.
+  let i2: I64 = 0
+  while i2 < m {
+    let j: I64 = 0
+    while j < n and j < i2 {
+      set(r, i2, j, 0.0)
+      j = j + 1
+    }
+    i2 = i2 + 1
+  }
+  QR { q: q, r: r }
+}
+
+# M := (I - 2 v v^T) M, applied only to rows k and below since v is zero above.
+fn apply_householder_left(m: Mat, v: Arr[F64], k: I64) {
+  let j: I64 = 0
+  while j < m.cols {
+    let dot: F64 = 0.0
+    let i: I64 = k
+    while i < m.rows {
+      dot = dot + v[i] * get(m, i, j)
+      i = i + 1
+    }
+    dot = 2.0 * dot
+    i = k
+    while i < m.rows {
+      set(m, i, j, get(m, i, j) - dot * v[i])
+      i = i + 1
+    }
+    j = j + 1
+  }
+}
+
+# M := M (I - 2 v v^T).
+fn apply_householder_right(m: Mat, v: Arr[F64], k: I64) {
+  let i: I64 = 0
+  while i < m.rows {
+    let dot: F64 = 0.0
+    let j: I64 = k
+    while j < m.cols {
+      dot = dot + get(m, i, j) * v[j]
+      j = j + 1
+    }
+    dot = 2.0 * dot
+    j = k
+    while j < m.cols {
+      set(m, i, j, get(m, i, j) - dot * v[j])
+      j = j + 1
+    }
+    i = i + 1
+  }
+}
+
+# ---- least squares ---------------------------------------------------------
+
+# The x minimising ||A x - b||_2, for A with at least as many rows as columns
+# and full column rank.
+#
+# METHOD: Householder QR, then back substitution through the leading n by n
+# block of R.
+#
+# NOT the normal equations. Solving A^T A x = A^T b is the form everyone
+# derives on paper and it squares the condition number: a design matrix with
+# condition 1e8, which is an ordinary result of having one feature measured in
+# metres and another in millimetres, becomes a system with condition 1e16 and
+# the answer has no correct digits at all. The QR route works with the
+# condition number of A itself. It costs twice as much and that is the entire
+# price of the difference.
+#
+# Where it is not enough: if A is rank deficient, R has a zero on its diagonal
+# and this aborts. The right answer there is the minimum-norm solution from the
+# SVD, which `lstsq_svd` below gives. Rank deficiency is not exotic; it is what
+# a duplicated feature column looks like.
+fn lstsq(a: Mat, b: Mat) -> Mat {
+  let m: I64 = a.rows
+  let n: I64 = a.cols
+  if m < n { abort("linalg.lstsq: underdetermined, use lstsq_svd") }
+  let f: QR = qr(a)
+  # Q^T b, the first n entries of which are what the triangular solve needs.
+  let qtb: Mat = matmul(transpose(f.q), b)
+  let x: Mat = zeros(n, b.cols)
+  let c: I64 = 0
+  while c < b.cols {
+    let i: I64 = n - 1
+    while i >= 0 {
+      let rii: F64 = get(f.r, i, i)
+      if fabs(rii) <= EPS * f64_of_i64(n) {
+        abort("linalg.lstsq: A is rank deficient, use lstsq_svd")
+      }
+      let s: F64 = get(qtb, i, c)
+      let j: I64 = i + 1
+      while j < n {
+        s = s - get(f.r, i, j) * get(x, j, c)
+        j = j + 1
+      }
+      set(x, i, c, s / rii)
+      i = i - 1
+    }
+    c = c + 1
+  }
+  x
+}
+
+# The minimum-norm least-squares solution, through the pseudoinverse.
+#
+# METHOD: SVD, then x = V S^+ U^T b with S^+ inverting only the singular values
+# above the rank tolerance.
+#
+# This is the routine that always has an answer. Where `lstsq` aborts on a rank
+# deficient A, this returns the solution of smallest norm among the infinitely
+# many that fit equally well, which is the conventional choice and the one that
+# does not blow up when two columns are nearly identical.
+#
+# The cost is an SVD, roughly ten times a QR. Use `lstsq` when the matrix is
+# known to have full column rank and this when it is not.
+fn lstsq_svd(a: Mat, b: Mat) -> Mat {
+  let f: SVD = svd(a)
+  let n: I64 = a.cols
+  let tol: F64 = rank_tolerance(a, f)
+  let utb: Mat = matmul(transpose(f.u), b)
+  let z: Mat = zeros(n, b.cols)
+  let i: I64 = 0
+  while i < len(f.s) {
+    let c: I64 = 0
+    while c < b.cols {
+      if f.s[i] > tol {
+        set(z, i, c, get(utb, i, c) / f.s[i])
+      }
+      c = c + 1
+    }
+    i = i + 1
+  }
+  matmul(f.v, z)
+}
+
+# ---- norms -----------------------------------------------------------------
+
+# The Frobenius norm: the square root of the sum of squares of every entry.
+#
+# Computed directly, not with scaling to avoid overflow. The scaled version
+# matters when entries approach 1e154, where squaring overflows; that is a real
+# concern in a library meant for arbitrary input and it is skipped here because
+# the guard costs a pass and a branch on every element for a case no caller of
+# this file has. Named so it is a decision rather than an oversight.
+fn norm_fro(m: Mat) -> F64 {
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i < len(m.data) {
+    total = total + m.data[i] * m.data[i]
+    i = i + 1
+  }
+  f64_sqrt(total)
+}
+
+# The 1-norm: the largest absolute column sum. This is the operator norm
+# induced by the vector 1-norm, which is why it is a column sum and not a row
+# sum; getting that backwards gives the infinity norm instead, and on a
+# symmetric matrix the mistake is invisible.
+fn norm_1(m: Mat) -> F64 {
+  let best: F64 = 0.0
+  let j: I64 = 0
+  while j < m.cols {
+    let s: F64 = 0.0
+    let i: I64 = 0
+    while i < m.rows {
+      s = s + fabs(get(m, i, j))
+      i = i + 1
+    }
+    best = fmax(best, s)
+    j = j + 1
+  }
+  best
+}
+
+# The infinity norm: the largest absolute row sum.
+fn norm_inf(m: Mat) -> F64 {
+  let best: F64 = 0.0
+  let i: I64 = 0
+  while i < m.rows {
+    let s: F64 = 0.0
+    let j: I64 = 0
+    while j < m.cols {
+      s = s + fabs(get(m, i, j))
+      j = j + 1
+    }
+    best = fmax(best, s)
+    i = i + 1
+  }
+  best
+}
+
+# The 2-norm, also called the spectral norm: the largest singular value.
+#
+# The only one of the four that needs a factorisation, which is why the others
+# exist at all. When a bound is wanted rather than the exact value, the
+# Frobenius norm is above it and the 1-norm and infinity norm bracket it
+# (||A||_2^2 <= ||A||_1 ||A||_inf), all for O(n^2).
+fn norm_2(m: Mat) -> F64 {
+  let f: SVD = svd(m)
+  if len(f.s) == 0 { return 0.0 }
+  f.s[0]
+}
+
+# `norm(m, which)` with the kind named as a string, for callers that want to
+# pick at runtime. The four above are the ones to call directly.
+fn norm(m: Mat, which: Str) -> F64 {
+  if which == "fro" { return norm_fro(m) }
+  if which == "1" { return norm_1(m) }
+  if which == "2" { return norm_2(m) }
+  if which == "inf" { return norm_inf(m) }
+  abort("linalg.norm: kind must be one of fro, 1, 2, inf")
+}
+
+# ---- the singular value decomposition --------------------------------------
+
+# A = U S V^T, with U (m by n) and V (n by n) having orthonormal columns and the
+# singular values in `s` sorted descending.
+#
+# This is the "thin" SVD: U has n columns, not m. The remaining m - n columns of
+# a full U span the orthogonal complement of the range and are never used by any
+# of `matrix_rank`, `norm_2`, `lstsq_svd` or a low-rank approximation.
+struct SVD {
+  u: Mat,
+  s: Arr[F64],
+  v: Mat,
+}
+
+let JACOBI_SWEEPS: I64 = 60
+
+# METHOD: one-sided Jacobi.
+#
+# The working matrix starts as A and its columns are rotated in pairs until they
+# are mutually orthogonal. When they are, each column is a singular value times
+# a column of U, and the accumulated rotations are V.
+#
+# One-sided Jacobi rather than the Golub-Kahan bidiagonalisation that LAPACK's
+# dgesvd uses. Golub-Kahan is several times faster and one-sided Jacobi is
+# chosen anyway, for two reasons:
+#
+#   1. Accuracy on the small singular values. Jacobi computes them to high
+#      *relative* accuracy: a singular value of 1e-15 relative to a largest of
+#      1 comes out with correct digits, where bidiagonalisation gives it an
+#      absolute error around machine epsilon times the largest value and
+#      therefore no correct digits at all. Since the small singular values are
+#      precisely what `matrix_rank` and the pseudoinverse are asking about, the
+#      slow method is the right one for the uses in this file.
+#   2. It is thirty lines and can be read and checked. Golub-Kahan needs an
+#      implicit-shift QR iteration on a bidiagonal matrix with deflation and
+#      shift-selection heuristics, and a subtly wrong shift converges to the
+#      wrong answer rather than failing.
+#
+# STABILITY: backward stable, and relatively accurate in the sense above.
+#
+# Where it is not enough: it is O(n^3) per sweep with a large constant, so a
+# 1000-by-1000 SVD here is slow enough to notice. Convergence is quadratic near
+# the end and the sweep cap is a safety net that is not normally reached; if it
+# is, the result is the best available rather than an error, because a
+# not-quite-converged SVD is still a useful answer and a hang is not.
+fn svd(a: Mat) -> SVD {
+  # The algorithm needs at least as many rows as columns. For a wide matrix,
+  # factor the transpose and swap the two orthogonal factors, since
+  # A^T = U S V^T implies A = V S U^T.
+  if a.rows < a.cols {
+    let t: SVD = svd(transpose(a))
+    return SVD { u: t.v, s: t.s, v: t.u }
+  }
+  let m: I64 = a.rows
+  let n: I64 = a.cols
+  let u: Mat = copy(a)
+  let v: Mat = identity(n)
+
+  let sweep: I64 = 0
+  let converged: Bool = false
+  while sweep < JACOBI_SWEEPS and not converged {
+    converged = true
+    let p: I64 = 0
+    while p < n - 1 {
+      let q: I64 = p + 1
+      while q < n {
+        # The 2-by-2 Gram submatrix of columns p and q.
+        let alpha: F64 = 0.0
+        let beta: F64 = 0.0
+        let gamma: F64 = 0.0
+        let i: I64 = 0
+        while i < m {
+          let up: F64 = get(u, i, p)
+          let uq: F64 = get(u, i, q)
+          alpha = alpha + up * up
+          beta = beta + uq * uq
+          gamma = gamma + up * uq
+          i = i + 1
+        }
+        # Orthogonal already, to the precision the column magnitudes allow.
+        # The test is relative to sqrt(alpha*beta) rather than absolute, which
+        # is what makes the small singular values come out accurately.
+        if fabs(gamma) > EPS * f64_sqrt(alpha * beta) {
+          converged = false
+          # The rotation that diagonalises the 2-by-2. `zeta` and the choice of
+          # the smaller root for `t` are the standard formulation: taking the
+          # root with the smaller magnitude keeps the rotation angle under 45
+          # degrees, which is what stops the sweep from undoing its own work.
+          let zeta: F64 = (beta - alpha) / (2.0 * gamma)
+          let t: F64 = fsign(zeta) / (fabs(zeta) + f64_sqrt(1.0 + zeta * zeta))
+          let c: F64 = 1.0 / f64_sqrt(1.0 + t * t)
+          let s: F64 = c * t
+          rotate_cols(u, p, q, c, s)
+          rotate_cols(v, p, q, c, s)
+        }
+        q = q + 1
+      }
+      p = p + 1
+    }
+    sweep = sweep + 1
+  }
+
+  # The singular values are the column norms of the converged U, and U itself
+  # is that matrix with its columns normalised.
+  let s: Arr[F64] = arr_new()
+  let j: I64 = 0
+  while j < n {
+    let nrm: F64 = 0.0
+    let i: I64 = 0
+    while i < m {
+      nrm = nrm + get(u, i, j) * get(u, i, j)
+      i = i + 1
+    }
+    push(s, f64_sqrt(nrm))
+    j = j + 1
+  }
+  j = 0
+  while j < n {
+    if s[j] > 0.0 {
+      let i: I64 = 0
+      while i < m {
+        set(u, i, j, get(u, i, j) / s[j])
+        i = i + 1
+      }
+    }
+    j = j + 1
+  }
+  sort_svd(u, s, v)
+  SVD { u: u, s: s, v: v }
+}
+
+# Rotate columns p and q of `m` by (c, s). Both U and V take the same rotation,
+# which is what keeps A = U S V^T true at every step rather than only at the
+# end.
+fn rotate_cols(m: Mat, p: I64, q: I64, c: F64, s: F64) {
+  let i: I64 = 0
+  while i < m.rows {
+    let mp: F64 = get(m, i, p)
+    let mq: F64 = get(m, i, q)
+    set(m, i, p, c * mp - s * mq)
+    set(m, i, q, s * mp + c * mq)
+    i = i + 1
+  }
+}
+
+# Order the singular values descending, moving the matching columns of U and V
+# with them.
+#
+# Selection sort, because n here is the number of columns and the cost is
+# dominated by the column swaps rather than the comparisons.
+fn sort_svd(u: Mat, s: Arr[F64], v: Mat) {
+  let n: I64 = len(s)
+  let i: I64 = 0
+  while i < n - 1 {
+    let best: I64 = i
+    let j: I64 = i + 1
+    while j < n {
+      if s[j] > s[best] { best = j }
+      j = j + 1
+    }
+    if best != i {
+      let t: F64 = s[i]
+      s[i] = s[best]
+      s[best] = t
+      swap_cols(u, i, best)
+      swap_cols(v, i, best)
+    }
+    i = i + 1
+  }
+}
+
+fn swap_cols(m: Mat, a: I64, b: I64) {
+  let i: I64 = 0
+  while i < m.rows {
+    let t: F64 = get(m, i, a)
+    set(m, i, a, get(m, i, b))
+    set(m, i, b, t)
+    i = i + 1
+  }
+}
+
+# The tolerance below which a singular value counts as zero.
+#
+# max(m, n) * eps * largest singular value. The same rule numpy and MATLAB use,
+# and the reasoning is that rounding in an m-by-n factorisation perturbs the
+# singular values by about that much, so anything smaller is indistinguishable
+# from zero given the arithmetic that produced it.
+#
+# It is relative to the largest singular value, which is what makes it scale
+# invariant: multiplying the matrix by a million does not change its rank and
+# does not change this answer.
+fn rank_tolerance(a: Mat, f: SVD) -> F64 {
+  if len(f.s) == 0 { return 0.0 }
+  let bigger: I64 = if a.rows > a.cols { a.rows } else { a.cols }
+  f64_of_i64(bigger) * EPS * f.s[0]
+}
+
+# The number of singular values above the tolerance.
+#
+# METHOD: SVD, then count.
+#
+# This is the only trustworthy way to compute a rank in floating point. Counting
+# nonzero pivots in an elimination is what a textbook says and it is worthless
+# numerically, because a pivot that should be zero comes out as 1e-16 and every
+# rank is reported as full. The determinant is worse still, for the scaling
+# reason given at `det`.
+#
+# It remains a judgement call: rank is a discontinuous function of the matrix,
+# so a matrix that is one part in 1e-15 away from rank deficient has full rank
+# by any tolerance, and the answer flips with the last bit of the input. When
+# the decision matters, look at the singular values themselves and see whether
+# there is a gap.
+fn matrix_rank(a: Mat) -> I64 {
+  let f: SVD = svd(a)
+  let tol: F64 = rank_tolerance(a, f)
+  let count: I64 = 0
+  let i: I64 = 0
+  while i < len(f.s) {
+    if f.s[i] > tol { count = count + 1 }
+    i = i + 1
+  }
+  count
+}
+
+# ---- symmetric eigenvalues -------------------------------------------------
+
+# The eigendecomposition A = V D V^T of a symmetric A, with eigenvalues ascending
+# and `vectors` holding the matching eigenvector in each column.
+struct Eigh {
+  values: Arr[F64],
+  vectors: Mat,
+}
+
+# METHOD: the cyclic Jacobi eigenvalue algorithm.
+#
+# Repeatedly zero the largest off-diagonal pair with a plane rotation, sweeping
+# over all pairs in order rather than searching for the largest each time. The
+# sum of squares of the off-diagonal entries decreases by exactly twice the
+# square of the zeroed entry at every rotation, so convergence is monotone and
+# provable, which is more than can be said for most eigenvalue iterations.
+#
+# Symmetric input only, and the symmetry is not checked: only the upper triangle
+# is read, and a caller passing an asymmetric matrix gets the eigenvalues of its
+# symmetric part rather than an error. That is the LAPACK convention, and the
+# alternative would reject Gram matrices that are asymmetric in the last bit.
+#
+# Jacobi rather than the tridiagonal-reduction-plus-QL that LAPACK's dsyev uses,
+# for the same two reasons as the SVD: high relative accuracy on the small
+# eigenvalues, and an implementation short enough to check. It is roughly five
+# times slower.
+#
+# STABILITY: backward stable, and unlike the general eigenvalue problem the
+# symmetric one is well conditioned to begin with. Each computed eigenvalue is
+# within a small multiple of eps times ||A|| of a true one, always, regardless
+# of how close together the eigenvalues are. That is a guarantee the
+# nonsymmetric problem does not have, and it is the reason there is no general
+# `eig` in this file: a nonsymmetric eigenproblem near a defective matrix has
+# eigenvalues that move like the cube root of the perturbation, and shipping one
+# without saying so would be worse than not shipping it.
+fn eigh(a: Mat) -> Eigh {
+  if a.rows != a.cols { abort("linalg.eigh: matrix must be square") }
+  let n: I64 = a.rows
+  let m: Mat = copy(a)
+  # Mirror the upper triangle down, so the working matrix is exactly symmetric
+  # even if the input was not quite.
+  let i: I64 = 0
+  while i < n {
+    let j: I64 = i + 1
+    while j < n {
+      set(m, j, i, get(m, i, j))
+      j = j + 1
+    }
+    i = i + 1
+  }
+  let v: Mat = identity(n)
+
+  let sweep: I64 = 0
+  let converged: Bool = false
+  while sweep < JACOBI_SWEEPS and not converged {
+    # The off-diagonal magnitude that has to be beaten for a rotation to be
+    # worth doing, relative to the size of the matrix.
+    let off: F64 = 0.0
+    i = 0
+    while i < n {
+      let j: I64 = i + 1
+      while j < n {
+        off = off + get(m, i, j) * get(m, i, j)
+        j = j + 1
+      }
+      i = i + 1
+    }
+    if f64_sqrt(2.0 * off) <= EPS * norm_fro(m) {
+      converged = true
+    } else {
+      let p: I64 = 0
+      while p < n - 1 {
+        let q: I64 = p + 1
+        while q < n {
+          let apq: F64 = get(m, p, q)
+          if apq != 0.0 {
+            # theta and t as in the classical formulation. The smaller root
+            # again, for the same reason as in the SVD.
+            let theta: F64 = (get(m, q, q) - get(m, p, p)) / (2.0 * apq)
+            let t: F64 = fsign(theta) / (fabs(theta) + f64_sqrt(1.0 + theta * theta))
+            let c: F64 = 1.0 / f64_sqrt(1.0 + t * t)
+            let s: F64 = c * t
+            jacobi_rotate(m, p, q, c, s)
+            rotate_cols(v, p, q, c, s)
+          }
+          q = q + 1
+        }
+        p = p + 1
+      }
+    }
+    sweep = sweep + 1
+  }
+
+  let values: Arr[F64] = arr_new()
+  i = 0
+  while i < n {
+    push(values, get(m, i, i))
+    i = i + 1
+  }
+  sort_eigh(values, v)
+  Eigh { values: values, vectors: v }
+}
+
+# A similarity transform by the rotation (c, s) in the (p, q) plane: rows first,
+# then columns, so that the result stays symmetric.
+fn jacobi_rotate(m: Mat, p: I64, q: I64, c: F64, s: F64) {
+  let k: I64 = 0
+  while k < m.rows {
+    let mkp: F64 = get(m, k, p)
+    let mkq: F64 = get(m, k, q)
+    set(m, k, p, c * mkp - s * mkq)
+    set(m, k, q, s * mkp + c * mkq)
+    k = k + 1
+  }
+  k = 0
+  while k < m.cols {
+    let mpk: F64 = get(m, p, k)
+    let mqk: F64 = get(m, q, k)
+    set(m, p, k, c * mpk - s * mqk)
+    set(m, q, k, s * mpk + c * mqk)
+    k = k + 1
+  }
+}
+
+# Ascending, which is the LAPACK convention for a symmetric eigensolver and the
+# opposite of the SVD's descending singular values. The two disagree because
+# both are conventions their callers already expect, and quietly making them
+# agree would surprise anyone porting code either way.
+fn sort_eigh(values: Arr[F64], vectors: Mat) {
+  let n: I64 = len(values)
+  let i: I64 = 0
+  while i < n - 1 {
+    let best: I64 = i
+    let j: I64 = i + 1
+    while j < n {
+      if values[j] < values[best] { best = j }
+      j = j + 1
+    }
+    if best != i {
+      let t: F64 = values[i]
+      values[i] = values[best]
+      values[best] = t
+      swap_cols(vectors, i, best)
+    }
+    i = i + 1
+  }
+}
