@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "twill-lang",
   "license": "MIT",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#12332C",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/martin-k-m/raster.git"

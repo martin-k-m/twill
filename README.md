@@ -1,4 +1,18 @@
-# Twill
+<!-- The github.com repo is still named raster; the raw URLs keep working after
+     it is renamed, via the redirect. -->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martin-k-m/raster/main/assets/twill-mark-glow.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/martin-k-m/raster/main/assets/twill-mark.png">
+    <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/raster/main/assets/twill-mark.png" width="140">
+  </picture>
+</p>
+
+<h1 align="center">Twill</h1>
+
+<p align="center">
+  A small programming language for numeric and machine-learning code.
+</p>
 
 [![CI](https://github.com/martin-k-m/raster/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/raster/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/martin-k-m/raster?sort=semver)](https://github.com/martin-k-m/raster/releases)
