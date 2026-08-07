@@ -787,3 +787,736 @@ fn matmul(a: Tensor, b: Tensor) -> Res[Tensor, Str] {
   # as flat regardless of the result's rank.
   Ok(Tensor { shape: out_shape, data: data })
 }
+
+# ---- axis helpers ----------------------------------------------------------
+#
+# Every axis-wise kernel below sees the tensor as `before * length * after`:
+# `before` independent blocks, each holding `after` interleaved runs of
+# `length`. The flat index of run element k is `i*length*after + k*after + j`.
+#
+# This is the single idea that makes reductions, scans, sorts, concat and split
+# one loop shape instead of five. It works because the buffer is dense and
+# row-major, so the axis being worked on is a fixed stride apart.
+
+struct Spans {
+  before: I64,
+  length: I64,
+  after: I64,
+}
+
+fn axis_spans(shape: Arr[I64], axis: I64) -> Spans {
+  let before: I64 = 1
+  let after: I64 = 1
+  let i: I64 = 0
+  while i < axis {
+    before = before * shape[i]
+    i = i + 1
+  }
+  i = axis + 1
+  while i < len(shape) {
+    after = after * shape[i]
+    i = i + 1
+  }
+  Spans { before: before, length: shape[axis], after: after }
+}
+
+fn remove_axis(shape: Arr[I64], axis: I64) -> Arr[I64] {
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(shape) {
+    if i != axis { push(out, shape[i]) }
+    i = i + 1
+  }
+  out
+}
+
+# The reduced shape with a 1 left in the reduced axis. This is what other array
+# libraries spell `keepdims=True`. The bootstrap has no such flag and asks the
+# caller to `broadcast_to` the original shape instead; both are here because a
+# 1-axis is what makes the result line up against the input again, and
+# right-aligned broadcasting will not do that on its own: reducing axis 1 of a
+# [2, 3] gives a [2], and [2] does not align with [2, 3].
+fn keep_axis(shape: Arr[I64], axis: I64) -> Arr[I64] {
+  let out: Arr[I64] = copy_shape(shape)
+  out[axis] = 1
+  out
+}
+
+# A negative axis counts from the end, so -1 is the last axis. Out of range is
+# an error rather than a clamp: a clamped axis reduces the wrong thing and the
+# result still has a plausible shape, which is the worst kind of bug.
+fn normalize_axis(axis: I64, rank: I64) -> Res[I64, Str] {
+  let a: I64 = axis
+  if a < 0 { a = a + rank }
+  if a < 0 or a >= rank {
+    return Err(bytes.concat("axis ", bytes.concat(str(axis),
+      bytes.concat(" out of range for rank ", str(rank)))))
+  }
+  Ok(a)
+}
+
+# ---- reductions ------------------------------------------------------------
+
+# sum and mean over every element, to a rank-0 tensor.
+#
+# Gradient: every input contributed exactly once to the sum, so each gets the
+# whole upstream scalar; for mean each gets it divided by n. There is no
+# summing-back to do here because the output is a scalar, which is the one case
+# where the broadcast trap cannot bite.
+fn reduce_all(a: Tensor, mean: Bool) -> Tensor {
+  let n: I64 = len(a.data)
+  let s: F64 = 0.0
+  let i: I64 = 0
+  while i < n {
+    s = s + a.data[i]
+    i = i + 1
+  }
+  if mean { return scalar(s / f64_of_i64(n)) }
+  scalar(s)
+}
+
+fn sum_all(a: Tensor) -> Tensor = reduce_all(a, false)
+fn mean_all(a: Tensor) -> Tensor = reduce_all(a, true)
+
+# sum or mean along one axis, dropping it.
+#
+# Gradient: the output at (i, j) is the sum of the L elements of that run, each
+# with coefficient 1 (or 1/L for mean), so the upstream value at (i, j) is
+# broadcast back along the run. That broadcast-back is the same operation as
+# `broadcast_to` and it is the reason a reduction and an expansion are each
+# other's gradient.
+fn reduce_axis(t: Tensor, axis_in: I64, mean: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(sp.before * sp.after)
+  let scale: F64 = 1.0
+  if mean { scale = 1.0 / f64_of_i64(sp.length) }
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let s: F64 = 0.0
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        s = s + t.data[base + k * sp.after]
+        k = k + 1
+      }
+      out[i * sp.after + j] = s * scale
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+}
+
+fn sum_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = reduce_axis(t, axis, false)
+fn mean_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = reduce_axis(t, axis, true)
+
+# The keepdims form of any axis reduction. Reduce, then reshape the 1 back in.
+# Written as a composition rather than a flag on every reduction because the
+# gradient then composes too: reshape's gradient is the identity on the buffer,
+# so nothing about the reduction's gradient has to know keepdims exists.
+fn reduce_axis_keep(t: Tensor, axis_in: I64, op: Op) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let dropped: Tensor = reduce_axis_by(t, axis, op)?
+  reshape(dropped, keep_axis(t.shape, axis))
+}
+
+# One name for "reduce this axis with this op", so that keepdims, and the
+# gradient dispatch further down, do not each need their own seven-way branch.
+fn reduce_axis_by(t: Tensor, axis: I64, op: Op) -> Res[Tensor, Str] {
+  if is_same_op(op, OpSum) { return sum_axis(t, axis) }
+  if is_same_op(op, OpMean) { return mean_axis(t, axis) }
+  if is_same_op(op, OpMax) { return max_axis(t, axis) }
+  if is_same_op(op, OpMin) { return min_axis(t, axis) }
+  if is_same_op(op, OpProd) { return prod_axis(t, axis) }
+  if is_same_op(op, OpMedian) { return median_axis(t, axis) }
+  if is_same_op(op, OpLogSumExp) { return logsumexp_axis(t, axis) }
+  Err(bytes.concat("reduce_axis_by: not a reduction: ", op_name(op)))
+}
+
+# Payload-free enum cases compare by name here rather than by a `match` per
+# call site. NEEDS-57 would make `==` work on them directly.
+fn is_same_op(a: Op, b: Op) -> Bool = op_name(a) == op_name(b)
+
+# max or min along an axis, dropping it.
+#
+# Gradient: the output is one of the inputs, so the derivative with respect to
+# that input is 1 and with respect to every other element of the run is 0. Move
+# a non-selected element a little and the maximum does not move at all. The
+# whole upstream value therefore routes to the selected offset.
+#
+# Ties go to the first occurrence, because the comparison is strict. That is a
+# choice, and it has to be the same choice as argmax's and as the sort's, or two
+# operations disagree about which element they are talking about.
+fn extreme_axis(t: Tensor, axis_in: I64, want_max: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(sp.before * sp.after)
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let best: F64 = t.data[base]
+      let k: I64 = 1
+      while k < sp.length {
+        let v: F64 = t.data[base + k * sp.after]
+        if (want_max and v > best) or ((not want_max) and v < best) { best = v }
+        k = k + 1
+      }
+      out[i * sp.after + j] = best
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+}
+
+fn max_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = extreme_axis(t, axis, true)
+fn min_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = extreme_axis(t, axis, false)
+
+# The flat offsets the extremes came from, recomputed in the backward pass
+# rather than recorded in the forward one. Recomputing is exact: the forward
+# kernel is deterministic and the input tensor is on the tape, so the same scan
+# picks the same element. Recording it would be faster and is the optimisation
+# that goes here.
+fn extreme_axis_origins(t: Tensor, axis: I64, want_max: Bool) -> Arr[I64] {
+  let sp: Spans = axis_spans(t.shape, axis)
+  let origin: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < sp.before * sp.after {
+    push(origin, 0)
+    i = i + 1
+  }
+  i = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let best: F64 = t.data[base]
+      let best_idx: I64 = base
+      let k: I64 = 1
+      while k < sp.length {
+        let v: F64 = t.data[base + k * sp.after]
+        if (want_max and v > best) or ((not want_max) and v < best) {
+          best = v
+          best_idx = base + k * sp.after
+        }
+        k = k + 1
+      }
+      origin[i * sp.after + j] = best_idx
+      j = j + 1
+    }
+    i = i + 1
+  }
+  origin
+}
+
+# argmax and argmin, returning the position within the run. Not differentiable:
+# the output is an index, and moving an input by an infinitesimal amount does not
+# move an index at all until it crosses a neighbour, at which point it jumps.
+# The derivative is zero almost everywhere and undefined on the boundaries, so
+# there is nothing worth propagating.
+fn arg_extreme_axis(t: Tensor, axis_in: I64, want_max: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(sp.before * sp.after)
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let best: F64 = t.data[base]
+      let best_k: I64 = 0
+      let k: I64 = 1
+      while k < sp.length {
+        let v: F64 = t.data[base + k * sp.after]
+        if (want_max and v > best) or ((not want_max) and v < best) {
+          best = v
+          best_k = k
+        }
+        k = k + 1
+      }
+      out[i * sp.after + j] = f64_of_i64(best_k)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+}
+
+fn argmax_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = arg_extreme_axis(t, axis, true)
+fn argmin_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = arg_extreme_axis(t, axis, false)
+
+# max or min over every element. Same gradient argument as the axis form: the
+# whole upstream scalar goes to the one offset that was selected.
+fn extreme_all(t: Tensor, want_max: Bool) -> Tensor {
+  scalar(t.data[extreme_all_origin(t, want_max)])
+}
+
+fn extreme_all_origin(t: Tensor, want_max: Bool) -> I64 {
+  let best: F64 = t.data[0]
+  let best_idx: I64 = 0
+  let i: I64 = 1
+  while i < len(t.data) {
+    let v: F64 = t.data[i]
+    if (want_max and v > best) or ((not want_max) and v < best) {
+      best = v
+      best_idx = i
+    }
+    i = i + 1
+  }
+  best_idx
+}
+
+fn max_all(t: Tensor) -> Tensor = extreme_all(t, true)
+fn min_all(t: Tensor) -> Tensor = extreme_all(t, false)
+
+# ---- softmax and logsumexp -------------------------------------------------
+
+# Softmax along an axis, shifted by the run maximum before exponentiating. The
+# shift is not an optimisation: exp of a large positive number overflows to
+# infinity and the ratio becomes NaN, and subtracting the maximum leaves the
+# answer unchanged because it cancels between numerator and denominator.
+#
+# Gradient: with s the softmax output and g the upstream cotangent, the
+# derivative is s * (g - dot(g, s)) within each run, where dot is over the run.
+# The subtraction is the whole content of the rule: softmax's outputs sum to 1
+# along the run, so any change that raises one output must lower the others, and
+# the dot term is exactly that constraint. Dropping it gives a gradient that is
+# wrong by a rank-1 term and still looks plausible, which is why it is spelled
+# out here rather than derived at the call site.
+fn softmax(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(len(t.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let m: F64 = t.data[base]
+      let k: I64 = 1
+      while k < sp.length {
+        let v: F64 = t.data[base + k * sp.after]
+        if v > m { m = v }
+        k = k + 1
+      }
+      let total: F64 = 0.0
+      k = 0
+      while k < sp.length {
+        let e: F64 = f64_exp(t.data[base + k * sp.after] - m)
+        out[base + k * sp.after] = e
+        total = total + e
+        k = k + 1
+      }
+      k = 0
+      while k < sp.length {
+        out[base + k * sp.after] = out[base + k * sp.after] / total
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
+
+# logsumexp along an axis, dropping it. Same maximum shift, and the added
+# maximum at the end is what makes it exact rather than merely non-overflowing.
+#
+# Gradient: d/dx log sum exp(x) = softmax(x). So the upstream value at each
+# output is spread along the run weighted by the softmax of that run. That is
+# the cleanest gradient in this file and it is worth knowing by name, because it
+# is why a cross-entropy written as logsumexp minus the true logit backpropagates
+# to `softmax - onehot`.
+fn logsumexp_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(sp.before * sp.after)
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let m: F64 = t.data[base]
+      let k: I64 = 1
+      while k < sp.length {
+        let v: F64 = t.data[base + k * sp.after]
+        if v > m { m = v }
+        k = k + 1
+      }
+      let total: F64 = 0.0
+      k = 0
+      while k < sp.length {
+        total = total + f64_exp(t.data[base + k * sp.after] - m)
+        k = k + 1
+      }
+      out[i * sp.after + j] = m + f64_log(total)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: remove_axis(t.shape, axis), data: out })
+}
+
+# ---- product ---------------------------------------------------------------
+
+# prod_over is the shared body for both product entry points: `before * after`
+# independent runs of length L, strided by `after`. Passing before = after = 1
+# and L = len(data) reduces the whole tensor, so the two are the same code.
+#
+# Gradient: the derivative of a product with respect to one factor is the
+# product of the others, which is the whole product divided by that factor,
+# except that the division is invalid exactly when the factor is zero, and a
+# zero in a tensor is not a rare case. So the zeros are counted instead:
+#
+#   no zeros     every factor gets total / x
+#   one zero     that factor gets the product of the rest; every other factor's
+#                "product of the others" still contains the zero, so it is 0
+#   two or more  every derivative is 0, for the same reason
+#
+# The zero-count and the product of the non-zero factors are both computed in
+# the forward pass here and recomputed in the backward pass by calling this
+# again, which is the recompute-instead-of-record choice made everywhere below.
+struct ProdAux {
+  out: Arr[F64],
+  nz_prod: Arr[F64],
+  zeros: Arr[I64],
+}
+
+fn prod_over(t: Tensor, l: I64, before: I64, after: I64) -> ProdAux {
+  let out_n: I64 = before * after
+  let out: Arr[F64] = alloc(out_n)
+  let nz_prod: Arr[F64] = alloc(out_n)
+  let zeros: Arr[I64] = arr_new()
+  let z: I64 = 0
+  while z < out_n {
+    push(zeros, 0)
+    z = z + 1
+  }
+  let i: I64 = 0
+  while i < before {
+    let j: I64 = 0
+    while j < after {
+      let base: I64 = i * l * after + j
+      let p: F64 = 1.0
+      let nz: F64 = 1.0
+      let nzeros: I64 = 0
+      let k: I64 = 0
+      while k < l {
+        let v: F64 = t.data[base + k * after]
+        p = p * v
+        if v == 0.0 {
+          nzeros = nzeros + 1
+        } else {
+          nz = nz * v
+        }
+        k = k + 1
+      }
+      let idx: I64 = i * after + j
+      out[idx] = p
+      nz_prod[idx] = nz
+      zeros[idx] = nzeros
+      j = j + 1
+    }
+    i = i + 1
+  }
+  ProdAux { out: out, nz_prod: nz_prod, zeros: zeros }
+}
+
+fn prod_all(t: Tensor) -> Tensor {
+  let aux: ProdAux = prod_over(t, len(t.data), 1, 1)
+  Tensor { shape: arr_new(), data: aux.out }
+}
+
+fn prod_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let aux: ProdAux = prod_over(t, sp.length, sp.before, sp.after)
+  Ok(Tensor { shape: remove_axis(t.shape, axis), data: aux.out })
+}
+
+# ---- median ----------------------------------------------------------------
+
+# median_over mirrors prod_over's layout.
+#
+# Gradient: the median of a run is one of its values, so moving any other value
+# a little does not move the answer at all and its derivative is zero. The
+# selected element takes the whole upstream value. An even-length run averages
+# the two middle values, so each of those takes half.
+#
+# Selection is by sorting *indices*, not values, because the gradient needs to
+# know which element was chosen and not just what it held.
+struct MedianAux {
+  out: Arr[F64],
+  lo: Arr[I64],
+  hi: Arr[I64],
+}
+
+fn median_over(t: Tensor, l: I64, before: I64, after: I64) -> MedianAux {
+  let out_n: I64 = before * after
+  let out: Arr[F64] = alloc(out_n)
+  let lo: Arr[I64] = arr_new()
+  let hi: Arr[I64] = arr_new()
+  let z: I64 = 0
+  while z < out_n {
+    push(lo, 0)
+    push(hi, 0)
+    z = z + 1
+  }
+  let i: I64 = 0
+  while i < before {
+    let j: I64 = 0
+    while j < after {
+      let base: I64 = i * l * after + j
+      let idx_buf: Arr[I64] = arr_new()
+      let k: I64 = 0
+      while k < l {
+        push(idx_buf, base + k * after)
+        k = k + 1
+      }
+      sort_offsets(idx_buf, t.data, false)
+      let idx: I64 = i * after + j
+      let mid: I64 = l / 2
+      if l % 2 == 1 {
+        lo[idx] = idx_buf[mid]
+        hi[idx] = idx_buf[mid]
+        out[idx] = t.data[idx_buf[mid]]
+      } else {
+        lo[idx] = idx_buf[mid - 1]
+        hi[idx] = idx_buf[mid]
+        out[idx] = (t.data[idx_buf[mid - 1]] + t.data[idx_buf[mid]]) / 2.0
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  MedianAux { out: out, lo: lo, hi: hi }
+}
+
+fn median_all(t: Tensor) -> Tensor {
+  let aux: MedianAux = median_over(t, len(t.data), 1, 1)
+  Tensor { shape: arr_new(), data: aux.out }
+}
+
+fn median_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let aux: MedianAux = median_over(t, sp.length, sp.before, sp.after)
+  Ok(Tensor { shape: remove_axis(t.shape, axis), data: aux.out })
+}
+
+# ---- sorting ---------------------------------------------------------------
+
+# A stable insertion sort of an array of flat offsets by the values they point
+# at. Insertion sort is quadratic and that is the wrong asymptotics for a long
+# axis; a merge sort goes here when it matters. It is not a placeholder for
+# correctness, though: it is stable, and stability is load-bearing.
+#
+# Stability is why ties keep their original relative order, which is what makes
+# the result reproducible between runs and, because the gradient of a sort
+# follows the permutation, makes the *gradient* reproducible too. An unstable
+# sort returns the same values in a different arrangement and a different
+# gradient.
+fn sort_offsets(offs: Arr[I64], data: Arr[F64], descending: Bool) {
+  let i: I64 = 1
+  while i < len(offs) {
+    let v: I64 = offs[i]
+    let vv: F64 = data[v]
+    let j: I64 = i - 1
+    while j >= 0 and sorts_before(vv, data[offs[j]], descending) {
+      offs[j + 1] = offs[j]
+      j = j - 1
+    }
+    offs[j + 1] = v
+    i = i + 1
+  }
+}
+
+# Strict comparison in the direction asked for. Strict is what keeps the
+# insertion loop stable: an equal pair does not shift, so the earlier element
+# stays earlier.
+fn sorts_before(x: F64, y: F64, descending: Bool) -> Bool {
+  if descending { return x > y }
+  x < y
+}
+
+# Sort each run along an axis.
+#
+# Gradient: sorting is a permutation, and the derivative of a permutation is its
+# inverse. Whatever cotangent arrives at the element now in position 3 belongs
+# to whichever element started there, so the backward pass sends each one home.
+# No approximation is involved, which is why this is worth having rather than
+# something a caller fakes with an argsort and a gather.
+fn sort_axis(t: Tensor, axis_in: I64, descending: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let origin: Arr[I64] = sort_origins(t, axis, descending, sp_length(t, axis))
+  let out: Arr[F64] = alloc(len(t.data))
+  let i: I64 = 0
+  while i < len(origin) {
+    out[i] = t.data[origin[i]]
+    i = i + 1
+  }
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
+
+fn sp_length(t: Tensor, axis: I64) -> I64 = t.shape[axis]
+
+# origin[dst] is the flat input offset that supplies output offset dst. Shared
+# by sort and topk, and by both of their gradients, so there is one definition
+# of which element went where.
+#
+# `keep` is how many of each sorted run survive into the output: the whole run
+# for a sort, k for a topk.
+fn sort_origins(t: Tensor, axis: I64, descending: Bool, keep: I64) -> Arr[I64] {
+  let sp: Spans = axis_spans(t.shape, axis)
+  let origin: Arr[I64] = arr_new()
+  let z: I64 = 0
+  while z < sp.before * keep * sp.after {
+    push(origin, 0)
+    z = z + 1
+  }
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let offs: Arr[I64] = arr_new()
+      let k: I64 = 0
+      while k < sp.length {
+        push(offs, base + k * sp.after)
+        k = k + 1
+      }
+      sort_offsets(offs, t.data, descending)
+      k = 0
+      while k < keep {
+        origin[i * keep * sp.after + k * sp.after + j] = offs[k]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  origin
+}
+
+# The indices that would sort each run. Not differentiable, for the same reason
+# as argmax.
+fn argsort_axis(t: Tensor, axis_in: I64, descending: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let origin: Arr[I64] = sort_origins(t, axis, descending, sp.length)
+  let out: Arr[F64] = alloc(len(t.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        # Back out the position within the run from the flat offset it came
+        # from, which is what an index means here.
+        let src: I64 = origin[base + k * sp.after]
+        out[base + k * sp.after] = f64_of_i64((src - base) / sp.after)
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
+
+# The k largest (or smallest) values along an axis, in order, with the axis
+# shrinking to k. This is the shape a caller wants for "the five most likely
+# classes": the values, in order, with everything else dropped.
+#
+# Gradient: differentiable through the values that survive, and exactly zero for
+# the ones that do not. A value outside the top k contributes nothing to the
+# output, so changing it a little does not move the output. That is correct
+# rather than a simplification.
+fn topk_axis(t: Tensor, k: I64, axis_in: I64, largest: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  if k <= 0 {
+    return Err(bytes.concat("topk: k must be positive, got ", str(k)))
+  }
+  if k > sp.length {
+    return Err(bytes.concat("topk: k is ", bytes.concat(str(k),
+      bytes.concat(" but axis ", bytes.concat(str(axis),
+      bytes.concat(" has length ", str(sp.length)))))))
+  }
+  let origin: Arr[I64] = sort_origins(t, axis, largest, k)
+  let out: Arr[F64] = alloc(len(origin))
+  let i: I64 = 0
+  while i < len(origin) {
+    out[i] = t.data[origin[i]]
+    i = i + 1
+  }
+  let shape: Arr[I64] = copy_shape(t.shape)
+  shape[axis] = k
+  Ok(Tensor { shape: shape, data: out })
+}
+
+# The indices of the k largest. Indices, so not differentiable.
+fn argtopk_axis(t: Tensor, k: I64, axis_in: I64, largest: Bool) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  if k <= 0 {
+    return Err(bytes.concat("argtopk: k must be positive, got ", str(k)))
+  }
+  if k > sp.length {
+    return Err(bytes.concat("argtopk: k is ", bytes.concat(str(k),
+      bytes.concat(" but axis ", bytes.concat(str(axis),
+      bytes.concat(" has length ", str(sp.length)))))))
+  }
+  let origin: Arr[I64] = sort_origins(t, axis, largest, k)
+  let out: Arr[F64] = alloc(len(origin))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let n: I64 = 0
+      while n < k {
+        let dst: I64 = i * k * sp.after + n * sp.after + j
+        out[dst] = f64_of_i64((origin[dst] - base) / sp.after)
+        n = n + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  let shape: Arr[I64] = copy_shape(t.shape)
+  shape[axis] = k
+  Ok(Tensor { shape: shape, data: out })
+}
+
+# Reverse the order along one axis, keeping the shape.
+#
+# Gradient: reversing is a permutation and it is its own inverse, so the
+# backward pass is the same reversal. Worth stating because it makes the rule
+# obvious rather than something to derive.
+fn flip_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
+  let axis: I64 = normalize_axis(axis_in, len(t.shape))?
+  let sp: Spans = axis_spans(t.shape, axis)
+  let out: Arr[F64] = alloc(len(t.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        out[base + k * sp.after] = t.data[base + (sp.length - 1 - k) * sp.after]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(Tensor { shape: copy_shape(t.shape), data: out })
+}
