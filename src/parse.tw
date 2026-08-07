@@ -1,0 +1,799 @@
+mode systems
+
+# parse.tw — the twill parser, in twill.
+#
+# A port of internal/parser/parser.go: recursive descent with a Pratt loop for
+# binary operators. Every production, every precedence, every error message and
+# every lookahead rule is the Go parser's, because the two parsers are compared
+# node for node over the corpus in testdata/ and a difference in either
+# direction is a bug in this file rather than an improvement.
+#
+# Two rules in here are subtle enough to be worth finding before reading the
+# code, because both are about a newline and neither is visible in the grammar:
+#
+#   - A `+` or `-` that starts a line begins a new statement, it does not
+#     continue the previous expression. See parse_binary.
+#   - A `(` or `[` that starts a line begins a new expression, it is not a call
+#     or an index on the previous line. See parse_postfix.
+#
+# Both exist because twill has no statement terminator, and both are documented
+# in docs/language-guide.md as the newline-continuation rule.
+
+import "lex.tw" as lex
+import "ast.tw" as ast
+import "bytes.tw" as bytes
+
+# ---- precedence ------------------------------------------------------------
+#
+# The table from internal/parser/parser.go, unchanged. `^` is the only
+# right-associative operator; `@` binds like `*`, which is what makes
+# `a @ b + c` mean `(a @ b) + c`.
+
+fn precedence_table() -> Dict[Str, I64] {
+  let d: Dict[Str, I64] = dict_new()
+  dict_set(d, "or", 1)
+  dict_set(d, "||", 1)
+  dict_set(d, "and", 2)
+  dict_set(d, "&&", 2)
+  dict_set(d, "==", 3)
+  dict_set(d, "!=", 3)
+  dict_set(d, "<", 4)
+  dict_set(d, "<=", 4)
+  dict_set(d, ">", 4)
+  dict_set(d, ">=", 4)
+  dict_set(d, "+", 5)
+  dict_set(d, "-", 5)
+  dict_set(d, "*", 6)
+  dict_set(d, "/", 6)
+  dict_set(d, "%", 6)
+  dict_set(d, "@", 6)
+  dict_set(d, "^", 7)
+  d
+}
+
+let PRECEDENCE: Dict[Str, I64] = precedence_table()
+
+fn precedence_of(op: Str) -> Opt[I64] = dict_get(PRECEDENCE, op)
+
+fn is_right_assoc(op: Str) -> Bool = bytes.equal(op, "^")
+
+# ---- the cursor ------------------------------------------------------------
+
+struct Parser {
+  toks: Arr[lex.Token],
+  pos: I64,
+  ids: ast.NodeIds,
+}
+
+# Signature is the three-part result of parsing a parameter list and an optional
+# return annotation. Go returns a tuple; twill returns one value, so the tuple
+# gets a name.
+struct Signature {
+  params: Arr[ast.Param],
+  ret: Opt[ast.ShapeAnno],
+  ret_unit: Opt[ast.UnitAnno],
+}
+
+# parse tokenizes and parses src into a Program.
+fn parse(src: Str) -> Res[ast.Program, lex.SyntaxError] {
+  let toks: Arr[lex.Token] = lex.tokenize(src)?
+  let p: Parser = Parser { toks: toks, pos: 0, ids: ast.new_ids() }
+  parse_program(p)
+}
+
+# ParseWithComments in Go returns the comments alongside, for the formatter.
+struct Parsed {
+  program: ast.Program,
+  comments: Arr[lex.Comment],
+  ids: ast.NodeIds,
+}
+
+fn parse_with_comments(src: Str) -> Res[Parsed, lex.SyntaxError] {
+  let sc: lex.Scan = lex.tokenize_with_comments(src)?
+  let p: Parser = Parser { toks: sc.tokens, pos: 0, ids: ast.new_ids() }
+  let prog: ast.Program = parse_program(p)?
+  Ok(Parsed { program: prog, comments: sc.comments, ids: p.ids })
+}
+
+# peek clamps to the last token, which is always EOF, so a lookahead past the
+# end returns EOF rather than failing. Every caller relies on that: `peek(2)` in
+# looks_like_record is allowed to run off the end of the file.
+fn peek(p: Parser, o: I64) -> lex.Token {
+  let idx: I64 = p.pos + o
+  if idx >= len(p.toks) {
+    idx = len(p.toks) - 1
+  }
+  p.toks[idx]
+}
+
+fn next_tok(p: Parser) -> lex.Token {
+  let t: lex.Token = p.toks[p.pos]
+  p.pos = p.pos + 1
+  t
+}
+
+fn at_end(p: Parser) -> Bool = peek(p, 0).kind == lex.KIND_EOF
+
+# check tests the *text* of the next token, and only for the three kinds where
+# the text is the whole meaning. An IDENT named "and" would otherwise be
+# indistinguishable from the keyword, which is why IDENT is not in the set.
+fn check(p: Parser, value: Str) -> Bool {
+  let t: lex.Token = peek(p, 0)
+  let kindable: Bool = t.kind == lex.KIND_OP or t.kind == lex.KIND_PUNCT or t.kind == lex.KIND_KEYWORD
+  kindable and bytes.equal(t.value, value)
+}
+
+fn accept(p: Parser, value: Str) -> Bool {
+  if check(p, value) {
+    next_tok(p)
+    return true
+  }
+  false
+}
+
+fn expect(p: Parser, value: Str) -> Res[lex.Token, lex.SyntaxError] {
+  if check(p, value) {
+    return Ok(next_tok(p))
+  }
+  let t: lex.Token = peek(p, 0)
+  Err(err_at(t, bytes.concat("expected ", bytes.concat(quoted(value),
+    bytes.concat(" but found ", quoted(token_text(t)))))))
+}
+
+fn expect_ident(p: Parser) -> Res[Str, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  if t.kind == lex.KIND_IDENT {
+    next_tok(p)
+    return Ok(t.value)
+  }
+  Err(err_at(t, bytes.concat("expected identifier but found ", quoted(token_text(t)))))
+}
+
+fn err_at(t: lex.Token, msg: Str) -> lex.SyntaxError =
+  lex.SyntaxError { msg: msg, line: t.line, col: t.col }
+
+# quoted renders a string the way Go's %q verb does, which is what every
+# diagnostic in internal/parser uses. Shared with the lexer's token dump so the
+# two cannot drift apart. See NEEDS-20 for the parts of %q not covered.
+fn quoted(s: Str) -> Str = lex.quote_value(s)
+
+# An EOF token has an empty value, and "expected \")\" but found \"\"" is a
+# worse message than naming the end of the file.
+fn token_text(t: lex.Token) -> Str {
+  if len(t.value) > 0 { return t.value }
+  if t.kind == lex.KIND_EOF { return "end of input" }
+  "?"
+}
+
+# A `;` is an optional statement separator and never carries meaning, so it is
+# skipped wherever a statement may start.
+fn skip_separators(p: Parser) {
+  while accept(p, ";") {
+  }
+}
+
+# ---- program ---------------------------------------------------------------
+
+fn parse_program(p: Parser) -> Res[ast.Program, lex.SyntaxError] {
+  let body: Arr[ast.Stmt] = arr_new()
+  skip_separators(p)
+  while not at_end(p) {
+    push(body, parse_stmt(p)?)
+    skip_separators(p)
+  }
+  Ok(ast.Program { body: body })
+}
+
+# ---- statements ------------------------------------------------------------
+
+fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+
+  if t.kind == lex.KIND_KEYWORD {
+    if bytes.equal(t.value, "let") { return parse_let(p) }
+    # A `fn` followed by a name is a declaration; a `fn` followed by `(` is a
+    # lambda in expression position, and falls through to parse_expr below.
+    if bytes.equal(t.value, "fn") and peek(p, 1).kind == lex.KIND_IDENT {
+      return parse_fn_decl(p)
+    }
+    if bytes.equal(t.value, "while") { return parse_while(p) }
+    if bytes.equal(t.value, "for") { return parse_for(p) }
+    if bytes.equal(t.value, "return") { return parse_return(p) }
+    if bytes.equal(t.value, "import") { return parse_import(p) }
+    if bytes.equal(t.value, "type") { return parse_type_decl(p) }
+    if bytes.equal(t.value, "unit") { return parse_unit_decl(p) }
+  }
+
+  # Assignment: ident '=' expr. The lexer produces `==` as one token, so this
+  # cannot mis-fire on a comparison; there is no need to look past the `=`.
+  if t.kind == lex.KIND_IDENT and peek(p, 1).kind == lex.KIND_OP and bytes.equal(peek(p, 1).value, "=") {
+    let name: Str = next_tok(p).value
+    next_tok(p)
+    let v: ast.Expr = parse_expr(p)?
+    return Ok(ast.assign_stmt(p.ids, name, v, t.line))
+  }
+
+  let x: ast.Expr = parse_expr(p)?
+  Ok(ast.expr_stmt(p.ids, x, t.line))
+}
+
+fn parse_let(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  # An annotation on a `let` introduces a unit: `let px: USD/share = ...`. It is
+  # not a type annotation today, and in systems mode it has to become one, which
+  # is NEEDS-1's sharpest edge.
+  let unit: Opt[ast.UnitAnno] = None
+  if accept(p, ":") {
+    unit = Some(parse_unit_expr(p)?)
+  }
+  expect(p, "=")?
+  let v: ast.Expr = parse_expr(p)?
+  Ok(ast.let_stmt(p.ids, name, unit, v, line))
+}
+
+fn parse_fn_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  let sig: Signature = parse_signature(p)?
+  let body: ast.Expr = parse_fn_body(p)?
+  Ok(SFn(ast.fn_decl(p.ids, name, sig.params, sig.ret, sig.ret_unit, body, line)))
+}
+
+fn parse_while(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let cond: ast.Expr = parse_expr(p)?
+  let body: ast.Block = parse_block(p)?
+  Ok(ast.while_stmt(p.ids, cond, body, line))
+}
+
+fn parse_for(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  expect(p, "in")?
+  let iter: ast.Expr = parse_expr(p)?
+  let body: ast.Block = parse_block(p)?
+  Ok(ast.for_stmt(p.ids, name, iter, body, line))
+}
+
+# A bare `return` is one at the end of a block, at a separator, or at the end of
+# the file. Anything else starts an expression, including a `-` on the next line:
+# `return` does not use the newline rule, so `return` followed by a value on the
+# next line still returns that value.
+fn parse_return(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  if check(p, "}") or check(p, ";") or at_end(p) {
+    return Ok(ast.return_stmt(p.ids, None, line))
+  }
+  let v: ast.Expr = parse_expr(p)?
+  Ok(ast.return_stmt(p.ids, Some(v), line))
+}
+
+fn parse_import(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let t: lex.Token = peek(p, 0)
+  if t.kind != lex.KIND_STRING {
+    return Err(err_at(t, "import expects a string path"))
+  }
+  next_tok(p)
+  let alias: Str = ""
+  # `as` is not a keyword: it is an ordinary identifier that only means
+  # something here. Making it a keyword would break every program with a
+  # variable called `as`, for no gain, since the position is unambiguous.
+  if peek(p, 0).kind == lex.KIND_IDENT and bytes.equal(peek(p, 0).value, "as") {
+    next_tok(p)
+    alias = expect_ident(p)?
+  }
+  Ok(ast.import_stmt(p.ids, t.value, alias, line))
+}
+
+fn parse_unit_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  Ok(ast.unit_decl(p.ids, name, line))
+}
+
+fn parse_type_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  expect(p, "=")?
+  expect(p, "{")?
+  let fields: Arr[ast.TypeField] = arr_new()
+  while not check(p, "}") and not at_end(p) {
+    let field_name: Str = expect_ident(p)?
+    expect(p, ":")?
+    let shape: ast.ShapeAnno = parse_shape_anno(p)?
+    push(fields, ast.TypeField { name: field_name, shape: shape })
+    if not accept(p, ",") {
+      break
+    }
+  }
+  expect(p, "}")?
+  Ok(ast.type_decl(p.ids, name, fields, line))
+}
+
+# ---- expressions -----------------------------------------------------------
+
+fn parse_expr(p: Parser) -> Res[ast.Expr, lex.SyntaxError] = parse_binary(p, 0)
+
+fn parse_binary(p: Parser, min_prec: I64) -> Res[ast.Expr, lex.SyntaxError] {
+  let left: ast.Expr = parse_unary(p)?
+  while true {
+    let t: lex.Token = peek(p, 0)
+    let op: Str = t.value
+    # `and` and `or` are keywords but behave as binary operators; `&&` and `||`
+    # arrive as OP and are handled by the same table.
+    let is_op: Bool = t.kind == lex.KIND_OP or
+      (t.kind == lex.KIND_KEYWORD and (bytes.equal(op, "and") or bytes.equal(op, "or")))
+    if not is_op {
+      break
+    }
+    # A '+' or '-' that starts a new line begins a new statement rather than
+    # continuing this expression, so a line like `-mean(x)` is not glued onto
+    # the previous line as a subtraction. To continue an expression across
+    # lines, end the line with the operator.
+    if (bytes.equal(op, "+") or bytes.equal(op, "-")) and p.pos > 0 and t.line > p.toks[p.pos - 1].line {
+      break
+    }
+    let prec: I64 = 0
+    match precedence_of(op) {
+      Some(v) => prec = v,
+      None => break,
+    }
+    if prec < min_prec {
+      break
+    }
+    next_tok(p)
+    # Left-associative operators parse their right side at one level tighter, so
+    # `a - b - c` groups as `(a - b) - c`. `^` does not, so `a ^ b ^ c` groups
+    # as `a ^ (b ^ c)`.
+    let next_min: I64 = prec + 1
+    if is_right_assoc(op) {
+      next_min = prec
+    }
+    let right: ast.Expr = parse_binary(p, next_min)?
+    left = ast.binary(p.ids, op, left, right, t.line)
+  }
+  Ok(left)
+}
+
+fn parse_unary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  let is_unary: Bool =
+    (t.kind == lex.KIND_OP and (bytes.equal(t.value, "-") or bytes.equal(t.value, "!"))) or
+    (t.kind == lex.KIND_KEYWORD and bytes.equal(t.value, "not"))
+  if is_unary {
+    next_tok(p)
+    # Recursing into parse_unary rather than parse_postfix is what makes `--x`
+    # and `not not b` parse, and what makes `-x[0]` mean `-(x[0])`.
+    let operand: ast.Expr = parse_unary(p)?
+    return Ok(ast.unary(p.ids, t.value, operand, t.line))
+  }
+  parse_postfix(p)
+}
+
+fn parse_postfix(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let x: ast.Expr = parse_primary(p)?
+  while true {
+    # A '(' or '[' that starts a new line begins a new expression rather than
+    # continuing this one as a call or an index. This keeps a line like `[a, b]`
+    # from being read as an index on the previous line. Keep the call or index
+    # on the same line as its target to chain them.
+    #
+    # Note this tests only '(' and '[': a '.' on a new line still continues the
+    # expression, which is what makes a fluent chain readable across lines and
+    # is the Go parser's behaviour.
+    if (check(p, "(") or check(p, "[")) and p.pos > 0 and peek(p, 0).line > p.toks[p.pos - 1].line {
+      break
+    }
+    if check(p, ".") {
+      let line: I64 = next_tok(p).line
+      let name: Str = expect_ident(p)?
+      x = ast.field(p.ids, x, name, line)
+      continue
+    }
+    if check(p, "(") {
+      let line: I64 = peek(p, 0).line
+      let args: Arr[ast.Expr] = parse_args(p)?
+      x = ast.call(p.ids, x, args, line)
+      continue
+    }
+    if check(p, "[") {
+      let line: I64 = next_tok(p).line
+      x = parse_index_or_slice(p, x, line)?
+      continue
+    }
+    break
+  }
+  Ok(x)
+}
+
+# parse_index_or_slice parses the body of a `[...]` after the '[' is consumed.
+# It produces an Index (`t[e]`) or a Slice (`t[a:b]`, with either side
+# optional). The two are told apart by whether a ':' follows the first
+# expression, which is why the start is parsed before the decision is made.
+fn parse_index_or_slice(p: Parser, target: ast.Expr, line: I64) -> Res[ast.Expr, lex.SyntaxError] {
+  let start: Opt[ast.Expr] = None
+  if not check(p, ":") {
+    start = Some(parse_expr(p)?)
+  }
+  if accept(p, ":") {
+    let end: Opt[ast.Expr] = None
+    if not check(p, "]") {
+      end = Some(parse_expr(p)?)
+    }
+    expect(p, "]")?
+    return Ok(ast.slice(p.ids, target, start, end, line))
+  }
+  expect(p, "]")?
+  match start {
+    Some(e) => Ok(ast.index(p.ids, target, e, line)),
+    # `t[]` reaches here: no start, and no ':' to make it a slice. The Go parser
+    # builds an Index with a nil index and the evaluator fails on it later; this
+    # refuses it where the mistake is, which is a divergence and a deliberate
+    # one. See NEEDS-31.
+    None => Err(err_at(peek(p, 0), "expected an index expression")),
+  }
+}
+
+fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+
+  if t.kind == lex.KIND_NUMBER {
+    next_tok(p)
+    match f64_of_str(t.value) {
+      Some(v) => return Ok(ast.number_lit(p.ids, v, t.line)),
+      None => return Err(err_at(t, bytes.concat("invalid number ", quoted(t.value)))),
+    }
+  }
+  if t.kind == lex.KIND_STRING {
+    next_tok(p)
+    return Ok(ast.string_lit(p.ids, t.value, t.line))
+  }
+  if t.kind == lex.KIND_KEYWORD {
+    if bytes.equal(t.value, "true") {
+      next_tok(p)
+      return Ok(ast.bool_lit(p.ids, true, t.line))
+    }
+    if bytes.equal(t.value, "false") {
+      next_tok(p)
+      return Ok(ast.bool_lit(p.ids, false, t.line))
+    }
+    if bytes.equal(t.value, "if") {
+      return Ok(EIf(parse_if(p)?))
+    }
+    if bytes.equal(t.value, "fn") {
+      return parse_lambda(p)
+    }
+    # Any other keyword falls through to the unexpected-token error below,
+    # which is what the Go parser's switch does by not matching.
+  }
+  if t.kind == lex.KIND_IDENT {
+    next_tok(p)
+    return Ok(ast.ident(p.ids, t.value, t.line))
+  }
+
+  # A parenthesised expression produces no node of its own: grouping is
+  # expressed by the tree's shape, so `(a + b)` and a `+` node are the same
+  # thing and the formatter re-inserts parentheses from precedence.
+  if check(p, "(") {
+    next_tok(p)
+    let inner: ast.Expr = parse_expr(p)?
+    expect(p, ")")?
+    return Ok(inner)
+  }
+  if check(p, "[") {
+    return parse_tensor_or_list(p)
+  }
+  if check(p, "{") {
+    if looks_like_record(p) {
+      return parse_record_lit(p)
+    }
+    return Ok(EBlock(parse_block(p)?))
+  }
+  Err(err_at(t, bytes.concat("unexpected token ", quoted(token_text(t)))))
+}
+
+fn parse_if(p: Parser) -> Res[ast.IfExpr, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let cond: ast.Expr = parse_expr(p)?
+  let then_block: ast.Block = parse_block(p)?
+  let else_branch: ast.Else = NoElse
+  if accept(p, "else") {
+    if check(p, "if") {
+      else_branch = ElseIf(parse_if(p)?)
+    } else {
+      else_branch = ElseBlock(parse_block(p)?)
+    }
+  }
+  Ok(ast.if_expr(p.ids, cond, then_block, else_branch, line))
+}
+
+fn parse_lambda(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let sig: Signature = parse_signature(p)?
+  let body: ast.Expr = parse_fn_body(p)?
+  Ok(ast.lambda(p.ids, sig.params, sig.ret, sig.ret_unit, body, line))
+}
+
+# A `[...]` is a tensor literal when every element is one a tensor can be built
+# from, and a list literal otherwise. The decision is made here and not in the
+# checker because it changes what the operators mean: `[1, 2] @ [3, 4]` is a
+# matmul, and a list has no `@`.
+#
+# An empty `[]` is a list, not a rank-1 tensor of length zero. That is the Go
+# parser's rule (isTensor starts false when there are no elements) and changing
+# it would change what `len([])` means.
+fn parse_tensor_or_list(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let elements: Arr[ast.Expr] = arr_new()
+  if not check(p, "]") {
+    push(elements, parse_expr(p)?)
+    while accept(p, ",") {
+      # A trailing comma before the bracket is allowed and produces no element.
+      if check(p, "]") {
+        break
+      }
+      push(elements, parse_expr(p)?)
+    }
+  }
+  expect(p, "]")?
+  let is_tensor: Bool = len(elements) > 0
+  let i: I64 = 0
+  while i < len(elements) {
+    if not is_numeric_elem(elements[i]) {
+      is_tensor = false
+      break
+    }
+    i = i + 1
+  }
+  if is_tensor {
+    return Ok(ast.tensor_lit(p.ids, elements, line))
+  }
+  Ok(ast.list_lit(p.ids, elements, line))
+}
+
+# is_numeric_elem reports whether e can appear inside a tensor literal: a number,
+# a nested tensor literal, or a negated number. Deliberately not an arbitrary
+# expression: `[a, b]` where a and b are variables is a list, and the runtime
+# builds a tensor from it if the values turn out to be numbers.
+fn is_numeric_elem(e: ast.Expr) -> Bool {
+  match e {
+    ENumber(_) => true,
+    ETensor(_) => true,
+    EUnary(u) => {
+      if not bytes.equal(u.op, "-") { return false }
+      match u.operand {
+        ENumber(_) => true,
+        _ => false,
+      }
+    },
+    _ => false,
+  }
+}
+
+fn parse_block(p: Parser) -> Res[ast.Block, lex.SyntaxError] {
+  let open: lex.Token = expect(p, "{")?
+  let body: Arr[ast.Stmt] = arr_new()
+  skip_separators(p)
+  while not check(p, "}") and not at_end(p) {
+    push(body, parse_stmt(p)?)
+    skip_separators(p)
+  }
+  let close_tok: lex.Token = expect(p, "}")?
+  Ok(ast.new_block(p.ids, body, open.line, close_tok.line))
+}
+
+# A function body is either `= expr` or a block. The `=` form is the one most of
+# std/ uses and it is not sugar for a block: a block's value is its last
+# expression statement, and `= expr` has no statement at all.
+fn parse_fn_body(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  if accept(p, "=") {
+    return parse_expr(p)
+  }
+  Ok(EBlock(parse_block(p)?))
+}
+
+# looks_like_record decides whether a `{` starts a record literal (`{ name: ...`)
+# rather than a block. A block never begins with `ident :`, so three tokens of
+# lookahead settle it with no backtracking.
+#
+# docs/self-hosting.md section 1.2 warns that pattern matching must not re-enter
+# this ambiguity, which is why `match` arms use `=>` and commas rather than
+# braces.
+fn looks_like_record(p: Parser) -> Bool {
+  bytes.equal(peek(p, 0).value, "{") and
+    peek(p, 1).kind == lex.KIND_IDENT and
+    peek(p, 2).kind == lex.KIND_PUNCT and bytes.equal(peek(p, 2).value, ":")
+}
+
+fn parse_record_lit(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let line: I64 = expect(p, "{")?.line
+  let fields: Arr[ast.RecordField] = arr_new()
+  while not check(p, "}") and not at_end(p) {
+    let name: Str = expect_ident(p)?
+    expect(p, ":")?
+    let val: ast.Expr = parse_expr(p)?
+    push(fields, ast.RecordField { name: name, value: val })
+    if not accept(p, ",") {
+      break
+    }
+  }
+  expect(p, "}")?
+  Ok(ast.record_lit(p.ids, fields, line))
+}
+
+# ---- signatures and annotations --------------------------------------------
+
+fn parse_signature(p: Parser) -> Res[Signature, lex.SyntaxError] {
+  let params: Arr[ast.Param] = parse_params(p)?
+  let ret: Opt[ast.ShapeAnno] = None
+  let ret_unit: Opt[ast.UnitAnno] = None
+  if accept(p, "->") {
+    # A `[` after the arrow is a shape; anything else is a unit expression.
+    # There is no third case, and a return type in the systems sense is NEEDS-1.
+    if check(p, "[") {
+      ret = Some(parse_shape_anno(p)?)
+    } else {
+      ret_unit = Some(parse_unit_expr(p)?)
+    }
+  }
+  Ok(Signature { params: params, ret: ret, ret_unit: ret_unit })
+}
+
+fn parse_params(p: Parser) -> Res[Arr[ast.Param], lex.SyntaxError] {
+  expect(p, "(")?
+  let params: Arr[ast.Param] = arr_new()
+  if not check(p, ")") {
+    push(params, parse_param(p)?)
+    while accept(p, ",") {
+      if check(p, ")") {
+        break
+      }
+      push(params, parse_param(p)?)
+    }
+  }
+  expect(p, ")")?
+  Ok(params)
+}
+
+fn parse_param(p: Parser) -> Res[ast.Param, lex.SyntaxError] {
+  let name: Str = expect_ident(p)?
+  let param: ast.Param = ast.plain_param(name)
+  if accept(p, ":") {
+    # `[` starts a shape; otherwise a unit expression, or a bare name that the
+    # checker resolves as a record type or a unit. The parser cannot tell a type
+    # from a unit here and does not try: it records the name and moves on.
+    if check(p, "[") {
+      param.shape = Some(parse_shape_anno(p)?)
+    } else {
+      let u: ast.UnitAnno = parse_unit_expr(p)?
+      if len(u.factors) == 1 and u.factors[0].exp == 1 {
+        param.type_name = u.factors[0].name
+      } else {
+        param.unit = Some(u)
+      }
+    }
+  }
+  Ok(param)
+}
+
+# parse_unit_expr parses a scalar unit expression: `USD`, `USD/year`, `1/year`,
+# `USD*share^-1`, `year^2`.
+#
+# There is no precedence here and there does not need to be: `*` and `/` both
+# multiply a factor into the product, with `/` flipping the sign of its
+# exponent, so `a/b*c` is a*c/b and the left-to-right reading is the only one.
+fn parse_unit_expr(p: Parser) -> Res[ast.UnitAnno, lex.SyntaxError] {
+  let anno: ast.UnitAnno = ast.UnitAnno { factors: arr_new() }
+  parse_unit_factor(p, anno, 1)?
+  while true {
+    if accept(p, "*") {
+      parse_unit_factor(p, anno, 1)?
+      continue
+    }
+    if accept(p, "/") {
+      parse_unit_factor(p, anno, -1)?
+      continue
+    }
+    break
+  }
+  Ok(anno)
+}
+
+fn parse_unit_factor(p: Parser, anno: ast.UnitAnno, sign: I64) -> Res[Unit, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  # `1` is the dimensionless factor, so `1/year` has a name to divide into. Any
+  # other number is a mistake rather than a scale factor: units carry no
+  # magnitude in twill.
+  if t.kind == lex.KIND_NUMBER {
+    next_tok(p)
+    if not bytes.equal(t.value, "1") {
+      return Err(err_at(t, "a numeric unit factor must be 1 (dimensionless)"))
+    }
+    return Ok(unit)
+  }
+  if t.kind != lex.KIND_IDENT {
+    return Err(err_at(t, "expected a unit name"))
+  }
+  next_tok(p)
+  let exp: I64 = sign
+  if accept(p, "^") {
+    let neg: Bool = accept(p, "-")
+    let nt: lex.Token = peek(p, 0)
+    if nt.kind != lex.KIND_NUMBER {
+      return Err(err_at(nt, "expected a unit exponent"))
+    }
+    next_tok(p)
+    match i64_of_str(nt.value) {
+      Some(k) => exp = sign * k,
+      None => return Err(err_at(nt, "unit exponent must be an integer")),
+    }
+    if neg {
+      exp = -exp
+    }
+  }
+  push(anno.factors, ast.UnitFactor { name: t.value, exp: exp })
+  Ok(unit)
+}
+
+# parse_shape_anno parses "[d0, d1, ...]" where each dim is an integer or a name.
+# "[]" is a scalar, and that is not the same as no annotation at all: the caller
+# wraps this in an Opt for exactly that reason.
+fn parse_shape_anno(p: Parser) -> Res[ast.ShapeAnno, lex.SyntaxError] {
+  expect(p, "[")?
+  let dims: Arr[ast.Dim] = arr_new()
+  if not check(p, "]") {
+    push(dims, parse_dim(p)?)
+    while accept(p, ",") {
+      if check(p, "]") {
+        break
+      }
+      push(dims, parse_dim(p)?)
+    }
+  }
+  expect(p, "]")?
+  Ok(ast.ShapeAnno { dims: dims })
+}
+
+fn parse_dim(p: Parser) -> Res[ast.Dim, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  if t.kind == lex.KIND_NUMBER {
+    next_tok(p)
+    match i64_of_str(t.value) {
+      Some(n) => {
+        if n < 0 {
+          return Err(err_at(t, "shape dimension must be a non-negative integer"))
+        }
+        return Ok(ast.concrete_dim(n))
+      },
+      None => return Err(err_at(t, "shape dimension must be a non-negative integer")),
+    }
+  }
+  if t.kind == lex.KIND_IDENT {
+    next_tok(p)
+    # "_" is an anonymous unknown dim; any other name is a shape variable, and
+    # the checker makes two occurrences of the same name agree.
+    if bytes.equal(t.value, "_") {
+      return Ok(ast.anon_dim())
+    }
+    return Ok(ast.var_dim(t.value))
+  }
+  Err(err_at(t, "expected a dimension size or name"))
+}
+
+fn parse_args(p: Parser) -> Res[Arr[ast.Expr], lex.SyntaxError] {
+  expect(p, "(")?
+  let args: Arr[ast.Expr] = arr_new()
+  if not check(p, ")") {
+    push(args, parse_expr(p)?)
+    while accept(p, ",") {
+      if check(p, ")") {
+        break
+      }
+      push(args, parse_expr(p)?)
+    }
+  }
+  expect(p, ")")?
+  Ok(args)
+}

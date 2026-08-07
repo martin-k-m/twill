@@ -415,3 +415,18 @@ exists. Worth a depth counter with a diagnostic rather than whatever the VM
 does by default.
 
 *Go bootstrap:* none. A deeply nested twill file crashes the Go parser today.
+
+## NEEDS-31 — deliberate divergence: `t[]`
+
+**Status:** decided. `src/parse.tw` `parse_index_or_slice`.
+
+`t[]` has no start expression and no `:` to make it a slice.
+`internal/parser/parser.go` builds an `ast.Index` with a nil `Index` field and
+the failure surfaces later in the evaluator, pointing at the wrong place.
+`src/parse.tw` refuses it at the bracket with "expected an index expression".
+
+This is the one place the twill parser is knowingly not a copy. It is recorded
+here rather than silently fixed because the differential harness will report it
+as a divergence, and a divergence with no note is indistinguishable from a bug.
+Either the Go parser is changed to match, or this entry is the reason the diff
+is expected.
