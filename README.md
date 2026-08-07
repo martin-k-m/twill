@@ -1,70 +1,157 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark-glow.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png">
-    <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png" width="140">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-wordmark.svg">
+    <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-wordmark.svg" width="340">
   </picture>
 </p>
 
-<h1 align="center">Twill</h1>
-
 <p align="center">
-  A small programming language for numeric and machine-learning code.
+  <b>A small language where tensors are the primitive, <code>grad</code> is built in,<br>
+  and a shape mistake is an error you see before the program runs.</b>
 </p>
 
-[![CI](https://github.com/martin-k-m/twill/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/twill/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/martin-k-m/twill?sort=semver)](https://github.com/martin-k-m/twill/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
+<p align="center">
+  <a href="https://github.com/martin-k-m/twill/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/martin-k-m/twill/ci.yml?branch=main&style=flat-square&label=CI&labelColor=12332C&color=7FE3C4"></a>
+  <a href="https://github.com/martin-k-m/twill/releases"><img alt="release" src="https://img.shields.io/github/v/release/martin-k-m/twill?sort=semver&style=flat-square&labelColor=12332C&color=4FB79B"></a>
+  <a href="go.mod"><img alt="go 1.23+" src="https://img.shields.io/badge/go-1.23%2B-D2F0E4?style=flat-square&labelColor=12332C"></a>
+  <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-A8DCCB?style=flat-square&labelColor=12332C">
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7FE3C4?style=flat-square&labelColor=12332C"></a>
+</p>
 
-Twill is a small programming language for numeric and machine-learning code.
-Tensors are the built-in data type, differentiation is part of the language
-(`grad`, not a library call), and a static checker catches shape mistakes
-before a program runs.
+---
 
-It spans the ML stack in one dependency-free binary: neural networks — from MLPs
-to **convolutional nets** and **self-attention/transformers** — gradient-boosted
-trees, and a differentiable backtester, all sharing the same autodiff engine,
-static shape checking, and reproducible-by-default execution. Tabular, vision,
-and sequences, with the same `grad`. Finance is one domain it's built out for; it
-is not limited to it.
+Most machine-learning code is a language plus a numeric framework bolted on top.
+twill goes the other way. Tensors are the built-in data type, differentiation is
+a language operation rather than a library call, and a static checker reads your
+shapes before anything executes.
 
-It's an early prototype (v0.28). The reference implementation is a single Go
-binary with no dependencies, so it's easy to build and easy to read.
+Here is the whole of it. This prices a European call by Monte Carlo and gets its
+delta and vega by differentiating the pricer, with no bumping and no second
+library:
 
 ```rust
-fn f(x) = x * x * x     # f(x) = x^3
-let df = grad(f)        # df(x) = 3x^2
-print(df(2.0))          # 12
+seed(42)
+let Z = randn(200000)                              # fixed shocks: the price is smooth in its inputs
+
+fn call_price(S0, K, r, sigma, T) {
+  let drift = (r - 0.5 * sigma * sigma) * T
+  let ST = S0 * exp(drift + sigma * sqrt(T) * Z)   # simulated terminal prices
+  exp(-r * T) * mean(relu(ST - K))                 # discounted expected payoff
+}
+
+let price = call_price(100.0, 100.0, 0.05, 0.2, 1.0)
+let delta = grad(fn(s) = call_price(s, 100.0, 0.05, 0.2, 1.0))(100.0)
+let vega  = grad(fn(v) = call_price(100.0, 100.0, 0.05, v, 1.0))(0.2)
+```
+
+```
+$ twill examples/montecarlo_option.tw
+European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths: 200000
+  price = 10.442696  (Black-Scholes 10.4506)
+  delta = 0.636269  (Black-Scholes 0.6368)
+  vega  = 37.488476   (Black-Scholes 37.524)
+```
+
+`grad` went through 200,000 simulated paths, a `relu` payoff and a mean, and
+landed on the closed-form Greeks. No tape object, no `requires_grad`, no
+`.backward()`. The full program is [`examples/montecarlo_option.tw`](examples/montecarlo_option.tw).
+
+This is an early prototype at v1.2.0. The reference implementation is a single Go
+binary with no dependencies, so it is quick to build and short enough to read.
+
+## Contents
+
+- [Shape errors, before the program runs](#shape-errors-before-the-program-runs)
+- [Why](#why)
+- [Install](#install)
+- [Run](#run)
+- [Differentiation](#differentiation)
+- [The language in a few lines](#the-language-in-a-few-lines)
+- [Units of measure](#units-of-measure)
+- [Tensors and operations](#tensors-and-operations)
+- [The standard library](#the-standard-library)
+- [What twill is built out for](#what-twill-is-built-out-for)
+- [twill is being written in twill](#twill-is-being-written-in-twill)
+- [What is not done yet](#what-is-not-done-yet)
+- [Repository layout](#repository-layout)
+- [Documentation](#documentation)
+- [License](#license)
+
+## Shape errors, before the program runs
+
+The single most useful thing twill does is refuse to start. `twill check` infers
+tensor shapes across the whole program and reports the ones that cannot line up:
+
+```
+$ twill check bad.tw
+bad.tw:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+  3 | let y = A @ x
+```
+
+Function parameters can carry shape annotations, which turn a contract into
+something the checker enforces at every call site:
+
+```rust
+fn matvec(A: [3, 2], x: [2]) -> [3] {
+  A @ x
+}
+```
+
+Break that contract and you get the mistake at the call and at the line it
+breaks, both before anything runs:
+
+```
+$ twill check model.tw
+model.tw:6: shape error: argument 2 ("x") axis 0 is 3 but the signature expects 2
+  6 | let out = matvec(A, [1.0, 2.0, 3.0])
+model.tw:2: shape error: shape mismatch in @: [3, 2] @ [3] (inner 2 != 3)
+  2 |   A @ x
+```
+
+Use `[2]` for a vector, `[3, 2]` for a matrix, `[]` for a scalar, and `_` for a
+dimension you do not want to pin down. A dimension can also be a name, a shape
+variable: a name used more than once must be the same size, which is what ties
+shapes together across a signature and lets the checker verify the return type of
+`fn mm(A: [n, k], B: [k, m]) -> [n, m]`.
+
+The checker only flags a mismatch when it is certain. Code whose shapes depend on
+runtime values is left alone rather than guessed at, so a clean run means what it
+says:
+
+```
+$ twill check examples/shapes.tw
+examples/shapes.tw: no shape problems found
 ```
 
 ## Why
 
-Most machine-learning code today is Python plus a numeric framework. That works,
-but the framework is bolted onto a language that predates it: autodiff is a
-runtime library, tensor shapes are only known once you run the code, and a lot
-of glue sits between the math and the program.
+Autodiff as a runtime library, shapes known only once you run, and a layer of
+glue between the math and the program are all consequences of the same thing: the
+framework arrived after the language. twill is an experiment in the other
+direction, a language built around differentiable tensor programs from the start.
+Three things fall out of it.
 
-Twill is an experiment in the other direction — a language built around
-differentiable tensor programs from the start. Three things fall out of that:
+**Tensors are the primitive.** Every number is a rank-0 tensor, vectors and
+matrices are literals, and `@` is matrix multiply. Broadcasting follows NumPy
+rules, and the gradients broadcast back correctly.
 
-- Tensors are the primitive. Every number is a rank-0 tensor, vectors and
-  matrices are literals, and `@` is matrix multiply.
-- `grad` is a keyword-like builtin backed by a real reverse-mode autodiff
-  engine. No `requires_grad`, no `.backward()`, no optimizer objects.
-- Shapes — and optional units of measure (USD, shares, years) — are checked
-  statically. `[2,3] @ [4]`, or adding dollars to shares, is an error you see
-  before the program runs, not a stack trace halfway through training.
+**`grad` is a builtin backed by a real reverse-mode engine.** It follows the
+structure of its argument, so a model held in a list gets a matching list of
+gradients back, and a model held in a record gets a record.
 
-The language is deliberately small. The whole implementation is a few thousand
-lines of Go you can read in a sitting. Large tensor operations run across CPU
-cores (deterministically — parallelism never changes a result).
+**Shapes and units are checked statically.** `[2,3] @ [4]` is an error you see
+before the program runs, not a stack trace forty minutes into training.
+
+The language is deliberately small, and the whole implementation is a few
+thousand lines of Go you can read in a sitting. Large tensor operations run
+across CPU cores, deterministically: parallelism never changes a result.
 
 ## Install
 
 Download a prebuilt binary for your platform from the
 [releases page](https://github.com/martin-k-m/twill/releases) and put it on your
-`PATH`. With a Go toolchain (1.23+) you can also:
+`PATH`. With a Go toolchain (1.23 or newer) you can also:
 
 ```bash
 go install github.com/martin-k-m/twill/cmd/twill@latest
@@ -87,9 +174,41 @@ twill fmt examples/hello.tw     # print canonically formatted source
 twill                           # start the REPL (multi-line aware)
 ```
 
-The REPL keeps reading until brackets balance, so you can define block-body
-functions interactively. Without installing, `go run ./cmd/twill <file.tw>`
-works too, and `go test ./...` runs the suite.
+The REPL keeps reading until brackets balance, so block-body functions can be
+defined interactively. Without installing, `go run ./cmd/twill <file.tw>` works
+too, and `go test ./...` runs the suite.
+
+## Differentiation
+
+| Builtin | Returns |
+| --- | --- |
+| `grad(f)` | a function computing `df/d(arg0)`, for scalar or tensor args |
+| `grads(f)` | a function returning the gradient of every argument, as a list |
+| `value_and_grad(f)` | a function returning `[f(x), df/d(arg0)]` |
+| `jacobian(f)` | a function returning the full `[m, n]` Jacobian of a vector output |
+| `hessian(f)` | a function returning the `[n, n]` Hessian of a scalar output |
+
+`grad`, `grads` and `value_and_grad` differentiate a scalar output, as a loss
+does. `jacobian` handles a vector output and returns every partial derivative at
+once ([`examples/jacobian.tw`](examples/jacobian.tw)). `hessian` gives exact
+second derivatives, via forward-mode jets over the core ops, which is enough for
+Newton's method:
+
+```
+$ twill examples/hessian.tw
+Hessian of xᵀAx  (equals A + Aᵀ):
+tensor([[4, 1], [1, 12]], shape=[2, 2])
+step 0   t = 1.5   f'(t) = 5.5
+step 1   t = 1.238095   f'(t) = 1.162833
+step 2   t = 1.144277   f'(t) = 0.127467
+step 3   t = 1.131153   f'(t) = 0.002356
+step 4   t = 1.130901   f'(t) = 0.000001
+step 5   t = 1.130901   f'(t) = 0
+converged to a minimum where f'(t) is ~0
+```
+
+The autodiff graph is only built while a value is being differentiated, so
+ordinary evaluation does not pay for it.
 
 ## The language in a few lines
 
@@ -103,13 +222,13 @@ let m = [[1.0, 2.0], [3.0, 4.0]]  # a matrix, shape [2, 2]
 let d  = v @ v                    # dot product -> 14
 let mv = m @ [1.0, 1.0]           # matrix-vector -> [3, 7]
 
-# Functions are one expression or a block; the last expression is returned.
+# A function is one expression or a block; the last expression is returned.
 fn rms(t) {
   let n = len(t)
   sqrt(sum(t * t) / n)
 }
 
-# Loops for training code.
+# Loops, for training code.
 let total = 0.0
 for i in range(10) { total = total + i }
 
@@ -118,62 +237,14 @@ fn energy(w) = sum(relu(w) * relu(w)) / 2.0
 let g = grad(energy)([-1.0, 2.0, -3.0, 4.0])   # [0, 2, 0, 4]
 ```
 
-The [language guide](docs/language-guide.md) covers everything; the
-[design notes](docs/design.md) explain how it works and what's next.
-
-## Differentiation
-
-`grad`, `grads`, and `value_and_grad` turn a function into its derivative.
-
-| Builtin | Returns |
-| --- | --- |
-| `grad(f)` | a function computing `df/d(arg0)`, for scalar or tensor args |
-| `grads(f)` | a function returning the gradient of every argument, as a list |
-| `value_and_grad(f)` | a function returning `[f(x), df/d(arg0)]` |
-| `jacobian(f)` | a function returning the full `[m, n]` Jacobian of a vector output |
-| `hessian(f)` | a function returning the `[n, n]` Hessian (second derivatives) of a scalar output |
-
-`grad`/`grads`/`value_and_grad` differentiate a scalar output, as a loss does;
-`jacobian` handles a vector output, returning every partial derivative at once
-(`examples/jacobian.tw`). `hessian` gives exact second derivatives — enough for
-Newton's method (`examples/hessian.tw`) — via forward-mode jets over the core ops. The
-autodiff graph is only built while a value is being differentiated, so ordinary
-evaluation doesn't pay for it. Gradients also follow the structure of their
-argument, so a model held in a list gets a matching list of gradients back —
-see `examples/nn_xor.tw`.
-
-## Shape checking
-
-Before running, Twill infers tensor shapes and reports the ones that can't line
-up. It only flags a mismatch when it's certain, so dynamic code (shapes that
-depend on runtime values) is left alone rather than guessed at.
-
-```
-$ twill check bad.tw
-bad.tw:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
-```
-
-Function parameters can carry optional shape annotations that document and
-enforce a contract:
-
-```rust
-fn matvec(A: [3, 2], x: [2]) -> [3] {
-  A @ x
-}
-```
-
-Use `[2]` for a vector, `[3, 2]` for a matrix, `[]` for a scalar, and `_` for a
-dimension you don't want to pin down. A dimension can also be a name (a shape
-variable): a name used more than once must be the same size, which lets the
-checker tie shapes together and verify the return —
-`fn mm(A: [n, k], B: [k, m]) -> [n, m]`.
+The [language guide](docs/language-guide.md) covers everything, and the
+[design notes](docs/design.md) explain how it works and what is next.
 
 ## Units of measure
 
-Scalars can carry units too. Declare base units, annotate quantities, and the
-checker tracks units through arithmetic — so price × quantity is money, but
-dollars + shares is a compile error. Units are erased at runtime (zero
-overhead).
+Scalars carry units too. Declare base units, annotate quantities, and the checker
+tracks units through arithmetic, so price times quantity is money but dollars
+plus shares is refused. Units are erased at runtime and cost nothing.
 
 ```rust
 unit USD
@@ -185,122 +256,195 @@ let price: USD/share = 150.0
 let value = notional(price, 200.0)   # USD
 ```
 
-See `examples/units.tw` and the [language guide](docs/language-guide.md#units-of-measure).
+```
+$ twill check bad.tw
+bad.tw:6: shape error: unit mismatch: USD*share^-1 + share
+  6 | let bad = price + qty
+```
+
+See [`examples/units.tw`](examples/units.tw) and the
+[language guide](docs/language-guide.md#units-of-measure).
 
 ## Tensors and operations
 
-Elementwise ops broadcast NumPy-style (a row vector across a matrix, a column
-against rows, a scalar against anything), and the gradients broadcast back
-correctly. Beyond arithmetic and `@`, the built-in ops include `relu`,
-`sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip`; `softmax` and
-`logsumexp`; `maximum`, `minimum`, `where`, and elementwise comparisons; the
-reductions `sum`, `mean`, `max`, `min`, `prod`, `median`, and `argmax`/`argmin` (with
-an optional axis); `flip`, `roll` and `diff`; sorting with `sort`, `argsort`, `topk` and `argtopk`;
-the cumulative scans `cumsum`, `cumprod`, `cummax` and `cummin` (also with an
-optional axis);
-and shape ops `reshape`, `broadcast_to`, `transpose`, `concat`, and `split`. There's a differentiable
-`einsum` for general contractions (`einsum("ij,jk->ik", A, B)`). Tensors and
-lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See the
-[language guide](docs/language-guide.md) for the full list.
+Elementwise ops broadcast NumPy-style, a row vector across a matrix, a column
+against rows, a scalar against anything. Beyond arithmetic and `@` the builtins
+cover:
 
-## A small standard library
+| Group | Operations |
+| --- | --- |
+| Elementwise | `relu`, `sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `square`, `abs`, `clip` |
+| Normalizing | `softmax`, `logsumexp` |
+| Selection | `maximum`, `minimum`, `where`, and elementwise comparisons |
+| Reductions | `sum`, `mean`, `max`, `min`, `prod`, `median`, `argmax`, `argmin` (optional axis) |
+| Rearranging | `flip`, `roll`, `diff`, `reshape`, `broadcast_to`, `transpose`, `concat`, `split` |
+| Sorting | `sort`, `argsort`, `topk`, `argtopk` |
+| Scans | `cumsum`, `cumprod`, `cummax`, `cummin` (optional axis) |
+| Contraction | `einsum("ij,jk->ik", A, B)`, differentiable and general |
+| Deep learning | `conv2d`, `maxpool2d`, `gather` |
 
-The `std/` libraries are written in Twill itself and are compiled into the
-`twill` binary, so `import "std/nn"` works from any directory with nothing to
-install alongside it. `std/nn` has dense layers, activations (`gelu`,
-`softplus`, ...), initializers (He, Xavier), and losses including softmax
-cross-entropy. `std/optim` has SGD, momentum, and Adam that work on a model held
-either as a positional list or a named record (they walk the tensor leaves with
-`map_leaves`/`zip_leaves`). Import with `import "std/nn"` (it pulls in the
-optimizers too).
+Tensors and lists also support differentiable first-axis slicing (`v[1:3]`,
+`m[:2]`). The [language guide](docs/language-guide.md) has the full list.
 
-`examples/classifier.tw` trains a 3-class MLP with softmax cross-entropy and
-Adam; `examples/nn_xor.tw` is a smaller net using `grad` over a whole
-parameter list. For deep learning there are differentiable `conv2d` and
-`maxpool2d` ops (plus `nn.conv`/`nn.conv_init`): `examples/cnn.tw` trains a real
-convolutional net — conv → relu → max-pool → dense — end-to-end with `grad`,
-the kernel included. `examples/minibatch.tw` shows a full training loop —
-standardize, train/test split, and reshuffled minibatches each epoch — using the
-differentiable `gather` op and `std/data`. And `examples/attention.tw` trains
-a **self-attention** sequence classifier (embed → attention → pool → dense):
-`grad` differentiates the attention softmax and the learned embeddings together.
+## The standard library
 
-Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
-`read_frame("data.csv")` (a header CSV as a *frame* — a record of named column
-tensors, so `df.close`, slicing, and `grad` all work on it). See
-`examples/frames.tw`, which computes realized volatility from a price series.
+The `std/` libraries are written in twill itself and compiled into the binary, so
+`import "std/nn"` works from any directory with nothing to install alongside it.
 
-Trained models persist with `save(model, "model.bin")` and `load("model.bin")` —
-any value, from a record of network weights to a fitted gradient-boosted forest,
-round-trips exactly. Train once, then ship the model with the single binary for
-inference (`examples/save_load.tw`).
+| Module | Contents |
+| --- | --- |
+| `std/nn` | dense layers, activations (`gelu`, `softplus`, ...), He and Xavier initializers, losses including softmax cross-entropy, `nn.conv` |
+| `std/optim` | SGD, momentum and Adam, over a model held as a positional list or a named record |
+| `std/data` | standardizing, train/test splitting, minibatching |
+| `std/backtest` | returns, moving averages, equity curves, drawdown, Sharpe, Sortino, CAGR |
+| `std/num`, `std/shapes` | numerics and rearrangements the builtins leave out |
 
-Randomness is **deterministic by default** (seeded), so a program reproduces
-exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.tw`
-prices a European option by Monte Carlo and gets its Greeks (delta, vega) *by
-autodiff* — no bump-and-revalue.
+The optimizers walk a model's tensor leaves with `map_leaves` and `zip_leaves`,
+which is why the same `optim.adam` works on a list of matrices and on a record of
+named weights. A library imported as a namespace, `import "std/nn" as nn`, exposes
+its fields in declaration order, so the same program prints the same thing every
+run.
 
-For tabular ML there's a native gradient-boosted-trees engine — the workhorse of
-credit, fraud, and default modeling — in pure Go, no XGBoost. `gbm_fit(X, y,
-opts)` trains a regression or logistic model and `gbm_predict(model, X)` scores
-it; fits are deterministic. See `examples/gbm.tw`.
+Load your own data with `read_csv("data.csv")`, which gives a `[rows, cols]`
+tensor, or `read_frame("data.csv")`, which reads a header CSV as a *frame*: a
+record of named column tensors, so `df.close`, slicing and `grad` all work on it.
+Trained models persist with `save(model, "model.bin")` and `load("model.bin")`.
+Any value round-trips exactly, from a record of network weights to a fitted
+gradient-boosted forest, so you can train once and ship the model with the single
+binary for inference.
 
-For quant signals, `std/backtest` plus the cumulative builtins
-(`cumsum`/`cumprod`/`cummax`) give a vectorized backtester — returns, moving
-averages, equity curves, drawdown, Sharpe, Sortino, CAGR (`examples/backtest.tw`).
-Because the Sharpe is differentiable in the return series, you can *tune a signal
-by gradient ascent straight through the backtest* — `examples/signal_opt.tw`
-learns a signal's weights by climbing its Sharpe, something a plain Python
-backtest can't do without JAX. [docs/finance.md](docs/finance.md) lays out where
-Twill aims to be better than a Python stack for financial ML, and how.
+Randomness is deterministic by default and seeded, so a program reproduces
+exactly. `seed(n)` picks the starting point.
 
-Parameters can also live in a record with named fields instead of a positional
-list. `grad` follows the record structure, so differentiating a loss over a
-record returns a record of gradients — see `examples/records.tw`. You can declare
-a record type and have the checker verify a model's fields and shapes:
+## What twill is built out for
+
+The same `grad`, the same checker and the same binary cover the stack:
+
+| Example | What it does |
+| --- | --- |
+| [`nn_xor.tw`](examples/nn_xor.tw) | a small net, with `grad` taken over the whole parameter list |
+| [`classifier.tw`](examples/classifier.tw) | a 3-class MLP with softmax cross-entropy and Adam |
+| [`cnn.tw`](examples/cnn.tw) | a convolutional net, conv to relu to max-pool to dense, trained end to end with the kernel included |
+| [`attention.tw`](examples/attention.tw) | a self-attention sequence classifier; `grad` differentiates the attention softmax and the learned embeddings together |
+| [`minibatch.tw`](examples/minibatch.tw) | a full training loop: standardize, split, reshuffled minibatches each epoch |
+| [`gbm.tw`](examples/gbm.tw) | gradient-boosted trees, native and deterministic, no XGBoost |
+| [`records.tw`](examples/records.tw) | parameters in a record, so `grad` returns a record of gradients |
+| [`frames.tw`](examples/frames.tw) | realized volatility from a price series, over a named-column frame |
+| [`backtest.tw`](examples/backtest.tw) | a vectorized backtester built on the cumulative builtins |
+| [`signal_opt.tw`](examples/signal_opt.tw) | tuning a trading signal by gradient ascent *straight through* the backtest |
+
+`signal_opt.tw` is the one worth a second look. Because the Sharpe ratio is
+differentiable in the return series, the backtest is a function you can climb,
+which a plain Python backtest cannot do without reaching for JAX.
+[docs/finance.md](docs/finance.md) sets out where twill aims to beat a Python
+stack for financial ML, and how.
+
+The checker also verifies declared record types, so a model's fields and shapes
+are part of the contract:
 
 ```rust
 type Model = { w: [3, 2], b: [3] }
 fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
 ```
 
-Libraries can be imported as a namespace with `import "std/nn" as nn` and
-called as `nn.dense(...)`. The namespace's fields come out in the library's
-declaration order, so the same program prints the same thing every run.
+## twill is being written in twill
 
-## Layout
+> **This section describes work in progress. None of it runs yet.**
+
+The reference implementation is Go. The next one is twill: the lexer, parser,
+checker, evaluator, tensor kernels, formatter and CLI are being written in the
+language itself, under `src/`, and are already in the repository. They do not
+execute, because the language cannot yet express its own compiler.
+
+That is the point of doing it. A `.tw` file declares its mode on the first line,
+and `mode systems` turns on the subset a compiler needs: a real 64-bit integer
+with defined wrapping, byte strings, arrays, dictionaries, structs, file reading.
+Designing that subset is the actual project; the compiler is downstream of it and
+is the easy half. Writing the compiler first is how you find out what the subset
+has to be, instead of guessing.
+
+The output so far is two things.
+
+**A specification of what the language still needs.** Every wall the port hits is
+written down in [`docs/needs.md`](docs/needs.md), one numbered entry per feature,
+naming the file and line that reaches for it and what the Go bootstrap does in the
+same place. Implementing an entry is then a matter of making twill do what Go
+already does there. It is a work queue, ordered by dependency.
+
+**Bugs in the reference implementation.** `src/lex.tw` was run against
+`internal/lexer/lexer.go` over 385 corpus files and 4,000 seeded fuzzer cases,
+compared on token kind, literal text, line, column, the comment list, and the
+error message and its position. Zero divergences on the corpus and the fuzzer,
+three on targeted edge cases. One of the three is a bug in the Go lexer: source
+ending in an unterminated string whose last byte is a backslash makes it index
+past the end of its rune slice and panic. The twill lexer checks, and reports
+"unterminated string" at the opening quote, which is the better diagnosis. It is
+recorded as `NEEDS-33`, with the resolution being to fix the Go side.
+
+The design, including why file-level modes are the mechanism and what each
+feature costs the numeric language, is in
+[`docs/self-hosting.md`](docs/self-hosting.md).
+
+[spool](https://github.com/martin-k-m/spool), the package manager, is the same
+experiment run a second time: a real program written against the subset, with its
+own list of what is missing.
+
+## What is not done yet
+
+This is a prototype, and some of it is deliberately left for later.
+
+- It is interpreted. Tensor ops loop in Go, and there is no vectorized or GPU
+  backend. The interpreter is the reference for the semantics.
+  [docs/gpu-feasibility.md](docs/gpu-feasibility.md) measures what a GPU backend
+  would actually buy and recommends against it for now.
+- Autodiff is reverse-mode and first-order. `grad(grad(f))` is refused rather
+  than silently answered with zero; use `hessian` for second derivatives.
+- The shape checker is best-effort, not a full type system. It catches
+  mismatches when shapes are statically knowable and stays quiet otherwise.
+- Imports are files and `std/` modules. There is no package manager yet, and no
+  versioning of third-party libraries.
+- The self-hosted compiler under `src/` does not run.
+
+The [design notes](docs/design.md) go into the roadmap.
+
+## Repository layout
 
 ```
-cmd/twill/          the `twill` command (run / check / repl)
+cmd/twill/           the `twill` command (run / check / fmt / repl)
 internal/lexer/      source text -> tokens
 internal/parser/     tokens -> AST
 internal/ast/        AST node types
 internal/tensor/     the differentiable tensor engine
 internal/gbm/        native gradient-boosted trees
 internal/value/      runtime values and environments
-internal/interp/     the tree-walking interpreter + builtins
-internal/checker/    static shape (and unit) analysis
+internal/interp/     the tree-walking interpreter and its builtins
+internal/checker/    static shape and unit analysis
 internal/format/     the source formatter (twill fmt)
-std/                 the standard library, written in Twill and embedded in
-                     the binary (nn, optim, data, backtest)
+src/                 the self-hosted implementation, written in twill
+std/                 the standard library, written in twill and embedded
 examples/            runnable .tw programs
 editors/vscode/      syntax highlighting for .tw files
-docs/                language guide and design notes
+assets/              the mark, the wordmark and the icons
+docs/                the guides, the design notes and the specification
 ```
 
-## What's not done yet
+## Documentation
 
-This is a prototype, and some of it is deliberately left for later:
+Start at [docs/README.md](docs/README.md), which indexes the lot. The short
+version:
 
-- It's interpreted. Tensor ops loop in Go; there's no vectorized or GPU
-  backend yet. The interpreter is the reference for the semantics.
-- Autodiff is reverse-mode and first-order; `grad(grad(f))` isn't supported.
-- The shape checker is best-effort, not a full type system — it catches
-  mismatches when shapes are statically knowable and stays quiet otherwise.
-- Imports are files and `std/` modules; there is no package manager and no
-  versioning of third-party libraries.
+| Document | For |
+| --- | --- |
+| [tutorial.md](docs/tutorial.md) | from nothing to a trained model |
+| [language-guide.md](docs/language-guide.md) | the reference |
+| [design.md](docs/design.md) | why it is built this way, and the roadmap |
+| [self-hosting.md](docs/self-hosting.md) | the systems subset, and the port |
+| [needs.md](docs/needs.md) | what the language still has to provide |
+| [finance.md](docs/finance.md) | the financial-ML case, assessed honestly |
+| [brand.md](docs/brand.md) | the mark, the palette and the asset rules |
 
-The [design notes](docs/design.md) go into the roadmap.
+Bug reports, small fixes and design discussion are all welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
