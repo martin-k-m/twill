@@ -1,6 +1,6 @@
 mode systems
 
-# lex.tw — the twill lexer, written in twill.
+# lex.tw: the twill lexer, written in twill.
 #
 # This is a port of internal/lexer/lexer.go, not a reinterpretation of it. The
 # token stream is compared against the Go lexer's over every .tw file in the

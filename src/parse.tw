@@ -1,6 +1,6 @@
 mode systems
 
-# parse.tw — the twill parser, in twill.
+# parse.tw: the twill parser, in twill.
 #
 # A port of internal/parser/parser.go: recursive descent with a Pratt loop for
 # binary operators. Every production, every precedence, every error message and

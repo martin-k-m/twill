@@ -1,6 +1,6 @@
 mode systems
 
-# check.tw — the twill shape checker, in twill.
+# check.tw: the twill shape checker, in twill.
 #
 # A port of internal/checker/checker.go. The policy is the one that file states
 # in its package comment and it is worth restating, because every decision below

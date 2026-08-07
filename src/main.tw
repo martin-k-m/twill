@@ -1,6 +1,6 @@
 mode systems
 
-# main.tw — the twill CLI, in twill.
+# main.tw: the twill CLI, in twill.
 #
 # `twill run`, `twill check`, `twill fmt`, `twill dump`. This is the shape of
 # cmd/twill/main.go, and the parts it can express today are the argument

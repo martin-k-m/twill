@@ -1,6 +1,6 @@
 mode systems
 
-# bytes.tw — the string-building primitives the rest of the compiler is written
+# bytes.tw: the string-building primitives the rest of the compiler is written
 # against.
 #
 # Every function here is one line over a runtime primitive, and that is the

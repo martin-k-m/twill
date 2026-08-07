@@ -18,7 +18,7 @@ Status key: **blocking** means no file in `src/` parses without it.
 
 ---
 
-## NEEDS-1 — `mode systems` as a file-level declaration
+## NEEDS-1: `mode systems` as a file-level declaration
 
 **Status:** blocking. Every file in `src/` opens with it.
 
@@ -31,7 +31,7 @@ below is refused outside it.
 *Go bootstrap:* no concept of a mode. `internal/parser/parser.go` `parseStmt`
 has no case for it and `internal/checker/checker.go` has a single policy.
 
-## NEEDS-2 — `I64` with bitwise operators
+## NEEDS-2: `I64` with bitwise operators
 
 **Status:** blocking. `src/lex.tw` uses it for every offset, line and column.
 
@@ -45,7 +45,7 @@ integer type rather than a float that happens to hold integers.
 no integer type and no bitwise operator; `builtins.go` `int` truncates a float
 and returns a float.
 
-## NEEDS-3 — `enum` with payloads and exhaustive `match`
+## NEEDS-3: `enum` with payloads and exhaustive `match`
 
 **Status:** blocking for `src/ast.tw` and everything downstream of it.
 
@@ -61,7 +61,7 @@ a design, it is a transcription error waiting to happen.
 every consumer type-switches. There is no exhaustiveness check anywhere, which
 is precisely the property the twill version is meant to gain.
 
-## NEEDS-4 — generics: `Arr[T]`, `Dict[K,V]`, `Opt[T]`, `Res[T,E]`
+## NEEDS-4: generics: `Arr[T]`, `Dict[K,V]`, `Opt[T]`, `Res[T,E]`
 
 **Status:** blocking.
 
@@ -73,7 +73,7 @@ holds `Arr[Token]` and `Arr[Comment]`) is the first.
 `[]Value` (heterogeneous) and `Record` as ordered string keys, and the checker
 models them as `tList` and `tRecord` with no element type.
 
-## NEEDS-5 — `struct`: nominal, mutable, reference semantics
+## NEEDS-5: `struct`: nominal, mutable, reference semantics
 
 **Status:** blocking. `src/lex.tw:198` `Lexer` is a cursor that advances.
 
@@ -88,7 +88,7 @@ not aliasing (`docs/self-hosting.md` section 1.2).
 *Go bootstrap:* `value.Record` exists but is value-ish and has no declared
 mutability. `interp` supports record field assignment only through rebinding.
 
-## NEEDS-6 — indexable, sliceable `Str`
+## NEEDS-6: indexable, sliceable `Str`
 
 **Status:** blocking.
 
@@ -102,7 +102,7 @@ the source span.
 and no concatenation. A lexer written in twill today cannot read its first
 character.
 
-## NEEDS-7 — `Bytes`: a growable byte buffer
+## NEEDS-7: `Bytes`: a growable byte buffer
 
 **Status:** blocking. The whole of `src/bytes.tw`.
 
@@ -113,7 +113,7 @@ compiler never builds a string by repeated `+`, which is quadratic.
 *Go bootstrap:* `strings.Builder`, used exactly this way in
 `internal/lexer/lexer.go` and `internal/format/format.go`.
 
-## NEEDS-8 — `Dict[Str, V]` with insertion-ordered iteration
+## NEEDS-8: `Dict[Str, V]` with insertion-ordered iteration
 
 **Status:** blocking.
 
@@ -131,7 +131,7 @@ random order emits different output on every run.
 printing (`unitString` calls `sort.Strings`) and because `Record` carries its
 own `Keys` slice for exactly this reason.
 
-## NEEDS-9 — a byte literal
+## NEEDS-9: a byte literal
 
 **Status:** not blocking. Worked around in `src/lex.tw:91`.
 
@@ -143,7 +143,7 @@ is paid once.
 
 *Go bootstrap:* Go rune literals, `'\n'` and friends, throughout the lexer.
 
-## NEEDS-10 — `Res[T, E]` and postfix `?`
+## NEEDS-10: `Res[T, E]` and postfix `?`
 
 **Status:** blocking.
 
@@ -159,7 +159,7 @@ the error value; `src/lex.tw:67` is its twill equivalent and matches its
 `Error()` rendering exactly, so a message printed by either implementation is
 the same string.
 
-## NEEDS-11 — `abort(msg)`
+## NEEDS-11: `abort(msg)`
 
 **Status:** blocking. `src/lex.tw:45` and about thirty other places.
 
@@ -171,7 +171,7 @@ keeping.
 `internal/interp` return an error instead, which conflates them with user
 errors.
 
-## NEEDS-12 — `continue` in `while` and `for`
+## NEEDS-12: `continue` in `while` and `for`
 
 **Status:** blocking. `src/lex.tw:305` and the whole scanner loop.
 
@@ -182,7 +182,7 @@ same shape. Rewriting it as nested `else` would nest eight deep.
 `while` with no loop-control statements at all; the language has neither
 `break` nor `continue`.
 
-## NEEDS-13 — `Unit` as a value, and `unit` as its literal
+## NEEDS-13: `Unit` as a value, and `unit` as its literal
 
 **Status:** not blocking; cosmetic. `src/lex.tw:421`.
 
@@ -192,7 +192,7 @@ the `Ok`. The checker already has a `tUnit` type; the value side is missing.
 *Go bootstrap:* `value.Unit`, which exists (`internal/value/value.go`) but has
 no source syntax.
 
-## NEEDS-14 — a `Bool` type name in annotations
+## NEEDS-14: a `Bool` type name in annotations
 
 **Status:** blocking, trivially.
 
@@ -203,7 +203,7 @@ unit and reported as undeclared.
 
 *Go bootstrap:* `checker.tBool` exists; there is no way to write it.
 
-## NEEDS-15 — lexer divergence: non-ASCII whitespace in comments
+## NEEDS-15: lexer divergence: non-ASCII whitespace in comments
 
 **Status:** known, accepted divergence, **confirmed by differential test**.
 `src/lex.tw:466` (`is_space`).
@@ -218,7 +218,7 @@ on it, the fix is a decoder in `trim_space`, not in the scanner.
 
 ## Parser
 
-## NEEDS-16 — recursive enum payloads without explicit indirection
+## NEEDS-16: recursive enum payloads without explicit indirection
 
 **Status:** blocking. `src/ast.tw` throughout.
 
@@ -229,7 +229,7 @@ true in the implementation, including for a payload that is the enum itself
 
 *Go bootstrap:* interfaces are already references.
 
-## NEEDS-17 — a growable `Arr` with `pop` and `set`
+## NEEDS-17: a growable `Arr` with `pop` and `set`
 
 **Status:** blocking. `src/parse.tw` builds every statement list this way.
 
@@ -239,7 +239,7 @@ token stream.
 
 *Go bootstrap:* Go slices with `append`.
 
-## NEEDS-18 — `f64_of_str` / `str_to_f64`
+## NEEDS-18: `f64_of_str` / `str_to_f64`
 
 **Status:** blocking. `src/parse.tw` `parse_number`.
 
@@ -252,7 +252,7 @@ primitive that calls the same conversion the Go side does.
 *Go bootstrap:* `strconv.ParseFloat(t.Value, 64)` in
 `internal/parser/parser.go` `parsePrimary`.
 
-## NEEDS-19 — `i64_of_str`
+## NEEDS-19: `i64_of_str`
 
 **Status:** blocking. `src/parse.tw` shape dimensions and unit exponents.
 
@@ -262,7 +262,7 @@ integer" on a failure and the two implementations must fail on the same inputs.
 
 *Go bootstrap:* `strconv.Atoi`.
 
-## NEEDS-20 — string formatting
+## NEEDS-20: string formatting
 
 **Status:** blocking. Every diagnostic in `src/parse.tw` and `src/check.tw`.
 
@@ -279,7 +279,7 @@ supplies the joining; what is missing is the rendering of a float the way Go's
 
 ## Checker
 
-## NEEDS-21 — identity of a heap value (`is_same`)
+## NEEDS-21: identity of a heap value (`is_same`)
 
 **Status:** blocking. `src/check.tw` recursion guard.
 
@@ -297,7 +297,7 @@ the canonical dump a stable name for a node, so it is not purely a workaround.
 
 *Go bootstrap:* pointer keys in a Go map.
 
-## NEEDS-22 — `Opt[T]` returned from `Dict` lookup, and `match` on it
+## NEEDS-22: `Opt[T]` returned from `Dict` lookup, and `match` on it
 
 **Status:** blocking. Every environment lookup in `src/check.tw`.
 
@@ -306,7 +306,7 @@ Go's `v, ok := m[k]` is two returns; twill has one. `Opt` is the whole reason
 
 *Go bootstrap:* the comma-ok form.
 
-## NEEDS-23 — sorting a `Arr[Str]`
+## NEEDS-23: sorting a `Arr[Str]`
 
 **Status:** blocking. `src/check.tw` `unit_string`.
 
@@ -321,7 +321,7 @@ comparator question that the subset does not need to answer yet.
 
 *Go bootstrap:* `sort.Strings`.
 
-## NEEDS-24 — integer division and modulo on `I64`
+## NEEDS-24: integer division and modulo on `I64`
 
 **Status:** blocking. `src/check.tw` `unit_sqrt` (`v % 2`, `v / 2`).
 
@@ -335,7 +335,7 @@ behaviour on division by zero as an error value, per
 
 ## Evaluator and tensors
 
-## NEEDS-25 — a foreign call into the native tensor core
+## NEEDS-25: a foreign call into the native tensor core
 
 **Status:** blocking for `src/eval.tw`, and by design.
 
@@ -352,7 +352,7 @@ route to being executed, which is what it currently is.
 *Go bootstrap:* `internal/interp/builtins.go` dispatches on a name into Go
 functions in `internal/tensor`.
 
-## NEEDS-26 — closures capturing a mutable environment
+## NEEDS-26: closures capturing a mutable environment
 
 **Status:** blocking. `src/eval.tw` function values.
 
@@ -365,7 +365,7 @@ evaluator needs by handle to reproduce the bootstrap's behaviour for
 *Go bootstrap:* `interp.Env` with `assign` walking parents
 (`internal/interp/interp.go`).
 
-## NEEDS-27 — deep equality with the "different types are never equal" rule
+## NEEDS-27: deep equality with the "different types are never equal" rule
 
 **Status:** blocking. `src/eval.tw` `==`.
 
@@ -376,7 +376,7 @@ tensor).
 
 *Go bootstrap:* `interp.valuesEqual`.
 
-## NEEDS-28 — `read_file`, `write_file`, `args`, `exit`, `write_out`
+## NEEDS-28: `read_file`, `write_file`, `args`, `exit`, `write_out`
 
 **Status:** blocking. `src/main.tw`.
 
@@ -389,7 +389,7 @@ do, and it should be landed knowing that.
 
 *Go bootstrap:* `os.ReadFile` and friends in `cmd/twill/`.
 
-## NEEDS-29 — a stable canonical rendering of a float
+## NEEDS-29: a stable canonical rendering of a float
 
 **Status:** blocking for `twill dump`, and the highest-risk item here.
 
@@ -405,7 +405,7 @@ lose a month.
 *Go bootstrap:* `strconv.FormatFloat` reached through the dumper in
 `cmd/twill/dump.go`.
 
-## NEEDS-30 — recursion depth, and a guard on it
+## NEEDS-30: recursion depth, and a guard on it
 
 **Status:** not blocking; an operational risk.
 
@@ -417,7 +417,7 @@ does by default.
 
 *Go bootstrap:* none. A deeply nested twill file crashes the Go parser today.
 
-## NEEDS-31 — deliberate divergence: `t[]`
+## NEEDS-31: deliberate divergence: `t[]`
 
 **Status:** decided. `src/parse.tw` `parse_index_or_slice`.
 
@@ -440,7 +440,7 @@ The three entries below came out of running `src/lex.tw` against
 `internal/lexer/lexer.go` over 385 corpus files and 4,000 fuzzer cases. See
 "Verification" at the end of this file.
 
-## NEEDS-32 — Go-compatible `%q` for a non-printable or non-ASCII character
+## NEEDS-32: Go-compatible `%q` for a non-printable or non-ASCII character
 
 **Status:** open divergence. `src/lex.tw:478` (`quote_char`).
 
@@ -458,7 +458,7 @@ Fix with the `%q` rendering asked for in NEEDS-20, not with a special case here.
 
 *Go bootstrap:* `fmt.Sprintf("unexpected character %q", string(ch))`.
 
-## NEEDS-33 — the Go bootstrap panics on a trailing backslash at end of file
+## NEEDS-33: the Go bootstrap panics on a trailing backslash at end of file
 
 **Status:** a bug in `internal/lexer/lexer.go`, not in `src/lex.tw`.
 
@@ -778,7 +778,7 @@ separately because they are cheap individually and easy to lose track of.
 | `read_file`, `args`, `write_out`, `write_err` | main.tw | `os` |
 | `abort(msg)` | everywhere | `panic` |
 
-## NEEDS-34 — the systems-mode checker policy
+## NEEDS-34: the systems-mode checker policy
 
 **Status:** open, and it is the design decision, not a coding task.
 
@@ -792,7 +792,7 @@ itself.
 Until it exists, the self-hosted compiler is not type-checked by its own
 checker, which is an uncomfortable place to be and worth naming.
 
-## NEEDS-35 — an out-of-range axis in `transpose`
+## NEEDS-35: an out-of-range axis in `transpose`
 
 **Status:** open, low priority. `src/check.tw` `transpose_result`.
 
@@ -801,7 +801,7 @@ diagnostic, matching `internal/checker/checker.go`. Every other axis-taking
 builtin reports it through `report_axis`. Fixing this means changing the Go side
 too, or the diagnostics diverge.
 
-## NEEDS-36 — the import resolver
+## NEEDS-36: the import resolver
 
 **Status:** blocking for `src/eval.tw`. `exec_import`.
 
@@ -813,7 +813,7 @@ lands in a record while an unaliased one lands unqualified.
 What is missing is file reading (NEEDS-28) and a way to reach the embedded
 standard library from twill, which the bootstrap does with `go:embed`.
 
-## NEEDS-37 — one builtin table, not two
+## NEEDS-37: one builtin table, not two
 
 **Status:** open, tidiness. `src/check.tw` and `src/eval.tw`.
 
@@ -821,7 +821,7 @@ The checker's table is what the diagnostics are compared against; the
 evaluator's would be what the dispatch uses. They are separate today because
 merging them before the dispatch exists would be guessing at its shape.
 
-## NEEDS-38 — the formatter
+## NEEDS-38: the formatter
 
 **Status:** not started. `src/main.tw` `cmd_fmt`.
 

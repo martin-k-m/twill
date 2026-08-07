@@ -1,6 +1,6 @@
 mode systems
 
-# ast.tw — the twill syntax tree, in twill.
+# ast.tw: the twill syntax tree, in twill.
 #
 # A port of internal/ast/ast.go. The Go version expresses the tree as three
 # interfaces (Node, Stmt, Expr) with unexported marker methods, and every

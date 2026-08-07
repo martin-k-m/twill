@@ -1,6 +1,6 @@
 mode systems
 
-# eval.tw — the twill evaluator, in twill.
+# eval.tw: the twill evaluator, in twill.
 #
 # PARTIAL, and the boundary is stated up front so nothing below reads as an
 # oversight.

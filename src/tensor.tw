@@ -1,6 +1,6 @@
 mode systems
 
-# tensor.tw — the tensor value model and the autodiff tape, in twill.
+# tensor.tw: the tensor value model and the autodiff tape, in twill.
 #
 # PARTIAL. Read this before reading the file.
 #
