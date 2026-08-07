@@ -1,0 +1,209 @@
+# optim_test.tw: std/optim.
+#
+# Run with:  twill std/tests/optim_test.tw
+#
+# The steps are tested by taking one from a known state and checking the number
+# that comes out, which is possible precisely because the state is explicit: a
+# step function here is a pure function of its arguments, so a single call is a
+# complete test of it. Each expected value is the update rule evaluated by hand,
+# written above the check.
+
+import "std/optim" as o
+import "harness.tw" as h
+
+fn sgd_moves_against_the_gradient() {
+  h.test("sgd moves against the gradient")
+  # p - lr * g = [1, 2] - 0.1 * [0.5, 0.5] = [0.95, 1.95].
+  h.check("one step subtracts lr times the gradient",
+          h.near_all(o.sgd_step([1.0, 2.0], [0.5, 0.5], 0.1), [0.95, 1.95]))
+  # The same code has to walk a record, since a model is often one.
+  let r = o.sgd_step({ w: [1.0], b: 2.0 }, { w: [1.0], b: 1.0 }, 0.5)
+  h.check("and it follows a record's structure",
+          h.same(r, { w: [0.5], b: 1.5 }))
+  h.check("zeros_like keeps the shape and empties the values",
+          h.same(o.zeros_like({ w: [1.0, 2.0], b: 3.0 }), { w: [0.0, 0.0], b: 0.0 }))
+}
+
+fn momentum_accumulates_a_velocity() {
+  h.test("momentum accumulates a velocity")
+  # Step 1 from v = 0: v = 0.9 * 0 - 0.1 * 1 = -0.1, p = 1 - 0.1 = 0.9.
+  let s1 = o.momentum_step([1.0], [1.0], [0.0], 0.1, 0.9)
+  h.check("the first step matches plain sgd", h.near_all(s1[0], [0.9]))
+  h.check("and leaves a velocity of -lr times the gradient",
+          h.near_all(s1[1], [-0.1]))
+  # Step 2 with the same gradient: v = 0.9 * -0.1 - 0.1 = -0.19,
+  # p = 0.9 - 0.19 = 0.71. Nearly twice the first step, which is the point.
+  let s2 = o.momentum_step(s1[0], [1.0], s1[1], 0.1, 0.9)
+  h.check("the second step is larger because the velocity carries",
+          h.close_all(s2[0], [0.71], 0.000000001))
+  h.check("the velocity has grown to -0.19", h.close_all(s2[1], [-0.19], 0.000000001))
+}
+
+fn nesterov_looks_ahead_before_it_steps() {
+  h.test("nesterov looks ahead before it steps")
+  # v = 0.9 * 0 - 0.1 * 1 = -0.1; p = 1 + 0.9 * -0.1 - 0.1 * 1 = 0.81.
+  let s = o.nesterov_step([1.0], [1.0], [0.0], 0.1, 0.9)
+  h.check("the first step is 0.81, not momentum's 0.9",
+          h.close_all(s[0], [0.81], 0.000000001))
+  h.check("the velocity is the same as momentum's", h.near_all(s[1], [-0.1]))
+  # The flag form has to agree with both named forms.
+  h.check("the flag off selects momentum",
+          h.same(o.sgd_momentum_step([1.0], [1.0], [0.0], 0.1, 0.9, 0.0)[0],
+                 o.momentum_step([1.0], [1.0], [0.0], 0.1, 0.9)[0]))
+  h.check("the flag on selects nesterov",
+          h.same(o.sgd_momentum_step([1.0], [1.0], [0.0], 0.1, 0.9, 1.0)[0],
+                 o.nesterov_step([1.0], [1.0], [0.0], 0.1, 0.9)[0]))
+}
+
+fn adams_first_step_is_the_learning_rate() {
+  h.test("adam's first step is the learning rate")
+  # From zero state with any gradient g: m = 0.1g, v = 0.001g^2, and the bias
+  # corrections divide by exactly those factors, so mhat = g and vhat = g^2.
+  # The update is lr * g / (|g| + eps), which is lr for a positive g whatever
+  # its size. That is the property the bias correction exists to give.
+  let s = o.adam_step([1.0], [1.0], [0.0], [0.0], 1, 0.1, 0.9, 0.999, 0.00000001)
+  h.check("a gradient of 1 moves the parameter by lr",
+          h.close_all(s[0], [0.9], 0.0000001))
+  let big = o.adam_step([1.0], [1000.0], [0.0], [0.0], 1, 0.1, 0.9, 0.999, 0.00000001)
+  h.check("a gradient of 1000 moves it by lr as well",
+          h.close_all(big[0], [0.9], 0.0000001))
+  h.check("the moments come back as state",
+          h.close_all(s[1], [0.1], 0.000000001))
+  h.check("including the second moment",
+          h.close_all(s[2], [0.001], 0.000000001))
+}
+
+fn adamw_decays_the_weights_on_top_of_the_adam_step() {
+  h.test("adamw decays the weights on top of the adam step")
+  # The adam part moves 1 to 0.9 as above; the decay subtracts lr * wd * p
+  # = 0.1 * 0.5 * 1 = 0.05, giving 0.85.
+  let s = o.adamw_step([1.0], [1.0], [0.0], [0.0], 1, 0.1, 0.9, 0.999,
+                       0.00000001, 0.5)
+  h.check("the decay is lr * wd * p, applied to the parameter",
+          h.close_all(s[0], [0.85], 0.0000001))
+  # With no decay it has to be adam exactly, which is the check that the two
+  # have not drifted apart.
+  h.check("a decay of zero is exactly adam",
+          h.same(o.adamw_step([1.0], [1.0], [0.0], [0.0], 1, 0.1, 0.9, 0.999,
+                              0.00000001, 0.0)[0],
+                 o.adam_step([1.0], [1.0], [0.0], [0.0], 1, 0.1, 0.9,
+                             0.999, 0.00000001)[0]))
+  # The decay does not go through the moments: the returned m is the same as
+  # adam's, which is the whole point of "decoupled".
+  h.check("and the decay never touches the moments",
+          h.close_all(s[1], [0.1], 0.000000001))
+}
+
+fn rmsprop_divides_by_the_root_mean_square_gradient() {
+  h.test("rmsprop divides by the root mean square gradient")
+  # s = 0.9 * 0 + 0.1 * 1 = 0.1; p = 1 - 0.1 * 1 / sqrt(0.1)
+  #   = 1 - 0.1 / 0.31622776601683794 = 1 - 0.31622776601683794
+  #   = 0.6837722339831621. The step is larger than lr because the running
+  #   average has not caught up yet, which is what having no bias correction
+  #   means in practice.
+  let s = o.rmsprop_step([1.0], [1.0], [0.0], 0.1, 0.9, 0.00000001)
+  h.check("one step from zero state gives 0.68377223",
+          h.close_all(s[0], [0.6837722339831621], 0.0000001))
+  h.check("the accumulator is the decayed mean square",
+          h.close_all(s[1], [0.1], 0.000000001))
+  # Adagrad's accumulator is a plain sum: s = 0 + 2^2 = 4, and the step is
+  # lr * 2 / 2 = 0.1, so p = 0.9.
+  let a = o.adagrad_step([1.0], [2.0], [0.0], 0.1, 0.00000001)
+  h.check("adagrad accumulates without decay", h.near_all(a[1], [4.0]))
+  h.check("and its first step is lr * g / |g|", h.close_all(a[0], [0.9], 0.0000001))
+}
+
+fn clipping_by_norm_shortens_the_step_without_turning_it() {
+  h.test("clipping by norm shortens the step without turning it")
+  # The 3-4-5 triangle: the global norm of [3, 4] is 5.
+  h.check("the global norm of [3, 4] is 5",
+          h.close(o.global_norm(list([3.0, 4.0])), 5.0, 0.0000001))
+  # Across two leaves the norm is of everything concatenated:
+  # sqrt(9 + 16 + 144) = 13.
+  h.check("and across two leaves it is sqrt of the total",
+          h.close(o.global_norm(list([3.0, 4.0], [12.0])), 13.0, 0.0000001))
+  # Scaling to a norm of 1 divides by 5: [0.6, 0.8].
+  let c = o.clip_by_global_norm(list([3.0, 4.0]), 1.0)
+  h.check("clipping to 1 scales [3, 4] to [0.6, 0.8]",
+          h.close_all(c[0], [0.6, 0.8], 0.0000001))
+  h.check("which keeps the direction, since 0.6 / 0.8 is 3 / 4",
+          h.close(item(c[0][0]) / item(c[0][1]), 0.75, 0.0000001))
+  h.check("a gradient already under the limit is untouched",
+          h.same(o.clip_by_global_norm(list([3.0, 4.0]), 10.0), list([3.0, 4.0])))
+  h.check("clipping by value truncates each element instead",
+          h.same(o.clip_by_value(list([3.0, -4.0]), 1.0), list([1.0, -1.0])))
+  # Per-leaf: [3, 4] has norm 5 and is scaled to 1; [0.5] is under and is not.
+  let l = o.clip_by_leaf_norm(list([3.0, 4.0], [0.5]), 1.0)
+  h.check("the per-leaf clip scales each leaf on its own",
+          h.close_all(l[0], [0.6, 0.8], 0.0000001))
+  h.check("and leaves a small leaf alone", h.near_all(l[1], [0.5]))
+}
+
+fn the_schedules_hit_their_endpoints() {
+  h.test("the schedules hit their endpoints")
+  h.check("a constant schedule is constant", h.near(o.const_schedule(0.1, 500), 0.1))
+  # 7 / 3 = 2 whole periods, so 0.5^2 = 0.25.
+  h.check("step decay halves twice by step 7",
+          h.near(o.step_schedule(1.0, 7, 3, 0.5), 0.25))
+  h.check("and not at all before the first period",
+          h.near(o.step_schedule(1.0, 2, 3, 0.5), 1.0))
+  # exp(-0.1 * 10) = e^-1 = 0.36787944117144233.
+  h.check("exponential decay is base times e to the -rate t",
+          h.close(o.exp_schedule(1.0, 10, 0.1), 0.36787944117144233, 0.000000001))
+  # 1 / (1 + 0.1 * 10) = 0.5.
+  h.check("inverse time decay halves when rate times step is 1",
+          h.near(o.inv_time_schedule(1.0, 10, 0.1), 0.5))
+  # cos(0) = 1, so the first point is base; cos(pi) = -1, so the last is final;
+  # cos(pi/2) = 0, so the midpoint is exactly halfway.
+  h.check("cosine starts at base", h.near(o.cosine_schedule(1.0, 0, 10, 0.0), 1.0))
+  h.check("ends at final", h.close(o.cosine_schedule(1.0, 10, 10, 0.0), 0.0, 0.0000001))
+  h.check("and is halfway at the midpoint",
+          h.close(o.cosine_schedule(1.0, 5, 10, 0.0), 0.5, 0.0000001))
+  h.check("past the end it holds rather than rising again",
+          h.close(o.cosine_schedule(1.0, 40, 10, 0.0), 0.0, 0.0000001))
+  # Warmup over 4 steps: step 0 is one quarter of the way, step 3 is all of it.
+  h.check("warmup starts at base / warmup", h.near(o.warmup_schedule(1.0, 0, 4), 0.25))
+  h.check("reaches base on the last warmup step",
+          h.near(o.warmup_schedule(1.0, 3, 4), 1.0))
+  h.check("and stays there", h.near(o.warmup_schedule(1.0, 99, 4), 1.0))
+  # Warmup 2 of a total of 12: step 1 is the top of the warmup, and step 2 is
+  # the start of the cosine, which is base again.
+  h.check("warmup into cosine peaks where the two meet",
+          h.near(o.warmup_cosine_schedule(1.0, 1, 2, 12, 0.0), 1.0))
+  h.check("and the cosine begins at base",
+          h.near(o.warmup_cosine_schedule(1.0, 2, 2, 12, 0.0), 1.0))
+  h.check("and ends at final",
+          h.close(o.warmup_cosine_schedule(1.0, 12, 2, 12, 0.0), 0.0, 0.0000001))
+  # One cycle with pct 0.2 of 10 steps is a warmup of 2, so it must agree.
+  h.check("one cycle is the same schedule with the warmup as a fraction",
+          h.near(o.one_cycle_schedule(1.0, 1, 10, 0.2, 0.0),
+                 o.warmup_cosine_schedule(1.0, 1, 2, 10, 0.0)))
+}
+
+fn a_step_is_reproducible_from_its_state() {
+  h.test("a step is reproducible from its state")
+  # The reason the state is explicit at all: the same inputs must give the same
+  # outputs, so a run resumed from saved state continues rather than restarts.
+  let a = o.adam_step([1.0, 2.0], [0.3, 0.4], [0.01, 0.02], [0.001, 0.002], 17,
+                      0.01, 0.9, 0.999, 0.00000001)
+  let b = o.adam_step([1.0, 2.0], [0.3, 0.4], [0.01, 0.02], [0.001, 0.002], 17,
+                      0.01, 0.9, 0.999, 0.00000001)
+  h.check("two calls with the same state agree exactly", h.same(a, b))
+  # And the step count matters: t enters through the bias correction, so the
+  # same moments at a different t must give a different answer.
+  let c = o.adam_step([1.0, 2.0], [0.3, 0.4], [0.01, 0.02], [0.001, 0.002], 1,
+                      0.01, 0.9, 0.999, 0.00000001)
+  h.check("a different step count gives a different step",
+          h.truthy(!(a[0] == c[0])))
+}
+
+sgd_moves_against_the_gradient()
+momentum_accumulates_a_velocity()
+nesterov_looks_ahead_before_it_steps()
+adams_first_step_is_the_learning_rate()
+adamw_decays_the_weights_on_top_of_the_adam_step()
+rmsprop_divides_by_the_root_mean_square_gradient()
+clipping_by_norm_shortens_the_step_without_turning_it()
+the_schedules_hit_their_endpoints()
+a_step_is_reproducible_from_its_state()
+h.report("optim_test")

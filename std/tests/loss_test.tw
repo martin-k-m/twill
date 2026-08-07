@@ -1,0 +1,213 @@
+# loss_test.tw: std/loss.
+#
+# Run with:  twill std/tests/loss_test.tw
+#
+# Every expected number below is derived by hand and the derivation is written
+# next to it. Nothing here was produced by running the code and pasting the
+# output, which would only prove the code still does what it did.
+
+import "std/loss" as L
+import "harness.tw" as h
+
+fn mse_is_the_mean_of_the_squared_errors() {
+  h.test("mse is the mean of the squared errors")
+  # errors 1 and 2, squares 1 and 4, mean 2.5.
+  h.check("mse([1, 2], [0, 0]) is 2.5", h.near(L.mse([1.0, 2.0], [0.0, 0.0]), 2.5))
+  h.check("mse of a perfect prediction is zero", h.near(L.mse([3.0], [3.0]), 0.0))
+  # d/dp mean((p - t)^2) = 2 (p - t) / n, so [2*1/2, 2*2/2] = [1, 2].
+  h.check("the gradient of mse is 2 (p - t) / n",
+          h.near_all(grad(fn(p) = L.mse(p, [0.0, 0.0]))([1.0, 2.0]), [1.0, 2.0]))
+}
+
+fn mae_punishes_an_outlier_less_than_mse_does() {
+  h.test("mae punishes an outlier less than mse does")
+  # |1| and |-3| average to 2.
+  h.check("mae([1, -3], [0, 0]) is 2", h.near(L.mae([1.0, -3.0], [0.0, 0.0]), 2.0))
+  # The same errors under mse: (1 + 9) / 2 = 5, which is larger, and the whole
+  # reason to reach for mae.
+  h.check("the same errors give 5 under mse",
+          h.near(L.mse([1.0, -3.0], [0.0, 0.0]), 5.0))
+}
+
+fn huber_is_quadratic_inside_delta_and_linear_outside_it() {
+  h.test("huber is quadratic inside delta and linear outside it")
+  # delta 1. Error 0 gives 0. Error 3 is outside, so 1 * (3 - 0.5) = 2.5.
+  # Mean of 0 and 2.5 is 1.25.
+  h.check("huber([0, 3], [0, 0], 1) is 1.25",
+          h.near(L.huber([0.0, 3.0], [0.0, 0.0], 1.0), 1.25))
+  # Error 0.5 is inside, so 0.5 * 0.25 = 0.125, which is exactly mse/2 there.
+  h.check("inside delta huber is half the squared error",
+          h.near(L.huber([0.5], [0.0], 1.0), 0.125))
+  # At the join the two arms agree: 0.5 * 1 = 1 * (1 - 0.5).
+  h.check("the two arms meet at delta", h.near(L.huber([1.0], [0.0], 1.0), 0.5))
+}
+
+fn logcosh_is_smooth_and_matches_log_of_cosh() {
+  h.test("logcosh is smooth and matches log of cosh")
+  h.check("logcosh of no error is zero", h.near(L.logcosh([0.0], [0.0]), 0.0))
+  # log(cosh(1)) = log(1.5430806348152437) = 0.4337808304830271.
+  h.check("logcosh of an error of 1 is 0.43378083",
+          h.close(L.logcosh([1.0], [0.0]), 0.4337808304830271, 0.000000001))
+  # cosh(800) overflows a float; the stable form is |e| - log(2) in the limit,
+  # so 800 - 0.6931471805599453 = 799.3068528194401.
+  h.check("logcosh survives an error of 800",
+          h.close(L.logcosh([800.0], [0.0]), 799.3068528194401, 0.0000001))
+}
+
+fn cross_entropy_is_the_stable_fused_form() {
+  h.test("cross entropy is the stable fused form")
+  # logsumexp([1, 2, 3]) = 3 + log(e^-2 + e^-1 + 1)
+  #                      = 3 + log(1.5032147244) = 3.4076059644.
+  # Target is class 2, so subtract the logit 3: 0.4076059644.
+  h.check("cross_entropy([1, 2, 3], onehot 2) is 0.40760596",
+          h.close(L.cross_entropy([1.0, 2.0, 3.0], L.onehot(2, 3)),
+                  0.4076059644443801, 0.000000001))
+  # The naive route exponentiates first: exp(1000) is inf and the softmax is
+  # NaN. The fused form subtracts the max, so the answer is log(1 + e^-1000),
+  # which is zero to every digit a float has.
+  let big = L.cross_entropy([1000.0, 0.0], L.onehot(0, 2))
+  h.check("a logit of 1000 does not overflow", h.near(big, 0.0))
+  h.check("and it is a number, not a NaN", h.truthy(big == big))
+  # A logit of -1000 for the true class: the loss is the gap, 1000.
+  h.check("a logit of -1000 gives a finite loss of 1000",
+          h.close(L.cross_entropy([0.0, -1000.0], L.onehot(1, 2)), 1000.0, 0.0000001))
+  # Uniform logits over 4 classes: log(4) = 1.3862943611198906, whatever the
+  # class, which is the entropy floor a model that knows nothing sits at.
+  h.check("uniform logits over 4 classes cost log 4",
+          h.close(L.cross_entropy([0.0, 0.0, 0.0, 0.0], L.onehot(1, 4)),
+                  1.3862943611198906, 0.000000001))
+}
+
+fn cross_entropy_gradient_is_softmax_minus_target() {
+  h.test("cross entropy gradient is softmax minus target")
+  # softmax([1, 2]) = [0.2689414214, 0.7310585786]; target is class 0, so the
+  # gradient is [-0.7310585786, 0.7310585786].
+  let g = grad(fn(z) = L.cross_entropy(z, L.onehot(0, 2)))([1.0, 2.0])
+  h.check("the gradient at [1, 2] for class 0 is softmax - onehot",
+          h.close_all(g, [-0.7310585786300049, 0.7310585786300049], 0.000000001))
+}
+
+fn the_batched_and_sparse_forms_agree_with_the_single_one() {
+  h.test("the batched and sparse forms agree with the single one")
+  let logits = [[1.0, 2.0], [0.5, -0.5]]
+  # Row 0, class 1: logsumexp([1,2]) - 2 = 2.3132616875 - 2 = 0.3132616875.
+  # Row 1, class 0: logsumexp([0.5,-0.5]) - 0.5 = 0.8132616875 - 0.5
+  #               = 0.3132616875. The two rows are equal, so the mean is the
+  #               same number again.
+  h.check("cross_entropy_batch averages the rows",
+          h.close(L.cross_entropy_batch(logits, [[0.0, 1.0], [1.0, 0.0]]),
+                  0.3132616875182228, 0.000000001))
+  h.check("the sparse form takes class indices instead",
+          h.close(L.cross_entropy_sparse(logits, [1.0, 0.0], 2),
+                  0.3132616875182228, 0.000000001))
+  h.check("onehot_rows builds the matrix the two share",
+          h.same(L.onehot_rows([1.0, 0.0], 2), [[0.0, 1.0], [1.0, 0.0]]))
+}
+
+fn nll_on_log_probabilities_equals_cross_entropy_on_logits() {
+  h.test("nll on log probabilities equals cross entropy on logits")
+  let logits = [1.0, 2.0, 3.0]
+  let logp = logits - logsumexp(logits, 0)
+  h.check("the two agree when the log-softmax is applied once",
+          h.close(L.nll(logp, L.onehot(2, 3)),
+                  L.cross_entropy(logits, L.onehot(2, 3)), 0.000000001))
+}
+
+fn binary_cross_entropy_from_logits_is_the_stable_one() {
+  h.test("binary cross entropy from logits is the stable one")
+  # A logit of 0 is p = 0.5, so the loss is log 2 = 0.6931471805599453.
+  h.check("a logit of 0 costs log 2",
+          h.close(L.bce_with_logits([0.0], [1.0]), 0.6931471805599453, 0.000000001))
+  # Confidently wrong: target 1, logit -100. max(x,0) - x*t + log(1+e^-|x|)
+  # = 0 + 100 + log(1 + e^-100) = 100.
+  h.check("a logit of -100 against a target of 1 costs 100",
+          h.close(L.bce_with_logits([-100.0], [1.0]), 100.0, 0.0000001))
+  # The probability form has already lost this: sigmoid(-100) underflows to 0
+  # and only the epsilon keeps it finite, at log(1e7) = 16.1, not 100.
+  h.check("the probability form cannot represent that at all",
+          h.truthy(L.bce(sigmoid([-100.0]), [1.0]) < 20.0))
+  # bce on p = 0.5 is log 2 up to the epsilon, which shifts it by about 2e-7.
+  h.check("bce on a probability of 0.5 is log 2",
+          h.close(L.bce([0.5], [1.0]), 0.6931471805599453, 0.000001))
+}
+
+fn focal_loss_discounts_examples_that_are_already_right() {
+  h.test("focal loss discounts examples that are already right")
+  h.check("gamma 0 is exactly bce_with_logits",
+          h.close(L.focal([0.3], [1.0], 0.0), L.bce_with_logits([0.3], [1.0]),
+                  0.000000001))
+  # logit 0, target 1: p = 0.5, so pt = 0.5 and the factor is 0.25.
+  # 0.25 * log 2 = 0.1732867951399863.
+  h.check("gamma 2 at p = 0.5 scales the loss by a quarter",
+          h.close(L.focal([0.0], [1.0], 2.0), 0.1732867951399863, 0.000000001))
+}
+
+fn hinge_is_zero_once_the_margin_is_met() {
+  h.test("hinge is zero once the margin is met")
+  # 1 - 1 * 2 = -1, clipped to 0.
+  h.check("a confident correct prediction costs nothing",
+          h.near(L.hinge([2.0], [1.0]), 0.0))
+  # 1 - 1 * 0.5 = 0.5.
+  h.check("inside the margin the cost is linear",
+          h.near(L.hinge([0.5], [1.0]), 0.5))
+  h.check("squared hinge squares that", h.near(L.hinge_squared([0.5], [1.0]), 0.25))
+}
+
+fn kl_divergence_is_zero_only_between_equal_distributions() {
+  h.test("kl divergence is zero only between equal distributions")
+  h.check("kl of a distribution from itself is zero",
+          h.close(L.kl_div([0.5, 0.5], [0.5, 0.5]), 0.0, 0.0000001))
+  # p is a point mass on class 0, q is uniform: 1 * log(1 / 0.5) = log 2.
+  h.check("a point mass against uniform costs log 2",
+          h.close(L.kl_div([1.0, 0.0], [0.5, 0.5]), 0.6931471805599453, 0.000001))
+  # Not symmetric, and the other direction is infinite in exact arithmetic
+  # (q puts mass where p has none), so it must come out much larger.
+  h.check("it is not symmetric",
+          h.truthy(L.kl_div([0.5, 0.5], [1.0, 0.0]) > 5.0))
+  # js is the mean KL from the mixture, which for two disjoint point masses is
+  # 0.5 log 2 + 0.5 log 2 = log 2, and stays finite where KL does not.
+  h.check("jensen-shannon stays finite between disjoint distributions",
+          h.close(L.js_div([1.0, 0.0], [0.0, 1.0]), 0.6931471805599453, 0.000001))
+}
+
+fn the_remaining_objectives_hit_their_hand_computed_values() {
+  h.test("the remaining objectives hit their hand computed values")
+  # H(p, q) with p a point mass on 0 and q uniform: -1 * log(0.5) = log 2.
+  h.check("cross entropy between probability vectors is -sum p log q",
+          h.close(L.cross_entropy_probs([1.0, 0.0], [0.5, 0.5]),
+                  0.6931471805599453, 0.000001))
+  # Poisson at log_rate 0 (rate 1) with a count of 1: e^0 - 1 * 0 = 1.
+  h.check("poisson_nll at a rate of 1 and a count of 1 is 1",
+          h.near(L.poisson_nll([0.0], [1.0]), 1.0))
+  # Weights 1 and 3 over losses 1 and 3: (1 + 9) / 4 = 2.5.
+  h.check("a weighted mean divides by the sum of the weights",
+          h.near(L.weighted([1.0, 3.0], [1.0, 3.0]), 2.5))
+}
+
+fn the_penalties_walk_a_whole_parameter_tree() {
+  h.test("the penalties walk a whole parameter tree")
+  # 1 + 4 + 9 = 14 across a record whose leaves are a vector and a scalar.
+  h.check("l2 sums the squares of every leaf",
+          h.near(L.l2_penalty({ a: [1.0, 2.0], b: 3.0 }), 14.0))
+  h.check("l1 sums the magnitudes",
+          h.near(L.l1_penalty(list([1.0, -2.0], 3.0)), 6.0))
+  # d/dp sum(p^2) = 2p, and the gradient keeps the tree's shape.
+  h.check("and the l2 penalty is differentiable through the tree",
+          h.same(grad(L.l2_penalty)({ a: [1.0, 2.0] }), { a: [2.0, 4.0] }))
+}
+
+mse_is_the_mean_of_the_squared_errors()
+mae_punishes_an_outlier_less_than_mse_does()
+huber_is_quadratic_inside_delta_and_linear_outside_it()
+logcosh_is_smooth_and_matches_log_of_cosh()
+cross_entropy_is_the_stable_fused_form()
+cross_entropy_gradient_is_softmax_minus_target()
+the_batched_and_sparse_forms_agree_with_the_single_one()
+nll_on_log_probabilities_equals_cross_entropy_on_logits()
+binary_cross_entropy_from_logits_is_the_stable_one()
+focal_loss_discounts_examples_that_are_already_right()
+hinge_is_zero_once_the_margin_is_met()
+kl_divergence_is_zero_only_between_equal_distributions()
+the_remaining_objectives_hit_their_hand_computed_values()
+the_penalties_walk_a_whole_parameter_tree()
+h.report("loss_test")

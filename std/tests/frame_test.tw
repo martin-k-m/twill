@@ -1,0 +1,236 @@
+# frame_test.tw: std/frame.
+#
+# Run with:  twill std/tests/frame_test.tw
+#
+# Four rows, two columns, small enough that every result below can be read off
+# the table by eye. The properties worth protecting here are that a row stays a
+# row through every operation, and that column order and names survive.
+
+import "std/frame" as f
+import "harness.tw" as h
+
+#   g   x
+#   0  10
+#   1  20
+#   0  30
+#   1  40
+let df = { g: [0.0, 1.0, 0.0, 1.0], x: [10.0, 20.0, 30.0, 40.0] }
+
+fn a_frame_reports_its_own_shape() {
+  h.test("a frame reports its own shape")
+  h.check("the column names come back in declaration order",
+          h.same(f.names(df), list("g", "x")))
+  h.check("there are four rows", h.truthy(f.nrows(df) == 4))
+  h.check("and two columns", h.truthy(f.ncols(df) == 2))
+  h.check("a column it has is found", h.truthy(f.has(df, "x") == 1))
+  h.check("and one it does not have is not", h.truthy(f.has(df, "z") == 0))
+}
+
+fn row_selection_moves_whole_rows() {
+  h.test("row selection moves whole rows")
+  # Rows 2 and 0, in that order: g becomes [0, 0] and x becomes [30, 10]. The
+  # pairing is what matters: 30 must still travel with the 0 it belongs to.
+  let t = f.take_rows(df, list(2, 0))
+  h.check("take_rows keeps the columns paired",
+          h.same(t, { g: [0.0, 0.0], x: [30.0, 10.0] }))
+  h.check("head takes the first rows",
+          h.same(f.head(df, 2), { g: [0.0, 1.0], x: [10.0, 20.0] }))
+  h.check("tail takes the last", h.same(f.tail(df, 1), { g: [1.0], x: [40.0] }))
+  h.check("slice_rows takes a half-open range",
+          h.same(f.slice_rows(df, 1, 3), { g: [1.0, 0.0], x: [20.0, 30.0] }))
+  h.check("and every one of them preserves the column names",
+          h.same(columns(f.head(df, 1)), list("g", "x")))
+}
+
+fn filtering_removes_rows_rather_than_zeroing_them() {
+  h.test("filtering removes rows rather than zeroing them")
+  # x > 15 keeps rows 1, 2, 3.
+  let kept = f.filter(df, greater(df.x, 15.0))
+  h.check("three rows survive x > 15", h.truthy(f.nrows(kept) == 3))
+  h.check("and they are the right ones",
+          h.same(kept, { g: [1.0, 0.0, 1.0], x: [20.0, 30.0, 40.0] }))
+  # The row count really changed, which is the difference from masking: the
+  # mean of the survivors is 30, not the 22.5 a zeroed row would give.
+  h.check("so the mean is over the survivors alone",
+          h.near(item(mean(kept.x)), 30.0))
+  h.check("a mask that keeps nothing gives an empty frame",
+          h.truthy(f.nrows(f.filter(df, greater(df.x, 100.0))) == 0))
+  h.check("mask_to_indices turns a 0/1 tensor into positions",
+          h.same(f.mask_to_indices([0.0, 1.0, 0.0, 1.0]), list(1, 3)))
+}
+
+fn sorting_is_stable_so_two_sorts_make_a_compound_key() {
+  h.test("sorting is stable so two sorts make a compound key")
+  h.check("descending by x reverses this table",
+          h.same(f.sort_by(df, "x", 1),
+                 { g: [1.0, 0.0, 1.0, 0.0], x: [40.0, 30.0, 20.0, 10.0] }))
+  h.check("ascending by x leaves it alone", h.same(f.sort_by(df, "x", 0), df))
+  # Sorting by x and then by g must leave the x order intact within each g,
+  # which is what stability buys: g 0 keeps 10 before 30, g 1 keeps 20 before
+  # 40.
+  let two = f.sort_by(f.sort_by(df, "x", 0), "g", 0)
+  h.check("sorting by x then g orders by g with x as the minor key",
+          h.same(two, { g: [0.0, 0.0, 1.0, 1.0], x: [10.0, 30.0, 20.0, 40.0] }))
+  h.check("concat_rows stacks two frames",
+          h.same(f.concat_rows(f.head(df, 1), f.tail(df, 1)),
+                 { g: [0.0, 1.0], x: [10.0, 40.0] }))
+}
+
+fn grouping_reduces_within_each_key() {
+  h.test("grouping reduces within each key")
+  h.check("the distinct keys come out in first-appearance order",
+          h.same(f.unique(df.g), list(0.0, 1.0)))
+  # Group 0 holds rows 0 and 2, group 1 rows 1 and 3.
+  h.check("group_by returns the row indices per key",
+          h.same(f.group_by(df, "g"), list(list(0.0, list(0, 2)),
+                                           list(1.0, list(1, 3)))))
+  # Group 0: 10 and 30, mean 20, sum 40. Group 1: 20 and 40, mean 30, sum 60.
+  h.check("group_mean averages within each group",
+          h.same(f.group_mean(df, "g", "x"), { key: [0.0, 1.0], value: [20.0, 30.0] }))
+  h.check("group_sum adds within each group",
+          h.same(f.group_sum(df, "g", "x"), { key: [0.0, 1.0], value: [40.0, 60.0] }))
+  h.check("group_max takes the largest",
+          h.same(f.group_max(df, "g", "x"), { key: [0.0, 1.0], value: [30.0, 40.0] }))
+  h.check("group_min the smallest",
+          h.same(f.group_min(df, "g", "x"), { key: [0.0, 1.0], value: [10.0, 20.0] }))
+  h.check("group_count counts the rows",
+          h.same(f.group_count(df, "g"), { key: [0.0, 1.0], value: [2.0, 2.0] }))
+  # An arbitrary reducer works because the reducer is a function: the median of
+  # each pair is its mean here.
+  h.check("group_agg takes any reduction",
+          h.same(f.group_agg(df, "g", "x", fn(v) = median(v)),
+                 { key: [0.0, 1.0], value: [20.0, 30.0] }))
+  # Broadcasting puts each group's answer back on every row of that group, in
+  # the original row order: rows 0 and 2 get 20, rows 1 and 3 get 30.
+  h.check("group_broadcast puts the group's value back on each row",
+          h.same(f.group_broadcast(df, "g", "x", fn(v) = mean(v)),
+                 [20.0, 30.0, 20.0, 30.0]))
+}
+
+fn joins_match_on_the_key_and_say_what_did_not_match() {
+  h.test("joins match on the key and say what did not match")
+  let r = { g: [0.0, 1.0], w: [7.0, 8.0] }
+  # Every row of df matches exactly one row of r, so the join keeps four rows
+  # and attaches w by group: 7 for g = 0 and 8 for g = 1.
+  let j = f.join(df, r, "g")
+  h.check("an inner join attaches the matching column",
+          h.same(j, { g: [0.0, 1.0, 0.0, 1.0], x: [10.0, 20.0, 30.0, 40.0],
+                      w: [7.0, 8.0, 7.0, 8.0] }))
+  h.check("and the right frame's key column is not duplicated",
+          h.same(columns(j), list("g", "x", "w")))
+  # A one-to-many key multiplies rows: two rows with g = 0 on the right means
+  # each of the two left rows with g = 0 appears twice, so 2*2 + 2*1 = 6.
+  let many = { g: [0.0, 0.0, 1.0], w: [1.0, 2.0, 3.0] }
+  h.check("a repeated key multiplies the rows",
+          h.truthy(f.nrows(f.join(df, many, "g")) == 6))
+  # An unmatched key disappears from an inner join entirely.
+  let partial = { g: [1.0], w: [8.0] }
+  h.check("an inner join drops rows with no match",
+          h.truthy(f.nrows(f.join(df, partial, "g")) == 2))
+  # The left join keeps them and marks them instead.
+  let lj = f.left_join(df, partial, "g", -1.0)
+  h.check("a left join keeps every left row", h.truthy(f.nrows(lj) == 4))
+  h.check("filling the unmatched ones", h.same(lj.w, [-1.0, 8.0, -1.0, 8.0]))
+  h.check("and marking which rows were real",
+          h.same(lj.matched, [0.0, 1.0, 0.0, 1.0]))
+}
+
+fn encoding_uses_the_vocabulary_it_is_given() {
+  h.test("encoding uses the vocabulary it is given")
+  let oh = f.one_hot(df, "g", list(0.0, 1.0), list("g0", "g1"), 0)
+  h.check("one column is added per category",
+          h.same(columns(oh), list("g", "x", "g0", "g1")))
+  h.check("and it is 1 exactly where the code matches",
+          h.same(oh.g0, [1.0, 0.0, 1.0, 0.0]))
+  h.check("with the complementary column beside it",
+          h.same(oh.g1, [0.0, 1.0, 0.0, 1.0]))
+  # The columns sum to 1 on every row, which is the collinearity drop_first
+  # exists to break.
+  h.check("the indicator columns sum to one on every row",
+          h.same(oh.g0 + oh.g1, [1.0, 1.0, 1.0, 1.0]))
+  h.check("drop_first leaves the first category out",
+          h.same(columns(f.one_hot(df, "g", list(0.0, 1.0), list("g0", "g1"), 1)),
+                 list("g", "x", "g1")))
+  # Ordinal encoding of x against a vocabulary of 10 and 30: those become 0 and
+  # 1, and 20 and 40 are not in it, so they become -1 rather than colliding
+  # with the first category.
+  h.check("an ordinal encoding maps to positions and marks the unknown as -1",
+          h.same(f.encode_ordinal(df, "x", list(10.0, 30.0)).x,
+                 [0.0, -1.0, 1.0, -1.0]))
+}
+
+fn standardising_a_column_hands_back_the_transform() {
+  h.test("standardising a column hands back the transform")
+  # x is 10, 20, 30, 40: mean 25, population standard deviation
+  # sqrt(125) = 11.180339887498949.
+  let s = f.standardize_column(df, "x")
+  h.check("the mean comes back", h.close(item(s[1]), 25.0, 0.000000001))
+  h.check("and the standard deviation",
+          h.close(item(s[2]), 11.180339887498949, 0.0000001))
+  # (10 - 25) / 11.18034 = -1.3416407864998738.
+  h.check("the column is z-scored",
+          h.close_all(s[0].x, [-1.3416407864998738, -0.4472135954999579,
+                               0.4472135954999579, 1.3416407864998738], 0.0000001))
+  h.check("and replaying the stored transform gives the same numbers",
+          h.same(f.apply_standardize_column(df, "x", s[1], s[2]).x, s[0].x))
+}
+
+fn conversion_to_a_tensor_takes_the_columns_asked_for() {
+  h.test("conversion to a tensor takes the columns asked for")
+  # The order is the order given, not the frame's, which is what makes this
+  # stand in for a select.
+  h.check("to_tensor stacks the named columns in that order",
+          h.same(f.to_tensor(df, list("x", "g")),
+                 [[10.0, 0.0], [20.0, 1.0], [30.0, 0.0], [40.0, 1.0]]))
+  h.check("to_matrix takes them all in the frame's order",
+          h.same(f.to_matrix(df),
+                 [[0.0, 10.0], [1.0, 20.0], [0.0, 30.0], [1.0, 40.0]]))
+  h.check("to_vector is one column", h.same(f.to_vector(df, "x"), df.x))
+  h.check("add_column extends the frame",
+          h.same(columns(f.add_column(df, "y", [1.0, 1.0, 1.0, 1.0])),
+                 list("g", "x", "y")))
+}
+
+fn describe_summarises_every_column() {
+  h.test("describe summarises every column")
+  let d = f.describe(df)
+  # Rows are in columns(df) order: g first, then x.
+  h.check("counts are the row count for each column", h.same(d.count, [4.0, 4.0]))
+  h.check("means are 0.5 and 25", h.same(d.mean, [0.5, 25.0]))
+  h.check("minima are 0 and 10", h.same(d.min, [0.0, 10.0]))
+  h.check("maxima are 1 and 40", h.same(d.max, [1.0, 40.0]))
+  h.check("and the spreads are the population standard deviations",
+          h.close_all(d.std, [0.5, 11.180339887498949], 0.0000001))
+}
+
+# WHY THERE IS NO CSV ROUND TRIP HERE
+#
+# The obvious test for the boundary this module rests on is to write the frame
+# with `write_frame`, read it back with `read_frame`, and compare. It is not
+# here for the same reason io_test.tw gives: there is no `remove` and no
+# temporary directory (docs/needs.md NEEDS-92), so the test would leave a CSV in
+# the tree on every run and the next run would be reading the debris of the
+# last. The two builtins are the interpreter's to test, and internal/interp
+# already does.
+
+# WHY THERE IS NO CSV ROUND TRIP HERE
+#
+# The obvious test for the boundary this module rests on is to write the frame
+# with `write_frame`, read it back with `read_frame` and compare. It is not here
+# for the same reason io_test.tw gives for its own: there is no `remove` and no
+# temporary directory (docs/needs.md NEEDS-92), so the test would leave a CSV in
+# the tree on every run and the next run would be reading the debris of the
+# last. Those two builtins are the interpreter's to test, and internal/interp
+# already does.
+
+a_frame_reports_its_own_shape()
+row_selection_moves_whole_rows()
+filtering_removes_rows_rather_than_zeroing_them()
+sorting_is_stable_so_two_sorts_make_a_compound_key()
+grouping_reduces_within_each_key()
+joins_match_on_the_key_and_say_what_did_not_match()
+encoding_uses_the_vocabulary_it_is_given()
+standardising_a_column_hands_back_the_transform()
+conversion_to_a_tensor_takes_the_columns_asked_for()
+describe_summarises_every_column()
+h.report("frame_test")

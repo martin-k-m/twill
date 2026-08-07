@@ -1,0 +1,73 @@
+# harness.tw: the four lines of test framework these files need.
+#
+# A test is a function whose name is a sentence saying what should be true, and
+# a body of `check` calls. Running a test file prints one line per check and a
+# summary, and exits by printing "FAILED" if anything went wrong, so the output
+# is readable by a person and greppable by a script.
+#
+# Imported as a file (`import "harness.tw" as h`) rather than as a std module,
+# because it is not part of the library: std modules ship inside the binary, and
+# a test harness has no business there. File imports resolve relative to the
+# importing file, so the tests run from any directory.
+#
+# The pass and fail counts live in this module's scope and are updated by the
+# functions below, which is why the summary comes from `h.report()` rather than
+# from reading a field: an `as` import binds a record of the module's values at
+# import time, so a counter read through it would be a snapshot of zero.
+
+let PASSED = 0
+let FAILED = 0
+
+# Record one check. `cond` is a Bool or a number, where non-zero passes.
+fn check(desc, cond) {
+  if truthy(cond) {
+    PASSED = PASSED + 1
+    print("  ok    ", desc)
+  } else {
+    FAILED = FAILED + 1
+    print("  FAIL  ", desc)
+  }
+}
+
+fn truthy(c) = if c == true { true } else if c == false { false } else { c != 0.0 }
+
+# Announce a test. Called at the top of each test function so a failure can be
+# traced to the sentence it belongs to without counting lines.
+fn test(name) = print(name)
+
+# Print the summary and say plainly whether the file passed.
+fn report(name) {
+  print("")
+  print(name, "passed", PASSED, "failed", FAILED)
+  if FAILED > 0 { print("FAILED") } else { print("OK") }
+}
+
+# ── Comparisons ─────────────────────────────────────────────────────────────
+
+# Scalars equal to within a tolerance.
+#
+# Every expected value in these tests is derived by hand and written out to more
+# digits than a float carries, so the tolerance is only absorbing the last bit
+# or two of rounding, not covering for an unknown answer. Where a test needs a
+# looser bound than 1e-9 it passes its own and says why.
+fn near(got, want) = abs(got - want) < 0.000000001
+
+fn close(got, want, tol) = abs(got - want) < tol
+
+# Every element of two same-shaped tensors equal to within a tolerance.
+fn near_all(got, want) = max(abs(got - want)) < 0.000000001
+
+fn close_all(got, want, tol) = max(abs(got - want)) < tol
+
+# Exact structural equality, which `==` already is: shape included for tensors,
+# field by field for records, element by element for lists.
+fn same(got, want) = got == want
+
+# A tensor's shape, as a list, matches. Spelled out because a shape mismatch is
+# the most common failure in this library and `shape(x) == list(2, 3)` reads
+# worse than the name does.
+fn shaped(got, dims) = shape(got) == dims
+
+# Is the value NaN? A NaN is the one value not equal to itself, which is the
+# only test available and is exactly the IEEE definition.
+fn is_nan(x) = x != x

@@ -1,0 +1,244 @@
+# nn_test.tw: std/nn.
+#
+# Run with:  twill std/tests/nn_test.tw
+#
+# Layers are tested on inputs small enough to work out on paper, so every
+# expected value below has a derivation above it rather than a provenance of
+# "this is what it printed".
+
+import "std/nn" as nn
+import "harness.tw" as h
+
+seed(11)
+
+fn dense_is_an_affine_map() {
+  h.test("dense is an affine map")
+  # [[1, 2]] @ [1, 1] + 0 = 3, in both the single-example and batched forms.
+  h.check("the bare form is W @ x + b",
+          h.near(item(nn.dense([[1.0, 2.0]], [0.0], [1.0, 1.0])), 3.0))
+  let p = { W: [[1.0, 2.0]], b: [0.5] }
+  # Batched: two rows, [1, 1] and [2, 0], give 1 + 2 + 0.5 and 2 + 0 + 0.5.
+  h.check("the batched form transposes W and keeps the rows",
+          h.near_all(nn.dense_apply(p, [[1.0, 1.0], [2.0, 0.0]]),
+                     [[3.5], [2.5]]))
+  h.check("and its output has one row per input row",
+          h.shaped(nn.dense_apply(nn.dense_params(3, 2, "he"), randn(5, 2)),
+                   list(5, 3)))
+}
+
+fn the_named_initialisers_have_the_scales_they_claim() {
+  h.test("the named initialisers have the scales they claim")
+  # He is sqrt(2 / nin) and xavier sqrt(1 / nin), so over a large sample the
+  # ratio of their standard deviations is sqrt(2) = 1.41421356. The tolerance
+  # is loose because this is a sample statistic: 5000 draws give a standard
+  # deviation accurate to about 1%.
+  let hei = nn.init("he", 100, 500)
+  let xav = nn.init("xavier", 100, 500)
+  let sd_he = sqrt(mean(square(hei)))
+  let sd_xav = sqrt(mean(square(xav)))
+  h.check("he's spread is sqrt(2 / nin)",
+          h.close(item(sd_he), 0.06324555320336758, 0.002))
+  h.check("xavier's is sqrt(1 / nin)",
+          h.close(item(sd_xav), 0.044721359549995794, 0.002))
+  h.check("so he is sqrt(2) wider than xavier",
+          h.close(item(sd_he / sd_xav), 1.4142135623730951, 0.05))
+  # The uniform variant is bounded by sqrt(6 / (nin + nout)); nothing may sit
+  # outside it, which a normal draw could not promise.
+  let u = nn.init("uniform", 100, 500)
+  h.check("the uniform strategy respects its limit",
+          h.truthy(item(max(abs(u))) < sqrt(6.0 / 600.0)))
+  h.check("zeros is zeros", h.near(item(max(abs(nn.init("zeros", 3, 3)))), 0.0))
+  h.check("every strategy gives the requested shape",
+          h.shaped(nn.init("lecun", 4, 7), list(4, 7)))
+  # An unknown name is loud rather than silent: it prints and returns NaNs, so
+  # the first loss is NaN. The printed line above this check is that warning.
+  h.check("an unknown strategy returns NaN rather than a plausible tensor",
+          h.is_nan(item(nn.init("glorot_normal_v2", 1, 1))))
+}
+
+fn layernorm_centres_and_scales_each_example() {
+  h.test("layernorm centres and scales each example")
+  # [1, 2, 3] has mean 2 and population variance 2/3, so the standard deviation
+  # is 0.816496580927726 and the output is [-1.2247448, 0, 1.2247448] before
+  # the epsilon, which shifts it by about 1e-5 relative.
+  let p = nn.layernorm_params(3)
+  let y = nn.layernorm(p, [[1.0, 2.0, 3.0]], 0.00001)
+  h.check("a row becomes zero mean", h.close(item(mean(y)), 0.0, 0.0000001))
+  h.check("and unit variance up to the epsilon",
+          h.close_all(y, [[-1.224744871391589, 0.0, 1.224744871391589]], 0.0001))
+  # The statistics come from the row alone, so adding a second, wildly
+  # different row must not change the first one. That is the whole difference
+  # from batchnorm.
+  let two = nn.layernorm(p, [[1.0, 2.0, 3.0], [100.0, 200.0, 300.0]], 0.00001)
+  h.check("and a second row does not affect the first",
+          h.close_all(two[0], y[0], 0.000000001))
+}
+
+fn batchnorm_normalises_over_the_batch_and_returns_its_state() {
+  h.test("batchnorm normalises over the batch and returns its state")
+  let p = nn.batchnorm_params(2)
+  let st = nn.batchnorm_state(2)
+  # Columns [1, 3] and [2, 4]: means [2, 3], population variances [1, 1], so
+  # the normalised batch is [[-1, -1], [1, 1]] up to the epsilon.
+  let out = nn.batchnorm(p, [[1.0, 2.0], [3.0, 4.0]], st[0], st[1], 0.1,
+                         0.00001, 1.0)
+  h.check("the batch is normalised per column",
+          h.close_all(out[0], [[-1.0, -1.0], [1.0, 1.0]], 0.0001))
+  # Running mean: 0.9 * 0 + 0.1 * [2, 3] = [0.2, 0.3].
+  h.check("the running mean takes a tenth of the batch mean",
+          h.near_all(out[1], [0.2, 0.3]))
+  # Running variance: 0.9 * 1 + 0.1 * 1 = 1, since both are 1 here.
+  h.check("the running variance stays at 1", h.near_all(out[2], [1.0, 1.0]))
+  # Inference uses the stored statistics and returns them untouched, so a
+  # validation pass cannot corrupt what training depends on.
+  let ev = nn.batchnorm(p, [[5.0, 5.0]], out[1], out[2], 0.1, 0.00001, 0.0)
+  h.check("inference leaves the running mean unchanged", h.same(ev[1], out[1]))
+  h.check("and the running variance unchanged", h.same(ev[2], out[2]))
+  # (5 - 0.2) / sqrt(1 + 1e-5) = 4.79997..., and (5 - 0.3) likewise.
+  h.check("and normalises by the stored statistics",
+          h.close_all(ev[0], [[4.8, 4.7]], 0.0001))
+}
+
+fn dropout_is_off_when_it_is_told_it_is() {
+  h.test("dropout is off when it is told it is")
+  h.check("at inference the input passes through untouched",
+          h.same(nn.dropout([1.0, 2.0, 3.0], 0.5, 0.0), [1.0, 2.0, 3.0]))
+  # A rate of 0 keeps everything and divides by 1, so training mode is the
+  # identity too. This is the only draw-independent check available.
+  h.check("a rate of zero is the identity in training as well",
+          h.near_all(nn.dropout([1.0, 2.0, 3.0], 0.0, 1.0), [1.0, 2.0, 3.0]))
+  # The surviving elements are scaled by 1 / (1 - rate), so anything that is
+  # not zero is exactly twice its input at a rate of one half.
+  let d = nn.dropout(ones(200), 0.5, 1.0)
+  h.check("survivors are rescaled by 1 / (1 - rate)",
+          h.truthy(item(max(d)) == 2.0))
+  h.check("and some are dropped", h.truthy(item(min(d)) == 0.0))
+}
+
+fn embedding_lookup_accumulates_gradient_for_a_repeated_id() {
+  h.test("embedding lookup accumulates gradient for a repeated id")
+  let p = { W: [[1.0, 2.0], [3.0, 4.0]] }
+  h.check("a lookup returns the named rows",
+          h.same(nn.embedding(p, [1.0, 0.0]), [[3.0, 4.0], [1.0, 2.0]]))
+  # Row 0 is looked up twice and row 1 not at all, so d(sum)/dW is [[2, 2],
+  # [0, 0]]: gather's backward pass is a scatter-add, which is what makes an
+  # embedding table trainable.
+  let g = grad(fn(w) = sum(nn.embedding(w, [0.0, 0.0])))(p)
+  h.check("a row used twice gets twice the gradient",
+          h.same(g, { W: [[2.0, 2.0], [0.0, 0.0]] }))
+}
+
+fn attention_shapes_and_the_causal_mask_hold() {
+  h.test("attention shapes and the causal mask hold")
+  let p = nn.attention_params(4, "xavier")
+  h.check("multi-head attention keeps the sequence shape",
+          h.shaped(nn.attention_heads(p, randn(3, 4), 2), list(3, 4)))
+  h.check("and so does the causal variant",
+          h.shaped(nn.attention_causal(p, randn(5, 4), 4), list(5, 4)))
+  # The mask is 0 on and below the diagonal and a large negative above it.
+  h.check("the mask blocks only the future",
+          h.same(nn.causal_mask(3),
+                 [[0.0, -1000000000.0, -1000000000.0],
+                  [0.0, 0.0, -1000000000.0],
+                  [0.0, 0.0, 0.0]]))
+  # Position 0 can only attend to itself, so its softmax row is exactly [1, 0,
+  # ...] and the output there is the projected first value vector, whatever the
+  # rest of the sequence is. Changing a later token must not move it.
+  let X = randn(4, 4)
+  let a = nn.attention_causal(p, X, 2)
+  let X2 = concat([X[0:3], randn(1, 4)], 0)
+  let b = nn.attention_causal(p, X2, 2)
+  h.check("the first position cannot see the future",
+          h.close_all(a[0], b[0], 0.000000001))
+  # Without the mask it can, and does.
+  let c = nn.attention_heads(p, X, 2)
+  let d = nn.attention_heads(p, X2, 2)
+  h.check("unmasked attention does see it",
+          h.truthy(item(max(abs(c[0] - d[0]))) > 0.0))
+}
+
+fn a_sequential_network_forwards_and_differentiates() {
+  h.test("a sequential network forwards and differentiates")
+  let net = nn.sequential(list(nn.dense_layer(4, 2, "he"),
+                               nn.relu_layer(),
+                               nn.dense_layer(1, 4, "he")))
+  h.check("the network has one parameter entry per layer",
+          h.truthy(len(net.params) == 3))
+  h.check("and the stateless layer carries nothing",
+          h.same(net.params[1], list()))
+  h.check("a forward pass keeps the batch and ends at the last width",
+          h.shaped(nn.forward(net, net.params, randn(6, 2)), list(6, 1)))
+  # The gradient has to come back with exactly the structure it was given,
+  # which is what lets an optimizer walk it. This is the property the
+  # two-parallel-lists design exists to protect.
+  let g = grad(fn(ps) = sum(nn.forward(net, ps, [[1.0, 2.0]])))(net.params)
+  h.check("the gradient mirrors the parameter structure",
+          h.shaped(g[0].W, shape(net.params[0].W)))
+  h.check("including the bias", h.shaped(g[2].b, shape(net.params[2].b)))
+  h.check("and the stateless layer's empty slot", h.same(g[1], list()))
+}
+
+fn the_shape_helpers_do_what_their_names_say() {
+  h.test("the shape helpers do what their names say")
+  h.check("flatten collapses everything to one axis",
+          h.shaped(nn.flatten(randn(2, 3, 4)), list(24)))
+  h.check("flatten_from keeps the leading axes",
+          h.shaped(nn.flatten_from(randn(5, 3, 4), 1), list(5, 12)))
+  h.check("a batched convolution keeps the batch axis",
+          h.shaped(nn.conv_batch(nn.conv_params(2, 1, 3, 3, "he"), randn(4, 1, 6, 6)),
+                   list(4, 2, 4, 4)))
+  # A 6x6 image, a 3x3 valid convolution and 2x2 pooling: 6 - 3 + 1 = 4, then
+  # 4 / 2 = 2.
+  h.check("conv then pool halves the 4x4 feature map",
+          h.shaped(maxpool2d(nn.conv_apply(nn.conv_params(3, 1, 3, 3, "he"),
+                                           randn(1, 6, 6)), 2),
+                   list(3, 2, 2)))
+}
+
+fn log_softmax_normalises_on_the_axis_it_was_given() {
+  h.test("log_softmax normalises on the axis it was given")
+  # exp of a log-softmax sums to 1 along the reduced axis.
+  let y = nn.log_softmax([[1.0, 2.0], [0.0, 0.0]], 1)
+  h.check("each row's probabilities sum to 1",
+          h.close_all(sum(exp(y), 1), [1.0, 1.0], 0.000000001))
+  # log_softmax([0, 0]) = [-log 2, -log 2].
+  h.check("equal logits give equal log probabilities",
+          h.close_all(y[1], [-0.6931471805599453, -0.6931471805599453], 0.000000001))
+  # A logit of -800: log(softmax) would underflow to log(0) = -inf. The
+  # subtracted logsumexp gives the exact answer, -800, instead.
+  let big = nn.log_softmax([0.0, -800.0], 0)
+  h.check("a logit of -800 gives -800, not -inf",
+          h.close(item(big[1]), -800.0, 0.0000001))
+}
+
+fn the_activations_agree_with_their_definitions() {
+  h.test("the activations agree with their definitions")
+  h.check("softplus(0) is log 2",
+          h.close(item(nn.softplus(0.0)), 0.6931471805599453, 0.000000001))
+  h.check("gelu(0) is 0", h.near(item(nn.gelu(0.0)), 0.0))
+  # silu(1) = 1 * sigmoid(1) = 0.7310585786300049.
+  h.check("silu(1) is sigmoid(1)",
+          h.close(item(nn.silu(1.0)), 0.7310585786300049, 0.000000001))
+  # mish(0) = 0 * tanh(log 2) = 0.
+  h.check("mish(0) is 0", h.near(item(nn.mish(0.0)), 0.0))
+  h.check("leaky_relu leaks a hundredth", h.near(item(nn.leaky_relu(-1.0)), -0.01))
+  h.check("and passes positives through", h.near(item(nn.leaky_relu(2.0)), 2.0))
+  # elu(-1, 1) = e^-1 - 1 = -0.6321205588285577.
+  h.check("elu decays to -alpha",
+          h.close(item(nn.elu(-1.0, 1.0)), -0.6321205588285577, 0.000000001))
+  h.check("relu6 clips at 6", h.near(item(nn.relu6(100.0)), 6.0))
+  h.check("softsign(1) is a half", h.near(item(nn.softsign(1.0)), 0.5))
+}
+
+dense_is_an_affine_map()
+the_named_initialisers_have_the_scales_they_claim()
+layernorm_centres_and_scales_each_example()
+batchnorm_normalises_over_the_batch_and_returns_its_state()
+dropout_is_off_when_it_is_told_it_is()
+embedding_lookup_accumulates_gradient_for_a_repeated_id()
+attention_shapes_and_the_causal_mask_hold()
+a_sequential_network_forwards_and_differentiates()
+the_shape_helpers_do_what_their_names_say()
+log_softmax_normalises_on_the_axis_it_was_given()
+the_activations_agree_with_their_definitions()
+h.report("nn_test")

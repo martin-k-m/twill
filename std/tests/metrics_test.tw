@@ -1,0 +1,276 @@
+# metrics_test.tw: std/metrics.
+#
+# Run with:  twill std/tests/metrics_test.tw
+#
+# One six-row confusion matrix carries most of this file. It is small enough
+# that every precision, recall and average below is worked out in the comment
+# above the check, which is the only way to be sure a metric library is right:
+# these are all short formulas over the same four counts, and a plausible wrong
+# answer looks exactly like a right one.
+
+import "std/metrics" as m
+import "harness.tw" as h
+
+# Six examples, two classes. Truth: two 0s and four 1s.
+# Prediction: one 0 mislabelled 1, and one 1 mislabelled 0.
+#
+#            pred 0  pred 1
+#   true 0      1       1
+#   true 1      1       3
+let y = [0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+let p = [0.0, 1.0, 1.0, 1.0, 0.0, 1.0]
+
+fn the_confusion_matrix_counts_true_by_predicted() {
+  h.test("the confusion matrix counts true by predicted")
+  h.check("the matrix is rows-true by columns-predicted",
+          h.same(m.confusion(y, p, 2), [[1.0, 1.0], [1.0, 3.0]]))
+  # Row sums are the true counts: two 0s and four 1s.
+  h.check("its row sums are the class supports",
+          h.same(sum(m.confusion(y, p, 2), 1), [2.0, 4.0]))
+  # Column sums are the prediction counts: two 0s and four 1s here too.
+  h.check("its column sums are the prediction counts",
+          h.same(sum(m.confusion(y, p, 2), 0), [2.0, 4.0]))
+  h.check("support_per_class agrees with the row sums",
+          h.same(m.support_per_class(y, 2), [2.0, 4.0]))
+  h.check("binary_counts unpacks it as tn, fp, fn, tp",
+          h.same(m.binary_counts(y, p), [1.0, 1.0, 1.0, 3.0]))
+}
+
+fn accuracy_counts_the_diagonal() {
+  h.test("accuracy counts the diagonal")
+  # 1 + 3 correct out of 6.
+  h.check("four of six are right", h.close(m.accuracy(y, p), 0.6666666666666666,
+                                           0.000000001))
+  # Recalls are 1/2 and 3/4, whose mean is 0.625. It is below accuracy because
+  # the smaller class is handled worse, which is exactly what it is for.
+  h.check("balanced accuracy averages the per-class recalls",
+          h.near(m.balanced_accuracy(y, p, 2), 0.625))
+  # A degenerate model that always says 1 gets 4/6 accuracy but only 0.5
+  # balanced, since it never finds class 0 at all.
+  let allones = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  h.check("always guessing the majority still scores on accuracy",
+          h.close(m.accuracy(y, allones), 0.6666666666666666, 0.000000001))
+  h.check("but balanced accuracy sees through it",
+          h.near(m.balanced_accuracy(y, allones, 2), 0.5))
+}
+
+fn precision_and_recall_use_the_column_and_the_row() {
+  h.test("precision and recall use the column and the row")
+  # Class 1: tp = 3, predicted 4, support 4. So precision and recall are both
+  # 3/4 here; class 0 has tp = 1 out of 2 predicted and 2 true, both 1/2.
+  h.check("precision per class is the diagonal over the column",
+          h.same(m.precision_per_class(y, p, 2), [0.5, 0.75]))
+  h.check("recall per class is the diagonal over the row",
+          h.same(m.recall_per_class(y, p, 2), [0.5, 0.75]))
+  h.check("the binary shortcut takes class 1", h.near(m.precision(y, p), 0.75))
+  h.check("for recall as well", h.near(m.recall(y, p), 0.75))
+  # Specificity for class 1: of the two true 0s, one was correctly not called
+  # 1, so 1/2.
+  h.check("specificity is recall of the other class", h.near(m.specificity(y, p), 0.5))
+  # A class the model never predicts has an undefined precision; the convention
+  # here is 0 rather than a NaN that would poison every average.
+  let never = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  h.check("a class never predicted gets precision 0, not NaN",
+          h.near(m.precision_per_class(y, never, 2)[1], 0.0))
+}
+
+fn f1_is_the_harmonic_mean_and_punishes_the_weaker_half() {
+  h.test("f1 is the harmonic mean and punishes the weaker half")
+  # Both halves are 0.75 for class 1, so their harmonic mean is 0.75 too.
+  h.check("f1 of equal precision and recall is that value",
+          h.near(m.f1(y, p), 0.75))
+  # Precision 1 with recall 0 is the case an arithmetic mean flatters: it
+  # would say 0.5. The harmonic mean says 0.
+  let one_shot = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  h.check("perfect precision with almost no recall scores low",
+          h.close(m.f1(y, one_shot), 0.4, 0.000000001))
+  # tp = 1, predicted 1, support 4: precision 1, recall 0.25, f1 = 2*0.25/1.25
+  # = 0.4, against an arithmetic mean of 0.625.
+  h.check("its precision really was 1", h.near(m.precision(y, one_shot), 1.0))
+  h.check("and its recall a quarter", h.near(m.recall(y, one_shot), 0.25))
+  # Fbeta with beta = 2 weights recall four times as heavily:
+  # 5 * 1 * 0.25 / (4 * 1 + 0.25) = 1.25 / 4.25 = 0.29411765.
+  h.check("fbeta with beta 2 leans on recall",
+          h.close(m.fbeta(y, one_shot, 2.0), 0.29411764705882354, 0.000000001))
+  # And beta = 0.5 leans the other way:
+  # 1.25 * 1 * 0.25 / (0.25 * 1 + 0.25) = 0.3125 / 0.5 = 0.625.
+  h.check("and beta a half leans on precision",
+          h.close(m.fbeta(y, one_shot, 0.5), 0.625, 0.000000001))
+}
+
+fn the_three_averaging_conventions_disagree_as_they_should() {
+  h.test("the three averaging conventions disagree as they should")
+  # macro: (0.5 + 0.75) / 2 = 0.625, every class counted once.
+  h.check("macro f1 is the plain mean of the per-class scores",
+          h.near(m.f1_macro(y, p, 2), 0.625))
+  # micro pools the counts: 4 tp out of 6 predictions, so it equals accuracy.
+  h.check("micro f1 equals accuracy for single-label data",
+          h.close(m.f1_micro(y, p, 2), m.accuracy(y, p), 0.000000001))
+  h.check("as does micro precision",
+          h.close(m.precision_micro(y, p, 2), 0.6666666666666666, 0.000000001))
+  h.check("and micro recall",
+          h.close(m.recall_micro(y, p, 2), 0.6666666666666666, 0.000000001))
+  # weighted: (2 * 0.5 + 4 * 0.75) / 6 = 4 / 6 = 0.66666667. Here it happens to
+  # land on accuracy too, because the per-class scores equal the recalls.
+  h.check("weighted f1 weights each class by its support",
+          h.close(m.f1_weighted(y, p, 2), 0.6666666666666666, 0.000000001))
+  h.check("macro and weighted differ, which is the point of having both",
+          h.truthy(m.f1_macro(y, p, 2) != m.f1_weighted(y, p, 2)))
+  h.check("macro precision is the mean of [0.5, 0.75]",
+          h.near(m.precision_macro(y, p, 2), 0.625))
+  h.check("and weighted precision leans to the larger class",
+          h.close(m.precision_weighted(y, p, 2), 0.6666666666666666, 0.000000001))
+}
+
+fn kappa_and_mcc_correct_for_chance() {
+  h.test("kappa and mcc correct for chance")
+  # po = 4/6 = 0.6666667. pe = (2*2 + 4*4) / 36 = 20/36 = 0.5555556.
+  # kappa = (0.6666667 - 0.5555556) / (1 - 0.5555556) = 0.1111111 / 0.4444444
+  #       = 0.25.
+  h.check("cohen's kappa is 0.25 here", h.close(m.cohen_kappa(y, p, 2), 0.25,
+                                                0.000000001))
+  # mcc = (3*1 - 1*1) / sqrt(4 * 4 * 2 * 2) = 2 / 8 = 0.25.
+  h.check("and mcc happens to agree", h.close(m.mcc(y, p), 0.25, 0.000000001))
+  h.check("a perfect prediction gives kappa 1",
+          h.close(m.cohen_kappa(y, y, 2), 1.0, 0.000000001))
+  h.check("and mcc 1", h.close(m.mcc(y, y), 1.0, 0.000000001))
+}
+
+fn the_roc_curve_and_its_area_match_the_rank_answer() {
+  h.test("the roc curve and its area match the rank answer")
+  # Scores 0.8, 0.4, 0.35, 0.1 with labels 1, 0, 1, 0. Sorted by score the
+  # labels are 1, 0, 1, 0, so the curve walks up, right, up, right:
+  #   fpr 0, 0,   0.5, 0.5, 1
+  #   tpr 0, 0.5, 0.5, 1,   1
+  let sc = [0.1, 0.4, 0.35, 0.8]
+  let yb = [0.0, 0.0, 1.0, 1.0]
+  let c = m.roc_curve(yb, sc)
+  h.check("the false positive rate steps at each negative",
+          h.same(c[0], [0.0, 0.0, 0.5, 0.5, 1.0]))
+  h.check("the true positive rate steps at each positive",
+          h.same(c[1], [0.0, 0.5, 0.5, 1.0, 1.0]))
+  h.check("the curve starts above the highest score",
+          h.truthy(item(c[2][0]) > item(max(tensor(sc)))))
+  # Area: one full unit square quarter is missed. Counting the three
+  # rectangles: 0.5*0.5 + 0.5*1 = 0.75. Equivalently, of the four
+  # positive-negative pairs, three have the positive scoring higher.
+  h.check("the area is 0.75, which is 3 of 4 pairs ordered correctly",
+          h.close(m.auc_roc(yb, sc), 0.75, 0.000000001))
+  # A perfect ranking is 1, and reversing every score gives 0.
+  h.check("a perfect ranking has area 1",
+          h.close(m.auc_roc(yb, [0.0, 0.1, 0.9, 1.0]), 1.0, 0.000000001))
+  h.check("and the reversed ranking area 0",
+          h.close(m.auc_roc(yb, [1.0, 0.9, 0.1, 0.0]), 0.0, 0.000000001))
+  # All scores tied: every pair is a tie, worth half each, so the area is 0.5.
+  # The whole tied block is one threshold and therefore one point on the curve,
+  # which makes it a straight diagonal whose area is exactly a half. Emitting a
+  # point per example instead would trace a staircase and give 0 or 1 depending
+  # on how the sort happened to break the ties.
+  h.check("a completely tied ranking has area exactly 0.5",
+          h.close(m.auc_roc(yb, [0.5, 0.5, 0.5, 0.5]), 0.5, 0.000000001))
+  h.check("the trapezoid rule on a straight line is its area",
+          h.close(m.auc([0.0, 1.0], [0.0, 1.0]), 0.5, 0.000000001))
+}
+
+fn the_precision_recall_curve_and_average_precision_agree_with_the_counts() {
+  h.test("the precision recall curve and average precision agree with the counts")
+  let sc = [0.1, 0.4, 0.35, 0.8]
+  let yb = [0.0, 0.0, 1.0, 1.0]
+  # In score order the labels are 1, 0, 1, 0. After k predictions the precision
+  # is tp/k: 1, 0.5, 0.6666667, 0.5; recall is tp/2: 0.5, 0.5, 1, 1.
+  let c = m.pr_curve(yb, sc)
+  h.check("recall rises only when a positive is found",
+          h.same(c[0], [0.5, 0.5, 1.0, 1.0]))
+  h.check("precision is the running tp over k",
+          h.close_all(c[1], [1.0, 0.5, 0.6666666666666666, 0.5], 0.000000001))
+  # Average precision takes the precision at each positive: (1 + 0.6666667)/2
+  # = 0.8333333.
+  h.check("average precision averages precision at the positives",
+          h.close(m.average_precision(yb, sc), 0.8333333333333333, 0.000000001))
+  h.check("a perfect ranking gives an average precision of 1",
+          h.close(m.average_precision(yb, [0.0, 0.1, 0.9, 1.0]), 1.0, 0.000000001))
+}
+
+fn top_k_accuracy_asks_whether_the_truth_was_in_the_shortlist() {
+  h.test("top k accuracy asks whether the truth was in the shortlist")
+  # Row 0's true class 1 has the highest score; row 1's true class 1 is second.
+  let sc = [[0.1, 0.9, 0.0], [0.7, 0.2, 0.1]]
+  h.check("at k = 1 only the first row is right",
+          h.near(m.top_k_accuracy([1.0, 1.0], sc, 1), 0.5))
+  h.check("at k = 2 both are", h.near(m.top_k_accuracy([1.0, 1.0], sc, 2), 1.0))
+  h.check("at k = 3 everything is", h.near(m.top_k_accuracy([2.0, 2.0], sc, 3), 1.0))
+}
+
+fn the_regression_metrics_match_their_definitions() {
+  h.test("the regression metrics match their definitions")
+  let t = [1.0, 2.0, 3.0, 4.0]
+  let q = [1.1, 1.9, 3.2, 3.8]
+  # Residuals -0.1, 0.1, -0.2, 0.2: squares 0.01, 0.01, 0.04, 0.04, sum 0.1.
+  # The target's deviations from its mean 2.5 are -1.5, -0.5, 0.5, 1.5, whose
+  # squares sum to 5. So r2 = 1 - 0.1/5 = 0.98.
+  h.check("r2 is 1 minus the residual over total sum of squares",
+          h.close(m.r2(t, q), 0.98, 0.000000001))
+  h.check("mse is the mean squared residual, 0.025",
+          h.close(m.mse(t, q), 0.025, 0.000000001))
+  h.check("rmse is its root, 0.15811388",
+          h.close(m.rmse(t, q), 0.15811388300841897, 0.000000001))
+  h.check("mae is the mean absolute residual, 0.15",
+          h.close(m.mae(t, q), 0.15, 0.000000001))
+  # Predicting the mean everywhere scores exactly 0, which is the definition of
+  # the baseline r2 is measured against.
+  h.check("predicting the mean scores exactly zero",
+          h.close(m.r2(t, [2.5, 2.5, 2.5, 2.5]), 0.0, 0.000000001))
+  # Worse than the mean is negative, and that is a result, not a bug.
+  h.check("a worse-than-mean model scores negative",
+          h.truthy(m.r2(t, [10.0, 10.0, 10.0, 10.0]) < 0.0))
+  # Adjusted with one predictor: 1 - 0.02 * 3 / 2 = 0.97.
+  h.check("adjusted r2 charges for the predictor",
+          h.close(m.r2_adjusted(t, q, 1), 0.97, 0.000000001))
+  # The residuals here have mean zero, so explained variance equals r2.
+  h.check("explained variance equals r2 when the residuals are centred",
+          h.close(m.explained_variance(t, q), 0.98, 0.000000001))
+  # A constant offset of 1 leaves the variance of the residual at 0, so
+  # explained variance is 1 while r2 is not.
+  h.check("but not when the model is biased by a constant",
+          h.close(m.explained_variance(t, t + 1.0), 1.0, 0.000000001))
+  # r2 does charge for it: the residual sum of squares is 4 * 1 = 4 against a
+  # total of 5, so 1 - 0.8 = 0.2.
+  h.check("which r2 charges for",
+          h.close(m.r2(t, t + 1.0), 0.2, 0.000000001))
+  # |2 - 1| / 2 = 0.5.
+  h.check("mape is the mean relative error", h.close(m.mape([2.0], [1.0]), 0.5,
+                                                     0.000000001))
+  # 2 * 1 / (2 + 1) = 0.6666667.
+  h.check("smape divides by the sum of both magnitudes",
+          h.close(m.smape([2.0], [1.0]), 0.6666666666666666, 0.000000001))
+}
+
+fn thresholding_is_a_separate_and_visible_step() {
+  h.test("thresholding is a separate and visible step")
+  h.check("scores above the threshold become 1",
+          h.same(m.threshold([0.2, 0.7], 0.5), [0.0, 1.0]))
+  # Moving the threshold changes recall, which is the reason it is not hidden
+  # inside the metrics: at 0.3 the second positive is found as well.
+  let sc = [0.1, 0.4, 0.35, 0.8]
+  let yb = [0.0, 0.0, 1.0, 1.0]
+  h.check("a threshold of 0.5 finds one of the two positives",
+          h.near(m.recall(yb, m.threshold(sc, 0.5)), 0.5))
+  h.check("and a threshold of 0.3 finds both",
+          h.near(m.recall(yb, m.threshold(sc, 0.3)), 1.0))
+  h.check("at the cost of precision",
+          h.close(m.precision(yb, m.threshold(sc, 0.3)), 0.6666666666666666,
+                  0.000000001))
+}
+
+the_confusion_matrix_counts_true_by_predicted()
+accuracy_counts_the_diagonal()
+precision_and_recall_use_the_column_and_the_row()
+f1_is_the_harmonic_mean_and_punishes_the_weaker_half()
+the_three_averaging_conventions_disagree_as_they_should()
+kappa_and_mcc_correct_for_chance()
+the_roc_curve_and_its_area_match_the_rank_answer()
+the_precision_recall_curve_and_average_precision_agree_with_the_counts()
+top_k_accuracy_asks_whether_the_truth_was_in_the_shortlist()
+the_regression_metrics_match_their_definitions()
+thresholding_is_a_separate_and_visible_step()
+h.report("metrics_test")

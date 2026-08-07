@@ -1798,3 +1798,154 @@ The `Arr` is already growable, so the storage exists; this is the missing half
 of `push`.
 
 *Go bootstrap:* `s = s[:len(s)-1]`.
+
+## NEEDS-94: a way to fail
+
+**Status:** blocking, and worked around badly. `std/nn.tw` `init`,
+`conv_init_as`.
+
+`nn.init(strategy, nout, nin)` takes the initialisation strategy by name, so
+that nobody gets Xavier when they meant He without being told. An unrecognised
+name is a programming error and should stop the program with a message naming
+the strategy and the caller. There is nothing in the language that stops a
+program: no `error`, no `panic`, no `assert`, no way to return a failure that
+cannot be ignored.
+
+The workaround is `print` followed by a tensor of NaNs, chosen because the NaN
+propagates into the first loss and is at least visible. It is still wrong in
+both directions: the print goes to stdout in the middle of whatever else is
+being printed, and the NaN surfaces one training step away from its cause, so
+the message and the symptom are separated by everything the model did in
+between.
+
+Every module in this set has the same hole. `std/frame.tw` cannot say that a
+column does not exist, `std/batch.tw` cannot say that a fold count exceeds the
+row count, and `std/loss.tw` cannot say that a probability was passed where a
+logit was wanted, which is the single most common mistake this library invites.
+
+*Go bootstrap:* the interpreter's builtins return `(value.Value, error)` and the
+error reaches the top with a source position attached. What is wanted is that
+mechanism exposed to Twill, not a new one.
+
+## NEEDS-95: a seeded random stream, or `permutation` taking a seed
+
+**Status:** open, worked around, and the workaround has a side effect.
+`std/batch.tw` `shuffled_indices`, `stratified_indices`,
+`stratified_kfold_indices`.
+
+Every split in `std/batch.tw` takes an explicit seed, because a split that
+cannot be reconstructed makes the number measured on it unreproducible.
+`permutation(n)` has no seed parameter, so the only way to honour that argument
+is to call the global `seed(s)` first.
+
+That works, and it moves the one random stream the whole program shares. A call
+to `train_test_split` therefore changes every subsequent `randn`, so splitting
+the data after initialising the model gives different weights than splitting
+before it, for no reason the reader of that code could see. `stratified_indices`
+makes it worse: it seeds once per class, so it consumes and resets the stream
+several times in one call.
+
+Either `permutation(n, seed)` and `randn(shape, seed)`, or a first-class
+generator value that carries its own state and is threaded like the optimizer
+state in `std/optim.tw`. The second is the better answer and the larger change;
+the first would remove the surprise today.
+
+*Go bootstrap:* `internal/interp` holds a package-level `*rand.Rand`. A
+per-call seed is a second `rand.New(rand.NewSource(seed))` that is not stored.
+
+## NEEDS-96: iteration that does not materialise
+
+**Status:** open, and a real limit on dataset size. `std/batch.tw`
+`epoch_batches`, `eval_batches`.
+
+`epoch_batches` returns the whole epoch as a list of `[Xb, yb]` pairs. Every
+batch of every epoch exists at once, which for a dataset that fits in memory
+costs one extra copy of it, and for one that does not is simply the wrong
+answer.
+
+What is wanted is a generator: a function that can yield a value and be resumed,
+or a lazy sequence with a `next`. Either would let a training loop pull one
+batch at a time, and would also let `std/io` stream a file that does not fit in
+memory, which is the same shape of problem.
+
+A closure over mutable state is the workaround available today, and it is worse
+than the list: `fn() { i = i + 1; ... }` has no way to say it is finished except
+by a sentinel value the caller has to test for, which is exactly the pattern
+that ends in reading one batch past the end.
+
+*Go bootstrap:* none. The Go interpreter builds the same list.
+
+## NEEDS-97: assigning to an element of a list
+
+**Status:** open, worked around. `std/batch.tw` `stratified_kfold_indices`.
+
+`xs[i] = v` is a syntax error. `append` is the only way to grow a list and there
+is no way to replace an element of one, so an algorithm that fills k buckets by
+dealing into them has to be turned inside out: `stratified_kfold_indices` makes
+one pass per fold over the same shuffled per-class lists, deciding each time
+whether an element belongs to the fold it is currently building. That is k times
+the work for a result that one pass would produce, and the rewritten loop is
+harder to read than the one it replaced.
+
+Tensors have the same gap and a better excuse, since in-place mutation of a
+tensor would have to be reflected on the tape. A list of indices carries no
+gradient and has no such problem.
+
+*Go bootstrap:* `[]value.Value` is a Go slice and assignment is assignment. The
+restriction is the language's, not the runtime's.
+
+## NEEDS-98: an empty record, and removing a field
+
+**Status:** blocking. `std/frame.tw` has no `select`, `drop`, `rename` or
+`from_columns` because of it, and `group_agg` cannot name its own output
+columns.
+
+`with_field(rec, name, value)` builds a record with a name known at run time,
+which is exactly the right primitive, and it is unusable on its own because
+there is nothing to start from. `{}` is a block and evaluates to unit, so there
+is no empty record, and nothing removes a field, so a record cannot be narrowed
+either. Every record therefore has to be born from a literal whose field names
+are in the source text.
+
+The consequence for a column-oriented table is severe. `select(df, names)` is
+the most basic operation a table has and it cannot be written: it needs a record
+whose fields come from a list. `drop` is `select` of the complement. `rename` is
+`select` with one name changed. `group_agg` can compute its answer but has to
+return it under the fixed names `key` and `value`, because it cannot name the
+columns after the ones it grouped and aggregated.
+
+Two primitives close it, and either alone would do:
+
+    record()                   the empty record, so with_field can build any
+    without_field(rec, name)   a copy without a field, so any record can be
+                               narrowed
+
+`record()` is the smaller and more general of the two: given it, `without_field`
+is a fold over `columns` skipping one name.
+
+*Go bootstrap:* `value.Record` is an ordered map. Both operations are three
+lines each and neither has a design question in it.
+
+## NEEDS-99: string concatenation
+
+**Status:** open, and it pushes work onto callers. `std/frame.tw` `one_hot`.
+
+One-hot encoding a column called `colour` over the categories 0, 1, 2 should
+produce columns called `colour_0`, `colour_1` and `colour_2`. There is no `+`
+on strings, no `concat` for them, and no formatting function that takes a
+string and a number and returns a string, so `one_hot` takes the output names
+as an argument and the caller writes them out by hand. For a category with
+thirty values that is thirty string literals at the call site, and every one of
+them is a chance to get the order wrong, which produces a frame whose column
+names disagree with its contents and nothing that would notice.
+
+The same gap is why `std/metrics.tw` cannot label the rows of `describe`, and
+why every diagnostic message in these modules is a `print` with several
+arguments rather than one built string.
+
+Wanted: `str_concat(a, b)` or `+` on strings, and a `str` that takes a number to
+a decimal string that round-trips (NEEDS-89 asks for the second half of that
+already).
+
+*Go bootstrap:* Go strings concatenate with `+`. `internal/interp` already
+formats numbers for `print`.

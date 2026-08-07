@@ -1,0 +1,216 @@
+# batch_test.tw: std/batch.
+#
+# Run with:  twill std/tests/batch_test.tw
+#
+# Most of what a splitter has to get right is structural rather than numeric:
+# the pieces have the sizes asked for, no row is in two of them, none is lost,
+# and the same seed gives the same answer twice. Those are the properties this
+# file checks, because they are the ones whose failure quietly invalidates a
+# result rather than crashing.
+
+import "std/batch" as b
+import "harness.tw" as h
+
+# Ten rows, each carrying its own index so a row can be recognised after being
+# moved. Six of class 0 and four of class 1.
+let X = reshape(tensor(range(10)), 10, 1)
+let y = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+
+# The sum of 0..9, which is what the rows of X add up to no matter how they are
+# permuted or divided.
+let TOTAL = 45.0
+
+fn a_seeded_shuffle_repeats_and_permutes() {
+  h.test("a seeded shuffle repeats and permutes")
+  h.check("the same seed gives the same ordering twice",
+          h.same(b.shuffled_indices(8, 7), b.shuffled_indices(8, 7)))
+  h.check("a different seed gives a different one",
+          h.truthy(!(b.shuffled_indices(8, 7) == b.shuffled_indices(8, 8))))
+  # A permutation of 0..7 has to contain each index once, which the sum
+  # 0+1+...+7 = 28 catches for any single transposition or duplication.
+  h.check("it is a permutation, so the indices still sum to 28",
+          h.near(item(sum(tensor(b.shuffled_indices(8, 7)))), 28.0))
+  let s = b.shuffle(X, y, 3)
+  h.check("shuffling keeps every row", h.near(item(sum(s[0])), TOTAL))
+  h.check("and keeps the labels aligned with them",
+          h.near(item(sum(s[1])), 4.0))
+  let all = b.shuffle_all(list(X, y), 3)
+  h.check("shuffle_all applies one ordering to every tensor",
+          h.same(all[0], s[0]))
+  h.check("including the second", h.same(all[1], s[1]))
+}
+
+fn a_split_partitions_the_rows() {
+  h.test("a split partitions the rows")
+  let parts = b.split_indices(10, 0.8, 1)
+  h.check("80 percent of 10 rows is 8 for training", h.truthy(len(parts[0]) == 8))
+  h.check("and 2 for testing", h.truthy(len(parts[1]) == 2))
+  # Nothing lost and nothing duplicated: the two halves' indices together are
+  # still 0..9, so they still sum to 45.
+  h.check("together they are still every row",
+          h.near(item(sum(tensor(parts[0]))) + item(sum(tensor(parts[1]))), TOTAL))
+  # 0.8 * 7 = 5.6, truncated to 5, so the training half takes the loss.
+  h.check("the cut truncates, so 7 rows split 5 and 2",
+          h.truthy(len(b.split_indices(7, 0.8, 1)[0]) == 5))
+  let t = b.train_test_split(X, y, 0.8, 1)
+  h.check("the data split has the same sizes", h.shaped(t[0], list(8, 1)))
+  h.check("and the labels follow the features", h.shaped(t[1], list(8)))
+  h.check("with the rest held out", h.shaped(t[2], list(2, 1)))
+  h.check("and no row lost between them",
+          h.near(item(sum(t[0])) + item(sum(t[2])), TOTAL))
+  h.check("the same seed splits the same way",
+          h.same(b.train_test_split(X, y, 0.8, 1)[0], t[0]))
+}
+
+fn a_three_way_split_takes_its_fractions_of_the_whole() {
+  h.test("a three way split takes its fractions of the whole")
+  # 10 percent validation and 20 percent test of 10 rows is 1 and 2, leaving 7
+  # for training. Fractions of the whole, not of what is left: nesting two
+  # splits would give 1 and 1.8 here instead.
+  let s = b.train_val_test_split(X, y, 0.1, 0.2, 4)
+  h.check("the training part is what remains", h.shaped(s[0], list(7, 1)))
+  h.check("validation is a tenth", h.shaped(s[2], list(1, 1)))
+  h.check("test is a fifth", h.shaped(s[4], list(2, 1)))
+  h.check("and the three together are the whole dataset",
+          h.near(item(sum(s[0])) + item(sum(s[2])) + item(sum(s[4])), TOTAL))
+}
+
+fn a_stratified_split_keeps_the_class_balance() {
+  h.test("a stratified split keeps the class balance")
+  # Six 0s and four 1s, split in half: three and two of each side.
+  let parts = b.stratified_indices(y, 2, 0.5, 3)
+  h.check("half of ten rows is five", h.truthy(len(parts[0]) == 5))
+  h.check("and the other five are held out", h.truthy(len(parts[1]) == 5))
+  let s = b.stratified_split(X, y, 2, 0.5, 3)
+  # Three 0s and two 1s on each side, so each side's labels sum to 2.
+  h.check("the training half has two positives", h.near(item(sum(s[1])), 2.0))
+  h.check("and so does the test half", h.near(item(sum(s[3])), 2.0))
+  h.check("with every row accounted for",
+          h.near(item(sum(s[0])) + item(sum(s[2])), TOTAL))
+  # A plain random split of this data can easily land 4 or 0 positives in a
+  # half; the stratified one cannot, whatever the seed.
+  let other = b.stratified_split(X, y, 2, 0.5, 99)
+  h.check("a different seed gives a different split with the same balance",
+          h.near(item(sum(other[1])), 2.0))
+  h.check("and it really is a different split",
+          h.truthy(!(other[0] == s[0])))
+}
+
+fn k_fold_gives_every_row_exactly_one_turn_as_validation() {
+  h.test("k fold gives every row exactly one turn as validation")
+  let folds = b.kfold_indices(10, 3, 2)
+  h.check("three folds are asked for and three come back",
+          h.truthy(len(folds) == 3))
+  # 10 rows over 3 folds is 4, 3, 3: the remainder is spread one per fold
+  # rather than dumped on the last.
+  h.check("the first fold takes the extra row", h.truthy(len(folds[0][1]) == 4))
+  h.check("and the others are equal", h.truthy(len(folds[1][1]) == 3))
+  h.check("with the third the same", h.truthy(len(folds[2][1]) == 3))
+  # Each fold's train and validation partition the data, so together they sum
+  # to 45; and the three validation sets are disjoint and cover everything, so
+  # they also sum to 45 between them.
+  let f0 = item(sum(tensor(folds[0][0]))) + item(sum(tensor(folds[0][1])))
+  h.check("train and validation partition the rows in each fold",
+          h.near(f0, TOTAL))
+  let cover = item(sum(tensor(folds[0][1]))) + item(sum(tensor(folds[1][1]))) +
+              item(sum(tensor(folds[2][1])))
+  h.check("and the validation folds together cover every row once",
+          h.near(cover, TOTAL))
+  h.check("the training set is everything else",
+          h.truthy(len(folds[0][0]) == 6))
+}
+
+fn stratified_k_fold_balances_every_fold() {
+  h.test("stratified k fold balances every fold")
+  let folds = b.stratified_kfold_indices(y, 2, 2, 5)
+  h.check("two folds come back", h.truthy(len(folds) == 2))
+  # Six 0s and four 1s dealt into two folds: three and two each, so five rows
+  # per fold and two positives in each.
+  h.check("each fold has half the rows", h.truthy(len(folds[0][1]) == 5))
+  h.check("and so does the other", h.truthy(len(folds[1][1]) == 5))
+  h.check("each fold has half the positives",
+          h.near(item(sum(gather(y, folds[0][1]))), 2.0))
+  h.check("in both folds", h.near(item(sum(gather(y, folds[1][1]))), 2.0))
+  h.check("and the two folds together are the whole dataset",
+          h.near(item(sum(tensor(folds[0][1]))) + item(sum(tensor(folds[1][1]))),
+                 TOTAL))
+}
+
+fn batching_covers_the_epoch_and_respects_drop_last() {
+  h.test("batching covers the epoch and respects drop last")
+  # 7 rows in batches of 3: 3, 3, 1 when the short batch is kept.
+  let kept = b.batch_indices(range(7), 3, 0)
+  h.check("keeping the short batch gives three batches",
+          h.truthy(len(kept) == 3))
+  h.check("and the last one is short", h.truthy(len(kept[2]) == 1))
+  let dropped = b.batch_indices(range(7), 3, 1)
+  h.check("dropping it gives two", h.truthy(len(dropped) == 2))
+  h.check("both full", h.truthy(len(dropped[1]) == 3))
+  h.check("batch_count agrees without building them",
+          h.truthy(b.batch_count(7, 3, 0) == 3))
+  h.check("including when the short batch is dropped",
+          h.truthy(b.batch_count(7, 3, 1) == 2))
+  h.check("and when the size divides exactly",
+          h.truthy(b.batch_count(6, 3, 0) == 2))
+  # An epoch over the ten rows in batches of 4: 4, 4, 2, and every row appears
+  # once, which the total catches.
+  let eb = b.epoch_batches(X, y, 4, 0, 9)
+  h.check("an epoch of ten rows in fours is three batches",
+          h.truthy(len(eb) == 3))
+  let seen = item(sum(eb[0][0])) + item(sum(eb[1][0])) + item(sum(eb[2][0]))
+  h.check("and every row is in exactly one of them", h.near(seen, TOTAL))
+  h.check("evaluation batches keep the original order",
+          h.same(b.eval_batches(X, y, 4)[0][0], X[0:4]))
+}
+
+fn padding_fills_to_a_common_length_and_says_where() {
+  h.test("padding fills to a common length and says where")
+  let out = b.pad_sequences(list([1.0, 2.0, 3.0], [4.0], [5.0, 6.0]), 3, 0.0)
+  h.check("every sequence becomes one row of the same width",
+          h.same(out[0], [[1.0, 2.0, 3.0], [4.0, 0.0, 0.0], [5.0, 6.0, 0.0]]))
+  h.check("and the mask marks the real positions",
+          h.same(out[1], [[1.0, 1.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]))
+  # A pad value that is also a legal token is exactly why the mask is returned
+  # rather than reconstructed: here 1 appears as both.
+  let amb = b.pad_sequences(list([1.0, 1.0], [1.0]), 2, 1.0)
+  h.check("a pad value that is also a real token is still distinguishable",
+          h.same(amb[1], [[1.0, 1.0], [1.0, 0.0]]))
+  h.check("a sequence longer than maxlen is truncated from the end",
+          h.same(b.pad_sequences(list([1.0, 2.0, 3.0]), 2, 0.0)[0], [[1.0, 2.0]]))
+  h.check("max_length finds the longest",
+          h.truthy(b.max_length(list([1.0, 2.0], [3.0])) == 2))
+  # The additive mask is 0 where the position is real, so adding it to a score
+  # leaves the real entries alone.
+  h.check("mask_to_bias leaves real positions at zero",
+          h.same(b.mask_to_bias([1.0, 0.0]), [0.0, -1000000000.0]))
+  # Rows [[0,1],[2,3]] with mask [1,0] average to [0,1]; rows [[4,5],[6,7]]
+  # with mask [1,1] average to [5,6]. Dividing by T rather than by the real
+  # length would have given [0,0.5] for the first.
+  h.check("a masked mean divides by the true length, not the padded one",
+          h.same(b.masked_mean(reshape(tensor(range(8)), 2, 2, 2),
+                               [[1.0, 0.0], [1.0, 1.0]]),
+                 [[0.0, 1.0], [5.0, 6.0]]))
+}
+
+fn the_index_helpers_behave() {
+  h.test("the index helpers behave")
+  h.check("where_label finds the rows of a class",
+          h.same(b.where_label(y, 1.0), list(6, 7, 8, 9)))
+  h.check("concat_idx joins two index lists",
+          h.same(b.concat_idx(range(2), range(3)), list(0, 1, 0, 1, 2)))
+  h.check("take is gather under a name",
+          h.same(b.take(X, list(2, 0)), gather(X, list(2, 0))))
+  h.check("ordered_indices is the unshuffled range",
+          h.same(b.ordered_indices(4), range(4)))
+}
+
+a_seeded_shuffle_repeats_and_permutes()
+a_split_partitions_the_rows()
+a_three_way_split_takes_its_fractions_of_the_whole()
+a_stratified_split_keeps_the_class_balance()
+k_fold_gives_every_row_exactly_one_turn_as_validation()
+stratified_k_fold_balances_every_fold()
+batching_covers_the_epoch_and_respects_drop_last()
+padding_fills_to_a_common_length_and_says_where()
+the_index_helpers_behave()
+h.report("batch_test")
