@@ -12,7 +12,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/martin-k-m/raster.git"
+    "url": "https://github.com/martin-k-m/twill.git"
   },
   "engines": {
     "vscode": "^1.75.0"

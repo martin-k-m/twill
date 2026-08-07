@@ -1,10 +1,8 @@
-<!-- The github.com repo is still named raster; the raw URLs keep working after
-     it is renamed, via the redirect. -->
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martin-k-m/raster/main/assets/twill-mark-glow.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/martin-k-m/raster/main/assets/twill-mark.png">
-    <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/raster/main/assets/twill-mark.png" width="140">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark-glow.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png">
+    <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png" width="140">
   </picture>
 </p>
 
@@ -14,8 +12,8 @@
   A small programming language for numeric and machine-learning code.
 </p>
 
-[![CI](https://github.com/martin-k-m/raster/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/raster/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/martin-k-m/raster?sort=semver)](https://github.com/martin-k-m/raster/releases)
+[![CI](https://github.com/martin-k-m/twill/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/twill/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/martin-k-m/twill?sort=semver)](https://github.com/martin-k-m/twill/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
 
@@ -65,24 +63,18 @@ cores (deterministically — parallelism never changes a result).
 ## Install
 
 Download a prebuilt binary for your platform from the
-[releases page](https://github.com/martin-k-m/raster/releases) and put it on your
+[releases page](https://github.com/martin-k-m/twill/releases) and put it on your
 `PATH`. With a Go toolchain (1.23+) you can also:
 
 ```bash
 go install github.com/martin-k-m/twill/cmd/twill@latest
 ```
 
-That module path needs the GitHub repository to be named `twill`. The language
-was renamed from Raster before the repository was, so until the repository
-rename lands, clone and build instead. The web links above deliberately point at
-the current repository name and will keep working through the rename, because
-GitHub redirects the old URL.
-
 Or build from source:
 
 ```bash
-git clone https://github.com/martin-k-m/raster.git
-cd raster
+git clone https://github.com/martin-k-m/twill.git
+cd twill
 go build -o twill ./cmd/twill
 ```
 
