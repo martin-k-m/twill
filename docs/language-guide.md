@@ -72,6 +72,74 @@ combine when, aligned from the right, each pair of dimensions is equal or one of
 them is 1. `@` covers vector·vector (dot), matrix·vector, vector·matrix, and
 matrix·matrix.
 
+### Bitwise operators on `I64`
+
+These belong to `mode systems` and to `I64` only. There is no bitwise operator
+on `F64` and no unsigned integer type. They are spelled as calls rather than as
+infix operators, because `and`, `or` and `not` are already the short-circuiting
+logical operators and giving one spelling two meanings by operand type is worse
+than a name.
+
+| Call | Meaning |
+| --- | --- |
+| `and(a, b)` | bitwise AND |
+| `or(a, b)` | bitwise OR |
+| `xor(a, b)` | bitwise XOR |
+| `not(a)` | bitwise complement, every bit flipped |
+| `shl(a, k)` | left shift, zeros shifted in at the bottom |
+| `shr(a, k)` | **arithmetic** right shift, the sign bit shifted in at the top |
+
+`I64` is two's complement and exactly 64 bits. `and`, `or`, `xor` and `not` are
+defined bit by bit on that representation and have nothing to say about sign.
+`shl` discards bits shifted off the top, so it wraps, and it is the same
+operation for negative and non-negative operands.
+
+**`shr` is arithmetic, not logical.** With a negative left operand it shifts
+copies of the sign bit in from the top, so `shr(-8, 1)` is `-4` and `shr(-1, k)`
+is `-1` for every `k`. Equivalently, `shr(a, k)` is `floor(a / 2^k)` for every
+`a`, which is what makes it the right shift for arithmetic and the wrong one for
+bit manipulation.
+
+This matters more often than it looks, because the subset has no unsigned type,
+so any 64-bit quantity that is conceptually unsigned is carried in an `I64` and
+has its top bit set half the time. Hash mixers, IEEE 754 bit patterns and
+multiprecision limbs are all in that position.
+
+**Shift counts.** `k` is masked to its low six bits, so the effective count is
+`k and 63`. A count of 64 or more therefore wraps rather than saturating to zero
+or to the sign, and a negative count is masked into the same 0..63 range rather
+than shifting the other way. Both are almost always a bug at the call site; the
+masking exists so the operation is total and platform-independent, not because
+either is a useful thing to write. Do not rely on it. Where a shift count is
+computed, range-check it.
+
+#### Getting a logical right shift
+
+There is no `ushr` operator. Build one. `src/float.tw`'s `ushr` is the idiom,
+and it is what every caller in the ecosystem should use or copy:
+
+```rust
+let SIGN_BIT: I64 = shl(1, 63)
+
+fn ushr(x: I64, k: I64) -> I64 {
+  if k == 0 { return x }
+  if x >= 0 { return shr(x, k) }
+  or(shr(and(x, not(SIGN_BIT)), k), shl(1, 63 - k))
+}
+```
+
+Clearing the sign bit makes the value non-negative, where `shr` is already the
+logical shift, and the bit is then put back at the position it would have
+shifted to. The `k == 0` guard is not decoration: without it `shl(1, 63 - k)`
+would be `shl(1, 63)`, which sets the sign bit rather than clearing nothing.
+
+The same construction appears in `std/random.tw` for splitmix64 and xoshiro.
+Anything porting a reference implementation written over `uint64` needs it,
+because such a reference's `>>` is logical and `shr` is not.
+
+Related: `docs/needs.md` NEEDS-2 (the type and its operators) and NEEDS-85 (why
+this is specified here rather than left to the eventual implementation).
+
 ## Equality
 
 `==` and `!=` are **deep structural comparison**. Two values are equal when they

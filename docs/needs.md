@@ -43,7 +43,10 @@ has no case for it and `internal/checker/checker.go` has a single policy.
 **Status:** blocking. `src/lex.tw` uses it for every offset, line and column.
 
 A signed 64-bit integer distinct from float64, with `and or xor shl shr not`,
-defined wrapping, and explicit `i64()` / `f64()` conversions only.
+defined wrapping, and explicit `i64()` / `f64()` conversions only. The exact
+semantics of those six, including that `shr` is arithmetic and that shift counts
+are masked to 0..63, are specified in `docs/language-guide.md`, Operators →
+Bitwise operators on `I64`; see NEEDS-85 for why they are specified there.
 `src/lex.tw:131` (`is_utf8_continuation`) and `src/lex.tw:498` (`utf8_width`)
 mask lead bytes with `and`, which is the whole reason the subset needs an
 integer type rather than a float that happens to hold integers.
@@ -344,6 +347,23 @@ behaviour on division by zero as an error value, per
 
 ## NEEDS-25: a foreign call into the native tensor core
 
+**Status: superseded by NEEDS-68. Not blocking; the thing it asks to call does
+not exist.** This entry asks for a calling convention into "the native tensor
+core", which meant the Go bootstrap's `internal/tensor`. Under the no-Go rule
+there is no such core to call: NEEDS-68 opens by stating that there is no
+bootstrap to call into, which is why the transcendental primitives have to be
+native rather than foreign. A foreign-call convention into a runtime that will
+not exist is not a language feature that is missing, it is a question that was
+overtaken.
+
+What survives is a real question with a different shape: which primitives the
+eventual runtime must provide, and how the checker types them. NEEDS-68 asks
+exactly that for the transcendentals, and is the entry to extend. The text below
+is kept for section 2.2's line between what reads twill source and what executes
+it, which still holds.
+
+*(Original text follows.)*
+
 **Status:** blocking for `src/eval.tw`, and by design.
 
 `docs/self-hosting.md` section 2.2 draws the line: everything that reads twill
@@ -397,6 +417,16 @@ do, and it should be landed knowing that.
 *Go bootstrap:* `os.ReadFile` and friends in `cmd/twill/`.
 
 ## NEEDS-29: a stable canonical rendering of a float
+
+**Status: superseded by NEEDS-87. Read that entry first.** The text below is
+kept because it is the record of what was believed, but its advice is now wrong
+in two ways: there is no bootstrap left to call into, so "treat it as a runtime
+primitive" is not an available option; and there is not one canonical rendering
+but three, with different verbs and different callers, which NEEDS-87 tabulates.
+`src/float.tw` answers this entry. Anyone acting on the paragraph beginning
+"Treat it as a runtime primitive" will implement the wrong function.
+
+*(Original text follows.)*
 
 **Status:** blocking for `twill dump`, and the highest-risk item here.
 
@@ -1016,6 +1046,16 @@ differential harness at all, so this is not a detail.
 
 ## NEEDS-57: value formatting
 
+**Status: superseded by NEEDS-88. Read that entry first.** This entry asks for
+`format_value` and `format_number` together and argues that neither can escape
+`src/eval.tw`. Half of it is now false: `format_number(F64)` lives in
+`src/float.tw`, which knows nothing about `Value` and never needed eval. Only
+`format_value` still has the circular-import problem described below, and
+NEEDS-88 states the remaining question accurately. The text is kept for the
+reasoning about the import cycle, which is still correct as far as it goes.
+
+*(Original text follows.)*
+
 **Status:** blocking for `src/eval.tw`. `print`, `str`, `write_frame`, and the
 `jacobian: f must return a tensor, got %s` message.
 
@@ -1562,8 +1602,27 @@ representation. Everywhere else it is a number.
 
 ## NEEDS-85: `shr` on `I64` is arithmetic, and there is no unsigned anything
 
-**Status:** open, a workaround is in place. `src/float.tw` `ushr`, `udiv10`,
-`unonzero`.
+**Status:** the semantics are now decided and written down; the `U64` half is
+still open, and a workaround is in place. `src/float.tw` `ushr`, `udiv10`,
+`unonzero`. **The normative text is `docs/language-guide.md`, Operators →
+Bitwise operators on `I64`.** Read it there, not here.
+
+The decision: `shr` is an **arithmetic** shift, `shl` shifts zeros in, and shift
+counts are masked to 0..63. A logical right shift is spelled by building one,
+and `src/float.tw`'s `ushr` is the named idiom.
+
+Why it had to be decided rather than measured: the Go bootstrap does not
+implement `mode systems`, `I64`, or any bitwise operator, so there was no
+running implementation to appeal to. `shr` is a name the systems-mode sources
+use and that nothing yet defines. Arithmetic was chosen because it is what the
+`internal/strconv` original does on `int64`, because `src/float.tw` and
+`std/random.tw` were already written against it and already carry the compensating
+helper, and because a language whose only integer type is signed should have its
+shift agree with division by a power of two.
+
+The cost of leaving it unstated was not theoretical: loom's `src/rng.tw` had
+assumed the opposite, so its splitmix64 finaliser was a different generator, and
+nothing would have reported it. That is fixed in loom.
 
 `docs/self-hosting.md` section 1.2 specifies `and or xor shl shr not` on a
 two's-complement `I64` and does not say what `shr` does with the sign bit.
