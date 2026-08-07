@@ -1,0 +1,318 @@
+# batch.tw: getting rows to a model in the right order and the right groups.
+#
+# Every function that draws on randomness takes a seed, and takes it as an
+# ordinary argument rather than reading one from somewhere. A split is part of a
+# result: "83% accuracy" means nothing unless the rows it was measured on can be
+# reconstructed, and the single most common way a reported number stops being
+# reproducible is a shuffle nobody recorded. Passing the seed makes the split a
+# function of its arguments, so the same call gives the same rows on any machine
+# and any day.
+#
+# One caveat that the seed argument cannot hide: `permutation` has no seed
+# parameter of its own, so seeding here means calling the global `seed`, which
+# moves the one random stream the whole program shares (see docs/needs.md
+# NEEDS-95). A split therefore perturbs any randomness that follows it, weight
+# initialisation included. The habit that avoids surprises is to do all the
+# splitting first, then seed once for the model.
+#
+# std/data has an unseeded `train_test_split` that predates this module. It is
+# left alone; this is where the seeded versions live.
+
+# ── Index machinery ─────────────────────────────────────────────────────────
+#
+# Everything here works in index space and only touches the data at the end.
+# Indices are cheap to combine, an index list can be saved next to a result, and
+# the same split can then be applied to a feature matrix, a label vector, and a
+# frame of metadata without any of them being copied three times over.
+
+# A seeded shuffle of 0..n-1.
+fn shuffled_indices(n, s) {
+  seed(s)
+  permutation(n)
+}
+
+# A list of the integers 0..n-1, unshuffled. `range` already is one; named so
+# that code choosing between shuffled and sequential reads symmetrically.
+fn ordered_indices(n) = range(n)
+
+# Select rows of a tensor by an index list. A thin name over `gather`, which is
+# differentiable, so a gathered minibatch still carries gradient back to the
+# rows it came from.
+fn take(X, idx) = gather(X, idx)
+
+# Join two index lists.
+fn concat_idx(a, b) = fold(fn(acc, i) = append(acc, i), a, b)
+
+# The indices whose label equals `c`.
+fn where_label(labels, c) {
+  let out = list()
+  for i in range(len(labels)) {
+    if labels[i] == c { out = append(out, i) }
+  }
+  out
+}
+
+# ── Shuffling ───────────────────────────────────────────────────────────────
+
+# A shuffled copy of a dataset, features and labels kept aligned.
+fn shuffle(X, y, s) {
+  let p = shuffled_indices(len(X), s)
+  [take(X, p), take(y, p)]
+}
+
+# A shuffled copy of any number of aligned tensors, given as a list.
+#
+# The list form is here because a dataset is often more than two tensors: a
+# feature matrix, labels, sample weights, and a group id all have to be permuted
+# by the same ordering or the alignment is silently destroyed.
+fn shuffle_all(tensors, s) {
+  let p = shuffled_indices(len(tensors[0]), s)
+  map(fn(t) = take(t, p), tensors)
+}
+
+# ── Splits ──────────────────────────────────────────────────────────────────
+
+# Split indices into two parts: the first `frac` of a shuffled ordering and the
+# rest. Returns [train_idx, test_idx].
+#
+# The cut is `int(frac * n)`, truncating rather than rounding, so an 80% split
+# of 7 rows gives 5 and 2. The truncation means the training half is the one
+# that loses the odd row, which is the right way round: a test set one row
+# short is a coarser measurement, and a training set one row short is nothing.
+fn split_indices(n, frac, s) {
+  let idx = shuffled_indices(n, s)
+  let cut = int(frac * n)
+  list(idx[0:cut], idx[cut:n])
+}
+
+# Train/test split of a feature matrix and a label vector.
+# Returns [Xtr, ytr, Xte, yte].
+fn train_test_split(X, y, frac, s) {
+  let parts = split_indices(len(X), frac, s)
+  [take(X, parts[0]), take(y, parts[0]), take(X, parts[1]), take(y, parts[1])]
+}
+
+# Three-way split. Returns [Xtr, ytr, Xva, yva, Xte, yte].
+#
+# The fractions are of the whole dataset, not of what is left after the previous
+# cut, because "20% validation" said out loud always means 20% of everything.
+# Nested fraction-of-the-remainder splits are how a 0.8/0.1/0.1 turns into
+# 0.8/0.02/0.18 without anyone noticing.
+fn train_val_test_split(X, y, val_frac, test_frac, s) {
+  let n = len(X)
+  let idx = shuffled_indices(n, s)
+  let n_val = int(val_frac * n)
+  let n_test = int(test_frac * n)
+  let n_train = n - n_val - n_test
+  let tr = idx[0:n_train]
+  let va = idx[n_train:n_train + n_val]
+  let te = idx[n_train + n_val:n]
+  [take(X, tr), take(y, tr), take(X, va), take(y, va), take(X, te), take(y, te)]
+}
+
+# Stratified train/test split: each class is split by `frac` separately, so the
+# class proportions in both halves match the whole.
+#
+# It matters more than it sounds. With 5% positives and 200 rows, a plain random
+# 80/20 split puts anywhere from 4 to 16 positives in the test set purely by
+# chance, and the measured recall swings with it. Stratifying removes that
+# source of variance entirely, and costs nothing.
+#
+# Returns [train_idx, test_idx]. Both are shuffled after the per-class parts are
+# concatenated, since otherwise every class's rows sit in one contiguous block
+# and any consumer that takes a prefix gets one class.
+fn stratified_indices(labels, classes, frac, s) {
+  let tr = list()
+  let te = list()
+  for c in range(classes) {
+    let members = where_label(labels, c)
+    let m = len(members)
+    seed(s + c)
+    let order = permutation(m)
+    let cut = int(frac * m)
+    for j in range(m) {
+      let row = members[order[j]]
+      if j < cut { tr = append(tr, row) } else { te = append(te, row) }
+    }
+  }
+  seed(s)
+  let ptr = permutation(len(tr))
+  let pte = permutation(len(te))
+  list(reorder(tr, ptr), reorder(te, pte))
+}
+
+# `xs` rearranged by an index list.
+fn reorder(xs, order) {
+  let out = list()
+  for i in order { out = append(out, xs[i]) }
+  out
+}
+
+fn stratified_split(X, y, classes, frac, s) {
+  let parts = stratified_indices(y, classes, frac, s)
+  [take(X, parts[0]), take(y, parts[0]), take(X, parts[1]), take(y, parts[1])]
+}
+
+# ── Cross-validation ────────────────────────────────────────────────────────
+
+# k-fold index sets. Returns a list of k entries, each `list(train_idx, val_idx)`.
+#
+# The folds partition the data: every row is in exactly one validation fold and
+# in k-1 training sets, so the k scores together are one prediction for every
+# row. That is the property worth protecting, and it is why the remainder rows
+# are spread one per fold rather than all appended to the last one: 10-fold on
+# 103 rows gives three folds of 11 and seven of 10, not nine of 10 and one of 13.
+fn kfold_indices(n, k, s) {
+  let idx = shuffled_indices(n, s)
+  let folds = list()
+  let base = int(n / k)
+  let extra = n - base * k
+  let start = 0
+  for f in range(k) {
+    let size = if f < extra { base + 1 } else { base }
+    let val = idx[start:start + size]
+    let train = concat_idx(idx[0:start], idx[start + size:n])
+    folds = append(folds, list(train, val))
+    start = start + size
+  }
+  folds
+}
+
+# Stratified k-fold: each class is dealt round-robin into the folds, so every
+# fold has the same class balance as the whole. Same return shape as above.
+#
+# Each class is shuffled once up front and the folds are then read off by
+# position mod k. Dealing into k accumulators would be the direct way to write
+# it, but a list element cannot be assigned to (docs/needs.md NEEDS-97), so the
+# loop is turned inside out: one pass per fold over the same shuffled lists.
+fn stratified_kfold_indices(labels, classes, k, s) {
+  let per_class = list()
+  for c in range(classes) {
+    let members = where_label(labels, c)
+    seed(s + c)
+    per_class = append(per_class, reorder(members, permutation(len(members))))
+  }
+  let folds = list()
+  for f in range(k) {
+    let val = list()
+    let train = list()
+    for c in range(classes) {
+      let ms = per_class[c]
+      for j in range(len(ms)) {
+        if j % k == f {
+          val = append(val, ms[j])
+        } else {
+          train = append(train, ms[j])
+        }
+      }
+    }
+    folds = append(folds, list(train, val))
+  }
+  folds
+}
+
+# ── Minibatching ────────────────────────────────────────────────────────────
+
+# Cut an index list into batches of `size`. Returns a list of index lists.
+#
+# `drop_last` is 1 to discard a final short batch and 0 to keep it. It is an
+# argument rather than a default because both answers are wrong somewhere:
+# keeping it makes the last gradient of each epoch noisier than the rest, and
+# dropping it means some rows are never trained on when the batch size does not
+# divide the dataset. Batch norm is the case where dropping matters most, since
+# a batch of one has zero variance and produces a division by epsilon.
+fn batch_indices(idx, size, drop_last) {
+  let n = len(idx)
+  let out = list()
+  let start = 0
+  while start < n {
+    let stop = if start + size > n { n } else { start + size }
+    let keep = if stop - start == size { 1 } else { 1 - drop_last }
+    if keep == 1 { out = append(out, idx[start:stop]) }
+    start = start + size
+  }
+  out
+}
+
+# One epoch of shuffled minibatches over a dataset. Returns a list of
+# `[Xb, yb]` pairs.
+#
+# The whole epoch is materialised rather than produced lazily, because there are
+# no generators in the language yet (docs/needs.md NEEDS-96). For a dataset that
+# fits in memory this is only an index permutation plus one gather per batch,
+# which is what a lazy loader would do anyway; for one that does not, this is
+# the wrong function and there is currently no right one.
+fn epoch_batches(X, y, size, drop_last, s) {
+  let order = shuffled_indices(len(X), s)
+  let groups = batch_indices(order, size, drop_last)
+  map(fn(g) = [take(X, g), take(y, g)], groups)
+}
+
+# The same without shuffling, for evaluation, where the order is irrelevant and
+# a reshuffle would only make the run harder to compare against the last one.
+fn eval_batches(X, y, size) {
+  let groups = batch_indices(ordered_indices(len(X)), size, 0)
+  map(fn(g) = [take(X, g), take(y, g)], groups)
+}
+
+# How many batches an epoch will have, without building them.
+fn batch_count(n, size, drop_last) {
+  let whole = int(n / size)
+  if drop_last == 1 or n % size == 0 { whole } else { whole + 1 }
+}
+
+# ── Ragged sequences ────────────────────────────────────────────────────────
+
+# Pad a list of 1-D sequences to a common length. Returns [padded, mask], both
+# [N, maxlen]; the mask is 1 where the position is real and 0 where it is
+# padding.
+#
+# The mask is returned rather than left to the caller to reconstruct because
+# every use of a padded batch needs it and reconstructing it by comparing
+# against the pad value is wrong the moment the pad value is a legal token. A
+# mean over a padded sequence that ignores the mask is an average over an
+# arbitrary number of zeros, and an attention softmax that ignores it spends
+# real probability mass on padding.
+#
+# Sequences longer than `maxlen` are truncated from the end, keeping the start.
+fn pad_sequences(seqs, maxlen, pad_value) {
+  let rows = list()
+  let masks = list()
+  for i in range(len(seqs)) {
+    let s = seqs[i]
+    let n = len(s)
+    let keep = if n > maxlen { maxlen } else { n }
+    let body = s[0:keep]
+    let row = if keep == maxlen {
+      body
+    } else {
+      concat([body, fill(pad_value, maxlen - keep)], 0)
+    }
+    let m = if keep == maxlen {
+      ones(maxlen)
+    } else {
+      concat([ones(keep), zeros(maxlen - keep)], 0)
+    }
+    rows = append(rows, reshape(row, 1, maxlen))
+    masks = append(masks, reshape(m, 1, maxlen))
+  }
+  [concat(rows, 0), concat(masks, 0)]
+}
+
+# The length of the longest sequence in a list, which is the usual `maxlen`.
+fn max_length(seqs) = fold(fn(a, s) = if len(s) > a { len(s) } else { a }, 0, seqs)
+
+# An additive mask for attention scores, from a 0/1 padding mask: 0 where the
+# position is real and a large negative where it is padding.
+#
+# Additive and applied before the softmax, for the same reason the causal mask
+# in std/nn is: multiplying the weights afterwards leaves the padded terms in
+# the denominator, so the surviving weights no longer sum to 1.
+fn mask_to_bias(mask) = (1.0 - mask) * -1000000000.0
+
+# Mean over the real positions of a padded [N, T, D] batch, given an [N, T]
+# mask. The division is by the true length of each row, not by T.
+fn masked_mean(x, mask) {
+  let m = reshape(mask, len(mask), len(mask[0]), 1)
+  sum(x * m, 1) / maximum(sum(m, 1), 1.0)
+}

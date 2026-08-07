@@ -1,0 +1,424 @@
+# frame.tw: a column-oriented table.
+#
+# A frame is a record whose fields are named column tensors. That is not a type
+# this module invents; it is what the interpreter already means by a frame, and
+# it is why `df.close` works, why slicing a column is ordinary tensor slicing,
+# and why `grad` can differentiate a computation that reads one.
+#
+# Where the boundary is. The interpreter owns the parts that touch a file or a
+# record's field table, because those need to build a record whose names are
+# known only at run time:
+#
+#   read_frame(path)          a CSV with a header row, into a record of columns
+#   write_frame(frame, path)  the same record back out
+#   read_csv(path)            a headerless numeric CSV, into one [rows, cols]
+#   columns(rec)              the field names, in declaration order
+#   field(rec, name)          a column by name
+#   with_field(rec, name, v)  a copy with one field set or replaced
+#
+# Everything in this file is built from those six plus ordinary tensor
+# operations, and nothing here re-implements any of them. Reading and writing
+# CSV is therefore not wrapped: call the builtins.
+#
+# Three consequences of a frame being a record of tensors, all worth knowing
+# before the first surprise.
+#
+#   Columns are numeric. A tensor holds numbers, so a categorical column is an
+#   integer code and a date is a number of days. Text lives in std/text and
+#   reaches a frame by being encoded into a code column first.
+#
+#   Columns can be added and replaced but not removed. `with_field` sets a
+#   field; nothing drops one, and there is no empty record to rebuild from,
+#   because `{}` is a block and evaluates to unit. So `select`, `drop`,
+#   `rename` and a general `from_columns` are not in this module: every one of
+#   them needs a record whose field names come from a list at run time, and that
+#   cannot be written in Twill today. docs/needs.md NEEDS-98 asks for the two
+#   primitives that would fix it. Where a name has to be chosen dynamically the
+#   functions below say so and use fixed names instead.
+#
+#   Every row operation goes through `map_leaves`, which rebuilds the record
+#   with the same field names. That is what makes filtering, sorting and slicing
+#   possible at all here, and it is why they preserve column order exactly.
+
+# ── Shape ───────────────────────────────────────────────────────────────────
+
+# The column names, in order. A pass-through, so code reading this module does
+# not have to switch between `columns(df)` and a frame-specific spelling.
+fn names(df) = columns(df)
+
+# Number of rows: the length of the first column. All columns of a frame have
+# the same length by construction, and nothing here produces one where they do
+# not.
+fn nrows(df) = len(field(df, columns(df)[0]))
+
+fn ncols(df) = len(columns(df))
+
+# Does the frame have this column? 1 or 0.
+fn has(df, name) {
+  let found = 0
+  for c in columns(df) {
+    if c == name { found = 1 }
+  }
+  found
+}
+
+# Add or replace a column. `with_field` under a name that says what it is for.
+fn add_column(df, name, col) = with_field(df, name, col)
+
+# ── Row operations ──────────────────────────────────────────────────────────
+
+# The rows at the given indices, in the given order.
+#
+# `map_leaves` walks every column and rebuilds the record with the same names,
+# so one index list gathers the whole table and a row stays a row. It is also
+# differentiable, since `gather` is, which means a frame can sit inside a loss.
+fn take_rows(df, idx) = map_leaves(fn(col) = gather(col, idx), df)
+
+fn head(df, n) = take_rows(df, range(n))
+
+fn tail(df, n) {
+  let total = nrows(df)
+  take_rows(df, range(total - n, total))
+}
+
+fn slice_rows(df, start, stop) = take_rows(df, range(start, stop))
+
+# The rows where `mask` is non-zero. `mask` is a [rows] tensor of 1s and 0s,
+# which is what the comparison builtins return, so a filter reads as
+# `filter(df, greater(df.price, 100.0))`.
+#
+# The mask is turned into an index list and the columns gathered, rather than
+# multiplied by the mask. Multiplying keeps the rows and zeroes them, which
+# changes every later count and average by whatever those rows now contribute,
+# and does it without changing the row count anyone would think to check.
+fn filter(df, mask) = take_rows(df, mask_to_indices(mask))
+
+fn mask_to_indices(mask) {
+  let idx = list()
+  for i in range(len(mask)) {
+    if mask[i] != 0.0 { idx = append(idx, i) }
+  }
+  idx
+}
+
+# Rows ordered by one column. `descending` is 1 or 0.
+#
+# `argsort` is stable, so rows that tie on the key keep their original relative
+# order. That is worth relying on rather than merely tolerating: sorting by one
+# column and then by another gives a sort by both with the first as the minor
+# key, which is how a multi-column sort is expressed here.
+fn sort_by(df, name, descending) {
+  let col = field(df, name)
+  let order = if descending == 1 { argsort(-col) } else { argsort(col) }
+  take_rows(df, order)
+}
+
+# The rows of `a` followed by the rows of `b`. Both frames must have the same
+# columns; `zip_leaves` walks them in parallel and will not line up otherwise.
+fn concat_rows(a, b) = zip_leaves(fn(z) = concat([z[0], z[1]], 0), [a, b])
+
+# ── Grouping ────────────────────────────────────────────────────────────────
+
+# The distinct values of a column, in order of first appearance.
+#
+# First-appearance rather than sorted, so a group-by reads in the same order as
+# the data it came from and does not silently reorder when a new value arrives.
+# Sorting is one call away for anyone who wants it.
+fn unique(col) {
+  let seen = list()
+  for i in range(len(col)) {
+    if in_list(seen, col[i]) == 0 { seen = append(seen, col[i]) }
+  }
+  seen
+}
+
+fn in_list(xs, v) {
+  let found = 0
+  for x in xs { if x == v { found = 1 } }
+  found
+}
+
+# Group row indices by the value of a key column. Returns a list of
+# `list(key_value, index_list)`, one entry per distinct key.
+#
+# The grouping is returned rather than aggregated on the spot so that any
+# aggregate at all can be computed from it, including ones this module has never
+# heard of. `group_agg` is the common path.
+fn group_by(df, key) {
+  let col = field(df, key)
+  let keys = unique(col)
+  let out = list()
+  for k in keys {
+    let idx = list()
+    for i in range(len(col)) {
+      if col[i] == k { idx = append(idx, i) }
+    }
+    out = append(out, list(k, idx))
+  }
+  out
+}
+
+# Group by `key`, reduce the `value` column within each group with `f`, and
+# return a two-column frame.
+#
+# The result's columns are named `key` and `value`, not after the input columns,
+# because naming them after the input would mean building a record from names
+# held in variables (see the header, and NEEDS-98). Fixed names are the honest
+# version of that limit: the caller can see what they will be.
+#
+# `f` is a function from a 1-D tensor to a scalar, so `mean`, `max`, `median` or
+# anything composed in Twill works here with nothing added to this module.
+fn group_agg(df, key, value, f) {
+  let groups = group_by(df, key)
+  let col = field(df, value)
+  let ks = list()
+  let vs = list()
+  for g in groups {
+    ks = append(ks, g[0])
+    vs = append(vs, f(gather(col, g[1])))
+  }
+  { key: tensor(ks), value: tensor(vs) }
+}
+
+fn group_sum(df, key, value) = group_agg(df, key, value, fn(v) = sum(v))
+
+fn group_mean(df, key, value) = group_agg(df, key, value, fn(v) = mean(v))
+
+fn group_max(df, key, value) = group_agg(df, key, value, fn(v) = max(v))
+
+fn group_min(df, key, value) = group_agg(df, key, value, fn(v) = min(v))
+
+# Rows per group, as a frame with columns `key` and `value`.
+fn group_count(df, key) {
+  let groups = group_by(df, key)
+  let ks = list()
+  let vs = list()
+  for g in groups {
+    ks = append(ks, g[0])
+    vs = append(vs, len(g[1]) * 1.0)
+  }
+  { key: tensor(ks), value: tensor(vs) }
+}
+
+# Aggregate a whole column of the grouped frame back onto every row of the
+# original, which is what a window function does: `group_mean` gives one row per
+# group, this gives one value per input row.
+fn group_broadcast(df, key, value, f) {
+  let g = group_agg(df, key, value, f)
+  let col = field(df, key)
+  let out = list()
+  for i in range(len(col)) {
+    out = append(out, lookup(g.key, g.value, col[i]))
+  }
+  tensor(out)
+}
+
+# The value paired with `k`, or 0 if the key is absent. Linear, which is fine
+# for the group counts this is used with and would not be for a large join.
+fn lookup(keys, values, k) {
+  let out = 0.0
+  for i in range(len(keys)) {
+    if keys[i] == k { out = values[i] }
+  }
+  out
+}
+
+# ── Joining ─────────────────────────────────────────────────────────────────
+
+# Inner join on a shared key column.
+#
+# Rows appear once per matching pair, so a key repeated m times on the left and
+# n times on the right produces m*n rows. That is the standard relational answer
+# and also the standard way a join accidentally multiplies a dataset; check
+# `nrows` afterwards if the right frame was not known to be unique on the key.
+#
+# The right frame's columns are added to the joined left frame one at a time,
+# and its key column is skipped because it is equal to the left's by
+# construction. A name that appears in both frames is overwritten by the right
+# frame's version, since with_field replaces: this is the one place data can be
+# lost quietly, and there is no way to rename a column here to avoid it.
+#
+# The match is a nested scan, O(n*m). Fine for the sizes a single-binary tool
+# meets, and the wrong shape entirely for a million rows; a hash join needs a
+# dictionary keyed by a number, which the language does not have yet.
+fn join(left, right, key) {
+  let lk = field(left, key)
+  let rk = field(right, key)
+  let li = list()
+  let ri = list()
+  for i in range(len(lk)) {
+    for j in range(len(rk)) {
+      if lk[i] == rk[j] {
+        li = append(li, i)
+        ri = append(ri, j)
+      }
+    }
+  }
+  attach(take_rows(left, li), take_rows(right, ri), key)
+}
+
+# Left join: every row of `left` appears at least once, with `fill_value` in the
+# right frame's columns where nothing matched.
+#
+# The unmatched fill is a number, because a tensor has no null and cannot have
+# one. A filled 0 and a real 0 are indistinguishable afterwards, so the returned
+# frame carries a `matched` column: 1 where the row found a partner and 0 where
+# it did not. Any later average over the joined columns that ignores it is
+# averaging over invented data.
+fn left_join(left, right, key, fill_value) {
+  let lk = field(left, key)
+  let rk = field(right, key)
+  let li = list()
+  let ri = list()
+  let matched = list()
+  for i in range(len(lk)) {
+    let any = 0
+    for j in range(len(rk)) {
+      if lk[i] == rk[j] {
+        li = append(li, i)
+        ri = append(ri, j)
+        matched = append(matched, 1.0)
+        any = 1
+      }
+    }
+    if any == 0 {
+      li = append(li, i)
+      ri = append(ri, 0)
+      matched = append(matched, 0.0)
+    }
+  }
+  let l2 = take_rows(left, li)
+  let r2 = take_rows(right, ri)
+  let m = tensor(matched)
+  let out = with_field(l2, "matched", m)
+  let filled = out
+  for c in columns(r2) {
+    if c != key {
+      filled = with_field(filled, c, m * field(r2, c) + (1.0 - m) * fill_value)
+    }
+  }
+  filled
+}
+
+# The right frame's non-key columns added to the left frame. Both must already
+# have the same number of rows, which is what the index lists above arrange.
+fn attach(l, r, key) {
+  let out = l
+  for c in columns(r) {
+    if c != key { out = with_field(out, c, field(r, c)) }
+  }
+  out
+}
+
+# ── Encoding ────────────────────────────────────────────────────────────────
+
+# One-hot encode a code column, adding one 0/1 column per category.
+#
+# The categories and the new column names are both arguments, and neither is
+# derived from the data. That is the point. Categories discovered from the frame
+# in front of you are the categories in *that* frame: encode a training set and
+# a test set separately and they get different columns, or the same columns
+# meaning different things, and the model scores nonsense for a reason that
+# takes a day to find. An explicit vocabulary makes the encoding a fixed
+# transform that applies to any batch of rows.
+#
+# The names have to be passed rather than derived because there is no string
+# concatenation in the language, so "colour" and 2 cannot be combined into
+# "colour_2" here (docs/needs.md NEEDS-99).
+#
+# `drop_first` drops the first category's column. For a linear model with an
+# intercept the full set is collinear, since the columns sum to 1 and the
+# intercept already supplies that, so one has to go; for a tree or a neural net
+# it makes no difference and keeping all of them is easier to read.
+fn one_hot(df, col_name, values, new_names, drop_first) {
+  let col = field(df, col_name)
+  let out = df
+  let i = if drop_first == 1 { 1 } else { 0 }
+  while i < len(values) {
+    out = with_field(out, new_names[i], equal(col, values[i]))
+    i = i + 1
+  }
+  out
+}
+
+# Ordinal-encode a column in place: each value in `values` becomes its position.
+#
+# Anything not in `values` becomes -1 rather than defaulting to 0, since a
+# silent collision with the first category is exactly the sort of error that
+# survives all the way to production.
+fn encode_ordinal(df, col_name, values) {
+  let col = field(df, col_name)
+  let out = fill(-1.0, len(col))
+  for i in range(len(values)) {
+    out = where(equal(col, values[i]), fill(i * 1.0, len(col)), out)
+  }
+  with_field(df, col_name, out)
+}
+
+# Z-score a column in place, returning [frame, mean, std] so the same transform
+# can be replayed on new rows. Standardising the test set by its own statistics
+# is a leak and a different transform; this makes the parameters something you
+# hold rather than something you recompute.
+fn standardize_column(df, col_name) {
+  let v = field(df, col_name)
+  let mu = mean(v)
+  let sd = sqrt(mean(square(v - mu)) + 0.00000001)
+  [with_field(df, col_name, (v - mu) / sd), mu, sd]
+}
+
+fn apply_standardize_column(df, col_name, mu, sd) =
+  with_field(df, col_name, (field(df, col_name) - mu) / sd)
+
+# ── Conversion ──────────────────────────────────────────────────────────────
+
+# The named columns as one [rows, k] matrix, in the order given.
+#
+# This is the handoff to a model: a frame is for arranging data and a tensor is
+# for training on it. Columns are named explicitly rather than defaulting to all
+# of them, because the label column almost never belongs in the feature matrix
+# and a default of everything is how it gets there.
+#
+# It also stands in for the `select` this module cannot provide: choosing
+# feature columns is what select was mostly wanted for.
+fn to_tensor(df, col_names) {
+  let n = nrows(df)
+  let parts = list()
+  for c in col_names {
+    parts = append(parts, reshape(field(df, c), n, 1))
+  }
+  concat(parts, 1)
+}
+
+# Every column as one matrix, in `columns` order.
+fn to_matrix(df) = to_tensor(df, columns(df))
+
+# One column as a 1-D tensor. `field` already does this; named for symmetry with
+# `to_tensor`, so pulling out features and labels reads the same on both sides.
+fn to_vector(df, col_name) = field(df, col_name)
+
+# ── Summary ─────────────────────────────────────────────────────────────────
+
+# Per-column count, mean, standard deviation, min and max, as a frame with one
+# row per input column.
+#
+# The input column names are not in the output, because a frame column holds
+# numbers and a name is a string. The rows are in `columns(df)` order, which is
+# how to read the result and why this is something to look at rather than
+# something to compute on.
+fn describe(df) {
+  let counts = list()
+  let means = list()
+  let sds = list()
+  let mins = list()
+  let maxs = list()
+  for c in columns(df) {
+    let v = field(df, c)
+    counts = append(counts, len(v) * 1.0)
+    means = append(means, mean(v))
+    sds = append(sds, sqrt(mean(square(v - mean(v))) + 0.00000001))
+    mins = append(mins, min(v))
+    maxs = append(maxs, max(v))
+  }
+  { count: tensor(counts), mean: tensor(means), std: tensor(sds),
+    min: tensor(mins), max: tensor(maxs) }
+}
