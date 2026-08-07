@@ -1,4 +1,4 @@
-# einsum.tw — Einstein summation, a single primitive for many tensor ops.
+# einsum.tw: Einstein summation, a single primitive for many tensor ops.
 #
 # `einsum(spec, ...tensors)` contracts and sums over repeated indices. It's
 # differentiable, so it composes with grad like any other op.

@@ -1,4 +1,4 @@
-# frames.tw — tabular / time-series data with frames.
+# frames.tw: tabular / time-series data with frames.
 #
 # A frame is just a record whose fields are named column tensors, so field
 # access, slicing, and grad all work on it. `read_frame` loads a CSV with a

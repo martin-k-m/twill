@@ -1,6 +1,6 @@
-# save_load.tw — train a model, save it, load it back: the deploy story.
+# save_load.tw: the deploy story. Train a model, save it, load it back.
 #
-# A trained model in Twill is just data — a record or list of tensors, or a
+# A trained model in Twill is just data: a record or list of tensors, or a
 # native model like a gradient-boosted forest. `save` writes any value to a
 # file (exactly, bit-for-bit); `load` reads it back. So you can train once and
 # ship the model alongside the single static binary for inference anywhere.

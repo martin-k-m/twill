@@ -1,4 +1,4 @@
-# records.tw — a model held in a record (named fields) instead of a list,
+# records.tw: a model held in a record (named fields) instead of a list,
 # trained with a namespaced import of the nn library.
 #
 # `grad` flows through the record, so grad(loss)(model) returns a record with

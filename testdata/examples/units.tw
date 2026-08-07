@@ -1,8 +1,8 @@
-# units.tw — dimensioned quantities, checked at compile time and erased at runtime.
+# units.tw: dimensioned quantities, checked at compile time and erased at runtime.
 #
 # Declaring `unit USD` (etc.) lets the checker verify that a price times a
 # quantity is money, that you never add shares to dollars, and that a function
-# returns the unit it claims — all statically. At runtime the units vanish:
+# returns the unit it claims, all statically. At runtime the units vanish:
 # this file computes plain numbers with zero overhead.
 
 unit USD

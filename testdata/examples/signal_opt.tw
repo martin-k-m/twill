@@ -1,7 +1,7 @@
-# signal_opt.tw — tune a trading signal by gradient ascent on its Sharpe ratio.
+# signal_opt.tw: tune a trading signal by gradient ascent on its Sharpe ratio.
 #
 # The backtest Sharpe is differentiable in the return series, and the strategy's
-# returns are a smooth function of the signal's weights — so `grad` hands back
+# returns are a smooth function of the signal's weights, so `grad` hands back
 # the gradient of Sharpe with respect to those weights, and we simply climb it.
 # No Python, no JAX: this is reverse-mode autodiff straight through a backtest,
 # which is exactly what a vanilla Python backtest can't give you.

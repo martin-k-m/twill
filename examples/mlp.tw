@@ -1,4 +1,4 @@
-# mlp.tw — a tiny 2-layer neural network learning XOR.
+# mlp.tw: a tiny 2-layer neural network learning XOR.
 #
 # Shows composition of tensor ops, `tanh`/`sigmoid` nonlinearities, and
 # training a multi-parameter model with `grads`.

@@ -1,7 +1,7 @@
-# jacobian.tw — full Jacobian (sensitivity) matrices by autodiff.
+# jacobian.tw: full Jacobian (sensitivity) matrices by autodiff.
 #
 # `grad` differentiates a scalar output. `jacobian(f)(x)` gives the whole matrix
-# of partial derivatives of a *vector* output with respect to a vector input —
+# of partial derivatives of a *vector* output with respect to a vector input,
 # every output's sensitivity to every input at once, exactly (one reverse-mode
 # pass per output). Uses: risk/sensitivity matrices, input attribution, and
 # Jacobian regularization.

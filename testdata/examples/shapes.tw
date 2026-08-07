@@ -1,4 +1,4 @@
-# shapes.tw — static shape checking.
+# shapes.tw: static shape checking.
 #
 # Twill infers tensor shapes and checks them before running. Run
 #   twill check examples/shapes.tw

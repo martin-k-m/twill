@@ -1,8 +1,8 @@
-# hessian.tw — exact second derivatives (Hessians) by forward-mode autodiff.
+# hessian.tw: exact second derivatives (Hessians) by forward-mode autodiff.
 #
 # `grad` gives first derivatives; `hessian(f)(x)` gives the full matrix of second
 # partial derivatives of a scalar function. This is exact second-order autodiff
-# (not finite differences) — the ingredient Newton's method needs.
+# (not finite differences), the ingredient Newton's method needs.
 
 # The Hessian of a quadratic form xᵀ A x is A + Aᵀ, at every point.
 let A = [[2.0, 0.5], [0.5, 6.0]]

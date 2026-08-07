@@ -1,8 +1,8 @@
-# attention.tw — a self-attention sequence classifier, trained with `grad`.
+# attention.tw: a self-attention sequence classifier, trained with `grad`.
 #
 # This is the core transformer computation: embed a sequence of tokens, mix them
 # with single-head self-attention, pool, and classify. `grad` differentiates the
-# whole thing — embeddings, the attention softmax, and all — so the model learns
+# whole thing (embeddings, the attention softmax, and all), so the model learns
 # end-to-end. Same autodiff and single binary as everything else; now it does
 # sequences, not just tables and images.
 

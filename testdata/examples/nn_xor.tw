@@ -1,4 +1,4 @@
-# nn_xor.tw — the XOR network again, but built on the nn library.
+# nn_xor.tw: the XOR network again, but built on the nn library.
 #
 # The whole model lives in one list of parameters, so `grads` returns all four
 # gradients at once and `sgd_step` updates the list with map/zip. Compare this

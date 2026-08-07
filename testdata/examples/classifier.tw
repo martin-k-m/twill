@@ -1,4 +1,4 @@
-# classifier.tw — a 3-class classifier trained with softmax cross-entropy
+# classifier.tw: a 3-class classifier trained with softmax cross-entropy
 # and Adam, using the nn/optim libraries.
 #
 # The data is three clusters in 2-D. The model is a 2-layer MLP producing

@@ -1,8 +1,8 @@
-# minibatch.tw — a real training loop: standardize, split, shuffle, minibatch.
+# minibatch.tw: a real training loop. Standardize, split, shuffle, minibatch.
 #
 # The earlier examples train full-batch or one row at a time. Real models train
 # on shuffled minibatches over many epochs. `gather` (differentiable row select)
-# and `permutation` (a seeded shuffle) make that a few array ops — and it stays
+# and `permutation` (a seeded shuffle) make that a few array ops, and it stays
 # reproducible, so the same seed gives the same run every time.
 
 import "std/nn" as nn

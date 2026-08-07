@@ -1,7 +1,7 @@
-# backtest.tw — a vectorized momentum-strategy backtest.
+# backtest.tw: a vectorized momentum-strategy backtest.
 #
 # Builds a synthetic daily price series, runs a long-only momentum rule, and
-# reports the standard performance stats — Sharpe, CAGR, max drawdown — beside
+# reports the standard performance stats (Sharpe, CAGR, max drawdown) beside
 # buy-and-hold. Every step is a tensor operation; see std/backtest.tw.
 
 import "std/backtest" as bt

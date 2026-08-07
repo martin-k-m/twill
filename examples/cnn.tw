@@ -1,7 +1,7 @@
-# cnn.tw — a convolutional neural network, trained end-to-end with `grad`.
+# cnn.tw: a convolutional neural network, trained end-to-end with `grad`.
 #
 # The task: tell a vertical bar from a horizontal bar in a noisy 6x6 image. The
-# model is a real conv net — conv -> relu -> max-pool -> dense -> sigmoid — and
+# model is a real conv net (conv -> relu -> max-pool -> dense -> sigmoid) and
 # `grad` differentiates the whole thing at once, convolution included. Same
 # autodiff, static shapes, and single binary as the rest of Twill.
 

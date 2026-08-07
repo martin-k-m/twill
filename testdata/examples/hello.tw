@@ -1,4 +1,4 @@
-# hello.tw — the basics of Twill.
+# hello.tw: the basics of Twill.
 
 print("Hello from Twill!")
 

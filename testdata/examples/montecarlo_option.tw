@@ -1,10 +1,10 @@
-# montecarlo_option.tw — price a European call by Monte Carlo, and get its
+# montecarlo_option.tw: price a European call by Monte Carlo, and get its
 # Greeks (delta, vega) by differentiating the pricer. No finite differences,
-# no extra libraries — `grad` does it.
+# no extra libraries. `grad` does it.
 #
 # This is the finance beachhead: the payoff is parallel and simple, the result
-# is reproducible (seeded RNG), and the sensitivities come straight from autodiff
-# — something Python needs JAX or bumping-and-revaluing to match.
+# is reproducible (seeded RNG), and the sensitivities come straight from autodiff,
+# something Python needs JAX or bumping-and-revaluing to match.
 
 seed(42)
 

@@ -1,4 +1,4 @@
-# autodiff.tw — differentiation is a language primitive in Twill.
+# autodiff.tw: differentiation is a language primitive in Twill.
 #
 # `grad(f)` returns a new function: the derivative of f w.r.t. its first
 # argument. It works for scalars and tensors alike, with no tape wiring
