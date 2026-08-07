@@ -16,6 +16,13 @@ in `src/`.
 
 Status key: **blocking** means no file in `src/` parses without it.
 
+An id is permanent once assigned. Three agents appended concurrently and
+collided on 68 through 72; the collision was resolved by moving one set, and
+every comment in `src/` that named an id had to be re-read to find out which
+entry it meant. A new entry takes the next number above the highest one in this
+file and never reuses one, so a `NEEDS-n` in a comment means the same thing a
+month later as it did when it was written.
+
 ---
 
 ## NEEDS-1: `mode systems` as a file-level declaration
@@ -826,8 +833,8 @@ merging them before the dispatch exists would be guessing at its shape.
 **Status:** done. `src/fmt.tw`, wired into `src/main.tw` `format_file`.
 
 `internal/format/format.go` is ported. What is left of this entry is the
-primitives the port names, which are NEEDS-68 and NEEDS-71, and the two
-behaviours it inherited rather than chose, which are NEEDS-69 and NEEDS-70.
+primitives the port names, which are NEEDS-76 and NEEDS-79, and the two
+behaviours it inherited rather than chose, which are NEEDS-77 and NEEDS-78.
 
 The rule that had to survive the port, because it is the one people notice:
 `fmt --write` never renames a file. The retired-extension check runs before the
@@ -854,7 +861,7 @@ form, and comparing its output against the reference binary's `twill fmt`.
   a refusal on both.
 
 The one divergence the run actually found was the float exponent threshold, and
-it is now NEEDS-68. It would not have been caught by the corpus, which contains
+it is now NEEDS-76. It would not have been caught by the corpus, which contains
 no float literal that reaches `%g`.
 
 ### Verification of the einsum spec parser
@@ -1256,98 +1263,6 @@ harness's first complaint is not a surprise.
 
 *Go bootstrap:* `fmt.Errorf` with `%v`.
 
-## NEEDS-68: `f64_shortest`, Go's `%g` for the source formatter
-
-**Status:** blocking for `src/fmt.tw`. `format_number`.
-
-`f64_shortest(F64) -> Str`, which must equal Go's
-`strconv.FormatFloat(x, 'g', -1, 64)` exactly. This is not NEEDS-57's
-`format_number` (that one renders a `Value` for `print`) and it is not
-NEEDS-29's hexadecimal dump form. It is the decimal spelling a number literal
-gets when `twill fmt` writes it back out, and it is compared byte for byte
-against the Go formatter over the whole corpus.
-
-The contract is narrower than "prints a float", and the differential run caught
-the part that is easy to get wrong, so it is written down here rather than left
-to the reader of `strconv`:
-
-- Shortest digits that round-trip back to the same `F64`.
-- Exponent form when the decimal exponent is `< -4` or `>= 6`. Not 21. Go uses
-  a precision of 6 for this decision when the precision is "shortest".
-- The exponent is at least two digits and always signed: `1e-07`, `1e+20`.
-- Negative zero prints as `-0`.
-
-Measured against the reference binary: `1234567.5` gives `1.2345675e+06`,
-`123456.5` gives `123456.5`, `1e20` gives `1e+20`. `1000000` never reaches this
-function, because `format_number` takes the integer path first, which is why the
-threshold of 6 is invisible until a value has a fractional part.
-
-*Go bootstrap:* `strconv.FormatFloat`, through `internal/format`'s
-`formatNumber`.
-
-## NEEDS-69: the formatter drops `unit USD`
-
-**Status:** open, and it is a bug on the Go side first. `src/fmt.tw` `stmt`,
-`internal/format/format.go` `(*printer).stmt`.
-
-`internal/format/format.go`'s statement switch has no case for `*ast.UnitDecl`,
-so a `unit` declaration formats to nothing and a file that declares a base unit
-loses it. `src/fmt.tw` reproduces this deliberately: the cross-agreement check
-compares bytes, so fixing it in one implementation alone would turn a silently
-dropped declaration into a reported divergence and bury the real problem under
-a harness failure.
-
-Fix both together, in one change, or the corpus goes red. The fix is one line on
-each side, printing `unit <name>` through the same trailing-comment path every
-other single-line statement uses.
-
-## NEEDS-70: the formatter does not preserve blank lines
-
-**Status:** open, cosmetic, and the most likely reason someone stops running
-`twill fmt`. `src/fmt.tw`, and `internal/format/format.go` equally.
-
-The printer emits one line per statement and nothing else, so the blank lines a
-author put between paragraphs of a function are gone after one format. Comments
-survive; the whitespace that groups them does not.
-
-Preserving them needs the tree to carry the gap: the statement line numbers are
-already there, so a gap of two or more source lines between consecutive
-statements could re-emit as one blank line. That rule is not in the Go file to
-copy, which is exactly why it is recorded here rather than invented in the port.
-Whatever is chosen has to be chosen on both sides at once, for the same reason
-as NEEDS-69.
-
-## NEEDS-71: a `Dict` keyed by `I64`
-
-**Status:** open, a workaround is in place. `src/fmt.tw` `Printer.trailing`,
-`line_key`.
-
-The formatter maps a source line to the trailing comment on it. The natural type
-is `Dict[I64, Str]`; `docs/self-hosting.md` only specifies `Str` keys, so the
-line number is rendered with `str()` at every set and every get. That is a
-decimal conversion per statement printed, and it makes the key type a lie about
-what the map is for.
-
-Either `Dict` takes any equatable key, or this stays a documented workaround.
-It is not blocking and it is not free: the same pattern will appear anywhere the
-compiler wants to key on a node id, which `src/ast.tw` hands out precisely so it
-can be keyed on.
-
-## NEEDS-72: `twill tokens` is not a command
-
-**Status:** recorded so it is not read as an accident. `src/main.tw`.
-
-The earlier draft of `src/main.tw` had `twill tokens <file>` and
-`twill dump --dump=tokens`, and `src/lex.tw`'s `dump_tokens` was written for
-them. `cmd/twill/main.go` has neither, and this file is compared against it with
-stderr byte for byte, so a command the reference binary does not have would make
-`twill tokens x.tw` print a token stream on one side and
-`twill: cannot read file "tokens"` on the other.
-
-`dump_tokens` stays in `src/lex.tw` and the lexer's differential check should
-call it directly rather than through the CLI. If a token dump is wanted from the
-command line, it has to be added to the Go binary first.
-
 ## NEEDS-75: a tape the interpreted code records on
 
 **Status:** blocking for `src/eval.tw`. `grad`, `grads`, `value_and_grad`,
@@ -1388,3 +1303,95 @@ The alternative, giving `VTensor` a node field, was not taken here because it
 would put a gradient concept into the value model that most values never use,
 and `src/tensor.tw` deliberately kept `Tensor` a shape and a buffer. Recorded so
 the choice is visible rather than assumed.
+
+## NEEDS-76: `f64_shortest`, Go's `%g` for the source formatter
+
+**Status:** blocking for `src/fmt.tw`. `format_number`.
+
+`f64_shortest(F64) -> Str`, which must equal Go's
+`strconv.FormatFloat(x, 'g', -1, 64)` exactly. This is not NEEDS-57's
+`format_number` (that one renders a `Value` for `print`) and it is not
+NEEDS-29's hexadecimal dump form. It is the decimal spelling a number literal
+gets when `twill fmt` writes it back out, and it is compared byte for byte
+against the Go formatter over the whole corpus.
+
+The contract is narrower than "prints a float", and the differential run caught
+the part that is easy to get wrong, so it is written down here rather than left
+to the reader of `strconv`:
+
+- Shortest digits that round-trip back to the same `F64`.
+- Exponent form when the decimal exponent is `< -4` or `>= 6`. Not 21. Go uses
+  a precision of 6 for this decision when the precision is "shortest".
+- The exponent is at least two digits and always signed: `1e-07`, `1e+20`.
+- Negative zero prints as `-0`.
+
+Measured against the reference binary: `1234567.5` gives `1.2345675e+06`,
+`123456.5` gives `123456.5`, `1e20` gives `1e+20`. `1000000` never reaches this
+function, because `format_number` takes the integer path first, which is why the
+threshold of 6 is invisible until a value has a fractional part.
+
+*Go bootstrap:* `strconv.FormatFloat`, through `internal/format`'s
+`formatNumber`.
+
+## NEEDS-77: the formatter drops `unit USD`
+
+**Status:** open, and it is a bug on the Go side first. `src/fmt.tw` `stmt`,
+`internal/format/format.go` `(*printer).stmt`.
+
+`internal/format/format.go`'s statement switch has no case for `*ast.UnitDecl`,
+so a `unit` declaration formats to nothing and a file that declares a base unit
+loses it. `src/fmt.tw` reproduces this deliberately: the cross-agreement check
+compares bytes, so fixing it in one implementation alone would turn a silently
+dropped declaration into a reported divergence and bury the real problem under
+a harness failure.
+
+Fix both together, in one change, or the corpus goes red. The fix is one line on
+each side, printing `unit <name>` through the same trailing-comment path every
+other single-line statement uses.
+
+## NEEDS-78: the formatter does not preserve blank lines
+
+**Status:** open, cosmetic, and the most likely reason someone stops running
+`twill fmt`. `src/fmt.tw`, and `internal/format/format.go` equally.
+
+The printer emits one line per statement and nothing else, so the blank lines a
+author put between paragraphs of a function are gone after one format. Comments
+survive; the whitespace that groups them does not.
+
+Preserving them needs the tree to carry the gap: the statement line numbers are
+already there, so a gap of two or more source lines between consecutive
+statements could re-emit as one blank line. That rule is not in the Go file to
+copy, which is exactly why it is recorded here rather than invented in the port.
+Whatever is chosen has to be chosen on both sides at once, for the same reason
+as NEEDS-77.
+
+## NEEDS-79: a `Dict` keyed by `I64`
+
+**Status:** open, a workaround is in place. `src/fmt.tw` `Printer.trailing`,
+`line_key`.
+
+The formatter maps a source line to the trailing comment on it. The natural type
+is `Dict[I64, Str]`; `docs/self-hosting.md` only specifies `Str` keys, so the
+line number is rendered with `str()` at every set and every get. That is a
+decimal conversion per statement printed, and it makes the key type a lie about
+what the map is for.
+
+Either `Dict` takes any equatable key, or this stays a documented workaround.
+It is not blocking and it is not free: the same pattern will appear anywhere the
+compiler wants to key on a node id, which `src/ast.tw` hands out precisely so it
+can be keyed on.
+
+## NEEDS-80: `twill tokens` is not a command
+
+**Status:** recorded so it is not read as an accident. `src/main.tw`.
+
+The earlier draft of `src/main.tw` had `twill tokens <file>` and
+`twill dump --dump=tokens`, and `src/lex.tw`'s `dump_tokens` was written for
+them. `cmd/twill/main.go` has neither, and this file is compared against it with
+stderr byte for byte, so a command the reference binary does not have would make
+`twill tokens x.tw` print a token stream on one side and
+`twill: cannot read file "tokens"` on the other.
+
+`dump_tokens` stays in `src/lex.tw` and the lexer's differential check should
+call it directly rather than through the CLI. If a token dump is wanted from the
+command line, it has to be added to the Go binary first.
