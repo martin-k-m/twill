@@ -195,7 +195,8 @@ fn clone(t: Tensor) -> Tensor {
 
 # ---- float helpers --------------------------------------------------------
 #
-# NEEDS-54 supplies the transcendentals. These wrappers exist so that there is
+# NEEDS-68 supplies the transcendentals and NEEDS-65 supplies `f64_floor`.
+# These wrappers exist so that there is
 # exactly one place to change when they land, and so the NaN and signed-zero
 # rules below are written once rather than at every use.
 
@@ -937,7 +938,7 @@ fn reduce_axis_by(t: Tensor, axis: I64, op: Op) -> Res[Tensor, Str] {
 }
 
 # Payload-free enum cases compare by name here rather than by a `match` per
-# call site. NEEDS-57 would make `==` work on them directly.
+# call site. NEEDS-70 would make `==` work on them directly.
 fn is_same_op(a: Op, b: Op) -> Bool = op_name(a) == op_name(b)
 
 # max or min along an axis, dropping it.

@@ -853,3 +853,394 @@ The structural differences that could have broken it and did not: the twill
 version splits on bytes rather than using `strings.Split`, and it sorts the
 implicit output labels with its own insertion sort rather than `sort.Slice`.
 Both are places where a port silently drifts.
+
+---
+
+## NEEDS-54: the tensor kernel set the builtins call
+
+**Status:** blocking for `src/eval.tw`. Every builtin that computes anything.
+
+NEEDS-25 is the calling convention. This is the list of what has to be on the
+other end of it, arrived at by porting `internal/interp/builtins.go` and writing
+down every kernel a builtin names. It is the surface, not the implementation:
+each entry is one function in `internal/tensor` today.
+
+Under the no-Go rule there is no escape hatch here. None of these can be written
+in twill: they are the elementwise loops, the matmul inner loop, the
+convolution, the reductions and the reverse-mode gradient rule for each, which
+`docs/self-hosting.md` section 2.2 put in the native core precisely because they
+want SIMD and layout control. Every one of them must be a native primitive.
+
+| Kernel | Signature | Go |
+|---|---|---|
+| `relu` `exp` `log` `sin` `cos` `tanh` `sigmoid` `sqrt` `square` `neg` | `(Tensor) -> Tensor` | `tensor.Relu` and friends |
+| `add` `mul` | `(Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.Add`, `tensor.Mul` |
+| `pow_scalar` | `(Tensor, F64) -> Tensor` | `tensor.PowScalar` |
+| `clip` | `(Tensor, F64, F64) -> Tensor` | `tensor.Clip` |
+| `matmul` `conv2d` `maximum` `minimum` `greater` `less` `greater_equal` `less_equal` `equal_op` | `(Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.MatMul` and friends |
+| `where_op` | `(Tensor, Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.Where` |
+| `maxpool2d` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.MaxPool2D` |
+| `gather` | `(Tensor, Arr[I64]) -> Res[Tensor, Str]` | `tensor.Gather` |
+| `sum` `mean` `max_all` `min_all` `prod` `median` | `(Tensor) -> Tensor` | `tensor.Sum` and friends |
+| `sum_axis` `mean_axis` `max_axis` `min_axis` `prod_axis` `median_axis` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.SumAxis` and friends |
+| `sort_axis` `argsort_axis` | `(Tensor, I64, Bool) -> Res[Tensor, Str]` | `tensor.SortAxis`, `tensor.ArgsortAxis` |
+| `topk_axis` `argtopk_axis` | `(Tensor, I64, I64, Bool) -> Res[Tensor, Str]` | `tensor.TopKAxis`, `tensor.ArgTopKAxis` |
+| `argmax_axis` `argmin_axis` `flip_axis` `diff_axis` `softmax` `logsumexp` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.ArgmaxAxis` and friends |
+| `roll_axis` | `(Tensor, I64, I64) -> Res[Tensor, Str]` | `tensor.RollAxis` |
+| `reshape` `broadcast_to` | `(Tensor, Arr[I64]) -> Res[Tensor, Str]` | `tensor.Reshape`, `tensor.BroadcastTo` |
+| `transpose_perm` | `(Tensor, Arr[I64]) -> Res[Tensor, Str]` | `tensor.TransposePerm` |
+| `einsum` | `(Str, Arr[Tensor]) -> Res[Tensor, Str]` | `tensor.Einsum` |
+| `concat` | `(Arr[Tensor], I64) -> Res[Tensor, Str]` | `tensor.Concat` |
+| `split` `split_equal` | `(Tensor, Arr[I64] \| I64, I64) -> Res[Arr[Tensor], Str]` | `tensor.Split`, `tensor.SplitEqual` |
+| `cumsum` `cumprod` `cummax` `cummin` | `(Tensor) -> Tensor` | `tensor.CumSum` and friends |
+| `cumsum_axis` `cumprod_axis` `cummax_axis` `cummin_axis` | `(Tensor, I64) -> Res[Tensor, Str]` | `tensor.CumsumAxis` and friends |
+| `leaf` | `(Arr[F64], Arr[I64]) -> Tensor` | `tensor.Leaf` |
+| `leaf_grad` | `(Tensor) -> Opt[Arr[F64]]` | reading `t.Grad`, which is nil until a backward pass reaches it |
+| `backward` | `(Tensor) -> Res[Unit, Str]` | `(*Tensor).Backward` |
+| `set_record_jets` | `(Bool)` | `tensor.SetRecordJets` |
+| `hessian` | `(Tensor, Tensor) -> Res[Tensor, Str]` | `tensor.Hessian`, which returns `([]float64, n)` and is reshaped by the caller there |
+| `from_nested` `to_nested` | see NEEDS-62 | `tensor.FromNested`, `(*Tensor).ToNested` |
+
+Two things about this list are load-bearing and easy to lose.
+
+The `Res[..., Str]` returns are not decoration. `src/eval.tw` `lift` turns a
+kernel's message into a runtime error carrying the call's line, and the message
+text is compared byte for byte by the differential harness, so a kernel that
+aborts instead of returning a message takes the line number with it.
+
+Negative axes are normalised **inside** the kernel and not in `src/eval.tw`.
+`internal/tensor/ops.go` `normalizeAxis` adds the rank first and then reports the
+*adjusted* axis if it is still out of range, so `sum(m, -5)` on a rank-2 tensor
+says `axis -3 out of range for rank 2`. Normalising on the twill side would
+report `-5` and diverge on the single input that reaches the message.
+
+## NEEDS-55: a seeded random number generator
+
+**Status:** blocking for `src/eval.tw`. `randn`, `rand`, `seed`, `permutation`.
+
+`rng_seed(I64)`, `rng_uniform() -> F64`, `rng_normal() -> F64`,
+`rng_perm(n) -> Arr[I64]`. Native: it is one generator's state for the whole
+program, which is the thing the language has no way to own.
+
+The contract is reproducibility, and it is stronger than "random": `seed(k)`
+followed by the same sequence of `rand`/`randn`/`permutation` calls must give
+the same numbers on every run and every platform, because that is what makes a
+training run in `examples/` reproducible and what the corpus compares. The Go
+side gets this from `math/rand`'s `Float64`, `NormFloat64` and `Perm` on an
+explicitly seeded `*rand.Rand`, so the native core has to match those streams
+bit for bit, not merely be seeded.
+
+## NEEDS-56: the output sink for `print`
+
+**Status:** blocking for `src/eval.tw`. `bi_print`.
+
+`emit_line(Str)`. Not `write_out`: `interp.New` takes an `out func(string)` and
+every caller supplies a different one. The test harness captures into a buffer,
+the REPL interleaves with its own prompt, and only the `run` command writes to
+stdout. The line ending belongs to the sink, which is why `print` joins with
+spaces and adds nothing.
+
+An evaluator that wrote to a file descriptor directly could not be tested by the
+differential harness at all, so this is not a detail.
+
+## NEEDS-57: value formatting
+
+**Status:** blocking for `src/eval.tw`. `print`, `str`, `write_frame`, and the
+`jacobian: f must return a tensor, got %s` message.
+
+`format_value(Value) -> Str` and `format_number(F64) -> Str`, from
+`internal/value`'s `Format` and `FormatNumber`. Not ported by anyone: `src/fmt.tw`
+is the *source* formatter, the port of `internal/format`, so the obvious name is
+taken and this needs a home of its own.
+
+It cannot live in `src/fmt.tw` even if the name were free, because it formats a
+`Value`, and `Value` is declared in `src/eval.tw`. A module holding it would
+have to import eval, and eval has to call it, so either the two import each
+other or it goes in `src/eval.tw`. There is no third option and the language has
+no answer for the first one today.
+
+It is also a bigger job than it looks: `FormatNumber` is the float rendering of
+NEEDS-29, and every printed number in every `testdata/` expectation goes through
+it.
+
+## NEEDS-58: paths resolved against the running source file
+
+**Status:** blocking for `src/eval.tw`. `read_csv`, `read_frame`, `write_frame`,
+`save`, `load`.
+
+`resolve_path(Str) -> Str`: an absolute path unchanged, a relative one joined to
+the directory of the source file currently executing, *not* the process's
+working directory. `internal/interp` keeps a `srcStack` for this so that a
+script reading `data.csv` next to itself works when run from anywhere.
+
+The import resolver (NEEDS-51) needs the same stack, and they should be one
+thing rather than two.
+
+## NEEDS-59: reading and writing whole files
+
+**Status:** blocking for `src/eval.tw`. The frame builtins.
+
+NEEDS-28 has both, as `read_file(path) -> Res[Bytes, Str]` and `write_file`.
+The shapes the frame builtins want differ, and the difference is not cosmetic:
+
+- `read_file(path) -> Opt[Str]`. An option, because `read_csv` reports
+  `read_csv: cannot read "..."` and discards the underlying OS error entirely,
+  so a `Res` carrying a message the caller must then throw away is the wrong
+  shape. `Str` rather than `Bytes` because every line of the file is then split
+  and parsed as text.
+- `write_file(path, Str) -> Res[Unit, Str]`, likewise taking `Str`. This is the
+  same widening NEEDS-48 asks for on `write_out`, for the same reason.
+
+Either NEEDS-28's signatures grow these, or the conversions happen at each call
+site and `read_csv` allocates a second copy of the whole file.
+
+## NEEDS-60: parsing a float the way Go does
+
+**Status:** blocking for `src/eval.tw`. `read_csv`, `read_frame`.
+
+`f64_parse(Str) -> Opt[F64]`. The runtime primitive table already lists
+`f64_of_str` for the lexer, but the lexer only ever hands it text its own scanner
+accepted. This one is handed arbitrary CSV fields and has to decide, so it needs
+the option return and it needs Go's exact acceptance set: leading sign,
+`inf`/`infinity`/`nan` case-insensitively, hex float literals, and underscores
+refused. A parser that accepts a superset turns a corrupt column into silent
+numbers; one that accepts a subset rejects files the bootstrap reads.
+
+## NEEDS-61: `trim_space` over Unicode, not ASCII
+
+**Status:** open, low priority. `src/eval.tw` `trim_space`.
+
+`strings.TrimSpace` strips every Unicode space, including U+00A0 and the
+ideographic space. The twill version strips the six ASCII ones, which is every
+byte a CSV realistically contains and not every byte Go would strip. A file with
+a non-breaking space around a number parses on the Go side and fails here.
+
+Either a `trim_space` primitive with Go's semantics, or `unicode.IsSpace` as a
+predicate the twill loop can call.
+
+## NEEDS-62: `Nested`, and where it belongs
+
+**Status:** open. `src/eval.tw` `value_to_nested`, `tensor` builtin.
+
+`tensor([[1, 2], [3, 4]])` goes through an intermediate that is a number or a
+list of them nested to any depth, and `tensor.FromNested` reads the shape off it
+and refuses a ragged one. `src/eval.tw` declares the enum because
+`src/tensor.tw` does not have it, which is the wrong place: `from_nested` and
+`to_nested` are the tensor engine's and the type they speak should be too. Moving
+it is a one-line change once the kernel set lands, and it is recorded so it does
+not become permanent by default.
+
+## NEEDS-63: opaque values from the native core
+
+**Status:** blocking for `src/eval.tw`. `gbm_fit`, `gbm_predict`.
+
+A fitted model is a value twill holds and cannot look inside. `src/eval.tw` adds
+`VForeign(ForeignVal { kind, handle })` for it: a string naming the kind and an
+opaque handle the core resolves. `gbm_predict` checks the kind, which is what
+makes `gbm_predict(3, X)` report *first argument must be a model from gbm_fit*
+rather than crashing in the core.
+
+The primitives:
+
+- `gbm_fit(Arr[F64], Arr[F64], I64, I64, GbmParams) -> Res[I64, Str]`
+- `gbm_predict(I64, Arr[F64], I64, I64) -> Res[Arr[F64], Str]`
+
+`internal/gbm` is 900 lines of tree building and it is the one part of the
+builtin surface that is neither a tensor kernel nor twill's business. It stays
+native. The handle has to survive `save` and `load` (NEEDS-64), which is the
+part that makes it more than an integer.
+
+What is *not* deferred: `GbmParams` and its defaults are declared in
+`src/eval.tw`, because the defaults are part of what `gbm_fit(X, y)` means to
+someone reading a twill program.
+
+## NEEDS-64: `save` and `load`
+
+**Status:** blocking for `src/eval.tw`.
+
+`save_value(Value, Str) -> Res[Unit, Str]` and
+`load_value(Str) -> Res[Value, Str]`, from `internal/interp/serialize.go`.
+
+The format is the contract: a file written by the bootstrap must load in the
+self-hosted evaluator and the other way round, or a model trained before the
+switch is lost. That makes this the one primitive here whose *encoding* is part
+of the specification rather than an implementation detail, and it covers
+tensors, lists, records and the gbm model of NEEDS-63.
+
+Porting the encoder to twill is possible for everything except the model, so the
+seam is the same one either way, and it is recorded as native for that reason.
+
+## NEEDS-65: `f64_trunc`, `f64_floor`, `f64_ceil`, `f64_round`
+
+**Status:** blocking for `src/eval.tw`. `int`, `floor`, `ceil`, `round`, and
+every `int_of` coercion.
+
+Alongside the `f64_mod` and `f64_pow` already in the runtime primitive table.
+`f64_round` is half away from zero, matching `math.Round` and not the
+round-half-to-even a reader coming from Python or from IEEE would assume, and
+the difference shows on exactly the inputs a test would use.
+
+## NEEDS-66: three builtins the checker's table does not know
+
+**Status:** open, and it is a bug on the checker's side rather than a language
+gap. `src/check.tw` `builtin_names`.
+
+`argsort`, `argtopk` and `split` are defined in
+`internal/interp/builtins.go` and ported in `src/eval.tw`, and they are absent
+from `src/check.tw`'s `builtin_names`. A program calling one of them is reported
+as an undefined variable by the checker and then works when run.
+
+The Go checker has the same list, so fixing it means fixing both or the
+diagnostics diverge. Related to NEEDS-52, but separate: NEEDS-52 is that there
+are two tables, this is that they already disagree.
+
+## NEEDS-67: mutating a struct through a parameter
+
+**Status:** open, and it is a semantics question, not a task.
+`src/eval.tw` `gbm_opts_from_record`.
+
+That function takes a `GbmParams` and assigns to its fields, and the caller
+expects to see the changes. Whether it does depends on whether a struct is
+passed by handle or by value, which `docs/self-hosting.md` does not say. The
+same question decides whether `Env`, `Tape` and `Printer` work at all, so it is
+already answered implicitly everywhere in `src/`, but it is answered by
+assumption and not by a rule.
+
+The assumption throughout `src/` is that a struct is a handle and assignment
+through it is visible to the caller, exactly as a Go pointer receiver is. If the
+answer turns out to be by-value, `gbm_opts_from_record` has to return the params
+and several other things in `src/` break more quietly than it does.
+
+---
+
+## Tensor kernels and autodiff
+
+The entries below are what `src/tensor.tw` reaches for now that the kernels and
+the gradient rules are in twill rather than deferred to a native core. NEEDS-25
+described the calling convention into that core; there is no core, so what it
+asked for is replaced by the handful of genuine primitives listed here. Nothing
+in `src/tensor.tw` needs a foreign call any more.
+
+## NEEDS-68: the transcendental float primitives
+
+**Status:** blocking for `src/tensor.tw`. `apply_unary`, `d_unary`, `softmax`,
+`logsumexp_axis`, `vjp_logsumexp`.
+
+`f64_exp`, `f64_log`, `f64_sin`, `f64_cos`, `f64_sqrt`, `f64_tanh`. These have
+to be native primitives, not twill: under the no-Go rule there is no bootstrap
+to call into, and a series expansion written in twill would not agree with
+`math.Exp` in the last bits.
+
+Agreement in the last bits is the requirement, not a nicety. `testdata/` compares
+output byte for byte after a canonical float rendering (NEEDS-29), so an `exp`
+that is one ulp off turns every test touching a sigmoid into a diff. Whatever
+supplies these must be the same implementation the bootstrap used, which in
+practice means Go's `math` or a faithful port of it.
+
+`f64_pow` is already in the runtime primitive table and `f64_floor` is NEEDS-65;
+neither is repeated here.
+
+*Go bootstrap:* `math.Exp` and friends, called from `internal/tensor/tensor.go`.
+
+## NEEDS-69: `f64_signbit`
+
+**Status:** open, low priority. `src/tensor.tw` `f64_max`, `f64_min`.
+
+`math.Max(-0, +0)` is `+0`, and a comparison chain cannot tell the two zeros
+apart. The only way to reproduce it is to ask which zero it is.
+
+Low priority because the sign of a zero is invisible until something divides by
+it, and it is recorded rather than skipped because when it does show up it shows
+up as an infinity of the wrong sign in a gradient, which reads as a bug in the
+gradient rather than in `max`.
+
+*Go bootstrap:* `math.Signbit`.
+
+## NEEDS-70: equality on a payload-free enum case
+
+**Status:** blocking for `src/tensor.tw`. `is_same_op`, and every dispatch in
+`vjp`.
+
+`Op` has forty-odd cases and none carries a payload. Asking whether a value is
+`OpAdd` currently means a `match` with forty arms, or `is_same_op`, which
+compares the rendered names and is both slow and a lie about what it is doing.
+
+What is wanted is `==` on two values of the same payload-free enum, comparing
+the case and nothing else. This is narrower than deriving equality for all
+enums, which would have to decide what a payload comparison means, and it covers
+the case that actually appears.
+
+Without it `vjp`'s dispatch is a string compare per op per backward pass, which
+is not a correctness problem and is an embarrassing one.
+
+*Go bootstrap:* `internal/interp/builtins.go` dispatches on a string name, so it
+has the same shape and the same cost, and gets away with it because the Go map
+lookup is one hash.
+
+## NEEDS-71: an `Arr` parameter aliases the caller's array
+
+**Status:** blocking for `src/tensor.tw`. `accumulate`, `odo_step`,
+`sort_offsets`, and every kernel that fills a buffer it was handed.
+
+`accumulate(cot, touched, node, buf)` mutates `cot[node].data` and expects the
+caller to see it. `odo_step(odo)` advances a struct's arrays in place. If an
+`Arr` parameter is copied rather than aliased, every one of those is a silent
+no-op and the whole backward pass returns zeros.
+
+This is the array half of NEEDS-67, which asks the same question about a struct.
+The two answers have to agree, because `Odometer` is a struct holding arrays and
+is mutated through both at once.
+
+The bootstrap's answer is aliasing, because a Go slice is a header over shared
+storage, so that is the answer `src/` is written against.
+
+*Go bootstrap:* Go slices.
+
+## NEEDS-72: nested containers
+
+**Status:** blocking for `src/tensor.tw`. `Arr[Arr[I64]]` in `Odometer.contrib`
+and `einsum_plan`, `Arr[Tensor]` in `concat`, `split` and `backward`,
+`Arr[Bool]` in `resolve_perm` and `backward`.
+
+`docs/self-hosting.md` section 1.2 lists `Arr[T]` without saying whether `T` may
+itself be a container or a struct. Every entry above needs it to be.
+
+Nothing exotic is wanted: no variance, no covariant assignment, just the
+element type being any type the subset already has. It is listed because a
+straightforward reading of the section is that `Arr` holds scalars, and the
+tensor kernels would then need a hand-rolled flattening for each of the five
+uses above, which is five chances to get an index wrong.
+
+*Go bootstrap:* `[][]int`, `[]*Tensor`, `[]bool`.
+
+## NEEDS-73: `abort` in value position
+
+**Status:** open, small. `src/tensor.tw` `apply_binary`, `apply_unary`.
+
+Both end in a `_ =>` arm that calls `abort` because the op passed was not of the
+kind the function handles. The arm has to have the same type as the others,
+which is `F64`, so `abort` has to be usable as an expression of any type and be
+understood by the checker as never returning.
+
+The alternative is returning a sentinel float and letting a wrong op silently
+compute with it, which is worse in exactly the way this file is trying to avoid.
+
+*Go bootstrap:* `panic` is a statement in Go and these branches are written as
+an early `return` there, which is available because the Go functions are not
+expression-bodied.
+
+## NEEDS-74: rendering an `Arr[I64]` the way Go's `%v` does
+
+**Status:** open, diagnostics only. `src/tensor.tw` `resolve_perm`.
+
+The invalid-permutation message renders the axes with `shape_string`, which
+produces `[1, 0]`. `internal/tensor/ops.go` uses `%v` on a `[]int`, which
+produces `[1 0]`, with spaces and no commas.
+
+Every other shape in a diagnostic goes through `shape_string` on both sides and
+matches. This one does not, because Go is printing an axis list rather than a
+shape. Either the Go side switches to the shape rendering, or a second renderer
+exists for it. It is one message and it is written down so the differential
+harness's first complaint is not a surprise.
+
+*Go bootstrap:* `fmt.Errorf` with `%v`.
