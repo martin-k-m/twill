@@ -173,3 +173,38 @@ func TestAnAliasedImportKeepsTheNameCheck(t *testing.T) {
 	// is still provably nothing.
 	wantOne(t, "import \"std/nn\" as nn\nprint(nope)", `unknown name "nope"`)
 }
+
+func TestConcatReportsPiecesThatDoNotFit(t *testing.T) {
+	wantOne(t, "let a = zeros(2, 3)\nlet b = zeros(4, 5)\nprint(concat([a, b], 0))",
+		"shapes differ on axis 1")
+}
+
+func TestConcatShapeFlowsDownstream(t *testing.T) {
+	// The second half of the win: concat used to return an unknown type, so a
+	// whole pipeline built on one was unchecked from that point on.
+	wantOne(t, `let a = zeros(2, 3)
+let b = zeros(2, 3)
+let c = concat([a, b], 0)
+print(c @ zeros(9, 9))`, "[4, 3] @ [9, 9]")
+}
+
+func TestConcatOnAnotherAxisAddsUpThere(t *testing.T) {
+	src := `let a = zeros(2, 3)
+let b = zeros(2, 5)
+print(concat([a, b], 1) @ zeros(8, 2))`
+	if diags := diagnostics(t, src); len(diags) != 0 {
+		t.Fatalf("a valid join was reported: %v", diags)
+	}
+}
+
+func TestConcatWithAnAxisThatDoesNotExist(t *testing.T) {
+	wantOne(t, "let a = zeros(2, 3)\nprint(concat([a, a], 9))", "axis out of range")
+}
+
+func TestConcatSaysNothingWhenAPieceIsUnknown(t *testing.T) {
+	// Unknowable is not the same as wrong.
+	src := "let a = zeros(2, 3)\nlet b = load(\"x.npy\")\nprint(concat([a, b], 0))"
+	if diags := diagnostics(t, src); len(diags) != 0 {
+		t.Fatalf("an unknowable concat was reported: %v", diags)
+	}
+}

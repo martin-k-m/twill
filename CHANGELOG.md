@@ -17,6 +17,13 @@
   4, 2)` asks for eight elements from six. The message names both counts, since
   the useful question is which one is wrong.
 
+- **`concat` has a shape.** It returned unknown, which cost twice: pieces that
+  cannot be joined reached the runtime, and everything downstream of a concat was
+  unchecked from that point on. `concat([zeros(2, 3), zeros(2, 3)], 0)` is a
+  `[4, 3]` now, and a later multiply against it is checked like any other. A
+  piece whose own shape is unknown still reports nothing, because unknowable is
+  not the same as wrong.
+
 - **An unknown name is reported.** `print(nope + 1.0)` used to pass. Forward
   references still resolve, because a file may call a function declared further
   down and does at run time. A file with an unaliased `import` stands the check

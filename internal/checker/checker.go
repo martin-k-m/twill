@@ -1060,7 +1060,9 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	case "einsum":
 		return c.inferEinsum(ex, argTypes)
-	case "concat", "fold":
+	case "concat":
+		return c.inferConcat(ex, argTypes)
+	case "fold":
 		return tUnknown{}
 	case "append", "enumerate", "columns", "split":
 		return tList{}
@@ -1287,6 +1289,81 @@ func convResult(argTypes []Type) Type {
 // that the axis was out of range and returned an unknown type, which silences
 // everything downstream as well. Detecting a mistake and saying nothing is the
 // worst of the three options.
+// inferConcat works out the shape of a concatenation, and reports the pieces
+// that cannot be joined.
+//
+// Worth doing twice over: the mismatch itself reached the runtime, and the
+// unknown type it used to return blinded everything downstream of it as well, so
+// a whole pipeline built on a concat was unchecked from that point on.
+func (c *checker) inferConcat(ex *ast.Call, argTypes []Type) Type {
+	if len(argTypes) < 1 {
+		return tUnknown{}
+	}
+	lst, ok := argTypes[0].(tList)
+	if !ok || len(lst.elems) == 0 {
+		return tUnknown{}
+	}
+
+	// Every piece has to be a tensor whose shape is known. One that is not
+	// makes the result unknowable rather than wrong, so this says nothing.
+	parts := make([]tTensor, 0, len(lst.elems))
+	for _, el := range lst.elems {
+		t, ok := el.(tTensor)
+		if !ok || len(t.dims) == 0 {
+			return tUnknown{}
+		}
+		for _, d := range t.dims {
+			if d < 0 {
+				return tUnknown{}
+			}
+		}
+		parts = append(parts, t)
+	}
+
+	rank := len(parts[0].dims)
+	for _, p := range parts[1:] {
+		if len(p.dims) != rank {
+			c.report(ex.Line, "concat needs pieces of the same rank: %s has %d, %s has %d",
+				dimsString(parts[0]), rank, dimsString(p), len(p.dims))
+			return tUnknown{}
+		}
+	}
+
+	axis := 0
+	if len(ex.Args) >= 2 {
+		ax, ok := constInt(ex.Args[1])
+		if !ok {
+			return tUnknown{}
+		}
+		axis = ax
+	}
+	if axis < 0 {
+		axis += rank
+	}
+	if axis < 0 || axis >= rank {
+		c.reportAxis(ex, parts[0])
+		return tUnknown{}
+	}
+
+	// Every axis but the joined one has to agree. This is the runtime's rule and
+	// its wording, so a reader who has seen one message recognises the other.
+	total := 0
+	for _, p := range parts {
+		total += p.dims[axis]
+		for i := range p.dims {
+			if i != axis && p.dims[i] != parts[0].dims[i] {
+				c.report(ex.Line, "concat: shapes differ on axis %d: %s and %s",
+					i, dimsString(parts[0]), dimsString(p))
+				return tUnknown{}
+			}
+		}
+	}
+
+	dims := append([]int{}, parts[0].dims...)
+	dims[axis] = total
+	return tTensor{dims: dims, unit: parts[0].unit}
+}
+
 func (c *checker) reportAxis(ex *ast.Call, t tTensor) {
 	c.report(ex.Line, "axis out of range for %s: it has %d %s, numbered 0 to %d",
 		dimsString(t), len(t.dims), plural(len(t.dims), "axis", "axes"), len(t.dims)-1)
