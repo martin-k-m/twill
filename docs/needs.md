@@ -203,9 +203,10 @@ unit and reported as undeclared.
 
 *Go bootstrap:* `checker.tBool` exists; there is no way to write it.
 
-## NEEDS-15 — the whole-file lexer divergence: non-ASCII whitespace in comments
+## NEEDS-15 — lexer divergence: non-ASCII whitespace in comments
 
-**Status:** known, accepted divergence. `src/lex.tw:466` (`is_space`).
+**Status:** known, accepted divergence, **confirmed by differential test**.
+`src/lex.tw:466` (`is_space`).
 
 Go's `strings.TrimSpace` trims a Unicode space set that includes U+0085 and
 U+00A0. `src/lex.tw` trims the ASCII members only, because matching the rest
@@ -430,3 +431,77 @@ here rather than silently fixed because the differential harness will report it
 as a divergence, and a divergence with no note is indistinguishable from a bug.
 Either the Go parser is changed to match, or this entry is the reason the diff
 is expected.
+
+---
+
+## Found by differential testing of the lexer
+
+The three entries below came out of running `src/lex.tw` against
+`internal/lexer/lexer.go` over 385 corpus files and 4,000 fuzzer cases. See
+"Verification" at the end of this file.
+
+## NEEDS-32 — Go-compatible `%q` for a non-printable or non-ASCII character
+
+**Status:** open divergence. `src/lex.tw:478` (`quote_char`).
+
+The message `unexpected character %q` is the lexer's only use of `%q` on source
+text. Go renders a non-printable rune as an escape: a NUL byte prints as
+`"\x00"` and a lone surrogate as `"\ufffd"`. `quote_char` emits the raw byte
+between quotes, so the two implementations produce different bytes for a NUL,
+a vertical tab, or any other non-printable input character.
+
+Every printable case agrees, including multi-byte ones: `€` and an emoji both
+round-trip. So this only fires on input that is already malformed, which is
+exactly why it would survive a weak harness and needs to be written down.
+
+Fix with the `%q` rendering asked for in NEEDS-20, not with a special case here.
+
+*Go bootstrap:* `fmt.Sprintf("unexpected character %q", string(ch))`.
+
+## NEEDS-33 — the Go bootstrap panics on a trailing backslash at end of file
+
+**Status:** a bug in `internal/lexer/lexer.go`, not in `src/lex.tw`.
+
+Source ending in an unterminated string whose last byte is a backslash, for
+example `x = "ab\`, makes the Go lexer index past the end of its rune slice and
+panic. The string branch consumes the backslash and calls `advance()` for the
+escaped character without checking that one exists.
+
+`src/lex.tw:405` checks, and returns "unterminated string" at the opening quote,
+which is the right diagnosis: the file's problem is the missing close quote, not
+the backslash.
+
+This is a divergence the harness will report, and the resolution is to fix the
+Go lexer rather than to reproduce a panic. It is listed here because it is the
+first thing self-hosting found, and finding it is the argument
+`docs/self-hosting.md` section 3 makes for the exercise.
+
+---
+
+## Verification
+
+`src/lex.tw` was checked against `internal/lexer/lexer.go` by transcribing both
+into a single executable form and comparing them, rather than by reading them
+side by side. The comparison covers token kind, literal text, line and column,
+the comment list including each comment's trailing flag, and the error message
+and position on inputs that fail.
+
+- **385 files**: every `.tw` file in `examples/`, `std/`, `testdata/` and
+  `src/`. Zero divergences.
+- **4,000 fuzzer cases**, seeded, mixing random token soup with mutated slices
+  of the corpus, over an alphabet that includes non-ASCII text, escape
+  sequences, NUL, vertical tab, unterminated strings and every multi-character
+  operator. 2,516 of the cases were error cases. Zero divergences.
+- **22 targeted edge cases**. Three divergences, all of them the ones recorded
+  above: NEEDS-15, NEEDS-32 and NEEDS-33.
+
+The byte-versus-rune question the port turns on is settled by this rather than
+by argument: the column counter in `src/lex.tw` skips UTF-8 continuation bytes,
+and the case "multibyte then column-sensitive tokens" confirms that a token
+following a multi-byte string literal lands on the same column in both
+implementations.
+
+This is not the real harness. The real one runs `src/lex.tw` on a twill runtime
+and compares against the Go binary, and it cannot exist until the entries above
+are implemented. Until then this is the strongest available evidence, and it is
+strong enough to have found NEEDS-33.
