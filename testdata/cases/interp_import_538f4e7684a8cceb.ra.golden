@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: cannot read import "x.ra"
-  1 | import "x.ra"

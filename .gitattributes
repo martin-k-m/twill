@@ -1,4 +1,4 @@
 # Normalize line endings to LF in the repository.
 * text=auto eol=lf
-*.ra text eol=lf
+*.tw text eol=lf
 *.go text eol=lf

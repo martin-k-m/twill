@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:2: runtime error: grad(grad(fn)) is not a second derivative: the gradient grad(fn) returns is a plain value with no history, so differentiating it again gives zero. Use hessian(f) for a second derivative, or jacobian(f) for the matrix of first ones
-  2 | print(grad(grad(f))(2.0))

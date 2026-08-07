@@ -1,6 +1,6 @@
 # Rewrite plan
 
-Raster is to stop being a Go program and become its own system level
+Twill is to stop being a Go program and become its own system level
 implementation with no dependency on anything else. This document plans that
 work: which target, in what order, how correctness is proved at each step, what
 it costs, and how much speed it actually returns.
@@ -20,12 +20,12 @@ Measured from the tree today:
 | `internal/tensor` | 2879 (tensor, ops, scan, jet, einsum, conv, gather, parallel) | Autodiff engine, reverse tape, forward jets, parallel kernels |
 | `internal/parser` | 878 | Recursive descent with a Pratt loop |
 | `internal/gbm` | 505 | Gradient boosted trees |
-| `internal/format` | 392 | `raster fmt` |
+| `internal/format` | 392 | `twill fmt` |
 | `internal/value` | 356 | Value representation, `Env` scopes |
 | `internal/lexer` | 223 | Hand-written scanner |
 | `internal/ast` | 313 | Node types |
-| `cmd/raster` | 256 | CLI: `run`, `check`, `fmt`, `repl`, `version` |
-| `std/*.ra` | 543 across 6 modules | Written in Raster, embedded in the binary |
+| `cmd/twill` | 256 | CLI: `run`, `check`, `fmt`, `repl`, `version` |
+| `std/*.tw` | 543 across 6 modules | Written in Twill, embedded in the binary |
 
 Non-test Go is about 10,300 lines. Tests are about 4,600 lines holding **279
 top level test functions** (checker 60, interp 106, tensor 102, gbm 4, value 4,
@@ -37,7 +37,7 @@ is 989 lines of finite-difference checks at `eps = 1e-6` against a `1e-4`
 absolute bar, covering matmul, conv2d, maxpool2d, einsum, softmax, logsumexp,
 sort, topk, gather, cumulative ops, split, concat, reshape, transpose, where,
 clip and prod-with-zeros. Any implementation that does not pass that file has
-not reproduced Raster's autodiff, whatever else it does.
+not reproduced Twill's autodiff, whatever else it does.
 
 The language surface that must be preserved exactly is in
 `docs/language-guide.md`: values, operators, equality, bindings, functions,
@@ -53,7 +53,7 @@ Two further constraints that are easy to forget and expensive to rediscover:
   `T L R B S U G`. Files written by v1.2.0 must load in the rewrite.
   `examples/model.bin` and `examples/params.bin` exist in the tree as fixtures.
 - `std/embed.go` compiles the standard library into the binary with `go:embed`,
-  with a `RASTER_STD` directory override. Every target must reproduce both
+  with a `TWILL_STD` directory override. Every target must reproduce both
   behaviours, because "single binary, no toolchain" depends on the embedding.
 
 ## 1. Target choice
@@ -133,17 +133,17 @@ the correctness axis it sits with C++, not with Rust.
 
 Verdict: the runner-up, and the tripwire is stated below.
 
-### Self-hosting Raster in Raster
+### Self-hosting Twill in Twill
 
 This is what the goal statement literally asks for, so it deserves a direct
 answer rather than deferral.
 
-Raster today cannot express its own compiler. It has no pointers, no mutable
+Twill today cannot express its own compiler. It has no pointers, no mutable
 aggregates beyond record field assignment, no byte or char type, no sum types
 or pattern matching, no arbitrary file IO, and no way to write a lexer that is
 not fighting the type system. `value.Value` is Go's `any`; there is no
 equivalent. Getting to self-hosting means first designing a systems dialect of
-Raster, which is a strictly larger project than the interpreter it would
+Twill, which is a strictly larger project than the interpreter it would
 replace, and it means running both dialects forever or making the numeric
 language absorb features it was designed to exclude.
 
@@ -198,21 +198,21 @@ of this language will ever be.
 
 No rewrite yet. Build the thing that makes every later stage verifiable.
 
-1. Add `raster run --dump=canonical`, which after a program finishes prints
+1. Add `twill run --dump=canonical`, which after a program finishes prints
    every top-level binding in a stable canonical form: name, kind, shape, and
    float64 values as `%x` hex bit patterns, record fields sorted by name, list
    order preserved. Hex, not decimal, because the point is bit equality.
-2. Extract the `.ra` source embedded in the 106 interp tests and 60 checker
+2. Extract the `.tw` source embedded in the 106 interp tests and 60 checker
    tests into standalone fixture files under `testdata/`, each with a recorded
    canonical output or a recorded exact error string and line number. The Go
    tests keep working, they just stop being the only place the fixtures live.
 3. Record golden outputs for the 24 examples and for a driver program per
    `std/` module.
-4. Add a small grammar-directed `.ra` generator for fuzzing, seeded and
+4. Add a small grammar-directed `.tw` generator for fuzzing, seeded and
    reproducible.
 
 Ends with: a corpus of roughly 400 fixtures with golden outputs, runnable
-against any binary claiming to be Raster.
+against any binary claiming to be Twill.
 
 ### Stage 1: bytecode VM in Go (6 to 10 weeks)
 
@@ -222,7 +222,7 @@ and roughly 7 allocations per iteration.
 
 Design a register-based instruction set over the existing `ast`, compile to it,
 and run it in a new `internal/vm`. Keep the tree-walker. Select with
-`RASTER_ENGINE=tree|vm`, defaulting to tree until parity holds, then flipping.
+`TWILL_ENGINE=tree|vm`, defaulting to tree until parity holds, then flipping.
 Run the whole test suite under both in CI.
 
 What this removes: per-iteration scope allocation (partly addressed already by
@@ -282,7 +282,7 @@ move the Go implementation to a `reference/` directory or a tag, and say in
 ### Stage 7 and after: self-hosting, optional
 
 With a bytecode target and a stable module format in place, a systems dialect
-of Raster becomes a front end rather than a rewrite. That is the cheapest path
+of Twill becomes a front end rather than a rewrite. That is the cheapest path
 to the original goal, and it is available only because Stage 2 exists.
 
 ## 3. Differential-testing harness
@@ -320,7 +320,7 @@ Rust, re-save, compare bytes. Then the reverse. Include
 `examples/model.bin` and `examples/params.bin`, and a generated case per tag
 (`T L R B S U G`).
 
-**`raster fmt`: idempotence and cross-agreement.** Format every `.ra` in the
+**`twill fmt`: idempotence and cross-agreement.** Format every `.tw` in the
 tree with both; require identical output, and require formatting twice to be a
 fixed point.
 
@@ -388,7 +388,7 @@ to 18 to 27 GFLOP/s with hand-tiled AVX2 or NEON microkernels, the 2 to 3x
 already established.
 
 **End to end on a real program, which is what matters.** A training example
-like `examples/mlp.ra` or `examples/cnn.ra` splits its time roughly 60 percent
+like `examples/mlp.tw` or `examples/cnn.tw` splits its time roughly 60 percent
 in kernels and 40 percent in the interpreter. Amdahl:
 
 - Stage 1 alone: about **1.5x** end to end.
@@ -436,7 +436,7 @@ It is the right first milestone for four reasons:
 4. It is small enough to finish, and finishing it produces a real decision
    point with better information than exists today.
 
-Concretely, done means: `tools/diff/run --old ./raster-v1.2.0 --new ./raster
+Concretely, done means: `tools/diff/run --old ./twill-v1.2.0 --new ./twill
 --corpus testdata/` exits zero, covering the 24 examples, all 6 std modules,
 the extracted interp and checker fixtures, the RSTR round trip, and `fmt`
 idempotence, with a fuzz mode that runs for a fixed budget and reports

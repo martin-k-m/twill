@@ -1,4 +1,4 @@
-// Package lexer turns Raster source text into a token stream.
+// Package lexer turns Twill source text into a token stream.
 package lexer
 
 import (

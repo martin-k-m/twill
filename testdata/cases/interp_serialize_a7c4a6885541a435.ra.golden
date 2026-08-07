@@ -1,8 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: shape error: unknown name "x"
-  1 | save(x, p)
-case.ra:1: shape error: unknown name "p"
-  1 | save(x, p)
-raster: 2 shape error(s); not running (use --no-check to run anyway)

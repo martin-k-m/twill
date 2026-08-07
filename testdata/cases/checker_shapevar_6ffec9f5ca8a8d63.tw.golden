@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:3: shape error: argument 1 ("A") has rank 1 but the signature expects rank 2
+  3 | let r = f(v)
+case.tw:1: shape error: axis out of range for [3]: it has 1 axis, numbered 0 to 0
+  1 | fn f(A: [n, k]) -> [n] { sum(A, 1) }
+twill: 2 shape error(s); not running (use --no-check to run anyway)

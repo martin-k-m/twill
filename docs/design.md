@@ -1,12 +1,12 @@
 # Design notes
 
-Why Raster is built the way it is, and what's left to do.
+Why Twill is built the way it is, and what's left to do.
 
 ## The idea
 
 The usual machine-learning stack — Python plus a numeric framework — was
 assembled over time, not designed as a whole. Autodiff, shapes, and device
-placement are all added on top of a language that came first. Raster asks a
+placement are all added on top of a language that came first. Twill asks a
 narrower question: if you designed a language around differentiable tensor
 programs from the start, what would it look like?
 
@@ -55,11 +55,11 @@ source ─lexer─▶ tokens ─parser─▶ AST ─┬─ checker ─▶ shape 
 - `internal/interp` — evaluates the AST against lexical scopes. All arithmetic
   lowers to tensor-engine ops, so any computed value can be differentiated.
 - `internal/checker` — static shape inference over the AST.
-- `cmd/raster` — the CLI and REPL.
+- `cmd/twill` — the CLI and REPL.
 
 ## How autodiff works
 
-Raster uses reverse-mode automatic differentiation, the same approach as PyTorch
+Twill uses reverse-mode automatic differentiation, the same approach as PyTorch
 and JAX, implemented directly in the tensor engine.
 
 Besides computing its output, each operation can record the inputs it depended
@@ -121,7 +121,7 @@ Roughly in order of value:
 
 ## Non-goals for now
 
-- Being a general-purpose language. Raster is aimed at differentiable numeric
+- Being a general-purpose language. Twill is aimed at differentiable numeric
   programs.
 - Matching a mature framework's operator coverage on day one. The point is the
   core model; operators are easy to add once that's right.

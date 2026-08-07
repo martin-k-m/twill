@@ -1,0 +1,14 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: unknown name "expected"
+  1 | expected a structure-mismatch error
+case.tw:1: shape error: unknown name "a"
+  1 | expected a structure-mismatch error
+case.tw:1: shape error: unknown name "structure"
+  1 | expected a structure-mismatch error
+case.tw:1: shape error: unknown name "mismatch"
+  1 | expected a structure-mismatch error
+case.tw:1: shape error: unknown name "error"
+  1 | expected a structure-mismatch error
+twill: 5 shape error(s); not running (use --no-check to run anyway)

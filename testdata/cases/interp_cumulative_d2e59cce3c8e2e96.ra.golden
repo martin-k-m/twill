@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: axis 5 out of range for rank 2
-  1 | cumsum(tensor([[1.0, 2.0]]), 5)

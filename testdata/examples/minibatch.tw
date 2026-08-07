@@ -1,0 +1,69 @@
+# minibatch.tw — a real training loop: standardize, split, shuffle, minibatch.
+#
+# The earlier examples train full-batch or one row at a time. Real models train
+# on shuffled minibatches over many epochs. `gather` (differentiable row select)
+# and `permutation` (a seeded shuffle) make that a few array ops — and it stays
+# reproducible, so the same seed gives the same run every time.
+
+import "std/nn" as nn
+import "std/data" as data
+
+seed(1)
+
+# A synthetic binary-classification dataset with noisy labels.
+let n = 600
+let d = 5
+let raw = randn(n, d)
+let w_true = [1.2, -0.8, 0.5, -1.5, 0.3]
+let y = greater(raw @ w_true + 0.5 * randn(n), 0.0)
+
+# Standardize the features, then hold out 20% for testing.
+let X = data.standardize(raw)[0]
+let split = data.train_test_split(X, y, 0.8)
+let Xtr = split[0]
+let ytr = split[1]
+let Xte = split[2]
+let yte = split[3]
+
+# A one-hidden-layer classifier, run over a whole batch at once.
+let model = {
+  w1: nn.he_init(16, d), b1: zeros(16),
+  w2: nn.he_init(1, 16), b2: zeros(1)
+}
+
+fn forward(m, Xb) {
+  let h = tanh(Xb @ transpose(m.w1) + m.b1)         # [B, 16]
+  reshape(sigmoid(h @ transpose(m.w2) + m.b2), len(Xb))
+}
+
+fn loss(m, Xb, yb) = nn.bce(forward(m, Xb), yb)
+
+# Train with Adam over shuffled minibatches.
+let bs = 32
+let ntr = len(Xtr)
+let nb = int(ntr / bs)
+let mo = nn.zeros_like(model)
+let vo = nn.zeros_like(model)
+let t = 0
+for epoch in range(15) {
+  let sh = data.shuffle(Xtr, ytr)
+  let Xs = sh[0]
+  let ys = sh[1]
+  for b in range(nb) {
+    let lo = b * bs
+    let Xb = Xs[lo:lo + bs]
+    let yb = ys[lo:lo + bs]
+    t = t + 1
+    let g = grad(fn(m) = loss(m, Xb, yb))(model)
+    let out = nn.adam_step(model, g, mo, vo, t, 0.01, 0.9, 0.999, 0.00000001)
+    model = out[0]
+    mo = out[1]
+    vo = out[2]
+  }
+  if epoch % 3 == 0 {
+    print("epoch", epoch, "train loss", loss(model, Xtr, ytr))
+  }
+}
+
+let pred = forward(model, Xte)
+print("test accuracy:", mean(equal(greater(pred, 0.5), yte)))

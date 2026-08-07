@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: shape mismatch: [2] vs [3] cannot broadcast
+  1 | let z = [1.0, 2.0] + [1.0, 2.0, 3.0]
+twill: 1 shape error(s); not running (use --no-check to run anyway)

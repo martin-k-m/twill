@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: unknown name "p"
+  1 | load(p)
+twill: 1 shape error(s); not running (use --no-check to run anyway)

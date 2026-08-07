@@ -1,8 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: shape error: unknown name "path"
-  1 | path/filepath
-case.ra:1: shape error: unknown name "filepath"
-  1 | path/filepath
-raster: 2 shape error(s); not running (use --no-check to run anyway)

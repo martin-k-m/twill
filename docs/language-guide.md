@@ -1,18 +1,18 @@
-# Raster language guide
+# Twill language guide
 
-This is the reference for Raster v0.28. The language is small, so this is short.
+This is the reference for Twill v0.28. The language is small, so this is short.
 
 ## Running programs
 
 ```bash
-raster path/to/program.ra    # shape-check, then run
-raster run path/to/program.ra
-raster check path/to/program.ra   # shape-check only
-raster fmt path/to/program.ra     # canonically format (add --write to edit in place)
-raster                             # REPL
+twill path/to/program.tw    # shape-check, then run
+twill run path/to/program.tw
+twill check path/to/program.tw   # shape-check only
+twill fmt path/to/program.tw     # canonically format (add --write to edit in place)
+twill                             # REPL
 ```
 
-`raster fmt` reprints a program in a canonical style, preserving comments. It
+`twill fmt` reprints a program in a canonical style, preserving comments. It
 refuses rather than move a comment it can't place.
 
 Pass `--no-check` to run without the static shape check. In the REPL, each line's
@@ -215,7 +215,7 @@ return a scalar; a gradient has the same shape as the argument it corresponds to
 including nested lists. `jacobian(f)(x)` instead takes a function with a *vector*
 output and returns the full matrix of partials — row `i` is the gradient of
 output `i` — computed by one reverse-mode pass per output. See
-`examples/jacobian.ra`.
+`examples/jacobian.tw`.
 
 ```rust
 grad(fn(x) = x * x)(4.0)                 # 8
@@ -230,7 +230,7 @@ Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `log`, `sin`, `cos`, `sqrt`, `sum`, `mean`, `abs`, `pow`.
 
 `hessian(f)(x)` gives the exact matrix of second partial derivatives of a scalar
-function — second-order autodiff via forward-mode jets (see `examples/hessian.ra`
+function — second-order autodiff via forward-mode jets (see `examples/hessian.tw`
 for Newton's method). It supports functions built from arithmetic, the unary
 math functions, `matmul`, `sum`, `mean`, and the structural ops indexing
 (`x[i]`), slicing (`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a
@@ -242,13 +242,13 @@ history, so differentiating it again differentiates a constant.
 
 ## Shape checking
 
-`raster check` (and the check that runs before `raster run`) infers tensor shapes
+`twill check` (and the check that runs before `twill run`) infers tensor shapes
 and reports mismatches it can prove. It stays quiet when a shape can't be
 determined, so dynamic code doesn't produce false alarms.
 
 ```
-$ raster check bad.ra
-bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+$ twill check bad.tw
+bad.tw:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 ```
 
 Annotations (`[3, 2]`, `[2]`, `[]`, `_` for unknown, or named shape variables)
@@ -338,15 +338,15 @@ There are two kinds of import path, and the spelling tells you which is which.
 
 ```rust
 import "std/nn"             # a standard-library module (ships inside the binary)
-import "helpers.ra"         # a file, relative to the importing file
+import "helpers.tw"         # a file, relative to the importing file
 ```
 
 A path beginning with `std/` names a **module** of the standard library, not a
 file: no extension, no directory, and it means the same thing from anywhere,
-because the library is compiled into the `raster` binary. `std/` is reserved — a
+because the library is compiled into the `twill` binary. `std/` is reserved — a
 directory called `std` next to your program does not shadow it. Every other path
 is a **file**, resolved relative to the importing file first, then the working
-directory; `import "./std/local.ra"` reaches a real directory named `std`.
+directory; `import "./std/local.tw"` reaches a real directory named `std`.
 
 Either kind can be namespaced:
 
@@ -365,9 +365,9 @@ the same result on every run.
 A standard-library module may only import other `std/` modules — it has no
 directory of its own to resolve a relative path against.
 
-To work on the library itself without rebuilding, set `RASTER_STD` to a directory
-of `.ra` files; it replaces the embedded library wholesale, so `import "std/nn"`
-reads `$RASTER_STD/nn.ra`. Unset it and you are back to the copy in the binary.
+To work on the library itself without rebuilding, set `TWILL_STD` to a directory
+of `.tw` files; it replaces the embedded library wholesale, so `import "std/nn"`
+reads `$TWILL_STD/nn.tw`. Unset it and you are back to the copy in the binary.
 
 ## Standard library
 
@@ -414,7 +414,7 @@ Sorting: `sort(t[, axis[, descending]])` and `argsort` give the values and the
 positions; `topk(t, k[, axis[, smallest]])` and `argtopk` keep the k largest,
 largest first, shrinking that axis to k. All four default to the last axis,
 because sorting a matrix almost always means sorting each row. The flags are
-numbers, since a comparison in Raster already yields 1 and 0.
+numbers, since a comparison in Twill already yields 1 and 0.
 
 `sort` and `topk` are differentiable and exactly so. Sorting is a permutation
 and the derivative of a permutation is its inverse: whatever gradient arrives at
@@ -472,7 +472,7 @@ with `input` shaped `[Cin, H, W]` and `weight` shaped `[Cout, Cin, KH, KW]`,
 producing `[Cout, H-KH+1, W-KW+1]` (valid padding, unit stride).
 `maxpool2d(input, k)` does non-overlapping `k×k` max pooling over each channel of
 a `[C, H, W]` tensor. `grad` flows through both, so a convolutional net trains
-like any other model — see `examples/cnn.ra`.
+like any other model — see `examples/cnn.tw`.
 
 `einsum` is a general Einstein-summation contraction and is differentiable:
 
@@ -512,14 +512,14 @@ Persistence: `save(value, path)` writes any value — a tensor, a record or list
 of tensors (a model's whole parameter tree), or a fitted `gbm` model — to a file
 in an exact binary format, and `load(path)` reads it back. Paths are relative to
 the running script. This is the deploy path: train once, `save` the model, and
-ship it with the single binary for inference (`examples/save_load.ra`).
+ship it with the single binary for inference (`examples/save_load.tw`).
 
 Frames: a frame is a record whose fields are named column tensors, so field
 access, slicing, and `grad` all work on it. `read_frame(path)` loads a CSV whose
 first row is a header into such a record; `write_frame(frame, path)` writes one
 back. `columns(rec)` lists the field names, `field(rec, name)` looks one up by
 string, and `with_field(rec, name, value)` returns a copy with a field set. See
-`examples/frames.ra`.
+`examples/frames.tw`.
 
 Gradient-boosted trees: `gbm_fit(X, y)` (or `gbm_fit(X, y, opts)`) trains a
 native gradient-boosting model on a `[n, d]` feature matrix and an `[n]`
@@ -527,19 +527,19 @@ target/label vector, and `gbm_predict(model, X)` scores a `[n, d]` matrix into a
 `[n]` vector. `opts` is a record of hyperparameters — `rounds`, `learning_rate`,
 `max_depth`, `min_leaf`, `lambda`, `gamma`, and `objective` (`"squared"` for
 regression, `"logistic"` for binary classification, where predictions are
-probabilities). The engine is pure Go and deterministic. See `examples/gbm.ra`.
+probabilities). The engine is pure Go and deterministic. See `examples/gbm.tw`.
 
-Libraries written in Raster ship inside the binary and are imported as
+Libraries written in Twill ship inside the binary and are imported as
 `std/<module>`: `std/nn` (layers including `dense`, `conv`, `embed`, and
 `self_attention`; activations, initializers, losses), `std/optim` (SGD,
 momentum, Adam), `std/data` (`standardize`, `train_test_split`, `shuffle` for
-real training loops — see `examples/minibatch.ra`), and `std/backtest`
+real training loops — see `examples/minibatch.tw`), and `std/backtest`
 (returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
-CAGR). Their sources are the `.ra` files in `std/` in the repository. The
+CAGR). Their sources are the `.tw` files in `std/` in the repository. The
 optimizers are container-agnostic — the same `sgd_step`/`adam_step`
 update a model held in a positional list or a named record. The backtest Sharpe
 and Sortino are differentiable in the return series, so a smooth signal can be
-tuned by gradient ascent through the backtest (`examples/signal_opt.ra`).
+tuned by gradient ascent through the backtest (`examples/signal_opt.tw`).
 
 ## Example
 

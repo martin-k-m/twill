@@ -1,13 +1,13 @@
 # GPU feasibility
 
 An empirical answer to a question `docs/rewrite-plan.md` defers to this file:
-should Raster get a GPU backend, and if so when. Everything below was measured
+should Twill get a GPU backend, and if so when. Everything below was measured
 on one machine on 2026-08-07. Nothing here is estimated.
 
 The short version: a GPU backend is technically reachable, the honest speedup is
 about 9x and not the 30x the rewrite plan guesses at, it only applies to matmul
 above roughly 128x128, it is *slower* than the current CPU code at the sizes
-Raster actually benchmarks, and it costs the no-dependencies property that the
+Twill actually benchmarks, and it costs the no-dependencies property that the
 project is built on. Recommendation is do not do this yet.
 
 ## The machine
@@ -122,7 +122,7 @@ Scoring the four candidates on this machine:
 - **WebGPU/wgpu.** Not testable here. There is no local Rust toolchain, and
   wgpu would mean either cgo against a native library or shelling out to a
   separate binary. Also, WebGPU has no f64 type at all, which by itself rules it
-  out for Raster.
+  out for Twill.
 
 ### 4. The f64 throughput reality
 
@@ -130,12 +130,12 @@ The claim to check was that consumer NVIDIA cards run double precision at about
 1/64 of single. Measured on this card: **1/52.7**. So the claim is close to
 right, slightly pessimistic, and the correction does not change anything.
 
-The RTX 5070 does 18.0 TFLOP/s in f32 and 342 GFLOP/s in f64. Raster's tensors
-are `[]float64` throughout, so Raster gets the 342, which is 5% of the number
+The RTX 5070 does 18.0 TFLOP/s in f32 and 342 GFLOP/s in f64. Twill's tensors
+are `[]float64` throughout, so Twill gets the 342, which is 5% of the number
 the card is sold on. The Arc iGPU is less lopsided in ratio (27.8:1) but slower
 in absolute terms (116 GFLOP/s f64), so it is worse either way.
 
-### 5. GPU against Raster's actual CPU code
+### 5. GPU against Twill's actual CPU code
 
 `internal/tensor.mm` is a parallel triple loop over `[]float64`, split across
 cores by `runChunks`. Measured, both in-repo and as a standalone copy of `mm`
@@ -192,7 +192,7 @@ Third, the Intel iGPU never beats the CPU except at N=1024, where it manages
 65.5 GFLOP/s round trip against the CPU's 25. The vendor-neutral story is real
 for correctness and useless for speed on the integrated part.
 
-## What integrating this into Raster would cost
+## What integrating this into Twill would cost
 
 ### The backward pass
 
@@ -217,7 +217,7 @@ every one of those closures has to be rewritten. That is the entire operator
 surface: `ops.go` (1234 lines), `einsum.go`, `conv.go`, `scan.go`, `gather.go`,
 and `jet.go`, which does forward mode and would need each op's JVP on the device
 too. There are 152 direct `.Data` uses in non-test code, 37 of them outside
-`internal/tensor`, in `internal/value`, `internal/interp` and `cmd/raster`. So
+`internal/tensor`, in `internal/value`, `internal/interp` and `cmd/twill`. So
 the boundary is not contained inside the tensor package today, and containing it
 is a prerequisite, not a detail.
 
@@ -230,7 +230,7 @@ There is a second, quieter cost. `parallel.go` is explicit that results are
 "bit-identical to a serial run" and "the same on any number of cores", and
 `parallelSum` uses fixed-size blocks specifically so the answer does not depend
 on the worker count. GPU reductions do not give that for free. `docs/finance.md`
-sells determinism and reproducibility as a thing Raster wins on "regardless".
+sells determinism and reproducibility as a thing Twill wins on "regardless".
 A GPU backend puts that in tension with itself, and for finance that is not a
 small print item.
 
@@ -265,12 +265,12 @@ of it.
 
 The evidence for that, in order of weight:
 
-1. **The workload is not there.** Raster's benchmarks are 64x64 matmul, 128x128
+1. **The workload is not there.** Twill's benchmarks are 64x64 matmul, 128x128
    broadcast add, 256x32 softmax. `minParallel` is 8192, so most ops do not even
    go multi-core today. At those sizes the GPU is measurably slower. Buying a
    GPU backend now means buying a 0.8x.
 2. **f64 throws away 95% of the card.** 342 GFLOP/s out of 18 TFLOP/s. The
-   biggest single GPU win available to Raster is not a GPU backend at all, it is
+   biggest single GPU win available to Twill is not a GPU backend at all, it is
    f32 support, which is worth up to 52.7x on the same silicon and costs a type
    parameter rather than a rewrite. That question should be settled first,
    because a device-resident f64 tensor engine is a lot of work aimed at the
@@ -295,7 +295,7 @@ What is worth doing instead, cheaply:
   in play. Keep it out of tree and behind a build tag so the default binary and
   the release matrix stay exactly as they are.
 
-Revisit when there is a real Raster program whose matmuls are 256x256 or larger
+Revisit when there is a real Twill program whose matmuls are 256x256 or larger
 and whose profile is matmul-bound. Until such a program exists, this is
 optimising a workload nobody has run.
 

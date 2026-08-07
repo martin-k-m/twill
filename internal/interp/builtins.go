@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/martin-k-m/raster/internal/gbm"
-	"github.com/martin-k-m/raster/internal/tensor"
-	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/twill/internal/gbm"
+	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/martin-k-m/twill/internal/value"
 )
 
 func (ip *Interp) installBuiltins() {

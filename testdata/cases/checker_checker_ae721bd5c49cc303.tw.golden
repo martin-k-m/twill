@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:2: shape error: axis out of range for [2, 3]: it has 2 axes, numbered 0 to 1
+  2 | print(concat([a, a], 9))
+twill: 1 shape error(s); not running (use --no-check to run anyway)

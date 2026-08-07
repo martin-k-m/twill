@@ -1,9 +1,9 @@
 {
-  "name": "raster-lang",
-  "displayName": "Raster",
-  "description": "Syntax highlighting for the Raster tensor language (.ra).",
+  "name": "twill-lang",
+  "displayName": "Twill",
+  "description": "Syntax highlighting for the Twill tensor language (.tw).",
   "version": "0.1.0",
-  "publisher": "raster-lang",
+  "publisher": "twill-lang",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,17 +16,17 @@
   "contributes": {
     "languages": [
       {
-        "id": "raster",
-        "aliases": ["Raster", "raster"],
-        "extensions": [".ra"],
+        "id": "twill",
+        "aliases": ["Twill", "twill"],
+        "extensions": [".tw"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "raster",
-        "scopeName": "source.raster",
-        "path": "./syntaxes/raster.tmLanguage.json"
+        "language": "twill",
+        "scopeName": "source.twill",
+        "path": "./syntaxes/twill.tmLanguage.json"
       }
     ]
   }

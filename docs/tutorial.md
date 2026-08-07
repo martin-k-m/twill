@@ -1,14 +1,14 @@
-# Getting started with Raster
+# Getting started with Twill
 
-This walks through Raster from nothing to training a small model. It assumes you
-have the `raster` binary on your `PATH` (see the README for install options).
+This walks through Twill from nothing to training a small model. It assumes you
+have the `twill` binary on your `PATH` (see the README for install options).
 
 ## Hello
 
-Put this in `hello.ra`:
+Put this in `hello.tw`:
 
 ```rust
-print("hello from raster")
+print("hello from twill")
 let x = 3.0
 print("x squared is", x * x)
 ```
@@ -16,14 +16,14 @@ print("x squared is", x * x)
 Run it:
 
 ```bash
-raster hello.ra
+twill hello.tw
 ```
 
 Or start the REPL and type expressions:
 
 ```bash
-raster
-raster> 2 + 2 * 3
+twill
+twill> 2 + 2 * 3
 8
 ```
 
@@ -108,7 +108,7 @@ print("w =", w, " b =", b)
 
 ## Using the library
 
-`std/nn` and `std/optim` are written in Raster and ship inside the `raster`
+`std/nn` and `std/optim` are written in Twill and ship inside the `twill`
 binary, so the import works from any directory. Importing `nn` also pulls in the
 optimizers. A model is just a list of tensors, so `grad` differentiates the whole
 thing at once and an optimizer updates it.
@@ -124,8 +124,8 @@ fn logits(p, x) {
 }
 ```
 
-See `examples/classifier.ra` for a full training loop with softmax
-cross-entropy and Adam, and `examples/nn_xor.ra` for a smaller one.
+See `examples/classifier.tw` for a full training loop with softmax
+cross-entropy and Adam, and `examples/nn_xor.tw` for a smaller one.
 
 ## Loading data
 
@@ -136,12 +136,12 @@ print("rows:", shape(data)[0])
 
 ## Catching shape mistakes
 
-Run `raster check file.ra` to shape-check without running. Aster infers tensor
+Run `twill check file.tw` to shape-check without running. Aster infers tensor
 shapes and reports mismatches it can prove:
 
 ```
-$ raster check bad.ra
-bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+$ twill check bad.tw
+bad.tw:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
   3 | let y = A @ x
 ```
 

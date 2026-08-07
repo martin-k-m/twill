@@ -1,0 +1,18 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: unknown name "github"
+  1 | github.com/martin-k-m/twill/internal/interp
+case.tw:1: shape error: unknown name "martin"
+  1 | github.com/martin-k-m/twill/internal/interp
+case.tw:1: shape error: unknown name "k"
+  1 | github.com/martin-k-m/twill/internal/interp
+case.tw:1: shape error: unknown name "m"
+  1 | github.com/martin-k-m/twill/internal/interp
+case.tw:1: shape error: unknown name "twill"
+  1 | github.com/martin-k-m/twill/internal/interp
+case.tw:1: shape error: unknown name "internal"
+  1 | github.com/martin-k-m/twill/internal/interp
+case.tw:1: shape error: unknown name "interp"
+  1 | github.com/martin-k-m/twill/internal/interp
+twill: 7 shape error(s); not running (use --no-check to run anyway)

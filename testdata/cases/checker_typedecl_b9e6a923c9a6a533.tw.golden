@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:2: shape error: record has no field "b"
+  2 | let x = p.b
+twill: 1 shape error(s); not running (use --no-check to run anyway)

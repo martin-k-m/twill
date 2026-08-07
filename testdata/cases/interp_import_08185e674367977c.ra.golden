@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: cannot read import "./std/local.ra"
-  1 | import "./std/local.ra"

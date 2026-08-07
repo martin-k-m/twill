@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/interp"
+	"github.com/martin-k-m/twill/internal/interp"
 )
 
 func TestReadCSV(t *testing.T) {
@@ -20,7 +20,7 @@ func TestReadCSV(t *testing.T) {
 		print(d[1][2])
 		print(sum(d))
 	`
-	main := filepath.Join(dir, "main.ra")
+	main := filepath.Join(dir, "main.tw")
 	if err := os.WriteFile(main, []byte(prog), 0o644); err != nil {
 		t.Fatal(err)
 	}

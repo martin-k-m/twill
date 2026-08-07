@@ -1,0 +1,19 @@
+exit 0
+--- stdout ---
+Hello from Twill!
+x + y = 7
+x * y = 12
+v = tensor([1, 2, 3], shape=[3])
+shape of m = [2, 2]
+v . w = 5
+square(5) = 25
+norm(v) = 3.741657
+# canonical v1
+_result = unit
+m = tensor shape=[2, 2] data=[0x1p+00 0x0p+00 0x0p+00 0x1p+01]
+norm = fn norm/1
+v = tensor shape=[3] data=[0x1p+00 0x1p+01 0x1.8p+01]
+w = tensor shape=[3] data=[0x1p+01 0x0p+00 0x1p+00]
+x = num 0x1.8p+01
+y = num 0x1p+02
+--- stderr ---

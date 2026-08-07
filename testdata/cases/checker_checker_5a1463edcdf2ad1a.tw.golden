@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:2: shape error: reshape changes the number of elements: [2, 3] has 6, [4, 2] needs 8
+  2 | print(reshape(x, 4, 2))
+twill: 1 shape error(s); not running (use --no-check to run anyway)

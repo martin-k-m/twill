@@ -1,6 +1,6 @@
-# Raster for VS Code
+# Twill for VS Code
 
-Syntax highlighting for Raster (`.ra`) files: comments, strings, numbers,
+Syntax highlighting for Twill (`.tw`) files: comments, strings, numbers,
 keywords, operators, function definitions, and the built-in / autodiff
 functions.
 
@@ -11,16 +11,16 @@ packaging:
 
 ```bash
 # from the repo root
-cp -r editors/vscode ~/.vscode/extensions/raster-lang-0.1.0
+cp -r editors/vscode ~/.vscode/extensions/twill-lang-0.1.0
 ```
 
-Then reload VS Code. Any `.ra` file will be highlighted.
+Then reload VS Code. Any `.tw` file will be highlighted.
 
 To build a `.vsix` package instead, install [`vsce`](https://github.com/microsoft/vscode-vsce)
 and run `vsce package` inside `editors/vscode`.
 
 ## What's here
 
-- `syntaxes/raster.tmLanguage.json` — the TextMate grammar.
+- `syntaxes/twill.tmLanguage.json` — the TextMate grammar.
 - `language-configuration.json` — comments, brackets, auto-closing pairs.
 - `package.json` — the extension manifest.

@@ -1,0 +1,29 @@
+# hello.tw — the basics of Twill.
+
+print("Hello from Twill!")
+
+# Everything numeric is a tensor. Scalars are rank-0 tensors.
+let x = 3.0
+let y = 4.0
+print("x + y =", x + y)
+print("x * y =", x * y)
+
+# Vectors and matrices are tensor literals.
+let v = [1.0, 2.0, 3.0]
+let m = [[1.0, 0.0], [0.0, 2.0]]
+print("v =", v)
+print("shape of m =", shape(m))
+
+# `@` is matrix / vector multiply.
+let w = [2.0, 0.0, 1.0]
+print("v . w =", v @ w)
+
+# Functions can be one-liners or blocks.
+fn square(n) = n * n
+fn norm(vec) {
+  let s = sum(vec * vec)
+  sqrt(s)
+}
+
+print("square(5) =", square(5.0))
+print("norm(v) =", norm(v))

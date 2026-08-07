@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:3: runtime error: undefined variable "whatever_nn_defines"
-  3 | print(whatever_nn_defines + x)

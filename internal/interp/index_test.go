@@ -3,7 +3,7 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/twill/internal/tensor"
 )
 
 // Element indexing x[i] is now differentiable: grad flows to the indexed

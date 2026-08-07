@@ -1,4 +1,4 @@
-// Command run holds two raster binaries to the same corpus and reports where
+// Command run holds two twill binaries to the same corpus and reports where
 // they disagree.
 //
 // The comparison is exact. Both binaries do IEEE-754 arithmetic in the same
@@ -25,13 +25,13 @@ import (
 
 func main() {
 	var (
-		corpus  = flag.String("corpus", "testdata", "corpus directory holding .ra fixtures")
-		oldBin  = flag.String("old", "", "path to the reference raster binary")
-		newBin  = flag.String("new", "", "path to the candidate raster binary")
+		corpus  = flag.String("corpus", "testdata", "corpus directory holding .tw fixtures")
+		oldBin  = flag.String("old", "", "path to the reference twill binary")
+		newBin  = flag.String("new", "", "path to the candidate twill binary")
 		bin     = flag.String("bin", "", "single binary, for -record and -verify")
 		record  = flag.Bool("record", false, "record golden outputs next to each fixture")
 		verify  = flag.Bool("verify", false, "check one binary against the recorded goldens")
-		doFmt   = flag.Bool("fmt", true, "check raster fmt idempotence and cross-agreement")
+		doFmt   = flag.Bool("fmt", true, "check twill fmt idempotence and cross-agreement")
 		doRSTR  = flag.Bool("rstr", true, "check RSTR save-file round trips")
 		fuzzN   = flag.Int("fuzz", 0, "generate and diff this many random programs")
 		seed    = flag.Int64("seed", 1, "fuzz seed; the same seed gives the same programs")
@@ -45,7 +45,7 @@ func main() {
 		fail(err)
 	}
 	if len(cases) == 0 {
-		fail(fmt.Errorf("no .ra fixtures under %s", *corpus))
+		fail(fmt.Errorf("no .tw fixtures under %s", *corpus))
 	}
 
 	rep := &report{}
@@ -69,7 +69,7 @@ func main() {
 			diffFmt(rep, *oldBin, *newBin, cases, *timeout, *jobs)
 		}
 		if *doRSTR {
-			checkRSTR(rep, *oldBin, *newBin, *timeout)
+			checkRSTR(rep, *oldBin, *newBin, *corpus, *timeout)
 		}
 		if *fuzzN > 0 {
 			fuzz(rep, *oldBin, *newBin, *fuzzN, *seed, *timeout, *jobs)
@@ -101,11 +101,11 @@ func (r result) text() string {
 // later fixture sees, and a fixed working directory is also what keeps error
 // messages free of machine-specific paths.
 //
-// dataDir, when set, is the fixture's own directory; its non-.ra files come
-// along, because examples/frames.ra is not a test of anything without
+// dataDir, when set, is the fixture's own directory; its non-.tw files come
+// along, because examples/frames.tw is not a test of anything without
 // prices.csv next to it.
 func runCase(bin, src, dataDir string, timeout time.Duration, args ...string) (result, error) {
-	dir, err := os.MkdirTemp("", "rasterdiff")
+	dir, err := os.MkdirTemp("", "twilldiff")
 	if err != nil {
 		return result{}, err
 	}
@@ -116,7 +116,7 @@ func runCase(bin, src, dataDir string, timeout time.Duration, args ...string) (r
 			return result{}, err
 		}
 	}
-	name := "case.ra"
+	name := "case.tw"
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
 		return result{}, err
 	}
@@ -132,7 +132,7 @@ func copyData(from, to string) error {
 		return err
 	}
 	for _, e := range entries {
-		if e.IsDir() || strings.HasSuffix(e.Name(), ".ra") || strings.HasSuffix(e.Name(), ".golden") {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tw") || strings.HasSuffix(e.Name(), ".golden") {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(from, e.Name()))
@@ -156,7 +156,7 @@ func runIn(bin, dir string, timeout time.Duration, args ...string) (result, erro
 	}
 	cmd := exec.CommandContext(ctx, abs, args...)
 	cmd.Dir = dir
-	// A fixed environment, because the point is reproducibility and RASTER_STD
+	// A fixed environment, because the point is reproducibility and TWILL_STD
 	// would otherwise silently swap the standard library under one binary.
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
 	var out, errb bytes.Buffer
@@ -190,7 +190,7 @@ func collect(root string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(path, ".ra") {
+		if !info.IsDir() && strings.HasSuffix(path, ".tw") {
 			cases = append(cases, path)
 		}
 		return nil
@@ -343,7 +343,7 @@ save(m, "a.bin")
 save(load("a.bin"), "b.bin")`,
 }
 
-func checkRSTR(rep *report, oldBin, newBin string, timeout time.Duration) {
+func checkRSTR(rep *report, oldBin, newBin, corpus string, timeout time.Duration) {
 	names := make([]string, 0, len(rstrCases))
 	for name := range rstrCases {
 		names = append(names, name)
@@ -377,7 +377,14 @@ func checkRSTR(rep *report, oldBin, newBin string, timeout time.Duration) {
 	}
 
 	// The checked-in fixtures, which are the actual v1.2.0 compatibility claim.
-	for _, fixture := range []string{"examples/model.bin", "examples/params.bin"} {
+	// The save files live in the corpus, not in examples/: .gitignore excludes
+	// *.bin, so the two fixtures the rewrite plan calls checked-in were never
+	// actually tracked. The corpus copies are force-added and are the ones a
+	// fresh clone can rely on.
+	for _, fixture := range []string{
+		filepath.Join(corpus, "examples", "model.bin"),
+		filepath.Join(corpus, "examples", "params.bin"),
+	} {
 		raw, err := os.ReadFile(fixture)
 		if err != nil {
 			rep.add("error", fixture, err.Error())
@@ -410,7 +417,7 @@ func rstrBytes(bin, src string, timeout time.Duration) ([2][]byte, error) {
 
 func rstrFixture(bin, src string, input []byte, timeout time.Duration) ([2][]byte, error) {
 	var out [2][]byte
-	dir, err := os.MkdirTemp("", "rasterrstr")
+	dir, err := os.MkdirTemp("", "twillrstr")
 	if err != nil {
 		return out, err
 	}
@@ -421,10 +428,10 @@ func rstrFixture(bin, src string, input []byte, timeout time.Duration) ([2][]byt
 			return out, err
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "case.ra"), []byte(src), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "case.tw"), []byte(src), 0o644); err != nil {
 		return out, err
 	}
-	res, err := runIn(bin, dir, timeout, "run", "case.ra")
+	res, err := runIn(bin, dir, timeout, "run", "case.tw")
 	if err != nil {
 		return out, err
 	}

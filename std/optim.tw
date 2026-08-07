@@ -1,0 +1,30 @@
+# optim.tw — optimizers over a model's parameters.
+#
+# A model is a "tree": a tensor, or a list or record nesting tensors. The
+# optimizers use map_leaves / zip_leaves, so the same code works whether the
+# parameters live in a positional list or a named record.
+
+# A tree of zero tensors shaped like `params` (handy for optimizer state).
+fn zeros_like(params) = map_leaves(fn(p) = p * 0.0, params)
+
+# Plain stochastic gradient descent.
+fn sgd_step(params, grads, lr) =
+  zip_leaves(fn(z) = z[0] - z[1] * lr, [params, grads])
+
+# SGD with momentum. Returns [new_params, new_velocity].
+fn momentum_step(params, grads, velocity, lr, mu) {
+  let v2 = zip_leaves(fn(z) = mu * z[0] - lr * z[1], [velocity, grads])
+  let p2 = zip_leaves(fn(z) = z[0] + z[1], [params, v2])
+  [p2, v2]
+}
+
+# Adam. `t` is the 1-based step count. Returns [new_params, new_m, new_v].
+fn adam_step(params, grads, m, v, t, lr, b1, b2, eps) {
+  let bc1 = 1.0 - pow(b1, t)
+  let bc2 = 1.0 - pow(b2, t)
+  let m2 = zip_leaves(fn(z) = b1 * z[0] + (1.0 - b1) * z[1], [m, grads])
+  let v2 = zip_leaves(fn(z) = b2 * z[0] + (1.0 - b2) * z[1] * z[1], [v, grads])
+  let p2 = zip_leaves(fn(z) = z[0] - lr * (z[1] / bc1) / (sqrt(z[2] / bc2) + eps),
+                      [params, m2, v2])
+  [p2, m2, v2]
+}

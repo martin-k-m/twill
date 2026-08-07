@@ -5,16 +5,16 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/format"
-	"github.com/martin-k-m/raster/internal/parser"
+	"github.com/martin-k-m/twill/internal/format"
+	"github.com/martin-k-m/twill/internal/parser"
 )
 
 func TestFormatExamplesRoundTrip(t *testing.T) {
-	files, _ := filepath.Glob(filepath.Join("..", "..", "examples", "*.ra"))
-	files2, _ := filepath.Glob(filepath.Join("..", "..", "std", "*.ra"))
+	files, _ := filepath.Glob(filepath.Join("..", "..", "examples", "*.tw"))
+	files2, _ := filepath.Glob(filepath.Join("..", "..", "std", "*.tw"))
 	files = append(files, files2...)
 	if len(files) == 0 {
-		t.Fatal("no .ra files found")
+		t.Fatal("no .tw files found")
 	}
 	for _, f := range files {
 		f := f

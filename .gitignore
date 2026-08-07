@@ -1,6 +1,6 @@
 # Build output
-/aster
-/aster.exe
+/twill
+/twill.exe
 /dist/
 
 # Go
@@ -8,7 +8,7 @@
 *.out
 coverage.txt
 
-# Model artifacts written by examples (examples/save_load.ra)
+# Model artifacts written by examples (examples/save_load.tw)
 *.bin
 
 # Editor / OS

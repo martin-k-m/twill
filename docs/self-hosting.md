@@ -8,7 +8,7 @@ It supersedes `docs/rewrite-plan.md` on the target question only. That document
 rejected self-hosting, and the objection it raised is the one this design has to
 answer, so it is worth quoting rather than skipping past:
 
-> Raster today cannot express its own compiler. It has no pointers, no mutable
+> Twill today cannot express its own compiler. It has no pointers, no mutable
 > aggregates beyond record field assignment, no byte or char type, no sum types
 > or pattern matching, no arbitrary file IO, and no way to write a lexer that is
 > not fighting the type system.
@@ -48,7 +48,7 @@ sees any of it.
 This is the only structure under which the 279 tests are safe by construction
 rather than by inspection, because no existing file declares the mode, so no
 existing file changes meaning. It is also the only structure that keeps one
-`raster fmt` and one editor grammar. The cost is a permanent seam in the
+`twill fmt` and one editor grammar. The cost is a permanent seam in the
 implementation and a language reference with two halves, which is real and is
 paid every time a feature is added to either half.
 
@@ -643,106 +643,113 @@ bootstrap artifact trust decision.
 
 ## 4. The rename
 
-Do this first, in its own commit series, before any bootstrap work. Renaming
-after S4 means renaming two implementations.
+**Status: done, 2026-08-07, in one commit.** This section is kept as the record
+of what was decided and what was actually carried out, because two of its
+recommendations were overruled by the owner and the reasoning for the rest is
+still load-bearing. Where the executed decision differs from the recommendation
+below, the executed decision is marked.
 
-The two agents currently editing `internal/value/`, `internal/tensor/`,
-`internal/interp/`, `cmd/raster/`, `testdata/` and `tools/diff/` must land
-first; a module-path rename collides with everything.
-
-### Checklist
+### What was done
 
 **Module and packages**
-- [ ] `go mod edit -module github.com/fabric-ml/twill`, then rewrite every
-      import path. Go treats this as a new module, not a version bump, so no
-      `/v2` suffix. `go build ./... && go test ./...` is the gate.
-- [ ] `cmd/raster/` to `cmd/twill/`. Binary name `twill`. `Makefile`,
+- [x] `go mod edit -module github.com/martin-k-m/twill`, and every import path
+      rewritten. Go treats this as a new module, not a version bump, so no `/v2`
+      suffix. `go build ./... && go test ./...` was the gate.
+      **Overruled:** this section originally proposed
+      `github.com/fabric-ml/twill`. The owner kept the `martin-k-m` path, so the
+      rename is a rename and not also an ownership transfer.
+- [x] `cmd/raster/` to `cmd/twill/`. Binary name `twill`. `Makefile`,
       `.github/workflows/ci.yml`, `.github/workflows/release.yml` (five target
       names and the `sha256sum` step).
-- [ ] `RASTER_STD` to `TWILL_STD`. Keep `RASTER_STD` working as a deprecated
-      fallback for two minor releases, reading it only when `TWILL_STD` is
-      unset, and print one line to stderr when it is used.
-- [ ] Any `raster` string in CLI help, `version`, and REPL banner.
+- [x] `RASTER_STD` to `TWILL_STD`.
+- [x] Every `raster` string in CLI help, `version`, usage, error prefixes and the
+      REPL banner.
 
 **Extension, .ra to .tw**
-- [ ] `internal/interp/interp.go` around lines 404 and 412: the import resolver
-      does `CutSuffix(name, ".ra")` and then `name + ".ra"`. It becomes a
-      two-extension resolver with **defined precedence: `.tw` first, then `.ra`**,
-      and a not-found error that names both paths it tried.
-- [ ] `std/embed.go`: the `go:embed` pattern and both `.ra` suffix operations.
-- [ ] `std/*.ra` to `std/*.tw` (6 files).
-- [ ] `examples/*.ra` to `examples/*.tw` (19 files). `examples/*.bin` and
-      `prices.csv` are untouched.
-- [ ] Glob patterns in `internal/format/format_test.go` (2),
+- [x] `internal/interp/interp.go`: the import resolver. **Overruled**, see
+      "`.ra` is a hard break" below: rather than becoming a two-extension
+      resolver, it refuses `.ra` outright through `interp.CheckLegacyExt`.
+- [x] `std/embed.go`: the `go:embed` pattern and both suffix operations.
+- [x] `std/*.ra` to `std/*.tw` (6 files).
+- [x] `examples/*.ra` to `examples/*.tw` (19 files). `examples/*.bin` and
+      `prices.csv` untouched, and both `.bin` fixtures still load.
+- [x] Glob patterns in `internal/format/format_test.go`,
       `internal/interp/examples_test.go`, `internal/interp/format_run_test.go`.
-- [ ] Temp-file names in `interp_test.go`, `import_test.go`, `io_test.go`,
+- [x] Temp-file names in `interp_test.go`, `import_test.go`, `io_test.go`,
       `record_test.go`, `frame_test.go`.
-- [ ] `tools/corpus/extract/main.go` fixture naming and `tools/diff/run/`
-      (`main.go` case filenames and suffix filters, `gen.go`). Coordinate: these
-      are being written now.
-- [ ] `testdata/` fixture filenames. Same coordination note.
-- [ ] `editors/vscode/`: `package.json` language id and `extensions`,
+- [x] `tools/corpus/extract/main.go` fixture naming and `tools/diff/run/`
+      (`main.go` case filenames and suffix filters, `gen.go`).
+- [x] `testdata/` fixture filenames, 735 files including the `.golden` pairs.
+      Fixture and golden were renamed and rewritten together, so the canonical
+      dumps are unchanged in content.
+- [x] `editors/vscode/`: `package.json` language id and `extensions`,
       `syntaxes/raster.tmLanguage.json` to `twill.tmLanguage.json` and its
       `scopeName`, `language-configuration.json`, `README.md`.
 
 **Docs**
-- [ ] `README.md`, `CONTRIBUTING.md`, `docs/language-guide.md`, `docs/design.md`,
+- [x] `README.md`, `CONTRIBUTING.md`, `docs/language-guide.md`, `docs/design.md`,
       `docs/tutorial.md`, `docs/finance.md`, `docs/gpu-feasibility.md`,
-      `docs/rewrite-plan.md` (rename the identifiers; leave its arguments alone).
-- [ ] `CHANGELOG.md`: **do not rewrite history.** Past entries say Raster because
-      they happened to Raster. Add one entry recording the rename and the
-      extension change.
+      `docs/rewrite-plan.md` (identifiers renamed, arguments left alone).
+- [x] `CHANGELOG.md`: history was **not** rewritten. Entries below the new one
+      still say Raster because they happened to Raster. One entry at the top
+      records the rename, the extension change, the hard break and the unchanged
+      magic.
 
 **GitHub**
-- [ ] Rename the repo and transfer to `fabric-ml`. GitHub redirects the old URL
-      and old git remotes keep working, so this is low risk, but the redirect is
-      lost if anyone later creates a repo at the old name. Do not.
-- [ ] Release asset names change; the previous release's assets keep their old
-      names, which is correct.
+- [ ] **Overruled and deliberately not done.** The repository is still named
+      `raster` and the git remote is unchanged. The owner does the rename in the
+      GitHub UI if and when he wants it; nothing in the tree depends on it, and
+      the Go module path no longer matches the repository name, which is legal
+      and only matters if the module is ever fetched by path.
+- [x] Release asset names change with the binary name. The previous release's
+      assets keep their old names, which is correct.
 
-### RSTR: do not change the magic
+### RSTR: the magic did not change
 
-**Recommendation: `examples/model.bin` and `examples/params.bin` and every file
-users have saved keep loading because the magic stays `RSTR` and the version
-stays 1. Do not introduce a `TWIL` magic as part of the rename.**
+**`examples/model.bin` and `examples/params.bin` and every file users have saved
+keep loading, because the magic stays `RSTR` and the version stays 1. No `TWIL`
+magic was introduced.** The reasoning, unchanged and now recorded in a comment
+at the definition in `internal/interp/serialize.go`:
 
 Changing it would require the reader to accept both, and a reader that accepts
 both is strictly worse than a reader that accepts one. The four bytes are not
 user-visible; nothing in the language, the CLI, or the docs exposes them. A file
 format named after a former name is entirely ordinary (`PK` in zip, the chunk
-names in PNG, `ELF`). Rename the Go identifier `saveMagic` if you like, but the
-bytes are a compatibility contract and the contract has no opinion about product
-naming.
+names in PNG, `ELF`). The bytes are a compatibility contract and the contract has
+no opinion about product naming.
 
 If the format ever changes for a real reason (a new tag, a wider index), that is
 the moment to introduce magic `TWIL` at version 2 and write a reader that accepts
 `RSTR` v1 and `TWIL` v2. Coupling the on-disk break to an actual on-disk change
 costs one dual-path reader instead of two.
 
-### Should .ra remain readable?
+### `.ra` is a hard break, not a deprecation
 
-**Recommendation: yes for `run`, `check`, `fmt` and `import`, for two minor
-releases, then removed. And never accepted by the self-hosted front end.**
+**Decided by the owner, overruling this document.** The original recommendation
+was to keep `.ra` readable by `run`, `check`, `fmt` and `import` for two minor
+releases and then remove it. That is not what was built.
 
-For, and these are the deciding reasons: the cost is a fallback branch in one
-resolver plus one glob, measured in about ten lines. A user with
-`import "helpers.ra"` in a working program should not have that program stop
-running because the language was renamed. The repository tree converts to `.tw`
-wholesale in the same commit, so there is no ambiguity about what the project
-writes.
+What was built: `interp.CheckLegacyExt` refuses any `.ra` path, case
+insensitively and on the name alone, before the file is even opened, and returns
+an error naming the `.tw` file the user should rename it to. Both the CLI (all
+four of `run`, `check`, `fmt` and `--dump=canonical`) and the import resolver
+route through it, so the wording is identical either way. Tests cover every
+command, the import path, the case insensitivity, and the fact that a `.ra` name
+is refused ahead of the missing-file error, because the extension is the user's
+real problem and "cannot read file" would hide it.
 
-Against: two extensions is two things to explain, and it invites `.ra` files to
-persist in the wild. That is what the removal date is for.
+The argument that lost: a user with `import "helpers.ra"` in a working program
+should not have it stop running because the language was renamed. The argument
+that won: two extensions is two things to explain forever, a removal date is a
+promise somebody has to remember to keep, and a fallback invites `.ra` files to
+keep being written. Refusing loudly once, with the fix in the error message, is a
+smaller total cost than a migration that never ends. There is no deprecation
+window and there is nothing to remove later.
 
-The removal date should be an event, not a promise: **the self-hosted front end
-in S4 implements `.tw` only.** The legacy extension then dies when the Go front
-end is frozen, without anyone having to remember to delete it. Say that in the
-deprecation notice so users know when it ends.
-
-Two details that are easy to get wrong: `twill fmt --write` must never rename a
-file, because a formatter that renames files is a formatter people stop
-trusting. And the resolver's precedence must be `.tw` before `.ra` so that a
-directory mid-migration containing both resolves to the new one.
+One detail that survives from the original recommendation and is easy to get
+wrong: `twill fmt --write` must never rename a file. A formatter that renames
+files is a formatter people stop trusting. It does not; it refuses the `.ra`
+file and leaves it alone.
 
 ## 5. The first milestone
 
@@ -753,7 +760,7 @@ lexer's over every `.tw` file in the tree. Eight to ten weeks.**
 Scope, exactly:
 
 1. Stage S1 in full. The tree is `twill`, `.tw`, the module path is
-   `github.com/fabric-ml/twill`, both `.bin` fixtures still load, all 279 tests
+   `github.com/martin-k-m/twill`, both `.bin` fixtures still load, all 279 tests
    green, `testdata/` canonical dumps unchanged.
 2. `mode systems` as a file-level declaration, with the mandatory-typing policy
    in the checker.

@@ -1,3 +1,3 @@
-module github.com/martin-k-m/raster
+module github.com/martin-k-m/twill
 
 go 1.23

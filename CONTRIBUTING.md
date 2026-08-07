@@ -1,6 +1,6 @@
 # Contributing
 
-Raster is an early-stage language. Bug reports, small fixes, and design
+Twill is an early-stage language. Bug reports, small fixes, and design
 discussion are all welcome.
 
 ## Building and testing
@@ -8,7 +8,7 @@ discussion are all welcome.
 You need Go 1.23 or newer.
 
 ```bash
-go build -o raster ./cmd/raster   # build the binary
+go build -o twill ./cmd/twill   # build the binary
 go test ./...                     # run the tests
 go vet ./...                      # static checks
 gofmt -l .                        # should print nothing
@@ -19,7 +19,7 @@ Or use the Makefile: `make build`, `make test`, `make check`, `make bench`.
 ## Layout
 
 ```
-cmd/raster/          the command (run / check / repl)
+cmd/twill/          the command (run / check / repl)
 internal/lexer/      source text -> tokens
 internal/parser/     tokens -> AST
 internal/ast/        AST node types
@@ -27,8 +27,8 @@ internal/tensor/     the differentiable tensor engine
 internal/value/      runtime values and environments
 internal/interp/     the tree-walking interpreter + builtins
 internal/checker/    static shape analysis
-std/                 libraries written in Raster (nn.ra, optim.ra)
-examples/            runnable .ra programs
+std/                 libraries written in Twill (nn.tw, optim.tw)
+examples/            runnable .tw programs
 editors/vscode/      syntax highlighting
 ```
 

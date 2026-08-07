@@ -1,0 +1,28 @@
+# hessian.tw — exact second derivatives (Hessians) by forward-mode autodiff.
+#
+# `grad` gives first derivatives; `hessian(f)(x)` gives the full matrix of second
+# partial derivatives of a scalar function. This is exact second-order autodiff
+# (not finite differences) — the ingredient Newton's method needs.
+
+# The Hessian of a quadratic form xᵀ A x is A + Aᵀ, at every point.
+let A = [[2.0, 0.5], [0.5, 6.0]]
+print("Hessian of xᵀAx  (equals A + Aᵀ):")
+print(hessian(fn(x) = sum((A @ x) * x))([0.0, 0.0]))
+
+# Newton's method on a 1-D function: t <- t - f'(t) / f''(t). Second order, so it
+# converges to the minimum in a handful of steps (quadratically near the answer).
+fn f(t) = t * t * t * t - 3.0 * t * t + t
+let t = 2.0
+for step in range(6) {
+  let slope = grad(f)(t)
+  let curve = item(hessian(f)(t))
+  t = t - slope / curve
+  print("step", step, "  t =", t, "  f'(t) =", grad(f)(t))
+}
+print("converged to a minimum where f'(t) is ~0")
+
+# The Hessian flows through slicing/reshape/concat too, so component-wise
+# functions work: g(x) = (x0 - x1)² + x1²  has Hessian [[2, -2], [-2, 4]].
+fn g(x) = sum(square(x[0:1] - x[1:2])) + sum(square(x[1:2]))
+print("Hessian of (x0-x1)² + x1²:")
+print(hessian(g)([1.0, 2.0]))

@@ -1,5 +1,5 @@
-BINARY := raster
-PKG := ./cmd/raster
+BINARY := twill
+PKG := ./cmd/twill
 
 .PHONY: build test vet fmt check bench examples install clean
 
@@ -23,12 +23,12 @@ bench:
 	go test -run=XXX -bench=. ./internal/tensor/
 
 examples: build
-	./$(BINARY) examples/hello.ra
-	./$(BINARY) examples/autodiff.ra
-	./$(BINARY) examples/linreg.ra
-	./$(BINARY) examples/nn_xor.ra
-	./$(BINARY) examples/classifier.ra
-	./$(BINARY) check examples/shapes.ra
+	./$(BINARY) examples/hello.tw
+	./$(BINARY) examples/autodiff.tw
+	./$(BINARY) examples/linreg.tw
+	./$(BINARY) examples/nn_xor.tw
+	./$(BINARY) examples/classifier.tw
+	./$(BINARY) check examples/shapes.tw
 
 install:
 	go install $(PKG)

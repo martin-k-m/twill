@@ -1,8 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: shape error: unknown name "numbers"
-  1 | numbers/tensors
-case.ra:1: shape error: unknown name "tensors"
-  1 | numbers/tensors
-raster: 2 shape error(s); not running (use --no-check to run anyway)

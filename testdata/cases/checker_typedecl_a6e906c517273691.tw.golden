@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:3: shape error: unknown type "Model" on parameter "m"
+  3 | let r = predict(partial, [1.0, 1.0])
+case.tw:1: shape error: record has no field "b"
+  1 | fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
+twill: 2 shape error(s); not running (use --no-check to run anyway)

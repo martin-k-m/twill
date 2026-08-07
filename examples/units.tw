@@ -1,0 +1,30 @@
+# units.tw — dimensioned quantities, checked at compile time and erased at runtime.
+#
+# Declaring `unit USD` (etc.) lets the checker verify that a price times a
+# quantity is money, that you never add shares to dollars, and that a function
+# returns the unit it claims — all statically. At runtime the units vanish:
+# this file computes plain numbers with zero overhead.
+
+unit USD
+unit share
+unit year
+
+# Notional value of a position: price per share times a share count is money.
+# The checker derives USD/share * share = USD and matches it to the return.
+fn notional(px: USD/share, qty: share) -> USD { px * qty }
+
+# Simple interest over a period: a rate (USD/year) times a duration (year).
+fn interest(rate: USD/year, t: year) -> USD { rate * t }
+
+# Introduce units on a value with a `let` annotation; bare literals are adopted
+# into the declared unit, so 150.0 here is a price, not a plain number.
+let price: USD/share = 150.0
+let quantity: share = 200.0
+
+let value = notional(price, quantity)     # inferred: USD
+let accrued = interest(4.5, 2.0)          # USD, a 4.50/yr coupon over 2 years
+let total = value + accrued               # USD + USD is fine; USD + share is not
+
+print("position value:", value, "USD")
+print("interest accrued:", accrued, "USD")
+print("total:", total, "USD")

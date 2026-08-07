@@ -1,0 +1,39 @@
+# montecarlo_option.tw — price a European call by Monte Carlo, and get its
+# Greeks (delta, vega) by differentiating the pricer. No finite differences,
+# no extra libraries — `grad` does it.
+#
+# This is the finance beachhead: the payoff is parallel and simple, the result
+# is reproducible (seeded RNG), and the sensitivities come straight from autodiff
+# — something Python needs JAX or bumping-and-revaluing to match.
+
+seed(42)
+
+# Fix the standard-normal shocks once, so the price is a smooth, differentiable
+# function of the inputs (common random numbers) and fully reproducible.
+let paths = 200000
+let Z = randn(paths)
+
+# Terminal-value pricer for a call under geometric Brownian motion.
+fn call_price(S0, K, r, sigma, T) {
+  let drift = (r - 0.5 * sigma * sigma) * T
+  let ST = S0 * exp(drift + sigma * sqrt(T) * Z)   # simulated terminal prices
+  let payoff = relu(ST - K)                        # max(ST - K, 0)
+  exp(-r * T) * mean(payoff)                       # discounted expected payoff
+}
+
+let S0 = 100.0
+let K = 100.0
+let r = 0.05
+let sigma = 0.2
+let T = 1.0
+
+let price = call_price(S0, K, r, sigma, T)
+
+# Greeks by autodiff: delta = dPrice/dS0, vega = dPrice/dSigma.
+let delta = grad(fn(s) = call_price(s, K, r, sigma, T))(S0)
+let vega = grad(fn(v) = call_price(S0, K, r, v, T))(sigma)
+
+print("European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths:", paths)
+print("  price =", price, " (Black-Scholes 10.4506)")
+print("  delta =", delta, " (Black-Scholes 0.6368)")
+print("  vega  =", vega, "  (Black-Scholes 37.524)")

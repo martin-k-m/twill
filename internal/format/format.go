@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/martin-k-m/raster/internal/ast"
-	"github.com/martin-k-m/raster/internal/lexer"
-	"github.com/martin-k-m/raster/internal/parser"
+	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/martin-k-m/twill/internal/lexer"
+	"github.com/martin-k-m/twill/internal/parser"
 )
 
 // Source parses src and returns the canonically formatted text. It refuses

@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: einsum: spec has 2 operands but got 1
+  1 | let y = einsum("ij,jk->ik", [[1.0,2.0]])
+twill: 1 shape error(s); not running (use --no-check to run anyway)

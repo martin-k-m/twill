@@ -1,0 +1,43 @@
+# shapes.tw — static shape checking.
+#
+# Twill infers tensor shapes and checks them before running. Run
+#   twill check examples/shapes.tw
+# to shape-check without executing. Uncomment a bad line below to see the
+# checker reject the program.
+
+# Parameters can carry optional shape annotations. `[3, 2]` is a 3x2 matrix,
+# `[2]` a length-2 vector, `[]` a scalar, and `_` an unknown dimension.
+fn matvec(A: [3, 2], x: [2]) -> [3] {
+  A @ x
+}
+
+let A = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]   # shape [3, 2]
+let x = [1.0, 1.0]                              # shape [2]
+print("A @ x =", matvec(A, x))
+
+# Named dimensions (shape variables) tie shapes together. Here `k` must be the
+# same in both arguments, and the result is checked to be [n, m].
+fn matmul2(P: [n, k], Q: [k, m]) -> [n, m] {
+  P @ Q
+}
+let B = [[1.0], [2.0]]                          # shape [2, 1]
+print("A @ B =", matmul2(A, B))                 # [3, 2] @ [2, 1] -> [3, 1]
+
+# Declared record types check a whole model's fields. A record passed to a
+# `: TypeName` parameter must have the right fields with the right shapes, and
+# field typos are caught.
+type Layer = { w: [3, 2], b: [3] }
+fn apply_layer(layer: Layer, x: [2]) -> [3] {
+  layer.w @ x + layer.b
+}
+let layer = { w: A, b: [0.0, 0.0, 0.0] }
+print("apply_layer =", apply_layer(layer, x))
+
+# Inference works without annotations too:
+let y = A @ x + [10.0, 20.0, 30.0]
+print("y =", y)
+
+# --- uncomment any line to see a shape error at check time ---
+# let bad = matvec(A, [1.0, 2.0, 3.0])     # argument axis 0 is 3, expected 2
+# let oops = [1.0, 2.0] @ [1.0, 2.0, 3.0]  # inner dims 2 != 3
+# let clash = matmul2(A, [[1.0, 2.0]])     # k is 2 from A but 1 from Q

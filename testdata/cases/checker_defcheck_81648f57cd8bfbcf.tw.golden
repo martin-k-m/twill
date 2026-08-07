@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+  1 | fn broken(A: [2, 3]) = A @ [1.0, 2.0]
+twill: 1 shape error(s); not running (use --no-check to run anyway)

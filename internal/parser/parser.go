@@ -1,4 +1,4 @@
-// Package parser builds an AST from Raster source using recursive descent
+// Package parser builds an AST from Twill source using recursive descent
 // with a Pratt loop for binary operators.
 package parser
 
@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/martin-k-m/raster/internal/ast"
-	"github.com/martin-k-m/raster/internal/lexer"
+	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/martin-k-m/twill/internal/lexer"
 )
 
 var precedence = map[string]int{

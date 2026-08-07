@@ -36,31 +36,31 @@ jobs:
         run: go test -race ./internal/tensor/ ./internal/interp/
 
       - name: Build binary
-        run: go build -o raster ./cmd/raster
+        run: go build -o twill ./cmd/twill
 
       - name: Run examples (smoke test)
         run: |
-          ./raster examples/hello.ra
-          ./raster examples/autodiff.ra
-          ./raster examples/linreg.ra
-          ./raster examples/nn_xor.ra
-          ./raster examples/classifier.ra
-          ./raster examples/records.ra
-          ./raster examples/einsum.ra
-          ./raster examples/montecarlo_option.ra
-          ./raster examples/frames.ra
-          ./raster examples/units.ra
-          ./raster examples/gbm.ra
-          ./raster examples/backtest.ra
-          ./raster examples/signal_opt.ra
-          ./raster examples/cnn.ra
-          ./raster examples/save_load.ra
-          ./raster examples/minibatch.ra
-          ./raster examples/attention.ra
-          ./raster examples/jacobian.ra
-          ./raster examples/hessian.ra
-          ./raster check examples/shapes.ra
-          ./raster fmt examples/hello.ra >/dev/null
+          ./twill examples/hello.tw
+          ./twill examples/autodiff.tw
+          ./twill examples/linreg.tw
+          ./twill examples/nn_xor.tw
+          ./twill examples/classifier.tw
+          ./twill examples/records.tw
+          ./twill examples/einsum.tw
+          ./twill examples/montecarlo_option.tw
+          ./twill examples/frames.tw
+          ./twill examples/units.tw
+          ./twill examples/gbm.tw
+          ./twill examples/backtest.tw
+          ./twill examples/signal_opt.tw
+          ./twill examples/cnn.tw
+          ./twill examples/save_load.tw
+          ./twill examples/minibatch.tw
+          ./twill examples/attention.tw
+          ./twill examples/jacobian.tw
+          ./twill examples/hessian.tw
+          ./twill check examples/shapes.tw
+          ./twill fmt examples/hello.tw >/dev/null
 
   lint:
     runs-on: ubuntu-latest

@@ -1,0 +1,10 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: unknown name "f"
+  1 | grad(grad(f)) was accepted
+case.tw:1: shape error: unknown name "was"
+  1 | grad(grad(f)) was accepted
+case.tw:1: shape error: unknown name "accepted"
+  1 | grad(grad(f)) was accepted
+twill: 3 shape error(s); not running (use --no-check to run anyway)

@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: cannot read import "secret.ra"
-  1 | import "secret.ra"

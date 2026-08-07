@@ -1,6 +1,6 @@
-// Package tensor is the differentiable tensor engine at the core of Raster.
+// Package tensor is the differentiable tensor engine at the core of Twill.
 //
-// Every numeric value in Raster is a Tensor. Scalars are rank-0 tensors
+// Every numeric value in Twill is a Tensor. Scalars are rank-0 tensors
 // (empty shape). Operations build a reverse-mode autodiff graph, but only
 // when an input requires gradients, so ordinary evaluation stays cheap.
 package tensor

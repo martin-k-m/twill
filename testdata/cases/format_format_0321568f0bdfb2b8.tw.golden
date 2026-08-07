@@ -1,0 +1,12 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: unknown name "a"
+  1 | let x = (a + b) * (c - d)
+case.tw:1: shape error: unknown name "b"
+  1 | let x = (a + b) * (c - d)
+case.tw:1: shape error: unknown name "c"
+  1 | let x = (a + b) * (c - d)
+case.tw:1: shape error: unknown name "d"
+  1 | let x = (a + b) * (c - d)
+twill: 4 shape error(s); not running (use --no-check to run anyway)

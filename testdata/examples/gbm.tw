@@ -1,0 +1,42 @@
+# gbm.tw — native gradient-boosted trees for tabular finance ML.
+#
+# Gradient-boosted trees are the workhorse of credit, fraud, and default
+# modeling. Twill fits them natively — pure Go, deterministic, single binary,
+# no XGBoost and no Python. `gbm_fit` trains a model; `gbm_predict` scores rows.
+
+seed(7)
+
+# A synthetic "loan book": each of n applicants has d numeric features.
+let n = 1000
+let d = 6
+let X = randn(n, d)
+
+# A hidden rule sets who defaults: a weighted mix of features crossing zero,
+# plus some noise so the classes overlap. In practice this signal is unknown;
+# here we plant it so we can measure the fit.
+let w = [0.9, -1.3, 0.7, 0.0, 0.5, -0.4]
+let score = X @ w + 0.5 * randn(n)
+let y = greater(score, 0.0)          # 1 = default, 0 = repaid
+
+# Split into train and test — the honest way to measure a model (and what audit
+# expects). First-axis slicing works on the feature matrix directly.
+let ntr = 700
+let Xtr = X[0:ntr]
+let ytr = y[0:ntr]
+let Xte = X[ntr:n]
+let yte = y[ntr:n]
+
+# Train a logistic (binary-classification) model on the training rows.
+let model = gbm_fit(Xtr, ytr, { objective: "logistic", rounds: 120, max_depth: 3, learning_rate: 0.15 })
+print(model)
+
+# Score the held-out rows: gbm_predict returns a default probability per row.
+let p = gbm_predict(model, Xte)
+let pred = greater(p, 0.5)
+print("test accuracy:", mean(equal(pred, yte)))
+
+# The same engine does regression: predict the continuous score directly.
+let reg = gbm_fit(Xtr, score[0:ntr], { rounds: 120, max_depth: 4 })
+let yhat = gbm_predict(reg, Xte)
+let resid = yhat - score[ntr:n]
+print("test regression RMSE:", sqrt(mean(square(resid))))

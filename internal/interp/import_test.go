@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/interp"
-	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/martin-k-m/twill/internal/value"
 )
 
-// writeModule writes src to dir/name.ra and returns the path.
+// writeModule writes src to dir/name.tw and returns the path.
 func writeModule(t *testing.T, dir, name, src string) string {
 	t.Helper()
-	path := filepath.Join(dir, name+".ra")
+	path := filepath.Join(dir, name+".tw")
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestNamespacedImportFieldOrderIsDeclarationOrder(t *testing.T) {
 	// Map iteration order varies per range, not per process, so repeat enough
 	// that an unordered snapshot could not stay lucky.
 	for i := 0; i < 50; i++ {
-		out := runFile(t, dir, "import \"lib.ra\" as lib\nprint(columns(lib))\n")
+		out := runFile(t, dir, "import \"lib.tw\" as lib\nprint(columns(lib))\n")
 		if len(out) != 1 || out[0] != want {
 			t.Fatalf("run %d: field order = %q, want %q", i, out, want)
 		}
@@ -55,10 +55,10 @@ func TestNamespacedImportFieldOrderIsDeclarationOrder(t *testing.T) {
 func TestNamespacedImportOrderIncludesNestedImports(t *testing.T) {
 	dir := t.TempDir()
 	writeModule(t, dir, "base", "let first = 1.0\nlet second = 2.0\n")
-	writeModule(t, dir, "lib", "import \"base.ra\"\nlet third = 3.0\n")
+	writeModule(t, dir, "lib", "import \"base.tw\"\nlet third = 3.0\n")
 	const want = "[first, second, third]"
 	for i := 0; i < 20; i++ {
-		out := runFile(t, dir, "import \"lib.ra\" as lib\nprint(columns(lib))\n")
+		out := runFile(t, dir, "import \"lib.tw\" as lib\nprint(columns(lib))\n")
 		if len(out) != 1 || out[0] != want {
 			t.Fatalf("run %d: field order = %q, want %q", i, out, want)
 		}
@@ -93,9 +93,9 @@ func TestStdNamespaceOrderIsStable(t *testing.T) {
 // The old spelling carried a file extension. It is gone, and says so.
 func TestStdImportRejectsFileExtension(t *testing.T) {
 	ip := interp.New(func(string) {})
-	_, err := ip.Run(`import "std/nn.ra"`)
+	_, err := ip.Run(`import "std/nn.tw"`)
 	if err == nil {
-		t.Fatal("expected an error for the old std/nn.ra spelling")
+		t.Fatal("expected an error for the old std/nn.tw spelling")
 	}
 	if !strings.Contains(err.Error(), `write "std/nn"`) {
 		t.Errorf("error should point at the new spelling, got %q", err)
@@ -127,11 +127,11 @@ func TestStdPrefixIsNotShadowedByALocalDirectory(t *testing.T) {
 	}
 }
 
-// RASTER_STD is the escape hatch: it replaces the embedded library wholesale.
+// TWILL_STD is the escape hatch: it replaces the embedded library wholesale.
 func TestStdOverrideDirectory(t *testing.T) {
 	over := t.TempDir()
 	writeModule(t, over, "nn", "fn mse(a, b) = 42.0\n")
-	t.Setenv("RASTER_STD", over)
+	t.Setenv("TWILL_STD", over)
 
 	dir := t.TempDir()
 	out := runFile(t, dir, "import \"std/nn\" as nn\nprint(nn.mse([1.0], [1.0]))\n")
@@ -142,7 +142,7 @@ func TestStdOverrideDirectory(t *testing.T) {
 	ip := interp.New(func(string) {})
 	if _, err := ip.Run(`import "std/optim"`); err == nil {
 		t.Fatal("expected a missing-module error from the override directory")
-	} else if !strings.Contains(err.Error(), "RASTER_STD") {
+	} else if !strings.Contains(err.Error(), "TWILL_STD") {
 		t.Errorf("error should name the override, got %q", err)
 	}
 }
@@ -153,8 +153,8 @@ func TestStdOverrideDirectory(t *testing.T) {
 func TestStdModuleCannotImportAFile(t *testing.T) {
 	over := t.TempDir()
 	writeModule(t, over, "secret", "let leaked = 1.0\n")
-	writeModule(t, over, "nn", "import \"secret.ra\"\n")
-	t.Setenv("RASTER_STD", over)
+	writeModule(t, over, "nn", "import \"secret.tw\"\n")
+	t.Setenv("TWILL_STD", over)
 
 	ip := interp.New(func(string) {})
 	_, err := ip.Run(`import "std/nn"`)
@@ -173,7 +173,7 @@ func TestRelativePathToStdFileStillWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeModule(t, dir, filepath.Join("std", "local"), "fn answer() = 7.0\n")
-	out := runFile(t, dir, "import \"./std/local.ra\"\nprint(answer())\n")
+	out := runFile(t, dir, "import \"./std/local.tw\"\nprint(answer())\n")
 	if len(out) != 1 || out[0] != "7" {
 		t.Fatalf("relative import of a std-named directory = %q", out)
 	}
@@ -201,11 +201,11 @@ func TestStdPlainImportLoadsOnce(t *testing.T) {
 func TestAPlainImportDoesNotHollowOutALaterNamespace(t *testing.T) {
 	dir := t.TempDir()
 	writeModule(t, dir, "base", "let first = 1.0\nlet second = 2.0\n")
-	writeModule(t, dir, "lib", "import \"base.ra\"\nlet third = 3.0\n")
+	writeModule(t, dir, "lib", "import \"base.tw\"\nlet third = 3.0\n")
 
-	alone := runFile(t, dir, "import \"lib.ra\" as lib\nprint(columns(lib))\n")
+	alone := runFile(t, dir, "import \"lib.tw\" as lib\nprint(columns(lib))\n")
 	after := runFile(t, dir,
-		"import \"base.ra\"\nimport \"lib.ra\" as lib\nprint(columns(lib))\n")
+		"import \"base.tw\"\nimport \"lib.tw\" as lib\nprint(columns(lib))\n")
 
 	if len(alone) != 1 || len(after) != 1 {
 		t.Fatalf("expected one line from each run, got %q and %q", alone, after)
@@ -239,10 +239,10 @@ func TestAPlainStdImportDoesNotHollowOutALaterNamespace(t *testing.T) {
 // terminate rather than recurse until the stack goes.
 func TestAPlainImportCycleInsideANamespaceTerminates(t *testing.T) {
 	dir := t.TempDir()
-	writeModule(t, dir, "x", "import \"y.ra\"\nlet a = 1.0\n")
-	writeModule(t, dir, "y", "import \"x.ra\"\nlet b = 2.0\n")
+	writeModule(t, dir, "x", "import \"y.tw\"\nlet a = 1.0\n")
+	writeModule(t, dir, "y", "import \"x.tw\"\nlet b = 2.0\n")
 
-	out := runFile(t, dir, "import \"x.ra\" as m\nprint(columns(m))\n")
+	out := runFile(t, dir, "import \"x.tw\" as m\nprint(columns(m))\n")
 	if len(out) != 1 {
 		t.Fatalf("expected one line, got %q", out)
 	}
@@ -258,14 +258,58 @@ func TestAPlainImportCycleInsideANamespaceTerminates(t *testing.T) {
 func TestTwoNamespacesOverOneModuleAreIndependent(t *testing.T) {
 	dir := t.TempDir()
 	writeModule(t, dir, "base", "let first = 1.0\n")
-	writeModule(t, dir, "lib", "import \"base.ra\"\nlet third = 3.0\n")
+	writeModule(t, dir, "lib", "import \"base.tw\"\nlet third = 3.0\n")
 
 	out := runFile(t, dir,
-		"import \"lib.ra\" as p\nimport \"lib.ra\" as q\nprint(columns(p))\nprint(columns(q))\n")
+		"import \"lib.tw\" as p\nimport \"lib.tw\" as q\nprint(columns(p))\nprint(columns(q))\n")
 	if len(out) != 2 {
 		t.Fatalf("expected two lines, got %q", out)
 	}
 	if out[0] != out[1] {
 		t.Fatalf("the two namespaces differ:\n  p = %s\n  q = %s", out[0], out[1])
+	}
+}
+
+// An `import "helpers.ra"` is refused rather than resolved, even when a file of
+// that exact name sits next to the importer. The rename is a clean break, so
+// the resolver never has two extensions to try and the user is pointed at .tw
+// once instead of being left with a working program that quietly depends on the
+// old name.
+func TestImportOfLegacyExtensionIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	// Deliberately not writeModule: this one really is called .ra.
+	if err := os.WriteFile(filepath.Join(dir, "helpers.ra"), []byte("let n = 1.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	main := filepath.Join(dir, "main.tw")
+	if err := os.WriteFile(main, []byte("import \"helpers.ra\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ip := interp.New(func(string) {})
+	err := ip.RunFile(main)
+	if err == nil {
+		t.Fatal("a .ra import resolved; the extension is meant to be a hard break")
+	}
+	if !strings.Contains(err.Error(), ".tw") {
+		t.Errorf("error must name the new extension, got %q", err)
+	}
+}
+
+// The suffix check is on the name alone and is case-insensitive, so a file
+// saved as HELPERS.RA on a case-preserving filesystem gets the same answer.
+func TestCheckLegacyExtIgnoresCase(t *testing.T) {
+	for _, name := range []string{"a.ra", "a.RA", "dir/b.Ra"} {
+		if err := interp.CheckLegacyExt(name); err == nil {
+			t.Errorf("%s was accepted", name)
+		} else if !strings.Contains(err.Error(), ".tw") {
+			t.Errorf("%s: error must name .tw, got %q", name, err)
+		}
+	}
+	for _, name := range []string{"a.tw", "a.ra.tw", "rambler", "", "ra"} {
+		if err := interp.CheckLegacyExt(name); err != nil {
+			t.Errorf("%s was refused: %v", name, err)
+		}
 	}
 }

@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Renamed
+
+- **The language is now Twill, and its source extension is now `.tw`**
+  (2026-08-07). The Go module path is `github.com/martin-k-m/twill`, the binary
+  and every CLI message is `twill`, the standard library override environment
+  variable is `TWILL_STD`, and `examples/`, `std/` and the whole fixture corpus
+  carry `.tw`.
+
+  **`.ra` is a hard break, not a deprecation.** There is no fallback and no
+  removal date: a `.ra` path handed to `twill run`, `check`, `fmt` or
+  `--dump=canonical`, or named by an `import`, is refused with an error that
+  tells you the extension is now `.tw`. One extension is one thing to explain,
+  and refusing loudly today is kinder than leaving `.ra` files in the wild
+  waiting on a deletion nobody remembers to do. Rename your files.
+
+  **The `RSTR` on-disk magic did not change**, and neither did the save format
+  version. Those four bytes are a compatibility contract rather than branding,
+  they are not visible from the language, the CLI or the docs, and every file
+  already saved keeps loading. `docs/self-hosting.md` sets out the reasoning. If
+  the format ever changes for a real reason, that is the moment to introduce a
+  `TWIL` magic at version 2.
+
+  **Entries below this one still say Raster, and that is correct.** They record
+  what happened to a project that was called Raster at the time. Nothing about
+  the rename is retroactive.
+
+  Not done here, and left to the repository owner: the GitHub repository itself
+  is still named `raster`, so clones and remotes are unaffected by this release.
+
 ### Changed
 
 - **A number that needs no gradient is not a heap-allocated tensor.** Every

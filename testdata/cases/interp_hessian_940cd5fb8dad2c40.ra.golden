@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: second-order autodiff: the function uses an operation without forward-mode support
-  1 | hessian(fn(x) = max(x) + sum(x))([1.0, 2.0])

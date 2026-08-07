@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/format"
-	"github.com/martin-k-m/raster/internal/interp"
+	"github.com/martin-k-m/twill/internal/format"
+	"github.com/martin-k-m/twill/internal/interp"
 )
 
 // TestFormattedExamplesMatch formats each example and checks that running the
@@ -15,7 +15,7 @@ import (
 // proven to preserve behavior, not just re-parse. Randomness is deterministic
 // by default, so even the stochastic examples reproduce.
 func TestFormattedExamplesMatch(t *testing.T) {
-	files, _ := filepath.Glob(filepath.Join("..", "..", "examples", "*.ra"))
+	files, _ := filepath.Glob(filepath.Join("..", "..", "examples", "*.tw"))
 	for _, f := range files {
 		src, err := os.ReadFile(f)
 		if err != nil {

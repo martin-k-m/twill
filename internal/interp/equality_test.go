@@ -3,8 +3,8 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/interp"
-	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/martin-k-m/twill/internal/value"
 )
 
 // wantBool runs src and asserts the result is the expected Bool.

@@ -1,2 +1,0 @@
-import "lib.ra" as lib
-print(columns(lib))

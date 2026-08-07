@@ -1,4 +1,4 @@
-// Package interp is the tree-walking evaluator and standard library for Raster.
+// Package interp is the tree-walking evaluator and standard library for Twill.
 package interp
 
 import (
@@ -10,11 +10,11 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/martin-k-m/raster/internal/ast"
-	"github.com/martin-k-m/raster/internal/parser"
-	"github.com/martin-k-m/raster/internal/tensor"
-	"github.com/martin-k-m/raster/internal/value"
-	"github.com/martin-k-m/raster/std"
+	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/martin-k-m/twill/internal/value"
+	"github.com/martin-k-m/twill/std"
 )
 
 // defaultSeed makes randomness reproducible by default — a run gives the same
@@ -28,9 +28,27 @@ const defaultSeed = 1
 // the filesystem. Every other import path is a file, relative to the importer.
 const stdPrefix = "std/"
 
-// stdOverrideEnv points stdPrefix at a directory of .ra files instead of the
+// stdOverrideEnv points stdPrefix at a directory of .tw files instead of the
 // embedded copy, for working on the library itself without rebuilding.
-const stdOverrideEnv = "RASTER_STD"
+const stdOverrideEnv = "TWILL_STD"
+
+// legacyExt is the source extension Twill used when the language was called
+// Raster. The move to .tw is a hard break, not a deprecation: a .ra file is
+// refused outright rather than read anyway, so that there is exactly one source
+// extension to explain and no .ra files linger in the wild waiting on a removal
+// date that nobody remembers.
+const legacyExt = ".ra"
+
+// CheckLegacyExt returns a non-nil error naming the new extension when path
+// carries the retired .ra extension, and nil otherwise. Both the CLI and the
+// import resolver route through it so the wording is the same either way.
+func CheckLegacyExt(path string) error {
+	if len(path) < len(legacyExt) || !strings.EqualFold(path[len(path)-len(legacyExt):], legacyExt) {
+		return nil
+	}
+	renamed := path[:len(path)-len(legacyExt)] + ".tw"
+	return fmt.Errorf("%q uses the retired .ra extension: Twill source files are .tw, so rename it to %q", path, renamed)
+}
 
 // RuntimeError carries a source line for errors raised during evaluation.
 type RuntimeError struct {
@@ -40,7 +58,7 @@ type RuntimeError struct {
 
 func (e *RuntimeError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Msg) }
 
-// returnSignal unwinds the stack for a Raster `return`.
+// returnSignal unwinds the stack for a Twill `return`.
 type returnSignal struct{ value value.Value }
 
 // srcFrame says where the file currently executing came from. dir is what its
@@ -387,6 +405,9 @@ func (ip *Interp) loadModule(path string) (module, error) {
 		// pull in code from outside itself.
 		return module{}, fmt.Errorf("a standard-library module may only import other std modules, not %q", path)
 	}
+	if err := CheckLegacyExt(path); err != nil {
+		return module{}, err
+	}
 	abs, err := ip.resolveImport(path)
 	if err != nil {
 		return module{}, fmt.Errorf("cannot read import %q", path)
@@ -401,7 +422,7 @@ func (ip *Interp) loadModule(path string) (module, error) {
 // loadStd reads a standard-library module by name, from the override directory
 // if one is configured and from the embedded copy otherwise.
 func loadStd(name string) (module, error) {
-	if rest, ok := strings.CutSuffix(name, ".ra"); ok {
+	if rest, ok := strings.CutSuffix(name, ".tw"); ok {
 		return module{}, fmt.Errorf("a standard-library import names a module, not a file: write %q, not %q", stdPrefix+rest, stdPrefix+name)
 	}
 	if !validStdName(name) {
@@ -409,7 +430,7 @@ func loadStd(name string) (module, error) {
 	}
 	mod := module{key: stdPrefix + name, frame: srcFrame{std: true}}
 	if dir := os.Getenv(stdOverrideEnv); dir != "" {
-		src, err := os.ReadFile(filepath.Join(dir, name+".ra"))
+		src, err := os.ReadFile(filepath.Join(dir, name+".tw"))
 		if err != nil {
 			return module{}, fmt.Errorf("%s is set to %q, which has no module %q", stdOverrideEnv, dir, name)
 		}

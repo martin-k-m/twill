@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: cannot compare these values with "<"
-  1 | [1.0, "x"] < [1.0, "y"]

@@ -1,6 +1,6 @@
-# Raster for finance ML
+# Twill for finance ML
 
-This is an honest assessment of where Raster can beat a Python + NumPy/PyTorch
+This is an honest assessment of where Twill can beat a Python + NumPy/PyTorch
 stack for financial machine learning, and a roadmap to get there. The design
 constraint is deliberate: **pure Go, no native dependencies** — one static,
 auditable binary, no CUDA, no BLAS via cgo, no Python.
@@ -21,11 +21,11 @@ Being clear up front avoids a costly surprise later:
   default; the whole thing deploys as one binary with nothing to install. In
   regulated finance those are not nice-to-haves — they are the job.
 
-## The edge Raster already has
+## The edge Twill already has
 
 - **Greeks by autodiff.** Differentiate a pricer and get delta/vega/etc.
   directly — no bump-and-revalue, no finite-difference noise. See
-  `examples/montecarlo_option.ra`: a Monte-Carlo European call whose price and
+  `examples/montecarlo_option.tw`: a Monte-Carlo European call whose price and
   Greeks match Black-Scholes closed form, computed with `grad`.
 - **Deterministic by default.** Randomness is seeded, so a run reproduces
   exactly. `seed(n)` picks the starting point. This is what model-risk
@@ -40,7 +40,7 @@ Being clear up front avoids a costly surprise later:
 
 ## Beachhead: derivatives pricing and risk
 
-This is the workload where pure-Go Raster can be *provably better than Python
+This is the workload where pure-Go Twill can be *provably better than Python
 soon*, because it wins on speed (parallel), correctness, reproducibility, and
 deployment at the same time — and its infrastructure (fast RNG, parallelism,
 autodiff at scale) is shared with backtesting and MC risk.
@@ -68,14 +68,14 @@ then widens to the other workloads.
    `read_frame`/`write_frame` do header CSV, and `columns`/`field`/`with_field`
    manipulate columns by name. Field access, slicing, and `grad` all work on a
    frame, and a numeric time column makes it a time series. See
-   `examples/frames.ra`. Parquet/Arrow would need a third-party module, so it's
+   `examples/frames.tw`. Parquet/Arrow would need a third-party module, so it's
    deferred to keep the zero-dependency single binary.
 4. **Dimensioned types.** *(delivered v0.15)* Declare base units (`unit USD`) and
    annotate scalars with units or unit expressions (`px: USD/share`, `-> USD`).
    The checker tracks units through arithmetic, `matmul`/`dot`, and powers,
    requires dimensionless arguments to transcendentals, and rejects nonsense
    like dollars + shares — all statically, then fully erased at runtime for zero
-   overhead. See `examples/units.ra`. This is correctness Python structurally
+   overhead. See `examples/units.tw`. This is correctness Python structurally
    cannot offer.
 5. **Gradient-boosted trees.** *(delivered v0.16)* A native, pure-Go GBM engine
    (`internal/gbm`) using the second-order (Newton) formulation, so regression
@@ -84,7 +84,7 @@ then widens to the other workloads.
    the split search runs across cores but reduces in fixed order, so fits are
    deterministic. This is the model class that dominates finance tabular ML
    (credit/fraud/default), now native and dependency-free. See
-   `examples/gbm.ra`. Boosting-specific extras (early stopping, feature
+   `examples/gbm.tw`. Boosting-specific extras (early stopping, feature
    importance, categorical splits, missing-value handling) are natural
    follow-ups.
 6. **Backtesting toolkit.** *(delivered v0.17)* Cumulative-scan builtins
@@ -93,9 +93,9 @@ then widens to the other workloads.
    CAGR — all vectorized on tensors, no event loop needed. The Sharpe ratio is
    differentiable in the return series, so a smooth signal can be *tuned by
    gradient ascent* — a genuine edge over a Python backtest. See
-   `examples/backtest.ra`.
+   `examples/backtest.tw`.
 
-With #1–#6 delivered, the original roadmap is complete: Raster now covers
+With #1–#6 delivered, the original roadmap is complete: Twill now covers
 parallel numerics, data frames, dimensioned types, gradient-boosted trees, and
 backtesting — the pure-Go, deterministic, single-binary core of the finance
 pitch.
@@ -104,7 +104,7 @@ Beyond the roadmap, the first follow-up is delivered: **gradient-optimized
 signals** *(v0.18)*. Because the backtest Sharpe/Sortino are differentiable in
 the return series, `grad` differentiates a whole backtest, so a signal's weights
 can be tuned by gradient ascent on risk-adjusted return — see
-`examples/signal_opt.ra`. Remaining ideas live in each item's notes above (GBM
+`examples/signal_opt.tw`. Remaining ideas live in each item's notes above (GBM
 early stopping / feature importance / histogram splits, Parquet I/O, second-order
 autodiff for risk sensitivities, and a vectorized interpreter backend for speed).
 
@@ -112,5 +112,5 @@ autodiff for risk sensitivities, and a vectorized interpreter backend for speed)
 
 - Competing with CUDA/PyTorch on large dense deep learning under a pure-Go, no
   native deps constraint.
-- Matching the breadth of the Python ecosystem. Raster aims to be *better for a
+- Matching the breadth of the Python ecosystem. Twill aims to be *better for a
   specific, high-stakes finance workflow*, not broader than Python.

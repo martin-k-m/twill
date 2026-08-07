@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/interp"
+	"github.com/martin-k-m/twill/internal/interp"
 )
 
 func TestRecordLiteralAndField(t *testing.T) {
@@ -45,12 +45,12 @@ func TestRecordFormatPreservesOrder(t *testing.T) {
 
 func TestNamespacedImport(t *testing.T) {
 	dir := t.TempDir()
-	lib := filepath.Join(dir, "lib.ra")
+	lib := filepath.Join(dir, "lib.tw")
 	if err := os.WriteFile(lib, []byte("fn triple(x) = x * 3.0\nlet k = 7.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	main := filepath.Join(dir, "main.ra")
-	body := "import \"lib.ra\" as lib\nprint(lib.triple(4.0))\nprint(lib.k)\n"
+	main := filepath.Join(dir, "main.tw")
+	body := "import \"lib.tw\" as lib\nprint(lib.triple(4.0))\nprint(lib.k)\n"
 	if err := os.WriteFile(main, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

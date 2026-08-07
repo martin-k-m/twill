@@ -1,0 +1,3 @@
+import "lib.tw" as lib
+print(lib.triple(4.0))
+print(lib.k)

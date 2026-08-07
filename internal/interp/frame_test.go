@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/interp"
+	"github.com/martin-k-m/twill/internal/interp"
 )
 
 func runFileCapture(t *testing.T, dir, name, src string) []string {
@@ -27,7 +27,7 @@ func TestReadFrame(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "d.csv"), []byte("a,b\n1,2\n3,4\n5,6\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out := runFileCapture(t, dir, "main.ra",
+	out := runFileCapture(t, dir, "main.tw",
 		`let df = read_frame("d.csv")`+"\n"+`print(len(df.a), sum(df.a), sum(df.b))`)
 	if len(out) != 1 || out[0] != "3 9 12" {
 		t.Errorf("read_frame output = %q, want %q", out, "3 9 12")
@@ -41,7 +41,7 @@ func TestWriteReadFrameRoundTrip(t *testing.T) {
 		write_frame(df, "out.csv")
 		let df2 = read_frame("out.csv")
 		print(columns(df2), sum(df2.x), sum(df2.y))`
-	out := runFileCapture(t, dir, "main.ra", src)
+	out := runFileCapture(t, dir, "main.tw", src)
 	if len(out) != 1 || out[0] != "[x, y] 6 60" {
 		t.Errorf("round-trip output = %q, want %q", out, "[x, y] 6 60")
 	}

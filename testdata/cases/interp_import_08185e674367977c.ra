@@ -1,2 +1,0 @@
-import "./std/local.ra"
-print(answer())

@@ -7,14 +7,23 @@ import (
 	"io"
 	"os"
 
-	"github.com/martin-k-m/raster/internal/gbm"
-	"github.com/martin-k-m/raster/internal/tensor"
-	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/twill/internal/gbm"
+	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/martin-k-m/twill/internal/value"
 )
 
 // A saved file is: the 4-byte magic "RSTR", a version byte, then one tagged
 // value. The format is little-endian and exact (float64 bit patterns), so a
 // round-trip reproduces a value's numbers bit-for-bit.
+//
+// The magic stays "RSTR" even though the language was renamed from Raster to
+// Twill. These four bytes are a compatibility contract, not branding: every
+// file a user has already saved must keep loading, and nothing in the language,
+// the CLI or the docs ever exposes them. A format named after a former name is
+// ordinary (PK in zip, the chunk names in PNG, ELF). Accepting two magics would
+// make the reader strictly worse for no gain. If the format ever changes for a
+// real reason, that is the moment to introduce magic "TWIL" at version 2 and
+// write one dual-path reader, rather than paying for two.
 var saveMagic = [4]byte{'R', 'S', 'T', 'R'}
 
 const saveVersion byte = 1
@@ -61,7 +70,7 @@ func loadValue(path string) (value.Value, error) {
 		return nil, err
 	}
 	if m != saveMagic {
-		return nil, fmt.Errorf("not a Raster save file")
+		return nil, fmt.Errorf("not a Twill save file")
 	}
 	ver, err := r.ReadByte()
 	if err != nil {

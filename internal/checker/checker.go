@@ -1,4 +1,4 @@
-// Package checker performs best-effort static shape analysis of a Raster
+// Package checker performs best-effort static shape analysis of a Twill
 // program. It infers tensor shapes where it can and reports a diagnostic only
 // when a mismatch is certain (both operand shapes fully known and
 // incompatible). Anything it cannot determine is left as Unknown, so dynamic
@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/martin-k-m/raster/internal/ast"
-	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/martin-k-m/twill/internal/tensor"
 )
 
 // Diagnostic is a single shape/type finding.

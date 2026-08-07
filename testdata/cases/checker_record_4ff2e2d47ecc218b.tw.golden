@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: shape error: unknown name "numbers"
+  1 | numbers/tensors
+case.tw:1: shape error: unknown name "tensors"
+  1 | numbers/tensors
+twill: 2 shape error(s); not running (use --no-check to run anyway)

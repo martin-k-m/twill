@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:3: shape error: function returns [2, 3] but its signature declares [3, 2]
+  3 | let r = wrong(a)
+twill: 1 shape error(s); not running (use --no-check to run anyway)

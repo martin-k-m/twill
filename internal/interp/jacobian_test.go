@@ -3,7 +3,7 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/twill/internal/tensor"
 )
 
 func jacResult(t *testing.T, src string) *tensor.Tensor {

@@ -1,5 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: runtime error: no standard-library module "nope" (the library has backtest, data, nn, num, optim, shapes)
-  1 | import "std/nope"

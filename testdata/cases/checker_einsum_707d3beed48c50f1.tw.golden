@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:4: shape error: shape mismatch in @: [2, 4] @ [2] (inner 4 != 2)
+  4 | let y = c @ [1.0, 2.0]
+twill: 1 shape error(s); not running (use --no-check to run anyway)

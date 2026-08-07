@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:2: shape error: unknown type "Model" on parameter "m"
+  2 | let r = use({ w: [[1.0,2.0],[3.0,4.0],[5.0,6.0]], b: [0.0, 0.0, 0.0] })
+case.tw:1: shape error: record has no field "wong"
+  1 | fn use(m: Model) = sum(m.wong)
+twill: 2 shape error(s); not running (use --no-check to run anyway)

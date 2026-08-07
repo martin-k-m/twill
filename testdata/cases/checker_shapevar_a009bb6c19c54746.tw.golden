@@ -1,0 +1,8 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:3: shape error: shape variable "k" is 3 elsewhere but 2 in argument 2
+  3 | let bad = mm(a, [[1.0, 2.0], [3.0, 4.0]])
+case.tw:1: shape error: shape mismatch in @: [2, 3] @ [2, 2] (inner 3 != 2)
+  1 | fn mm(A: [n, k], B: [k, m]) -> [n, m] { A @ B }
+twill: 2 shape error(s); not running (use --no-check to run anyway)

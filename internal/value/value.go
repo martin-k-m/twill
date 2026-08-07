@@ -1,12 +1,12 @@
-// Package value defines Raster's runtime values and lexical environments.
+// Package value defines Twill's runtime values and lexical environments.
 package value
 
 import (
 	"strconv"
 	"strings"
 
-	"github.com/martin-k-m/raster/internal/ast"
-	"github.com/martin-k-m/raster/internal/tensor"
+	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/martin-k-m/twill/internal/tensor"
 )
 
 // Value is any runtime value. Concrete types: Num, *tensor.Tensor, Bool, Str,
@@ -15,7 +15,7 @@ type Value any
 
 // Num is a plain number: one that carries no shape and no gradient history.
 //
-// Raster's numbers are rank-0 tensors, and a *tensor.Tensor costs two heap
+// Twill's numbers are rank-0 tensors, and a *tensor.Tensor costs two heap
 // allocations (the struct and its one-element backing slice) before anything
 // is computed. An interpreted scalar loop makes one of those per literal, per
 // loop counter and per intermediate result, which profiling put at over half

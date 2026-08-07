@@ -1,0 +1,5 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:1: runtime error: cannot read import "secret.tw"
+  1 | import "secret.tw"

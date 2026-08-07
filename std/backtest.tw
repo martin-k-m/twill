@@ -1,0 +1,67 @@
+# backtest.tw — vectorized backtesting and signal analytics.
+#
+# Everything operates on a 1-D price or return series (a tensor). The metrics
+# build on the cumulative builtins (cumsum / cumprod / cummax), so a whole
+# backtest is a handful of array operations — no event loop, no Python.
+
+# Simple period-over-period returns: r_t = p_t / p_{t-1} - 1  (length n-1).
+fn returns(p) {
+  let n = len(p)
+  p[1:n] / p[0:n - 1] - 1.0
+}
+
+# Log returns: log(p_t / p_{t-1})  (length n-1).
+fn log_returns(p) {
+  let n = len(p)
+  log(p[1:n] / p[0:n - 1])
+}
+
+# Simple moving average with window w  (length n-w+1), from prefix sums.
+fn sma(x, w) {
+  let n = len(x)
+  let c = concat([[0.0], cumsum(x)], 0)   # c[i] = sum of the first i elements
+  (c[w:n + 1] - c[0:n - w + 1]) / w
+}
+
+# Equity curve from a return series: the cumulative product of (1 + r).
+fn equity(r) = cumprod(1.0 + r)
+
+# Maximum drawdown of an equity curve: the worst peak-to-trough decline, as a
+# positive fraction.
+fn max_drawdown(eq) {
+  let peak = cummax(eq)
+  max((peak - eq) / peak)
+}
+
+# Annualized Sharpe ratio (periods = periods per year, e.g. 252 for daily). It
+# is differentiable in r, so a smooth signal can be tuned by gradient ascent.
+fn sharpe(r, periods) {
+  let mu = mean(r)
+  let sd = sqrt(mean(square(r - mu)))
+  mu / sd * sqrt(periods)
+}
+
+# Annualized volatility of a return series.
+fn ann_vol(r, periods) {
+  let mu = mean(r)
+  sqrt(mean(square(r - mu))) * sqrt(periods)
+}
+
+# Annualized Sortino ratio: like Sharpe, but penalizes only downside deviation
+# (returns below zero). Differentiable in r.
+fn sortino(r, periods) {
+  let downside = sqrt(mean(square(relu(0.0 - r))))
+  mean(r) / downside * sqrt(periods)
+}
+
+# Total compounded return of a series.
+fn total_return(r) {
+  let eq = equity(r)
+  eq[len(eq) - 1] - 1.0
+}
+
+# Compound annual growth rate.
+fn cagr(r, periods) {
+  let n = len(r)
+  pow(1.0 + total_return(r), periods / n) - 1.0
+}

@@ -1,11 +1,11 @@
-# Raster
+# Twill
 
 [![CI](https://github.com/martin-k-m/raster/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-k-m/raster/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/martin-k-m/raster?sort=semver)](https://github.com/martin-k-m/raster/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
 
-Raster is a small programming language for numeric and machine-learning code.
+Twill is a small programming language for numeric and machine-learning code.
 Tensors are the built-in data type, differentiation is part of the language
 (`grad`, not a library call), and a static checker catches shape mistakes
 before a program runs.
@@ -33,7 +33,7 @@ but the framework is bolted onto a language that predates it: autodiff is a
 runtime library, tensor shapes are only known once you run the code, and a lot
 of glue sits between the math and the program.
 
-Raster is an experiment in the other direction — a language built around
+Twill is an experiment in the other direction — a language built around
 differentiable tensor programs from the start. Three things fall out of that:
 
 - Tensors are the primitive. Every number is a rank-0 tensor, vectors and
@@ -55,28 +55,34 @@ Download a prebuilt binary for your platform from the
 `PATH`. With a Go toolchain (1.23+) you can also:
 
 ```bash
-go install github.com/martin-k-m/raster/cmd/raster@latest
+go install github.com/martin-k-m/twill/cmd/twill@latest
 ```
+
+That module path needs the GitHub repository to be named `twill`. The language
+was renamed from Raster before the repository was, so until the repository
+rename lands, clone and build instead. The web links above deliberately point at
+the current repository name and will keep working through the rename, because
+GitHub redirects the old URL.
 
 Or build from source:
 
 ```bash
 git clone https://github.com/martin-k-m/raster.git
 cd raster
-go build -o raster ./cmd/raster
+go build -o twill ./cmd/twill
 ```
 
 ## Run
 
 ```bash
-raster examples/autodiff.ra      # run a program
-raster check examples/shapes.ra  # shape-check without running
-raster fmt examples/hello.ra     # print canonically formatted source
-raster                           # start the REPL (multi-line aware)
+twill examples/autodiff.tw      # run a program
+twill check examples/shapes.tw  # shape-check without running
+twill fmt examples/hello.tw     # print canonically formatted source
+twill                           # start the REPL (multi-line aware)
 ```
 
 The REPL keeps reading until brackets balance, so you can define block-body
-functions interactively. Without installing, `go run ./cmd/raster <file.ra>`
+functions interactively. Without installing, `go run ./cmd/twill <file.tw>`
 works too, and `go test ./...` runs the suite.
 
 ## The language in a few lines
@@ -123,22 +129,22 @@ The [language guide](docs/language-guide.md) covers everything; the
 
 `grad`/`grads`/`value_and_grad` differentiate a scalar output, as a loss does;
 `jacobian` handles a vector output, returning every partial derivative at once
-(`examples/jacobian.ra`). `hessian` gives exact second derivatives — enough for
-Newton's method (`examples/hessian.ra`) — via forward-mode jets over the core ops. The
+(`examples/jacobian.tw`). `hessian` gives exact second derivatives — enough for
+Newton's method (`examples/hessian.tw`) — via forward-mode jets over the core ops. The
 autodiff graph is only built while a value is being differentiated, so ordinary
 evaluation doesn't pay for it. Gradients also follow the structure of their
 argument, so a model held in a list gets a matching list of gradients back —
-see `examples/nn_xor.ra`.
+see `examples/nn_xor.tw`.
 
 ## Shape checking
 
-Before running, Raster infers tensor shapes and reports the ones that can't line
+Before running, Twill infers tensor shapes and reports the ones that can't line
 up. It only flags a mismatch when it's certain, so dynamic code (shapes that
 depend on runtime values) is left alone rather than guessed at.
 
 ```
-$ raster check bad.ra
-bad.ra:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+$ twill check bad.tw
+bad.tw:3: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
 ```
 
 Function parameters can carry optional shape annotations that document and
@@ -173,7 +179,7 @@ let price: USD/share = 150.0
 let value = notional(price, 200.0)   # USD
 ```
 
-See `examples/units.ra` and the [language guide](docs/language-guide.md#units-of-measure).
+See `examples/units.tw` and the [language guide](docs/language-guide.md#units-of-measure).
 
 ## Tensors and operations
 
@@ -193,8 +199,8 @@ lists also support differentiable first-axis slicing (`v[1:3]`, `m[:2]`). See th
 
 ## A small standard library
 
-The `std/` libraries are written in Raster itself and are compiled into the
-`raster` binary, so `import "std/nn"` works from any directory with nothing to
+The `std/` libraries are written in Twill itself and are compiled into the
+`twill` binary, so `import "std/nn"` works from any directory with nothing to
 install alongside it. `std/nn` has dense layers, activations (`gelu`,
 `softplus`, ...), initializers (He, Xavier), and losses including softmax
 cross-entropy. `std/optim` has SGD, momentum, and Adam that work on a model held
@@ -202,49 +208,49 @@ either as a positional list or a named record (they walk the tensor leaves with
 `map_leaves`/`zip_leaves`). Import with `import "std/nn"` (it pulls in the
 optimizers too).
 
-`examples/classifier.ra` trains a 3-class MLP with softmax cross-entropy and
-Adam; `examples/nn_xor.ra` is a smaller net using `grad` over a whole
+`examples/classifier.tw` trains a 3-class MLP with softmax cross-entropy and
+Adam; `examples/nn_xor.tw` is a smaller net using `grad` over a whole
 parameter list. For deep learning there are differentiable `conv2d` and
-`maxpool2d` ops (plus `nn.conv`/`nn.conv_init`): `examples/cnn.ra` trains a real
+`maxpool2d` ops (plus `nn.conv`/`nn.conv_init`): `examples/cnn.tw` trains a real
 convolutional net — conv → relu → max-pool → dense — end-to-end with `grad`,
-the kernel included. `examples/minibatch.ra` shows a full training loop —
+the kernel included. `examples/minibatch.tw` shows a full training loop —
 standardize, train/test split, and reshuffled minibatches each epoch — using the
-differentiable `gather` op and `std/data`. And `examples/attention.ra` trains
+differentiable `gather` op and `std/data`. And `examples/attention.tw` trains
 a **self-attention** sequence classifier (embed → attention → pool → dense):
 `grad` differentiates the attention softmax and the learned embeddings together.
 
 Load your own data with `read_csv("data.csv")` (a `[rows, cols]` tensor) or
 `read_frame("data.csv")` (a header CSV as a *frame* — a record of named column
 tensors, so `df.close`, slicing, and `grad` all work on it). See
-`examples/frames.ra`, which computes realized volatility from a price series.
+`examples/frames.tw`, which computes realized volatility from a price series.
 
 Trained models persist with `save(model, "model.bin")` and `load("model.bin")` —
 any value, from a record of network weights to a fitted gradient-boosted forest,
 round-trips exactly. Train once, then ship the model with the single binary for
-inference (`examples/save_load.ra`).
+inference (`examples/save_load.tw`).
 
 Randomness is **deterministic by default** (seeded), so a program reproduces
-exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.ra`
+exactly; `seed(n)` picks the starting point. `examples/montecarlo_option.tw`
 prices a European option by Monte Carlo and gets its Greeks (delta, vega) *by
 autodiff* — no bump-and-revalue.
 
 For tabular ML there's a native gradient-boosted-trees engine — the workhorse of
 credit, fraud, and default modeling — in pure Go, no XGBoost. `gbm_fit(X, y,
 opts)` trains a regression or logistic model and `gbm_predict(model, X)` scores
-it; fits are deterministic. See `examples/gbm.ra`.
+it; fits are deterministic. See `examples/gbm.tw`.
 
 For quant signals, `std/backtest` plus the cumulative builtins
 (`cumsum`/`cumprod`/`cummax`) give a vectorized backtester — returns, moving
-averages, equity curves, drawdown, Sharpe, Sortino, CAGR (`examples/backtest.ra`).
+averages, equity curves, drawdown, Sharpe, Sortino, CAGR (`examples/backtest.tw`).
 Because the Sharpe is differentiable in the return series, you can *tune a signal
-by gradient ascent straight through the backtest* — `examples/signal_opt.ra`
+by gradient ascent straight through the backtest* — `examples/signal_opt.tw`
 learns a signal's weights by climbing its Sharpe, something a plain Python
 backtest can't do without JAX. [docs/finance.md](docs/finance.md) lays out where
-Raster aims to be better than a Python stack for financial ML, and how.
+Twill aims to be better than a Python stack for financial ML, and how.
 
 Parameters can also live in a record with named fields instead of a positional
 list. `grad` follows the record structure, so differentiating a loss over a
-record returns a record of gradients — see `examples/records.ra`. You can declare
+record returns a record of gradients — see `examples/records.tw`. You can declare
 a record type and have the checker verify a model's fields and shapes:
 
 ```rust
@@ -259,7 +265,7 @@ declaration order, so the same program prints the same thing every run.
 ## Layout
 
 ```
-cmd/raster/          the `raster` command (run / check / repl)
+cmd/twill/          the `twill` command (run / check / repl)
 internal/lexer/      source text -> tokens
 internal/parser/     tokens -> AST
 internal/ast/        AST node types
@@ -268,11 +274,11 @@ internal/gbm/        native gradient-boosted trees
 internal/value/      runtime values and environments
 internal/interp/     the tree-walking interpreter + builtins
 internal/checker/    static shape (and unit) analysis
-internal/format/     the source formatter (raster fmt)
-std/                 the standard library, written in Raster and embedded in
+internal/format/     the source formatter (twill fmt)
+std/                 the standard library, written in Twill and embedded in
                      the binary (nn, optim, data, backtest)
-examples/            runnable .ra programs
-editors/vscode/      syntax highlighting for .ra files
+examples/            runnable .tw programs
+editors/vscode/      syntax highlighting for .tw files
 docs/                language guide and design notes
 ```
 

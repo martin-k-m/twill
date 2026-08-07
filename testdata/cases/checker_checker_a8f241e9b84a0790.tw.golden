@@ -1,0 +1,6 @@
+exit 1
+--- stdout ---
+--- stderr ---
+case.tw:3: shape error: shape mismatch in @: [2, 2] @ [3] (inner 2 != 3)
+  3 | print(m @ v)
+twill: 1 shape error(s); not running (use --no-check to run anyway)

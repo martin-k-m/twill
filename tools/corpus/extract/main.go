@@ -1,4 +1,4 @@
-// Command extract pulls the .ra sources embedded in the Go test files out into
+// Command extract pulls the .tw sources embedded in the Go test files out into
 // standalone fixtures under testdata/.
 //
 // The fixtures are the specification, and until now they existed only as string
@@ -22,10 +22,10 @@ import (
 	"strconv"
 	"strings"
 
-	rparser "github.com/martin-k-m/raster/internal/parser"
+	rparser "github.com/martin-k-m/twill/internal/parser"
 )
 
-// unportable lists fixtures whose recorded output is not a fact about Raster.
+// unportable lists fixtures whose recorded output is not a fact about Twill.
 // Each of these opens a file that is not there, so its golden ends in the
 // operating system's phrasing ("no such file or directory" against "The system
 // cannot find the file specified") and in that platform's path separator. A
@@ -60,7 +60,7 @@ func main() {
 		}
 		sort.Strings(files)
 		for _, file := range files {
-			for _, lit := range rasterLiterals(file) {
+			for _, lit := range twillLiterals(file) {
 				sum := sha256.Sum256([]byte(lit))
 				key := hex.EncodeToString(sum[:8])
 				if seen[key] || unportable[key] {
@@ -70,7 +70,7 @@ func main() {
 				base := strings.TrimSuffix(filepath.Base(file), "_test.go")
 				pkg := filepath.Base(root)
 				fixtures = append(fixtures, fixture{
-					name: fmt.Sprintf("%s_%s_%s.ra", pkg, base, key),
+					name: fmt.Sprintf("%s_%s_%s.tw", pkg, base, key),
 					src:  lit,
 				})
 			}
@@ -92,9 +92,9 @@ func main() {
 	fmt.Printf("wrote %d fixtures to %s\n", len(fixtures), *out)
 }
 
-// rasterLiterals returns every string literal in a Go test file that is
-// plausibly a Raster program.
-func rasterLiterals(path string) []string {
+// twillLiterals returns every string literal in a Go test file that is
+// plausibly a Twill program.
+func twillLiterals(path string) []string {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
@@ -110,7 +110,7 @@ func rasterLiterals(path string) []string {
 		if err != nil {
 			return true
 		}
-		if src, ok := asRasterSource(s); ok {
+		if src, ok := asTwillSource(s); ok {
 			found = append(found, src)
 		}
 		return true
@@ -118,7 +118,7 @@ func rasterLiterals(path string) []string {
 	return found
 }
 
-// asRasterSource decides whether a Go string literal is a Raster program.
+// asTwillSource decides whether a Go string literal is a Twill program.
 //
 // Parsing it is necessary but nowhere near sufficient: a test's expected-error
 // substring like "inner 2 != 1" or "shape mismatch" parses cleanly as an
@@ -127,7 +127,7 @@ func rasterLiterals(path string) []string {
 // keyword or a call or an operator. The residual risk is the other direction,
 // dropping a one-token fixture such as "1 + 2", which is covered many times
 // over by the fixtures that are kept.
-func asRasterSource(s string) (string, bool) {
+func asTwillSource(s string) (string, bool) {
 	trimmed := dedent(s)
 	if strings.TrimSpace(trimmed) == "" {
 		return "", false
@@ -154,7 +154,7 @@ func looksLikeCode(s string) bool {
 }
 
 // dedent strips the common leading tabs the tests use for raw-string blocks.
-// Raster is not indentation sensitive, but leaving the indentation in makes the
+// Twill is not indentation sensitive, but leaving the indentation in makes the
 // fixtures unreadable and makes fmt idempotence checks report the whole file.
 func dedent(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")

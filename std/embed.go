@@ -1,7 +1,7 @@
-// Package std embeds Raster's standard library, the .ra files in this
-// directory, so a single `raster` binary carries the library with it. An
+// Package std embeds Twill's standard library, the .tw files in this
+// directory, so a single `twill` binary carries the library with it. An
 // installed binary has no source tree to read them from, which is why they are
-// compiled in rather than located at run time. The interpreter's RASTER_STD
+// compiled in rather than located at run time. The interpreter's TWILL_STD
 // override is the one way to read the library from disk instead.
 package std
 
@@ -10,13 +10,13 @@ import (
 	"strings"
 )
 
-//go:embed *.ra
+//go:embed *.tw
 var sources embed.FS
 
 // Read returns the source of module name ("nn", "optim", ...), reporting
 // whether the module exists.
 func Read(name string) (string, bool) {
-	b, err := sources.ReadFile(name + ".ra")
+	b, err := sources.ReadFile(name + ".tw")
 	if err != nil {
 		return "", false
 	}
@@ -32,7 +32,7 @@ func Names() []string {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		names = append(names, strings.TrimSuffix(e.Name(), ".ra"))
+		names = append(names, strings.TrimSuffix(e.Name(), ".tw"))
 	}
 	return names
 }

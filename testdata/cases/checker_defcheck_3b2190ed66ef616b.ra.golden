@@ -1,6 +1,0 @@
-exit 1
---- stdout ---
---- stderr ---
-case.ra:1: shape error: function "wrong" returns [3] but its signature declares [2]
-  1 | fn wrong(A: [2, 3]) -> [2] { sum(A, 0) }
-raster: 1 shape error(s); not running (use --no-check to run anyway)

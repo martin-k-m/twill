@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/interp"
-	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/martin-k-m/twill/internal/value"
 )
 
 func run(t *testing.T, src string) (value.Value, []string) {
@@ -149,12 +149,12 @@ func TestPrintFormatting(t *testing.T) {
 
 func TestImport(t *testing.T) {
 	dir := t.TempDir()
-	lib := filepath.Join(dir, "lib.ra")
+	lib := filepath.Join(dir, "lib.tw")
 	if err := os.WriteFile(lib, []byte("fn triple(x) = x * 3.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	main := filepath.Join(dir, "main.ra")
-	body := "import \"lib.ra\"\nprint(triple(4.0))\n"
+	main := filepath.Join(dir, "main.tw")
+	body := "import \"lib.tw\"\nprint(triple(4.0))\n"
 	if err := os.WriteFile(main, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

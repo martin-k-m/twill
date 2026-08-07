@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/gbm"
-	"github.com/martin-k-m/raster/internal/interp"
-	"github.com/martin-k-m/raster/internal/tensor"
-	"github.com/martin-k-m/raster/internal/value"
+	"github.com/martin-k-m/twill/internal/gbm"
+	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/martin-k-m/twill/internal/value"
 )
 
 // roundTrip saves v to a temp file via the language's save/load builtins and

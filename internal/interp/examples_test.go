@@ -5,16 +5,16 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/raster/internal/checker"
-	"github.com/martin-k-m/raster/internal/interp"
-	"github.com/martin-k-m/raster/internal/parser"
+	"github.com/martin-k-m/twill/internal/checker"
+	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/martin-k-m/twill/internal/parser"
 )
 
 // TestExamplesRunClean shape-checks and runs every example program in-process,
 // so the suite covers them without depending on the built binary.
 func TestExamplesRunClean(t *testing.T) {
 	dir := filepath.Join("..", "..", "examples")
-	files, err := filepath.Glob(filepath.Join(dir, "*.ra"))
+	files, err := filepath.Glob(filepath.Join(dir, "*.tw"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no example files found in %s (err=%v)", dir, err)
 	}

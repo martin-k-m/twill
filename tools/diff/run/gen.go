@@ -1,6 +1,6 @@
 package main
 
-// A grammar-directed generator for .ra programs.
+// A grammar-directed generator for .tw programs.
 //
 // It is deliberately narrow. Programs are built from a scalar pool and a pool
 // of length-3 vectors, so almost everything it emits passes the shape checker

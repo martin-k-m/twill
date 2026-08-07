@@ -1,4 +1,4 @@
-// Package ast defines the Raster syntax tree.
+// Package ast defines the Twill syntax tree.
 package ast
 
 // Node is any tree node.
