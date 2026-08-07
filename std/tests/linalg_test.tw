@@ -1,0 +1,334 @@
+mode systems
+
+# linalg_test.tw: tests for std/linalg.tw.
+#
+# The factorisations are tested two ways and both are needed. A reconstruction
+# check (does Q R equal A, does L L^T equal A) catches an algorithm that is
+# wrong; a check against an independently computed value catches one that is
+# self-consistently wrong, which is what a sign convention error looks like.
+# Reconstruction alone would pass a QR whose Q and R are both negated.
+
+import "std/linalg" as la
+import "systems_harness.tw" as t
+
+# Push and return, so a literal matrix reads as one expression.
+fn av(xs: Arr[F64], v: F64) -> Arr[F64] {
+  push(xs, v)
+  xs
+}
+
+# The largest absolute difference between two matrices of the same shape. A
+# scalar summary of a reconstruction, so a single tolerance covers the whole
+# matrix rather than one entry at a time.
+fn max_diff(a: la.Mat, b: la.Mat) -> F64 {
+  let worst: F64 = 0.0
+  let i: I64 = 0
+  while i < len(a.data) {
+    let d: F64 = t.fabs(a.data[i] - b.data[i])
+    if d > worst { worst = d }
+    i = i + 1
+  }
+  worst
+}
+
+# A = [[2, 1, -1], [-3, -1, 2], [-2, 1, 2]], the standard elimination example.
+fn example_a() -> la.Mat {
+  let d: Arr[F64] = arr_new()
+  d = av(av(av(d, 2.0), 1.0), -1.0)
+  d = av(av(av(d, -3.0), -1.0), 2.0)
+  d = av(av(av(d, -2.0), 1.0), 2.0)
+  la.of_rows(3, 3, d)
+}
+
+# [[1, 2], [3, 4]], used for the norms and the SVD.
+fn small() -> la.Mat {
+  let d: Arr[F64] = arr_new()
+  d = av(av(av(av(d, 1.0), 2.0), 3.0), 4.0)
+  la.of_rows(2, 2, d)
+}
+
+fn main() -> I64 {
+  let rp: t.Report = t.new_report()
+
+  # ---- solve ---------------------------------------------------------------
+
+  # A x = b with b = [8, -11, -3] has the exact solution [2, 3, -1]. Verified by
+  # substitution: 2*2 + 1*3 - 1*(-1) = 8, -3*2 - 1*3 + 2*(-1) = -11,
+  # -2*2 + 1*3 + 2*(-1) = -3. Every entry is an integer, so the only error is
+  # rounding in the elimination and the tolerance is tight.
+  let b: la.Mat = la.col_vec(av(av(av(arr_new(), 8.0), -11.0), -3.0))
+  let x: la.Mat = la.solve(example_a(), b)
+  t.check_close(rp, "solve recovers the known solution of a 3 by 3 system, first component",
+    la.get(x, 0, 0), 2.0, 0.0000000001)
+  t.check_close(rp, "solve recovers the known solution of a 3 by 3 system, second component",
+    la.get(x, 1, 0), 3.0, 0.0000000001)
+  t.check_close(rp, "solve recovers the known solution of a 3 by 3 system, third component",
+    la.get(x, 2, 0), -1.0, 0.0000000001)
+
+  # Partial pivoting is what this one is for: the leading entry is zero, so an
+  # unpivoted elimination divides by it and returns NaN. The system is
+  # 0x + 1y = 1, 1x + 1y = 3, whose solution is x = 2, y = 1 by inspection.
+  let piv: Arr[F64] = arr_new()
+  piv = av(av(av(av(piv, 0.0), 1.0), 1.0), 1.0)
+  let pb: la.Mat = la.col_vec(av(av(arr_new(), 1.0), 3.0))
+  let px: la.Mat = la.solve(la.of_rows(2, 2, piv), pb)
+  t.check_close(rp, "solve pivots past a zero in the leading position",
+    la.get(px, 0, 0), 2.0, 0.0000000001)
+
+  # ---- determinant ---------------------------------------------------------
+
+  # det([[1, 2], [3, 4]]) = 1*4 - 2*3 = -2, exact by hand.
+  t.check_close(rp, "the determinant of a 2 by 2 is ad minus bc",
+    la.det(small()), -2.0, 0.0000000001)
+
+  # det of the elimination example is -1. Independently: numpy's linalg.det
+  # gives -1.0000000000000002 on the same matrix, so the true value is -1 and
+  # both implementations are within rounding of it.
+  t.check_close(rp, "the determinant of the elimination example is minus one",
+    la.det(example_a()), -1.0, 0.00000001)
+
+  # [[1, 2], [2, 4]] has a repeated row scaled by two, so it is singular and the
+  # determinant is exactly zero. The LU reports the singularity rather than
+  # producing a tiny nonzero value, which is why the tolerance can be zero.
+  let sing: Arr[F64] = arr_new()
+  sing = av(av(av(av(sing, 1.0), 2.0), 2.0), 4.0)
+  t.check(rp, "the determinant of a singular matrix is exactly zero",
+    la.det(la.of_rows(2, 2, sing)) == 0.0)
+
+  # ---- LU ------------------------------------------------------------------
+
+  # P A = L U, reconstructed. This is the check that catches a permutation
+  # applied in the wrong direction, which every other test would pass.
+  let f: la.LU = la.lu(example_a())
+  let l: la.Mat = la.identity(3)
+  let u: la.Mat = la.zeros(3, 3)
+  let i: I64 = 0
+  while i < 3 {
+    let j: I64 = 0
+    while j < 3 {
+      if j < i {
+        la.set(l, i, j, la.get(f.lu, i, j))
+      } else {
+        la.set(u, i, j, la.get(f.lu, i, j))
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  let pa: la.Mat = la.zeros(3, 3)
+  i = 0
+  while i < 3 {
+    let j: I64 = 0
+    while j < 3 {
+      la.set(pa, i, j, la.get(example_a(), f.perm[i], j))
+      j = j + 1
+    }
+    i = i + 1
+  }
+  t.check(rp, "lu reconstructs the row-permuted original as L times U",
+    max_diff(la.matmul(l, u), pa) < 0.0000000001)
+
+  # ---- Cholesky ------------------------------------------------------------
+
+  # The textbook example: A = [[4, 12, -16], [12, 37, -43], [-16, -43, 98]]
+  # factors as L = [[2, 0, 0], [6, 1, 0], [-8, 5, 3]]. Every entry of L is an
+  # integer and can be checked by multiplying L L^T by hand, which is why this
+  # matrix is the one everyone uses.
+  let cd: Arr[F64] = arr_new()
+  cd = av(av(av(cd, 4.0), 12.0), -16.0)
+  cd = av(av(av(cd, 12.0), 37.0), -43.0)
+  cd = av(av(av(cd, -16.0), -43.0), 98.0)
+  let spd: la.Mat = la.of_rows(3, 3, cd)
+  let lc: la.Mat = la.cholesky(spd)
+  t.check_close(rp, "cholesky gives the textbook factor, entry (0, 0)",
+    la.get(lc, 0, 0), 2.0, 0.0000000001)
+  t.check_close(rp, "cholesky gives the textbook factor, entry (1, 0)",
+    la.get(lc, 1, 0), 6.0, 0.0000000001)
+  t.check_close(rp, "cholesky gives the textbook factor, entry (2, 1)",
+    la.get(lc, 2, 1), 5.0, 0.0000000001)
+  t.check_close(rp, "cholesky gives the textbook factor, entry (2, 2)",
+    la.get(lc, 2, 2), 3.0, 0.0000000001)
+  t.check(rp, "cholesky leaves the strict upper triangle at zero",
+    la.get(lc, 0, 1) == 0.0 and la.get(lc, 0, 2) == 0.0)
+  t.check(rp, "the cholesky factor times its transpose is the original",
+    max_diff(la.matmul(lc, la.transpose(lc)), spd) < 0.000000001)
+
+  # ---- QR ------------------------------------------------------------------
+
+  # A = [[12, -51, 4], [6, 167, -68], [-4, 24, -41]], the matrix from every
+  # Householder derivation. With the sign convention in linalg.tw (reflect away
+  # from the axis), R has diagonal -14, -175, -35. Confirmed against numpy's
+  # linalg.qr, which uses the same LAPACK convention and gives
+  # [[-14, -21, 14], [0, -175, 70], [0, 0, -35]].
+  let hd: Arr[F64] = arr_new()
+  hd = av(av(av(hd, 12.0), -51.0), 4.0)
+  hd = av(av(av(hd, 6.0), 167.0), -68.0)
+  hd = av(av(av(hd, -4.0), 24.0), -41.0)
+  let ha: la.Mat = la.of_rows(3, 3, hd)
+  let qr: la.QR = la.qr(ha)
+  t.check_close(rp, "qr puts minus fourteen in the first diagonal of R",
+    la.get(qr.r, 0, 0), -14.0, 0.0000000001)
+  t.check_close(rp, "qr puts minus one hundred and seventy five in the second diagonal of R",
+    la.get(qr.r, 1, 1), -175.0, 0.00000001)
+  t.check_close(rp, "qr puts minus thirty five in the third diagonal of R",
+    la.get(qr.r, 2, 2), -35.0, 0.00000001)
+  t.check(rp, "qr leaves R upper triangular",
+    la.get(qr.r, 1, 0) == 0.0 and la.get(qr.r, 2, 0) == 0.0 and la.get(qr.r, 2, 1) == 0.0)
+  t.check(rp, "the Q from qr is orthogonal to machine precision",
+    max_diff(la.matmul(la.transpose(qr.q), qr.q), la.identity(3)) < 0.0000000000001)
+  t.check(rp, "q times r reconstructs the original matrix",
+    max_diff(la.matmul(qr.q, qr.r), ha) < 0.000000001)
+
+  # ---- norms ---------------------------------------------------------------
+
+  # For [[1, 2], [3, 4]]:
+  #   Frobenius = sqrt(1 + 4 + 9 + 16) = sqrt(30) = 5.477225575051661
+  #   1-norm    = max column sum = max(1 + 3, 2 + 4) = 6
+  #   inf-norm  = max row sum    = max(1 + 2, 3 + 4) = 7
+  #   2-norm    = largest singular value = 5.464985704219043, from numpy's
+  #               linalg.norm(M, 2) on the same matrix
+  # The 1-norm and the infinity norm differ here on purpose: a symmetric test
+  # matrix would let a transposed implementation pass.
+  t.check_close(rp, "the frobenius norm is the root of the sum of squares",
+    la.norm(small(), "fro"), 5.477225575051661, 0.0000000000001)
+  t.check_close(rp, "the one norm is the largest absolute column sum",
+    la.norm(small(), "1"), 6.0, 0.0000000000001)
+  t.check_close(rp, "the infinity norm is the largest absolute row sum",
+    la.norm(small(), "inf"), 7.0, 0.0000000000001)
+  t.check_close(rp, "the two norm is the largest singular value",
+    la.norm(small(), "2"), 5.464985704219043, 0.000000001)
+
+  # ---- SVD -----------------------------------------------------------------
+
+  # The singular values of [[1, 2], [3, 4]] are 5.464985704219043 and
+  # 0.3659661906262574, from numpy's linalg.svd on the same matrix. The small
+  # one is the interesting half of this test: an algorithm with poor relative
+  # accuracy on the small singular values still gets the large one right.
+  let f2: la.SVD = la.svd(small())
+  t.check_close(rp, "svd gives the larger singular value of the two by two",
+    f2.s[0], 5.464985704219043, 0.000000001)
+  t.check_close(rp, "svd gives the smaller singular value of the two by two",
+    f2.s[1], 0.3659661906262574, 0.000000001)
+  t.check(rp, "svd returns the singular values in descending order",
+    f2.s[0] > f2.s[1])
+
+  # U S V^T reconstructs A. Built explicitly rather than trusted, because the
+  # transpose on V is the easiest thing in the whole file to get backwards.
+  let smat: la.Mat = la.zeros(2, 2)
+  la.set(smat, 0, 0, f2.s[0])
+  la.set(smat, 1, 1, f2.s[1])
+  t.check(rp, "u times s times v transpose reconstructs the original",
+    max_diff(la.matmul(la.matmul(f2.u, smat), la.transpose(f2.v)), small()) < 0.000000001)
+
+  # A diagonal matrix has its absolute diagonal entries as singular values, in
+  # descending order. Signs are absorbed into U, which is the property a
+  # negative entry checks.
+  let dg: Arr[F64] = arr_new()
+  dg = av(av(av(av(dg, 3.0), 0.0), 0.0), -2.0)
+  let dsv: la.SVD = la.svd(la.of_rows(2, 2, dg))
+  t.check_close(rp, "the singular values of a diagonal matrix are its absolute entries, largest first",
+    dsv.s[0], 3.0, 0.000000001)
+  t.check_close(rp, "a negative diagonal entry gives a positive singular value",
+    dsv.s[1], 2.0, 0.000000001)
+
+  # ---- inverse and rank ----------------------------------------------------
+
+  # inv([[4, 7], [2, 6]]) = [[0.6, -0.7], [-0.2, 0.4]]. Exact by the closed
+  # form: the determinant is 4*6 - 7*2 = 10, and the adjugate is
+  # [[6, -7], [-2, 4]], so every entry is a tenth of an integer.
+  let iv: Arr[F64] = arr_new()
+  iv = av(av(av(av(iv, 4.0), 7.0), 2.0), 6.0)
+  let ivm: la.Mat = la.of_rows(2, 2, iv)
+  let inverse: la.Mat = la.inv(ivm)
+  t.check_close(rp, "inv gives six tenths in the leading entry of the closed form",
+    la.get(inverse, 0, 0), 0.6, 0.0000000001)
+  t.check_close(rp, "inv gives minus seven tenths in the off diagonal of the closed form",
+    la.get(inverse, 0, 1), -0.7, 0.0000000001)
+  t.check(rp, "a matrix times its inverse is the identity",
+    max_diff(la.matmul(ivm, inverse), la.identity(2)) < 0.0000000001)
+
+  # Rank is where the tolerance earns its keep: [[1, 2], [2, 4]] has a second
+  # singular value of exactly zero in exact arithmetic and something around
+  # 1e-16 in floating point, so a naive "count the nonzeros" reports 2.
+  t.check_eq_i64(rp, "matrix rank sees through a duplicated row",
+    la.matrix_rank(la.of_rows(2, 2, sing)), 1)
+  t.check_eq_i64(rp, "the identity has full rank", la.matrix_rank(la.identity(3)), 3)
+
+  # ---- eigh ----------------------------------------------------------------
+
+  # [[2, 1], [1, 2]] has eigenvalues 1 and 3, exactly: the characteristic
+  # polynomial is (2 - k)^2 - 1 = k^2 - 4k + 3. Ascending, so 1 first.
+  let ed: Arr[F64] = arr_new()
+  ed = av(av(av(av(ed, 2.0), 1.0), 1.0), 2.0)
+  let sym: la.Mat = la.of_rows(2, 2, ed)
+  let e: la.Eigh = la.eigh(sym)
+  t.check_close(rp, "eigh gives the smaller eigenvalue of the two by two first",
+    e.values[0], 1.0, 0.0000000001)
+  t.check_close(rp, "eigh gives the larger eigenvalue second",
+    e.values[1], 3.0, 0.0000000001)
+  t.check(rp, "the eigenvectors from eigh are orthonormal",
+    max_diff(la.matmul(la.transpose(e.vectors), e.vectors), la.identity(2)) < 0.0000000000001)
+
+  # V D V^T reconstructs A, which is the check that the eigenvectors match the
+  # eigenvalues they were sorted alongside.
+  let dmat: la.Mat = la.zeros(2, 2)
+  la.set(dmat, 0, 0, e.values[0])
+  la.set(dmat, 1, 1, e.values[1])
+  t.check(rp, "v times d times v transpose reconstructs the symmetric original",
+    max_diff(la.matmul(la.matmul(e.vectors, dmat), la.transpose(e.vectors)), sym) < 0.0000000001)
+
+  # A diagonal matrix is already diagonalised, so eigh must not disturb it.
+  # It is the case a rotation loop can get wrong by rotating anyway.
+  let diag2: Arr[F64] = arr_new()
+  diag2 = av(av(av(av(diag2, 5.0), 0.0), 0.0), -1.0)
+  let de: la.Eigh = la.eigh(la.of_rows(2, 2, diag2))
+  t.check_close(rp, "eigh of a diagonal matrix returns its entries sorted ascending",
+    de.values[0], -1.0, 0.0000000001)
+
+  # ---- least squares -------------------------------------------------------
+
+  # Fitting y = a + b x to (0, 1), (1, 3), (2, 4), (3, 6).
+  # The normal equations are 4a + 6b = 14 and 6a + 14b = 28, whose exact
+  # solution is a = 11/10 and b = 8/5. numpy's linalg.lstsq on the same design
+  # matrix gives [1.1000000000000003, 1.6], agreeing to the last bits.
+  let xd: Arr[F64] = arr_new()
+  xd = av(av(xd, 1.0), 0.0)
+  xd = av(av(xd, 1.0), 1.0)
+  xd = av(av(xd, 1.0), 2.0)
+  xd = av(av(xd, 1.0), 3.0)
+  let design: la.Mat = la.of_rows(4, 2, xd)
+  let yv: la.Mat = la.col_vec(av(av(av(av(arr_new(), 1.0), 3.0), 4.0), 6.0))
+  let fit: la.Mat = la.lstsq(design, yv)
+  t.check_close(rp, "lstsq recovers the intercept of the known line",
+    la.get(fit, 0, 0), 1.1, 0.0000000001)
+  t.check_close(rp, "lstsq recovers the slope of the known line",
+    la.get(fit, 1, 0), 1.6, 0.0000000001)
+
+  # The SVD route must agree with the QR route wherever both apply. They are
+  # different algorithms with different failure modes, so agreement to ten
+  # digits is real evidence rather than a tautology.
+  let fit2: la.Mat = la.lstsq_svd(design, yv)
+  t.check_close(rp, "lstsq by svd agrees with lstsq by qr on a full rank system",
+    la.get(fit2, 0, 0), 1.1, 0.0000001)
+  t.check_close(rp, "lstsq by svd agrees on the slope too",
+    la.get(fit2, 1, 0), 1.6, 0.0000001)
+
+  # An exactly determined system is a least squares problem with zero residual,
+  # so lstsq and solve must return the same vector.
+  let sq: la.Mat = la.lstsq(example_a(), b)
+  t.check_close(rp, "lstsq on a square full rank system agrees with solve",
+    la.get(sq, 0, 0), 2.0, 0.00000001)
+
+  # ---- matmul --------------------------------------------------------------
+
+  # [[1, 2], [3, 4]] squared is [[7, 10], [15, 22]], by hand.
+  let sq2: la.Mat = la.matmul(small(), small())
+  t.check_close(rp, "matmul squares the two by two correctly, entry (0, 0)",
+    la.get(sq2, 0, 0), 7.0, 0.0000000001)
+  t.check_close(rp, "matmul squares the two by two correctly, entry (1, 1)",
+    la.get(sq2, 1, 1), 22.0, 0.0000000001)
+  t.check_close(rp, "transposing twice returns the original",
+    la.get(la.transpose(la.transpose(small())), 0, 1), 2.0, 0.0)
+
+  t.report(rp, "linalg")
+}
