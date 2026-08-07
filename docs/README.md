@@ -34,6 +34,7 @@ under `src/`, and it does not run yet. These four documents are that effort.
 | Document | What it is |
 | --- | --- |
 | [self-hosting.md](self-hosting.md) | The design. `mode systems`, the file-level mode mechanism, and what each systems feature costs the numeric language. |
+| [type-system.md](type-system.md) | The stage 2 design. Function types, generics unified with the existing shape variables, `enum` with exhaustive `match`, `Opt`/`Res` with `?`, and generic containers, as one system. Says what it refuses to add and why. |
 | [needs.md](needs.md) | The work queue. One numbered entry per feature `src/` reaches for and the bootstrap does not provide, naming the file and line. Ordered by dependency. |
 | [roadmap.md](roadmap.md) | The argued ranking. Every missing feature ordered by how many of the six twill codebases hit it independently, with the workaround each one uses and what it costs, grouped into stages. |
 | [rewrite-plan.md](rewrite-plan.md) | The earlier plan to rewrite out of Go into Rust. Superseded by `self-hosting.md` on the target question only; its staging discipline, differential harness and fixture corpus all still apply. |
@@ -55,3 +56,5 @@ If you want the whole picture and have an afternoon:
 4. [self-hosting.md](self-hosting.md) then [needs.md](needs.md), for where it goes
    next. Those two are the most active part of the project.
 5. [roadmap.md](roadmap.md), for what gets built first and why.
+6. [type-system.md](type-system.md), for the design of the stage the roadmap
+   ranks first.
