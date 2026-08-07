@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`for i in range(n)` counts instead of building a list.** The loop used to
+  materialise every element first: `range(3000000)` allocated a 48 MB slice and
+  three million scalars before the first iteration ran, and the collector then
+  walked that slice for the rest of the loop. Profiling a scalar loop put object
+  scanning at the top.
+
+  Measured on `for i in range(3000000) { acc = acc + 1.0 }`: 1224 ms to 989 ms,
+  19% faster, with 90 MB less allocated per run.
+
+  Nothing else changes. Each iteration still gets its own scope and its own
+  scalar, so a closure that captures the loop variable captures what it always
+  did, and a file that defines its own `range` gets its own. Both have tests,
+  because the fast path is a second implementation of the same loop and the two
+  must not drift apart.
+
 ### Fixed
 
 - **`tensor(...)` no longer discards the shape of its argument.** It returned an

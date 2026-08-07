@@ -176,6 +176,24 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		}
 		return value.TheUnit
 	case *ast.For:
+		// `for i in range(n)` is the loop people write, and going through the
+		// list costs a slice of n elements and n scalars before the first
+		// iteration runs. For range(3000000) that is a 48 MB slice the
+		// collector then walks repeatedly, which profiling put at the top of a
+		// scalar loop's cost.
+		//
+		// Counting instead allocates nothing up front. Everything else is
+		// unchanged: each iteration still gets its own scope and its own scalar,
+		// so a closure that captures the loop variable captures what it did
+		// before.
+		if start, end, step, ok := ip.rangeLoop(st.Iter, env); ok {
+			for x := start; (step > 0 && x < end) || (step < 0 && x > end); x += step {
+				scope := value.NewEnv(env)
+				scope.Define(st.Name, tensor.Scalar(float64(x)))
+				ip.execBlockIn(st.Body, scope)
+			}
+			return value.TheUnit
+		}
 		items := ip.iterate(ip.evalExpr(st.Iter, env), st.Line)
 		for _, item := range items {
 			scope := value.NewEnv(env)
@@ -214,6 +232,59 @@ func (ip *Interp) execBlockIn(b *ast.Block, scope *value.Env) value.Value {
 		last = ip.execStmt(s, scope)
 	}
 	return last
+}
+
+// rangeLoop reads `range(...)` bounds straight off a for-loop's iterable, so the
+// loop can count rather than walk a list that was built to be thrown away.
+//
+// It declines unless the call really is the builtin: a file is free to define
+// its own `range`, and quietly running this one instead would be a bug nobody
+// could find by reading their own source.
+func (ip *Interp) rangeLoop(iter ast.Expr, env *value.Env) (start, end, step int, ok bool) {
+	call, isCall := iter.(*ast.Call)
+	if !isCall {
+		return 0, 0, 0, false
+	}
+	name, isIdent := call.Callee.(*ast.Ident)
+	if !isIdent || name.Name != "range" || len(call.Args) < 1 || len(call.Args) > 3 {
+		return 0, 0, 0, false
+	}
+	// Builtins live in the environment like anything else, so the question is
+	// not whether `range` is bound but whether it is still the builtin. A file
+	// that defines its own must get its own.
+	bound, found := env.Get("range")
+	if !found {
+		return 0, 0, 0, false
+	}
+	if b, isBuiltin := bound.(*value.Builtin); !isBuiltin || b.Name != "range" {
+		return 0, 0, 0, false
+	}
+
+	bounds := make([]int, len(call.Args))
+	for i, arg := range call.Args {
+		v := ip.evalExpr(arg, env)
+		t, isTensor := v.(*tensor.Tensor)
+		if !isTensor || !t.IsScalar() {
+			return 0, 0, 0, false
+		}
+		bounds[i] = int(t.Data[0])
+	}
+
+	step = 1
+	switch len(bounds) {
+	case 1:
+		end = bounds[0]
+	case 2:
+		start, end = bounds[0], bounds[1]
+	case 3:
+		start, end, step = bounds[0], bounds[1], bounds[2]
+	}
+	if step == 0 {
+		// The builtin reports this as an error, and it is the builtin's to
+		// report. Falling through hands it back.
+		return 0, 0, 0, false
+	}
+	return start, end, step, true
 }
 
 func (ip *Interp) iterate(v value.Value, line int) []value.Value {

@@ -2,6 +2,7 @@ package interp_test
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/martin-k-m/raster/internal/interp"
@@ -232,5 +233,42 @@ func TestRollAndDiffFromTheLanguage(t *testing.T) {
 				t.Fatalf("%s: got %v, want %v", c.src, got.Data, c.want)
 			}
 		}
+	}
+}
+
+// `for i in range(n)` counts rather than walking a materialised list. These
+// pin the behaviour that has to survive that, since the fast path is a second
+// implementation of the same loop and the two must not drift.
+func TestRangeLoopSemantics(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"basic", "let s = 0.0\nfor i in range(3) { s = s + i }\nprint(s)", "3"},
+		{"start and end", "let s = 0.0\nfor i in range(2, 5) { s = s + i }\nprint(s)", "9"},
+		{"negative step", "let s = 0.0\nfor i in range(3, 0, -1) { s = s + i }\nprint(s)", "6"},
+		{"empty", "let s = 7.0\nfor i in range(0) { s = 0.0 }\nprint(s)", "7"},
+		// Each iteration keeps its own scope, so a closure captures that
+		// iteration's value rather than the last one.
+		{"closure capture", "let fs = list()\nfor i in range(3) { fs = append(fs, fn() = i) }\nprint(fs[0]() + fs[1]() + fs[2]())", "3"},
+		// A file that defines its own range gets its own.
+		{"shadowed", "fn range(n) = [9.0]\nlet s = 0.0\nfor i in range(3) { s = s + i }\nprint(s)", "9"},
+	}
+	for _, c := range cases {
+		v, out := run(t, c.src)
+		got := ""
+		if len(out) > 0 {
+			got = out[len(out)-1]
+		}
+		_ = v
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: printed %q, want it to contain %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestRangeStepZeroIsStillAnError(t *testing.T) {
+	// The builtin reports this, and the fast path hands it back rather than
+	// inventing its own message or looping forever.
+	ip := interp.New(func(string) {})
+	if _, err := ip.Run("for i in range(0, 5, 0) { print(i) }"); err == nil {
+		t.Error("a zero step was accepted")
 	}
 }
