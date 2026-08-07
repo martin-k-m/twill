@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 704 290" width="704" height="290" role="img" aria-label="twill">
+  <title>twill</title>
+  <defs>
+    <linearGradient id="twwl-face" x1="380" y1="52" x2="150" y2="455" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D2F0E4"/>
+      <stop offset="0.5" stop-color="#A8DCCB"/>
+      <stop offset="1" stop-color="#7FE3C4"/>
+    </linearGradient>
+    <linearGradient id="twwl-back" x1="253" y1="201" x2="152" y2="455" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4FB79B"/>
+      <stop offset="1" stop-color="#3E9A83"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(-17.1 20.9) scale(0.4926)">
+    <path fill="url(#twwl-face)" d="M126 186
+      C180 142 285 90 380 52
+      C397 76 398 106 391 130
+      C350 158 300 180 253 201
+      L252 300
+      C251 308 249 312 246 317
+      C200 380 168 428 152 455
+      C140 424 130 375 138 322
+      C137 310 130 288 124 272
+      C114 244 114 212 126 186 Z"/>
+    <path fill="url(#twwl-back)" d="M252 214
+      C210 250 172 282 138 322
+      C137 310 130 288 124 272
+      C144 242 188 219 253 201 Z"/>
+    <path fill="url(#twwl-back)" d="M246 317
+      C226 346 168 384 144 434
+      C147 443 150 451 152 455
+      C168 428 200 380 246 317 Z"/>
+  </g>
+
+  <!-- Drawn as strokes rather than set in a font, so the lockup renders the same
+       everywhere and needs no webfont. Geometric skeleton, single weight,
+       34 units between glyphs. -->
+  <g transform="translate(24 0)">
+  <g fill="none" stroke="#12332C" stroke-width="22" stroke-linecap="butt" stroke-linejoin="round">
+    <path d="M269 55 V208 C269 222 278 232 293 232 H301"/>
+    <path d="M247 124 H301"/>
+    <path d="M336 124 L368 232 L401 140 L434 232 L466 124"/>
+    <path d="M511 124 V232"/>
+    <path d="M567 55 V232"/>
+    <path d="M623 55 V232"/>
+  </g>
+    <circle cx="511" cy="82" r="12" fill="#12332C"/>
+  </g>
+</svg>

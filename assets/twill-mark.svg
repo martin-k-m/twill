@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="twill">
+  <title>twill</title>
+  <defs>
+    <!-- Runs along the ribbon, top-right tip to bottom-left point, so the sweep
+         reads as one continuous surface rather than four flat shapes. -->
+    <linearGradient id="tw-face" x1="380" y1="52" x2="150" y2="455" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D2F0E4"/>
+      <stop offset="0.5" stop-color="#A8DCCB"/>
+      <stop offset="1" stop-color="#7FE3C4"/>
+    </linearGradient>
+    <linearGradient id="tw-back" x1="253" y1="201" x2="152" y2="455" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4FB79B"/>
+      <stop offset="1" stop-color="#3E9A83"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Whole silhouette first; the underside faces paint over it, so no hairline
+       seams open between adjacent faces when the mark is scaled down. The
+       concave corner at 253,201 is the notch and must survive every edit. -->
+  <path fill="url(#tw-face)" d="M126 186
+    C180 142 285 90 380 52
+    C397 76 398 106 391 130
+    C350 158 300 180 253 201
+    L252 300
+    C251 308 249 312 246 317
+    C200 380 168 428 152 455
+    C140 424 130 375 138 322
+    C137 310 130 288 124 272
+    C114 244 114 212 126 186 Z"/>
+
+  <!-- First fold: the ribbon turns over beneath the top sweep. -->
+  <path fill="url(#tw-back)" d="M252 214
+    C210 250 172 282 138 322
+    C137 310 130 288 124 272
+    C144 242 188 219 253 201 Z"/>
+
+  <!-- Second fold: the underside takes over the trailing edge as the tail
+       narrows, and covers it completely at the point. -->
+  <path fill="url(#tw-back)" d="M246 317
+    C226 346 168 384 144 434
+    C147 443 150 451 152 455
+    C168 428 200 380 246 317 Z"/>
+</svg>
