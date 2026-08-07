@@ -2306,3 +2306,976 @@ fn einsum_grad(parsed: EinsumSpec, inputs: Arr[Tensor], p: I64, g: Tensor) -> Re
   }
   einsum_raw(g_subs, parsed.inputs[p], g_inputs)
 }
+
+# ---- the tape --------------------------------------------------------------
+#
+# Reverse-mode autodiff over a taped graph: the forward pass records each op
+# with its inputs and its output, and the backward pass walks the tape in
+# reverse accumulating cotangents.
+#
+# The bootstrap instead hangs parent pointers and a closure off each tensor and
+# topologically sorts them at Backward time. A tape is the same graph with the
+# sort already done, because an entry can only name entries recorded before it,
+# so index order is a topological order and walking it backwards is a valid
+# reverse pass with no visit and no seen set. That is the one structural
+# difference from internal/tensor and it is a simplification, not a compromise.
+#
+# It also keeps the tape a flat Arr, which is the only shape a bytecode emitter
+# can serialise without inventing a graph format.
+
+struct TapeEntry {
+  op: Op,
+  # Indices of earlier entries. A leaf has none.
+  inputs: Arr[I64],
+  out: Tensor,
+  # Integer parameters of the op: an axis, an index, a permutation, a gather
+  # list. By convention iattr[0] is a normalized axis where the op has one, and
+  # -1 there means "over every element".
+  iattr: Arr[I64],
+  # Float parameters: the exponent of a pow, the bounds of a clip.
+  fattr: Arr[F64],
+  # The einsum spec. The only op whose parameter is text.
+  sattr: Str,
+}
+
+struct Tape {
+  entries: Arr[TapeEntry],
+  # The nodes gradients are taken with respect to, in the order the caller named
+  # them, because `grads(loss)(W, b)` returns a list in that order and the order
+  # is part of the contract.
+  leaves: Arr[I64],
+}
+
+fn new_tape() -> Tape = Tape { entries: arr_new(), leaves: arr_new() }
+
+fn no_ints() -> Arr[I64] = arr_new()
+fn no_floats() -> Arr[F64] = arr_new()
+
+fn record(tp: Tape, op: Op, inputs: Arr[I64], out: Tensor,
+          iattr: Arr[I64], fattr: Arr[F64], sattr: Str) -> I64 {
+  push(tp.entries, TapeEntry { op: op, inputs: inputs, out: out,
+    iattr: iattr, fattr: fattr, sattr: sattr })
+  len(tp.entries) - 1
+}
+
+fn value_of(tp: Tape, node: I64) -> Tensor = tp.entries[node].out
+
+# A leaf is a value a gradient is wanted for. A const is a value that is on the
+# tape only so that a later entry can name it; it gets a cotangent slot like
+# everything else and nobody reads it.
+fn leaf(tp: Tape, t: Tensor) -> I64 {
+  let n: I64 = record(tp, OpLeaf, arr_new(), t, no_ints(), no_floats(), "")
+  push(tp.leaves, n)
+  n
+}
+
+fn konst(tp: Tape, t: Tensor) -> I64 =
+  record(tp, OpConst, arr_new(), t, no_ints(), no_floats(), "")
+
+fn one_input(a: I64) -> Arr[I64] {
+  let v: Arr[I64] = arr_new()
+  push(v, a)
+  v
+}
+
+fn two_inputs(a: I64, b: I64) -> Arr[I64] {
+  let v: Arr[I64] = arr_new()
+  push(v, a)
+  push(v, b)
+  v
+}
+
+fn one_int(a: I64) -> Arr[I64] = one_input(a)
+
+fn two_ints(a: I64, b: I64) -> Arr[I64] = two_inputs(a, b)
+
+fn three_ints(a: I64, b: I64, c: I64) -> Arr[I64] {
+  let v: Arr[I64] = arr_new()
+  push(v, a)
+  push(v, b)
+  push(v, c)
+  v
+}
+
+fn one_float(x: F64) -> Arr[F64] {
+  let v: Arr[F64] = arr_new()
+  push(v, x)
+  v
+}
+
+fn two_floats(x: F64, y: F64) -> Arr[F64] {
+  let v: Arr[F64] = arr_new()
+  push(v, x)
+  push(v, y)
+  v
+}
+
+# ---- the taped ops ---------------------------------------------------------
+#
+# Each of these is the forward kernel plus one record. They are mechanical on
+# purpose: nothing here decides anything, so a wrong gradient is always in the
+# vjp below and never in this section.
+
+fn t_binary(tp: Tape, op: Op, a: I64, b: I64) -> Res[I64, Str] {
+  let out: Tensor = binary(op, value_of(tp, a), value_of(tp, b))?
+  Ok(record(tp, op, two_inputs(a, b), out, no_ints(), no_floats(), ""))
+}
+
+fn t_unary(tp: Tape, op: Op, a: I64) -> I64 {
+  let out: Tensor = unary(op, value_of(tp, a))
+  record(tp, op, one_input(a), out, no_ints(), no_floats(), "")
+}
+
+fn t_pow_scalar(tp: Tape, a: I64, p: F64) -> I64 {
+  let out: Tensor = pow_scalar(value_of(tp, a), p)
+  record(tp, OpPow, one_input(a), out, no_ints(), one_float(p), "")
+}
+
+fn t_clip(tp: Tape, a: I64, lo: F64, hi: F64) -> I64 {
+  let out: Tensor = clip(value_of(tp, a), lo, hi)
+  record(tp, OpClip, one_input(a), out, no_ints(), two_floats(lo, hi), "")
+}
+
+fn t_where(tp: Tape, cond: I64, a: I64, b: I64) -> Res[I64, Str] {
+  let out: Tensor = where3(value_of(tp, cond), value_of(tp, a), value_of(tp, b))?
+  Ok(record(tp, OpWhere, three_ints(cond, a, b), out, no_ints(), no_floats(), ""))
+}
+
+fn t_matmul(tp: Tape, a: I64, b: I64) -> Res[I64, Str] {
+  let out: Tensor = matmul(value_of(tp, a), value_of(tp, b))?
+  Ok(record(tp, OpMatMul, two_inputs(a, b), out, no_ints(), no_floats(), ""))
+}
+
+fn t_einsum(tp: Tape, spec: Str, inputs: Arr[I64]) -> Res[I64, Str] {
+  let vals: Arr[Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(inputs) {
+    push(vals, value_of(tp, inputs[i]))
+    i = i + 1
+  }
+  let out: Tensor = einsum(spec, vals)?
+  Ok(record(tp, OpEinsum, inputs, out, no_ints(), no_floats(), spec))
+}
+
+# Reductions. An axis of -1 on the tape means the whole tensor, which is why the
+# axis is normalized before it is recorded and never after.
+fn t_reduce_all(tp: Tape, op: Op, a: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let out: Tensor = reduce_all_by(v, op)?
+  Ok(record(tp, op, one_input(a), out, one_int(0 - 1), no_floats(), ""))
+}
+
+fn reduce_all_by(v: Tensor, op: Op) -> Res[Tensor, Str] {
+  if is_same_op(op, OpSum) { return Ok(sum_all(v)) }
+  if is_same_op(op, OpMean) { return Ok(mean_all(v)) }
+  if is_same_op(op, OpMax) { return Ok(max_all(v)) }
+  if is_same_op(op, OpMin) { return Ok(min_all(v)) }
+  if is_same_op(op, OpProd) { return Ok(prod_all(v)) }
+  if is_same_op(op, OpMedian) { return Ok(median_all(v)) }
+  Err(bytes.concat("reduce_all_by: not a reduction: ", op_name(op)))
+}
+
+fn t_reduce_axis(tp: Tape, op: Op, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = reduce_axis_by(v, axis, op)?
+  Ok(record(tp, op, one_input(a), out, one_int(axis), no_floats(), ""))
+}
+
+# The keepdims form is the dropping form followed by a reshape, so it is two
+# tape entries and needs no gradient rule of its own.
+fn t_reduce_axis_keep(tp: Tape, op: Op, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let dropped: I64 = t_reduce_axis(tp, op, a, axis)?
+  t_reshape(tp, dropped, keep_axis(v.shape, axis))
+}
+
+fn t_softmax(tp: Tape, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = softmax(v, axis)?
+  Ok(record(tp, OpSoftmax, one_input(a), out, one_int(axis), no_floats(), ""))
+}
+
+fn t_reshape(tp: Tape, a: I64, shape: Arr[I64]) -> Res[I64, Str] {
+  let out: Tensor = reshape(value_of(tp, a), shape)?
+  Ok(record(tp, OpReshape, one_input(a), out, no_ints(), no_floats(), ""))
+}
+
+fn t_transpose(tp: Tape, a: I64, axes: Arr[I64]) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let perm: Arr[I64] = resolve_perm(len(v.shape), axes)?
+  let out: Tensor = transpose(v, perm)?
+  # The resolved permutation is recorded, not the argument: an empty argument
+  # means "reverse", and the backward pass would otherwise have to re-derive
+  # that from a rank it no longer trivially has.
+  Ok(record(tp, OpTranspose, one_input(a), out, perm, no_floats(), ""))
+}
+
+fn t_broadcast_to(tp: Tape, a: I64, shape: Arr[I64]) -> Res[I64, Str] {
+  let out: Tensor = broadcast_to(value_of(tp, a), shape)?
+  Ok(record(tp, OpBroadcastTo, one_input(a), out, no_ints(), no_floats(), ""))
+}
+
+fn t_concat(tp: Tape, inputs: Arr[I64], axis_in: I64) -> Res[I64, Str] {
+  let vals: Arr[Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(inputs) {
+    push(vals, value_of(tp, inputs[i]))
+    i = i + 1
+  }
+  if len(vals) == 0 { return Err("concat: need at least one tensor") }
+  let axis: I64 = normalize_axis(axis_in, len(vals[0].shape))?
+  let out: Tensor = concat(vals, axis)?
+  Ok(record(tp, OpConcat, inputs, out, one_int(axis), no_floats(), ""))
+}
+
+# Each piece of a split is its own node, so a program that uses two pieces
+# differently gets one accumulated gradient in the parent without split needing
+# to know that happened.
+fn t_split(tp: Tape, a: I64, sizes: Arr[I64], axis_in: I64) -> Res[Arr[I64], Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let pieces: Arr[Tensor] = split(v, sizes, axis)?
+  let out: Arr[I64] = arr_new()
+  let offset: I64 = 0
+  let p: I64 = 0
+  while p < len(pieces) {
+    push(out, record(tp, OpSplit, one_input(a), pieces[p],
+      three_ints(axis, offset, sizes[p]), no_floats(), ""))
+    offset = offset + sizes[p]
+    p = p + 1
+  }
+  Ok(out)
+}
+
+fn t_index_axis0(tp: Tape, a: I64, idx: I64) -> Res[I64, Str] {
+  let out: Tensor = index_axis0(value_of(tp, a), idx)?
+  Ok(record(tp, OpIndex0, one_input(a), out, one_int(idx), no_floats(), ""))
+}
+
+fn t_slice_axis0(tp: Tape, a: I64, start: I64, end: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let out: Tensor = slice_axis0(v, start, end)?
+  # The resolved bounds, so the backward pass never re-normalizes a negative
+  # index against a shape it would have to look up again.
+  let s: I64 = start
+  let e: I64 = end
+  if s < 0 { s = s + v.shape[0] }
+  if e < 0 { e = e + v.shape[0] }
+  Ok(record(tp, OpSlice0, one_input(a), out, two_ints(s, e), no_floats(), ""))
+}
+
+fn t_gather(tp: Tape, a: I64, idx: Arr[I64]) -> Res[I64, Str] {
+  let out: Tensor = gather(value_of(tp, a), idx)?
+  Ok(record(tp, OpGather, one_input(a), out, idx, no_floats(), ""))
+}
+
+fn t_flip_axis(tp: Tape, a: I64, axis_in: I64) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = flip_axis(v, axis)?
+  Ok(record(tp, OpFlip, one_input(a), out, one_int(axis), no_floats(), ""))
+}
+
+fn t_sort_axis(tp: Tape, a: I64, axis_in: I64, descending: Bool) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = sort_axis(v, axis, descending)?
+  Ok(record(tp, OpSort, one_input(a), out,
+    two_ints(axis, bool_to_int(descending)), no_floats(), ""))
+}
+
+fn t_topk_axis(tp: Tape, a: I64, k: I64, axis_in: I64, largest: Bool) -> Res[I64, Str] {
+  let v: Tensor = value_of(tp, a)
+  let axis: I64 = normalize_axis(axis_in, len(v.shape))?
+  let out: Tensor = topk_axis(v, k, axis, largest)?
+  Ok(record(tp, OpTopK, one_input(a), out,
+    three_ints(axis, k, bool_to_int(largest)), no_floats(), ""))
+}
+
+fn bool_to_int(b: Bool) -> I64 {
+  if b { return 1 }
+  0
+}
+
+fn int_to_bool(i: I64) -> Bool = i != 0
+
+# ---- the backward pass -----------------------------------------------------
+
+# Cotangent accumulation. Add, never assign: a value used twice receives a
+# contribution from each use, and assigning would silently drop one of them.
+# This is the single most important line in the file.
+fn accumulate(cot: Arr[Tensor], touched: Arr[Bool], node: I64, buf: Arr[F64]) {
+  let dst: Arr[F64] = cot[node].data
+  let i: I64 = 0
+  while i < len(buf) {
+    dst[i] = dst[i] + buf[i]
+    i = i + 1
+  }
+  touched[node] = true
+}
+
+# Spans for an op whose recorded axis may be -1, meaning "every element". The
+# all-elements case is one run over the whole buffer, which makes every
+# axis-wise gradient below serve both forms with no branch.
+fn spans_for(t: Tensor, axis: I64) -> Spans {
+  if axis < 0 {
+    return Spans { before: 1, length: len(t.data), after: 1 }
+  }
+  axis_spans(t.shape, axis)
+}
+
+# backward seeds `root` with `seed` and walks the tape in reverse, returning the
+# cotangent of each leaf in the order the leaves were declared.
+#
+# Two details are the ones a reimplementation gets wrong. The skip on an
+# untouched node is what keeps a dead branch of the graph from costing a full
+# backward pass; it is a cost property only, since an untouched cotangent is
+# zero and adding zero changes nothing. And accumulate adds rather than assigns,
+# for the reason stated on it.
+fn backward(tp: Tape, root: I64, seed: Tensor) -> Res[Arr[Tensor], Str] {
+  let n: I64 = len(tp.entries)
+  if root < 0 or root >= n {
+    return Err(bytes.concat("backward: no such tape node ", str(root)))
+  }
+  if not shape_equal(seed.shape, tp.entries[root].out.shape) {
+    return Err(bytes.concat("backward: seed has shape ",
+      bytes.concat(shape_string(seed.shape),
+      bytes.concat(" but the output has ", shape_string(tp.entries[root].out.shape)))))
+  }
+  let cot: Arr[Tensor] = arr_new()
+  let touched: Arr[Bool] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    # A zero cotangent per node, allocated up front. The bootstrap allocates one
+    # only when a node is first reached; doing that here needs an Opt per slot
+    # and buys memory, not correctness, so it is the optimisation that goes here.
+    push(cot, zeros_like(tp.entries[i].out))
+    push(touched, false)
+    i = i + 1
+  }
+  accumulate(cot, touched, root, seed.data)
+
+  i = n - 1
+  while i >= 0 {
+    if touched[i] {
+      vjp(tp, i, cot, touched)?
+    }
+    i = i - 1
+  }
+
+  let out: Arr[Tensor] = arr_new()
+  i = 0
+  while i < len(tp.leaves) {
+    push(out, cot[tp.leaves[i]])
+    i = i + 1
+  }
+  Ok(out)
+}
+
+# vjp adds node i's contribution to each of its inputs' cotangents.
+#
+# One function with a long branch rather than a closure recorded per entry. The
+# closure form is what the bootstrap uses and it is better for a language with
+# cheap closures; this form is better for reading, because every gradient rule
+# in the system is on one screen's scroll and can be checked against its forward
+# kernel without chasing a capture.
+fn vjp(tp: Tape, i: I64, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let e: TapeEntry = tp.entries[i]
+  let g: Tensor = cot[i]
+
+  # Leaves and constants have no inputs, and a comparison or an argmax has a
+  # zero derivative wherever it has one at all.
+  if len(e.inputs) == 0 { return Ok(0) }
+  if is_comparison(e.op) { return Ok(0) }
+  if is_same_op(e.op, OpArgmax) or is_same_op(e.op, OpArgmin) { return Ok(0) }
+
+  if is_binary_op(e.op) { return vjp_binary(tp, e, g, cot, touched) }
+  if is_unary_op(e.op) { return vjp_unary(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpWhere) { return vjp_where(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpMatMul) { return vjp_matmul(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpEinsum) { return vjp_einsum(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpSum) or is_same_op(e.op, OpMean) {
+    return vjp_sum_mean(tp, e, g, cot, touched)
+  }
+  if is_same_op(e.op, OpMax) or is_same_op(e.op, OpMin) {
+    return vjp_extreme(tp, e, g, cot, touched)
+  }
+  if is_same_op(e.op, OpProd) { return vjp_prod(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpMedian) { return vjp_median(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpLogSumExp) { return vjp_logsumexp(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpSoftmax) { return vjp_softmax(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpReshape) {
+    # The identity on the buffer, which is why it has no helper.
+    accumulate(cot, touched, e.inputs[0], g.data)
+    return Ok(0)
+  }
+  if is_same_op(e.op, OpTranspose) { return vjp_permutation(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpFlip) { return vjp_flip(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpSort) or is_same_op(e.op, OpTopK) {
+    return vjp_selection(tp, e, g, cot, touched)
+  }
+  if is_same_op(e.op, OpBroadcastTo) { return vjp_broadcast_to(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpConcat) { return vjp_concat(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpSplit) { return vjp_split(tp, e, g, cot, touched) }
+  if is_same_op(e.op, OpIndex0) or is_same_op(e.op, OpSlice0) {
+    return vjp_rows(tp, e, g, cot, touched)
+  }
+  if is_same_op(e.op, OpGather) { return vjp_gather(tp, e, g, cot, touched) }
+
+  Err(bytes.concat("backward: no gradient rule for ", op_name(e.op)))
+}
+
+fn is_binary_op(op: Op) -> Bool {
+  if is_comparison(op) { return true }
+  if is_same_op(op, OpAdd) or is_same_op(op, OpSub) { return true }
+  if is_same_op(op, OpMul) or is_same_op(op, OpDiv) { return true }
+  if is_same_op(op, OpMod) { return true }
+  if is_same_op(op, OpMaximum) or is_same_op(op, OpMinimum) { return true }
+  false
+}
+
+fn is_unary_op(op: Op) -> Bool {
+  if is_same_op(op, OpNeg) or is_same_op(op, OpRelu) { return true }
+  if is_same_op(op, OpExp) or is_same_op(op, OpLog) { return true }
+  if is_same_op(op, OpSin) or is_same_op(op, OpCos) { return true }
+  if is_same_op(op, OpSqrt) or is_same_op(op, OpTanh) { return true }
+  if is_same_op(op, OpSigmoid) or is_same_op(op, OpSquare) { return true }
+  if is_same_op(op, OpPow) or is_same_op(op, OpClip) { return true }
+  false
+}
+
+# Elementwise binary, with broadcasting.
+#
+# This is the rule the whole file is arranged around, so it is worth being
+# explicit. Walk the output index space. At output position o the operands
+# contributed their elements at offsets ia and ib, which the same effective
+# strides the forward pass used give incrementally. The local derivatives are
+# d/da and d/db at that pair. Add `d * g[o]` at ia and at ib.
+#
+# When an operand broadcast along an axis its effective stride there is zero, so
+# many different o map to the same ia, and the `+=` sums all of their
+# contributions into it. That is the summing-back, and doing it this way means
+# it is not a separate step that can be forgotten: it is the same loop that
+# produced the forward value, read backwards.
+#
+# The alternative spelling is to build a full-size gradient of the output's
+# shape and then reduce it to the operand's shape with sum_to_shape. That is
+# equivalent, and it is where the bug usually lives, because the reduction is a
+# second piece of code that has to agree with the first about which axes were
+# stretched.
+fn vjp_binary(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let b: Tensor = value_of(tp, e.inputs[1])
+  let shape: Arr[I64] = e.out.shape
+  let n: I64 = len(e.out.data)
+
+  let ga: Arr[F64] = alloc(len(a.data))
+  let gb: Arr[F64] = alloc(len(b.data))
+
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(a.shape, shape))
+  push(contrib, eff_strides(b.shape, shape))
+  let odo: Odometer = odo_new(shape, contrib)
+
+  let o: I64 = 0
+  while o < n {
+    let x: F64 = a.data[odo.offs[0]]
+    let y: F64 = b.data[odo.offs[1]]
+    let gv: F64 = g.data[o]
+    ga[odo.offs[0]] = ga[odo.offs[0]] + d_binary_a(e.op, x, y, e.out.data[o]) * gv
+    gb[odo.offs[1]] = gb[odo.offs[1]] + d_binary_b(e.op, x, y, e.out.data[o]) * gv
+    odo_step(odo)
+    o = o + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  accumulate(cot, touched, e.inputs[1], gb)
+  Ok(0)
+}
+
+# Elementwise unary. No broadcasting, so no summing back: the output has the
+# input's shape and position i came from position i.
+fn vjp_unary(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let p0: F64 = 0.0
+  let p1: F64 = 0.0
+  if len(e.fattr) > 0 { p0 = e.fattr[0] }
+  if len(e.fattr) > 1 { p1 = e.fattr[1] }
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < len(a.data) {
+    ga[i] = d_unary(e.op, a.data[i], e.out.data[i], p0, p1) * g.data[i]
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# where. The cotangent goes wholly to whichever operand was selected at each
+# output position, and nothing goes to the condition: it is not differentiable
+# and it is on the tape only so its value can be read here.
+#
+# Both operands broadcast, so this has the same summing-back as vjp_binary and
+# for the same reason.
+fn vjp_where(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let cond: Tensor = value_of(tp, e.inputs[0])
+  let a: Tensor = value_of(tp, e.inputs[1])
+  let b: Tensor = value_of(tp, e.inputs[2])
+  let shape: Arr[I64] = e.out.shape
+  let ga: Arr[F64] = alloc(len(a.data))
+  let gb: Arr[F64] = alloc(len(b.data))
+
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(cond.shape, shape))
+  push(contrib, eff_strides(a.shape, shape))
+  push(contrib, eff_strides(b.shape, shape))
+  let odo: Odometer = odo_new(shape, contrib)
+
+  let o: I64 = 0
+  while o < len(e.out.data) {
+    if cond.data[odo.offs[0]] != 0.0 {
+      ga[odo.offs[1]] = ga[odo.offs[1]] + g.data[o]
+    } else {
+      gb[odo.offs[2]] = gb[odo.offs[2]] + g.data[o]
+    }
+    odo_step(odo)
+    o = o + 1
+  }
+  accumulate(cot, touched, e.inputs[1], ga)
+  accumulate(cot, touched, e.inputs[2], gb)
+  Ok(0)
+}
+
+# matmul.
+#
+# For C = A B with A of [m, k] and B of [k, n], dL/dA = G B^T and dL/dB = A^T G.
+# The derivation in one line: C[i,j] = sum_p A[i,p] B[p,j], so dC[i,j]/dA[i,p]
+# is B[p,j], and dL/dA[i,p] = sum_j G[i,j] B[p,j], which is G B^T.
+#
+# The rank-1 promotion needs care and is the part most likely to be wrong. A
+# vector operand was promoted to [1, k] or [k, 1] for the forward pass, and the
+# promoted axis was dropped from the result. The gradient is computed entirely
+# in promoted space, where the shapes are honest, and the result is then already
+# the right length for the operand's real shape, because dropping a size-1 axis
+# does not change how many elements there are.
+#
+# The upstream cotangent is read as a flat m*n buffer regardless of the result's
+# rank, which is sound for the same reason: the promoted result is [m, n] and
+# the actual result is that same buffer with size-1 axes dropped.
+fn vjp_matmul(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let b: Tensor = value_of(tp, e.inputs[1])
+  let a2: Arr[I64] = matmul_promote(a.shape, true)
+  let b2: Arr[I64] = matmul_promote(b.shape, false)
+  let m: I64 = a2[0]
+  let k: I64 = a2[1]
+  let n: I64 = b2[1]
+
+  let bt: Arr[F64] = transpose2d(b.data, k, n)
+  accumulate(cot, touched, e.inputs[0], mm(g.data, m, n, bt, k))
+
+  let at: Arr[F64] = transpose2d(a.data, m, k)
+  accumulate(cot, touched, e.inputs[1], mm(at, k, m, g.data, n))
+  Ok(0)
+}
+
+# einsum. See einsum_grad: the gradient of a multilinear contraction is the same
+# contraction with the operand and the output swapped.
+fn vjp_einsum(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let vals: Arr[Tensor] = arr_new()
+  let i: I64 = 0
+  while i < len(e.inputs) {
+    push(vals, value_of(tp, e.inputs[i]))
+    i = i + 1
+  }
+  let parsed: EinsumSpec = parse_einsum(e.sattr, len(vals))?
+  i = 0
+  while i < len(e.inputs) {
+    let gp: Tensor = einsum_grad(parsed, vals, i, g)?
+    accumulate(cot, touched, e.inputs[i], gp.data)
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# sum and mean, over an axis or over everything.
+#
+# The output at (i, j) is the sum of the L elements of its run, each with
+# coefficient 1, or 1/L for mean. So the upstream value is copied back to every
+# element of the run, scaled. This is a broadcast, and it is the gradient of a
+# reduction being an expansion, which is the dual of broadcast_to's gradient
+# being a reduction.
+fn vjp_sum_mean(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let scale: F64 = 1.0
+  if is_same_op(e.op, OpMean) { scale = 1.0 / f64_of_i64(sp.length) }
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let gv: F64 = g.data[i * sp.after + j] * scale
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        ga[base + k * sp.after] = ga[base + k * sp.after] + gv
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# max and min. The whole upstream value routes to the offset that was selected
+# and every other element of the run gets nothing. Recomputing the selection is
+# exact because the forward kernel is deterministic and its input is on the tape.
+fn vjp_extreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let want_max: Bool = is_same_op(e.op, OpMax)
+  let ga: Arr[F64] = alloc(len(a.data))
+  if e.iattr[0] < 0 {
+    let idx: I64 = extreme_all_origin(a, want_max)
+    ga[idx] = ga[idx] + g.data[0]
+  } else {
+    let origin: Arr[I64] = extreme_axis_origins(a, e.iattr[0], want_max)
+    let o: I64 = 0
+    while o < len(origin) {
+      ga[origin[o]] = ga[origin[o]] + g.data[o]
+      o = o + 1
+    }
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# prod. The three-case rule stated on prod_over, applied per run.
+fn vjp_prod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let aux: ProdAux = prod_over(a, sp.length, sp.before, sp.after)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let idx: I64 = i * sp.after + j
+      let gv: F64 = g.data[idx]
+      if gv != 0.0 {
+        let base: I64 = i * sp.length * sp.after + j
+        let k: I64 = 0
+        while k < sp.length {
+          let p: I64 = base + k * sp.after
+          if aux.zeros[idx] == 0 {
+            # Every factor is non-zero, so the product of the others is the
+            # whole product divided by this one.
+            ga[p] = ga[p] + gv * aux.out[idx] / a.data[p]
+          } else {
+            # Exactly one zero: only that factor has a non-zero derivative,
+            # because every other factor's product of the rest still contains
+            # the zero. With two or more zeros nothing survives, which is why
+            # there is no third branch.
+            if aux.zeros[idx] == 1 and a.data[p] == 0.0 {
+              ga[p] = ga[p] + gv * aux.nz_prod[idx]
+            }
+          }
+          k = k + 1
+        }
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# median. The selected element takes the whole value; an even-length run splits
+# it between the two middle elements.
+fn vjp_median(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let aux: MedianAux = median_over(a, sp.length, sp.before, sp.after)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let idx: I64 = 0
+  while idx < len(aux.out) {
+    let gv: F64 = g.data[idx]
+    if gv != 0.0 {
+      if aux.lo[idx] == aux.hi[idx] {
+        ga[aux.lo[idx]] = ga[aux.lo[idx]] + gv
+      } else {
+        ga[aux.lo[idx]] = ga[aux.lo[idx]] + gv / 2.0
+        ga[aux.hi[idx]] = ga[aux.hi[idx]] + gv / 2.0
+      }
+    }
+    idx = idx + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# logsumexp. d/dx log sum exp(x) = softmax(x), so the upstream value is spread
+# along the run weighted by the softmax.
+#
+# The weights are recovered as exp(x - out) rather than by recomputing the
+# maximum and the sum. That identity is exact: out is log sum exp(x), so
+# exp(x_k - out) = exp(x_k) / sum exp(x) = softmax_k. It is stable for the same
+# reason the forward pass is, since x_k - out is never above zero by more than
+# the log of the run length.
+fn vjp_logsumexp(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = spans_for(a, e.iattr[0])
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let oi: I64 = i * sp.after + j
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        let p: I64 = base + k * sp.after
+        ga[p] = ga[p] + f64_exp(a.data[p] - e.out.data[oi]) * g.data[oi]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# softmax. With s the output, the gradient is s * (g - dot(g, s)) over each run.
+#
+# The dot term is the part that gets dropped by mistake. Softmax's outputs sum
+# to 1 along the run, so the Jacobian is not diagonal: raising one input lowers
+# every other output. Formally J = diag(s) - s s^T, and J^T g is s * g - s (s.g),
+# which is the expression below. Without the second term the gradient is wrong
+# by a rank-one correction that vanishes only when g is constant along the run,
+# which is exactly the case a quick hand test uses.
+fn vjp_softmax(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = axis_spans(a.shape, e.iattr[0])
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let dot: F64 = 0.0
+      let k: I64 = 0
+      while k < sp.length {
+        let p: I64 = base + k * sp.after
+        dot = dot + g.data[p] * e.out.data[p]
+        k = k + 1
+      }
+      k = 0
+      while k < sp.length {
+        let p: I64 = base + k * sp.after
+        ga[p] = ga[p] + e.out.data[p] * (g.data[p] - dot)
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# transpose. A permutation of the buffer, so its inverse. Expressed as a scatter
+# through the same origin table the forward pass read through, which is the
+# inverse by construction and cannot be applied the wrong way round.
+fn vjp_permutation(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let origin: Arr[I64] = transpose_origins(a.shape, e.iattr, e.out.shape)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let o: I64 = 0
+  while o < len(origin) {
+    ga[origin[o]] = ga[origin[o]] + g.data[o]
+    o = o + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# flip. A permutation that is its own inverse, so the backward pass is the same
+# reversal.
+fn vjp_flip(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let sp: Spans = axis_spans(a.shape, e.iattr[0])
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let base: I64 = i * sp.length * sp.after + j
+      let k: I64 = 0
+      while k < sp.length {
+        let dst: I64 = base + (sp.length - 1 - k) * sp.after
+        ga[dst] = ga[dst] + g.data[base + k * sp.after]
+        k = k + 1
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# sort and topk. Both are selections: each output element is one input element,
+# so its cotangent goes home to whichever input supplied it, and an input that
+# was not selected gets nothing. For a full sort every input is selected exactly
+# once, which makes it a permutation; for topk the unselected ones are genuinely
+# zero, because moving one of them does not move the output.
+fn vjp_selection(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let axis: I64 = e.iattr[0]
+  let keep: I64 = a.shape[axis]
+  let direction: Bool = int_to_bool(e.iattr[1])
+  if is_same_op(e.op, OpTopK) {
+    keep = e.iattr[1]
+    direction = int_to_bool(e.iattr[2])
+  }
+  let origin: Arr[I64] = sort_origins(a, axis, direction, keep)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let o: I64 = 0
+  while o < len(origin) {
+    ga[origin[o]] = ga[origin[o]] + g.data[o]
+    o = o + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# broadcast_to. The reverse of the expansion: every output that read a given
+# input element sends its cotangent back to it, so a broadcast axis sums. Same
+# scatter as vjp_binary and the same reasoning; see the comment on broadcast_to.
+fn vjp_broadcast_to(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let ga: Arr[F64] = alloc(len(a.data))
+  let contrib: Arr[Arr[I64]] = arr_new()
+  push(contrib, eff_strides(a.shape, e.out.shape))
+  let odo: Odometer = odo_new(e.out.shape, contrib)
+  let o: I64 = 0
+  while o < len(e.out.data) {
+    ga[odo.offs[0]] = ga[odo.offs[0]] + g.data[o]
+    odo_step(odo)
+    o = o + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# concat. Each input takes back the slab of the cotangent it filled. The slabs
+# are disjoint, so nothing sums here.
+fn vjp_concat(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let axis: I64 = e.iattr[0]
+  let sp: Spans = axis_spans(e.out.shape, axis)
+  let total: I64 = sp.length
+  let vals: Arr[Tensor] = arr_new()
+  let p: I64 = 0
+  while p < len(e.inputs) {
+    push(vals, value_of(tp, e.inputs[p]))
+    p = p + 1
+  }
+  p = 0
+  while p < len(e.inputs) {
+    let l: I64 = vals[p].shape[axis]
+    let offset: I64 = concat_offset(vals, axis, p)
+    let ga: Arr[F64] = alloc(len(vals[p].data))
+    let i: I64 = 0
+    while i < sp.before {
+      let k: I64 = 0
+      while k < l {
+        let j: I64 = 0
+        while j < sp.after {
+          ga[i * l * sp.after + k * sp.after + j] =
+            ga[i * l * sp.after + k * sp.after + j] +
+            g.data[i * total * sp.after + (offset + k) * sp.after + j]
+          j = j + 1
+        }
+        k = k + 1
+      }
+      i = i + 1
+    }
+    accumulate(cot, touched, e.inputs[p], ga)
+    p = p + 1
+  }
+  Ok(0)
+}
+
+# split. One piece's cotangent lands in the slab of the parent it came from.
+# Two pieces used in the same expression are two tape nodes with the same input,
+# and the accumulate in the backward loop adds their contributions; nothing here
+# has to know that happened.
+fn vjp_split(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let axis: I64 = e.iattr[0]
+  let offset: I64 = e.iattr[1]
+  let size: I64 = e.iattr[2]
+  let sp: Spans = axis_spans(a.shape, axis)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < sp.before {
+    let k: I64 = 0
+    while k < size {
+      let j: I64 = 0
+      while j < sp.after {
+        let dst: I64 = i * sp.length * sp.after + (offset + k) * sp.after + j
+        ga[dst] = ga[dst] + g.data[i * size * sp.after + k * sp.after + j]
+        j = j + 1
+      }
+      k = k + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# index and slice along axis 0. Both are a contiguous run of rows, so the
+# cotangent copies into the parent at the row offset and nowhere else.
+fn vjp_rows(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let rs: I64 = row_size(a.shape)
+  let start: I64 = e.iattr[0]
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < len(g.data) {
+    ga[start * rs + i] = ga[start * rs + i] + g.data[i]
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
+
+# gather. Scatter-add each output row's cotangent back to its source row. The
+# add rather than the assign is what makes a repeated index correct: an
+# embedding row read by three tokens in a batch receives all three
+# contributions, and an assignment would keep only the last.
+fn vjp_gather(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
+  let a: Tensor = value_of(tp, e.inputs[0])
+  let rs: I64 = row_size(a.shape)
+  let ga: Arr[F64] = alloc(len(a.data))
+  let i: I64 = 0
+  while i < len(e.iattr) {
+    let base: I64 = e.iattr[i] * rs
+    let obase: I64 = i * rs
+    let j: I64 = 0
+    while j < rs {
+      ga[base + j] = ga[base + j] + g.data[obase + j]
+      j = j + 1
+    }
+    i = i + 1
+  }
+  accumulate(cot, touched, e.inputs[0], ga)
+  Ok(0)
+}
