@@ -1,0 +1,912 @@
+mode systems
+
+# eval.tw — the twill evaluator, in twill.
+#
+# PARTIAL, and the boundary is stated up front so nothing below reads as an
+# oversight.
+#
+# What is here: the value model, lexical environments, statement execution,
+# expression evaluation, closures and calls, control flow including the return
+# signal, indexing and slicing, iteration, equality, and truthiness. That is the
+# whole of internal/interp/interp.go's structure, and it is the part that is
+# genuinely twill's business.
+#
+# What is not here: the ninety-odd builtins in internal/interp/builtins.go, and
+# the arithmetic underneath the operators. Those reach into the tensor engine,
+# which docs/self-hosting.md section 2.2 puts in the native core. The calling
+# convention that would let this file reach them is NEEDS-25. Where a function
+# below needs one, it names the primitive it needs rather than approximating it.
+#
+# The evaluator is a tree walker, exactly as the bootstrap is. docs/rewrite-plan
+# Stage 1 replaces it with a bytecode VM, and when that lands this file becomes
+# the emitter's reference for what each node has to mean, which is why it is
+# worth writing even though it will not be the thing that runs.
+
+import "ast.tw" as ast
+import "bytes.tw" as bytes
+import "tensor.tw" as tensor
+
+# ---- values ----------------------------------------------------------------
+
+# A closure captures its defining environment by handle, not by copy. That is
+# load-bearing and it is NEEDS-26: `for i in range(3) { push(fs, fn() = i) }`
+# has to give three closures that see the loop's binding, and the answer depends
+# on whether the capture aliases. The bootstrap aliases, so this does.
+struct Closure {
+  params: Arr[ast.Param],
+  body: ast.Expr,
+  env: Env,
+  # The name is carried only for diagnostics. An anonymous function has none and
+  # the message says "function" instead, which is what the Go side does.
+  name: Str,
+}
+
+struct ListVal {
+  items: Arr[Value],
+}
+
+# A record keeps its keys in insertion order, so printing or iterating a
+# namespace gives the same result on every run. internal/value/value.go carries
+# a Keys slice for exactly this reason; a Dict with insertion order gives it for
+# free.
+struct RecordVal {
+  fields: Dict[Str, Value],
+}
+
+struct BuiltinVal {
+  name: Str,
+}
+
+enum Value {
+  # A plain number: one that carries no shape and no gradient history. The
+  # bootstrap has this as a distinct case from a rank-0 tensor purely for
+  # allocation cost, and measured it at over half the runtime of a scalar loop.
+  # The distinction is invisible to a program: `as_tensor` widens on demand and
+  # a Num is produced only where nothing can be differentiating it.
+  VNum(F64),
+  VTensor(tensor.Tensor),
+  VBool(Bool),
+  VStr(Str),
+  VList(ListVal),
+  VRecord(RecordVal),
+  VClosure(Closure),
+  VBuiltin(BuiltinVal),
+  VUnit,
+}
+
+fn type_name(v: Value) -> Str {
+  match v {
+    VNum(_) => "number",
+    VTensor(_) => "tensor",
+    VBool(_) => "bool",
+    VStr(_) => "string",
+    VList(_) => "list",
+    VRecord(_) => "record",
+    VClosure(_) => "function",
+    VBuiltin(_) => "builtin",
+    VUnit => "unit",
+  }
+}
+
+# as_tensor widens a number to the rank-0 tensor the engine works in, and passes
+# a tensor through untouched. Every place that would otherwise test for a tensor
+# goes through here, so widening never loses a graph: anything that could be
+# differentiating turns a Num back into a rank-0 tensor first.
+fn as_tensor(v: Value) -> Opt[tensor.Tensor] {
+  match v {
+    VTensor(t) => Some(t),
+    VNum(x) => {
+      let data: Arr[F64] = arr_new()
+      push(data, x)
+      Some(tensor.Tensor { shape: arr_new(), data: data })
+    },
+    _ => None,
+  }
+}
+
+# A rank-0 tensor or a Num read back as a plain number. Used by the places that
+# need a scalar and would rather say so than broadcast.
+fn rank0_number(v: Value) -> Opt[F64] {
+  match v {
+    VNum(x) => Some(x),
+    VTensor(t) => {
+      if len(t.shape) == 0 { return Some(t.data[0]) }
+      None
+    },
+    _ => None,
+  }
+}
+
+# Truthiness, and it is narrow on purpose. A bool is itself; a number is true
+# when non-zero; everything else is an error rather than a convention, because
+# `if xs { ... }` meaning "xs is non-empty" is the kind of rule that reads
+# differently to every reader.
+fn truthy(v: Value, line: I64) -> Res[Bool, RuntimeError] {
+  match v {
+    VBool(b) => Ok(b),
+    VNum(x) => Ok(x != 0.0),
+    VTensor(t) => {
+      if len(t.shape) == 0 { return Ok(t.data[0] != 0.0) }
+      Err(runtime_error(line, "condition must be a bool or a scalar number"))
+    },
+    _ => Err(runtime_error(line, bytes.concat("condition must be a bool or a scalar number, got a ",
+      type_name(v)))),
+  }
+}
+
+# ---- errors and control flow -----------------------------------------------
+
+struct RuntimeError {
+  msg: Str,
+  line: I64,
+}
+
+fn runtime_error(line: I64, msg: Str) -> RuntimeError =
+  RuntimeError { msg: msg, line: line }
+
+fn error_text(e: RuntimeError) -> Str =
+  bytes.concat("line ", bytes.concat(str(e.line), bytes.concat(": ", e.msg)))
+
+# A `return` unwinds to the enclosing call. The bootstrap does this with a panic
+# carrying a returnSignal, recovered in callClosure, because Go has no other way
+# to leave a recursive tree walk early.
+#
+# Here it is a value, because a panic that is part of the normal control flow is
+# the thing docs/self-hosting.md section 1.2 narrowed `abort` to exclude. Every
+# execution step reports whether it completed or returned, and the cost is that
+# every caller has to look, which is what Flow makes unavoidable rather than
+# forgettable.
+enum Flow {
+  Normal(Value),
+  Returned(Value),
+}
+
+fn flow_value(f: Flow) -> Value {
+  match f {
+    Normal(v) => v,
+    Returned(v) => v,
+  }
+}
+
+# ---- environments ----------------------------------------------------------
+
+struct Env {
+  vars: Dict[Str, Value],
+  parent: Opt[Env],
+}
+
+fn new_env(parent: Opt[Env]) -> Env = Env { vars: dict_new(), parent: parent }
+
+fn env_get(e: Env, name: Str) -> Opt[Value] {
+  let cur: Opt[Env] = Some(e)
+  while true {
+    match cur {
+      Some(env) => {
+        match dict_get(env.vars, name) {
+          Some(v) => return Some(v),
+          None => cur = env.parent,
+        }
+      },
+      None => return None,
+    }
+  }
+  None
+}
+
+fn env_define(e: Env, name: Str, v: Value) {
+  dict_set(e.vars, name, v)
+}
+
+# Assignment rebinds where the name was defined, walking outward. Defining
+# locally instead would make `total = total + x` inside a loop body create a new
+# variable each iteration and quietly discard the accumulation.
+fn env_assign(e: Env, name: Str, v: Value) -> Bool {
+  let cur: Opt[Env] = Some(e)
+  while true {
+    match cur {
+      Some(env) => {
+        if dict_has(env.vars, name) {
+          dict_set(env.vars, name, v)
+          return true
+        }
+        cur = env.parent
+      },
+      None => return false,
+    }
+  }
+  false
+}
+
+# ---- statements ------------------------------------------------------------
+
+fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
+  match s {
+    SLet(st) => {
+      let v: Value = eval_expr(st.value, env)?
+      env_define(env, st.name, v)
+      Ok(Normal(VUnit))
+    },
+    SFn(st) => {
+      # A declaration binds before its body can run, so a function can call
+      # itself. It captures the environment it is declared in, which is the same
+      # environment the binding lands in, so the recursion resolves.
+      env_define(env, st.name, VClosure(Closure {
+        params: st.params, body: st.body, env: env, name: st.name,
+      }))
+      Ok(Normal(VUnit))
+    },
+    SAssign(st) => {
+      let v: Value = eval_expr(st.value, env)?
+      if not env_assign(env, st.name, v) {
+        # Assigning to a name that was never declared is a typo, not a
+        # declaration. `let` is how a binding is introduced and there is exactly
+        # one way to do it.
+        return Err(runtime_error(st.line, bytes.concat("undefined variable ", quoted(st.name))))
+      }
+      Ok(Normal(VUnit))
+    },
+    SWhile(st) => exec_while(st, env),
+    SFor(st) => exec_for(st, env),
+    SReturn(st) => {
+      match st.value {
+        Some(e) => Ok(Returned(eval_expr(e, env)?)),
+        None => Ok(Returned(VUnit)),
+      }
+    },
+    SImport(st) => exec_import(st, env),
+    STypeDecl(_) => Ok(Normal(VUnit)),
+    # A unit declaration is erased at run time: units are a static check and
+    # carry no representation in a value.
+    SUnitDecl(_) => Ok(Normal(VUnit)),
+    SExpr(st) => Ok(Normal(eval_expr(st.x, env)?)),
+    SBlock(b) => exec_block(b, new_env(Some(env))),
+  }
+}
+
+# A block's value is its last expression statement, and a declaration or a loop
+# resets it to unit. A `return` anywhere inside stops the block and propagates.
+fn exec_block(b: ast.Block, scope: Env) -> Res[Flow, RuntimeError] {
+  let last: Value = VUnit
+  for s in b.body {
+    let f: Flow = exec_stmt(s, scope)?
+    match f {
+      Returned(v) => return Ok(Returned(v)),
+      Normal(v) => {
+        match s {
+          SExpr(_) => last = v,
+          _ => last = VUnit,
+        }
+      },
+    }
+  }
+  Ok(Normal(last))
+}
+
+fn exec_while(st: ast.While, env: Env) -> Res[Flow, RuntimeError] {
+  while true {
+    let c: Value = eval_expr(st.cond, env)?
+    if not truthy(c, st.line)? {
+      break
+    }
+    # A fresh scope per iteration, so a `let` in the body does not leak into the
+    # next one and a closure made in the body captures that iteration.
+    let f: Flow = exec_block(st.body, new_env(Some(env)))?
+    match f {
+      Returned(v) => return Ok(Returned(v)),
+      Normal(_) => unit,
+    }
+  }
+  Ok(Normal(VUnit))
+}
+
+fn exec_for(st: ast.For, env: Env) -> Res[Flow, RuntimeError] {
+  # `for i in range(n)` is the overwhelmingly common form, and materialising a
+  # list of n values to iterate it is a per-loop allocation of the loop's whole
+  # extent. The bootstrap special-cases it (interp.rangeLoop) and so does this,
+  # for the same reason and with the same observable behaviour.
+  match range_loop(st.iter, env) {
+    Some(r) => {
+      let i: I64 = r.start
+      while (r.step > 0 and i < r.end) or (r.step < 0 and i > r.end) {
+        let scope: Env = new_env(Some(env))
+        env_define(scope, st.name, VNum(f64_of_i64(i)))
+        let f: Flow = exec_block(st.body, scope)?
+        match f {
+          Returned(v) => return Ok(Returned(v)),
+          Normal(_) => unit,
+        }
+        i = i + r.step
+      }
+      return Ok(Normal(VUnit))
+    },
+    None => unit,
+  }
+
+  let it: Value = eval_expr(st.iter, env)?
+  let items: Arr[Value] = iterate(it, st.line)?
+  let k: I64 = 0
+  while k < len(items) {
+    let scope: Env = new_env(Some(env))
+    env_define(scope, st.name, items[k])
+    let f: Flow = exec_block(st.body, scope)?
+    match f {
+      Returned(v) => return Ok(Returned(v)),
+      Normal(_) => unit,
+    }
+    k = k + 1
+  }
+  Ok(Normal(VUnit))
+}
+
+struct RangeSpec {
+  start: I64,
+  end: I64,
+  step: I64,
+}
+
+# Recognise `range(...)` written literally at the loop's iterator position, with
+# constant-foldable arguments. Anything else falls through to the general path,
+# including a variable that happens to hold a range's result, because that is a
+# list by then and iterating it is correct.
+fn range_loop(iter: ast.Expr, env: Env) -> Opt[RangeSpec] {
+  match iter {
+    ECall(c) => {
+      match c.callee {
+        EIdent(id) => {
+          if not bytes.equal(id.name, "range") { return None }
+          # A local binding named `range` shadows the builtin, and honouring
+          # that is what keeps this an optimisation rather than a language rule.
+          match env_get(env, "range") {
+            Some(_) => return None,
+            None => unit,
+          }
+          if len(c.args) < 1 or len(c.args) > 3 { return None }
+          let nums: Arr[I64] = arr_new()
+          let i: I64 = 0
+          while i < len(c.args) {
+            match const_i64(c.args[i], env) {
+              Some(n) => push(nums, n),
+              None => return None,
+            }
+            i = i + 1
+          }
+          if len(nums) == 1 { return Some(RangeSpec { start: 0, end: nums[0], step: 1 }) }
+          if len(nums) == 2 { return Some(RangeSpec { start: nums[0], end: nums[1], step: 1 }) }
+          if nums[2] == 0 { return None }
+          Some(RangeSpec { start: nums[0], end: nums[1], step: nums[2] })
+        },
+        _ => None,
+      }
+    },
+    _ => None,
+  }
+}
+
+# Only a literal, or a name already bound to a whole number. Not a general
+# constant folder: the loop bounds have to mean the same thing they would if the
+# list had been built, and evaluating an arbitrary expression twice would not.
+fn const_i64(e: ast.Expr, env: Env) -> Opt[I64] {
+  match e {
+    ENumber(n) => whole(n.value),
+    EIdent(id) => {
+      match env_get(env, id.name) {
+        Some(v) => {
+          match rank0_number(v) {
+            Some(x) => whole(x),
+            None => None,
+          }
+        },
+        None => None,
+      }
+    },
+    _ => None,
+  }
+}
+
+fn whole(x: F64) -> Opt[I64] {
+  let n: I64 = i64_of_f64(x)
+  if f64_of_i64(n) == x { return Some(n) }
+  None
+}
+
+# iterate turns a value into the sequence a `for` walks. Iterating a matrix
+# yields its rows, which is what makes `for row in X` read the way it looks.
+fn iterate(v: Value, line: I64) -> Res[Arr[Value], RuntimeError] {
+  match v {
+    VList(l) => Ok(l.items),
+    VTensor(t) => {
+      if len(t.shape) == 0 {
+        return Err(runtime_error(line, "cannot iterate a scalar"))
+      }
+      Ok(tensor_rows(t))
+    },
+    _ => Err(runtime_error(line, bytes.concat("cannot iterate a ", type_name(v)))),
+  }
+}
+
+fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
+  let out: Arr[Value] = arr_new()
+  let n: I64 = t.shape[0]
+  let row_shape: Arr[I64] = arr_new()
+  let i: I64 = 1
+  while i < len(t.shape) {
+    push(row_shape, t.shape[i])
+    i = i + 1
+  }
+  let stride: I64 = tensor.element_count(row_shape)
+  let k: I64 = 0
+  while k < n {
+    let data: Arr[F64] = arr_new()
+    let j: I64 = 0
+    while j < stride {
+      push(data, t.data[k * stride + j])
+      j = j + 1
+    }
+    if len(row_shape) == 0 {
+      push(out, VNum(data[0]))
+    } else {
+      push(out, VTensor(tensor.Tensor { shape: row_shape, data: data }))
+    }
+    k = k + 1
+  }
+  out
+}
+
+# ---- imports ---------------------------------------------------------------
+#
+# PARTIAL. The resolver's policy is here; the file reading and the std lookup
+# are NEEDS-28 and NEEDS-36.
+#
+# The rules that matter and are not obvious:
+#   - A path is resolved relative to the importing file, not the process's
+#     working directory, so a module that imports a sibling works from anywhere.
+#   - `std/...` resolves to the embedded library rather than the filesystem,
+#     unless TWILL_STD overrides it.
+#   - A `.ra` path is refused outright rather than resolved. See section 4 of
+#     docs/self-hosting.md: the extension change is a hard break, and refusing
+#     loudly once with the fix in the message is the whole of the migration.
+#   - A module is evaluated once and cached, so two importers share its state.
+#   - With no alias the module's bindings land in the importer's environment
+#     unqualified. With one they land in a record under the alias.
+fn exec_import(st: ast.Import, env: Env) -> Res[Flow, RuntimeError] {
+  Err(runtime_error(st.line, "import is not implemented in the self-hosted evaluator yet (NEEDS-36)"))
+}
+
+# ---- expressions -----------------------------------------------------------
+
+fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
+  match e {
+    ENumber(x) => Ok(VNum(x.value)),
+    EString(x) => Ok(VStr(x.value)),
+    EBool(x) => Ok(VBool(x.value)),
+    EIdent(x) => {
+      match env_get(env, x.name) {
+        Some(v) => Ok(v),
+        None => {
+          if is_builtin(x.name) {
+            return Ok(VBuiltin(BuiltinVal { name: x.name }))
+          }
+          Err(runtime_error(x.line, bytes.concat("undefined variable ", quoted(x.name))))
+        },
+      }
+    },
+    ETensor(x) => eval_tensor_lit(x, env),
+    EList(x) => {
+      let items: Arr[Value] = arr_new()
+      let i: I64 = 0
+      while i < len(x.elements) {
+        push(items, eval_expr(x.elements[i], env)?)
+        i = i + 1
+      }
+      Ok(VList(ListVal { items: items }))
+    },
+    ELambda(x) => Ok(VClosure(Closure { params: x.params, body: x.body, env: env, name: "" })),
+    EUnary(x) => eval_unary(x, env),
+    EBinary(x) => eval_binary(x, env),
+    ECall(x) => eval_call(x, env),
+    EIndex(x) => eval_index(x, env),
+    ESlice(x) => eval_slice(x, env),
+    ERecord(x) => {
+      let fields: Dict[Str, Value] = dict_new()
+      let i: I64 = 0
+      while i < len(x.fields) {
+        let f: ast.RecordField = x.fields[i]
+        dict_set(fields, f.name, eval_expr(f.value, env)?)
+        i = i + 1
+      }
+      Ok(VRecord(RecordVal { fields: fields }))
+    },
+    EField(x) => {
+      let target: Value = eval_expr(x.target, env)?
+      match target {
+        VRecord(r) => {
+          match dict_get(r.fields, x.name) {
+            Some(v) => Ok(v),
+            None => Err(runtime_error(x.line, bytes.concat("record has no field ", quoted(x.name)))),
+          }
+        },
+        _ => Err(runtime_error(x.line, bytes.concat("cannot read a field of a ", type_name(target)))),
+      }
+    },
+    EIf(x) => eval_if(x, env),
+    EBlock(b) => Ok(flow_value(exec_block(b, new_env(Some(env)))?)),
+  }
+}
+
+# An `if` used as an expression takes the value of whichever block ran. With no
+# else and a false condition it is unit, which is why `let x = if c { 1 }` is
+# legal and rarely what anyone means.
+fn eval_if(x: ast.IfExpr, env: Env) -> Res[Value, RuntimeError] {
+  let c: Value = eval_expr(x.cond, env)?
+  if truthy(c, x.line)? {
+    return Ok(flow_value(exec_block(x.then_block, new_env(Some(env)))?))
+  }
+  match x.else_branch {
+    ElseBlock(b) => Ok(flow_value(exec_block(b, new_env(Some(env)))?)),
+    ElseIf(alt) => eval_if(alt, env),
+    NoElse => Ok(VUnit),
+  }
+}
+
+# A tensor literal is built by flattening the nesting and reading the shape off
+# the first row at each depth, then requiring every other row to match. The
+# ragged case is an error here rather than a truncation, which is the same
+# decision src/check.tw makes statically.
+fn eval_tensor_lit(x: ast.TensorLit, env: Env) -> Res[Value, RuntimeError] {
+  let shape: Arr[I64] = arr_new()
+  let data: Arr[F64] = arr_new()
+  flatten_tensor_lit(x.elements, 0, shape, data, env, x.line)?
+  Ok(VTensor(tensor.Tensor { shape: shape, data: data }))
+}
+
+fn flatten_tensor_lit(elems: Arr[ast.Expr], depth: I64, shape: Arr[I64],
+                      data: Arr[F64], env: Env, line: I64) -> Res[Unit, RuntimeError] {
+  if depth == len(shape) {
+    push(shape, len(elems))
+  } else {
+    if shape[depth] != len(elems) {
+      return Err(runtime_error(line, "ragged tensor literal: rows have inconsistent lengths"))
+    }
+  }
+  let i: I64 = 0
+  while i < len(elems) {
+    match elems[i] {
+      ETensor(inner) => flatten_tensor_lit(inner.elements, depth + 1, shape, data, env, line)?,
+      _ => {
+        let v: Value = eval_expr(elems[i], env)?
+        match rank0_number(v) {
+          Some(n) => push(data, n),
+          None => return Err(runtime_error(line, "a tensor literal needs numbers")),
+        }
+      },
+    }
+    i = i + 1
+  }
+  Ok(unit)
+}
+
+fn eval_unary(x: ast.Unary, env: Env) -> Res[Value, RuntimeError] {
+  let v: Value = eval_expr(x.operand, env)?
+  if bytes.equal(x.op, "-") {
+    match v {
+      VNum(n) => return Ok(VNum(-n)),
+      # Negating a tensor is an elementwise kernel. NEEDS-25.
+      _ => return Err(runtime_error(x.line, "negation of a tensor needs the native core (NEEDS-25)")),
+    }
+  }
+  Ok(VBool(not truthy(v, x.line)?))
+}
+
+fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
+  # `and` and `or` short-circuit, so the right operand is not evaluated unless
+  # it is needed. They also return the operand rather than a bool, which is what
+  # makes `a or default` an idiom.
+  if bytes.equal(x.op, "and") or bytes.equal(x.op, "&&") {
+    let l: Value = eval_expr(x.left, env)?
+    if not truthy(l, x.line)? { return Ok(l) }
+    return eval_expr(x.right, env)
+  }
+  if bytes.equal(x.op, "or") or bytes.equal(x.op, "||") {
+    let l: Value = eval_expr(x.left, env)?
+    if truthy(l, x.line)? { return Ok(l) }
+    return eval_expr(x.right, env)
+  }
+
+  let l: Value = eval_expr(x.left, env)?
+  let r: Value = eval_expr(x.right, env)?
+
+  if bytes.equal(x.op, "==") { return Ok(VBool(deep_equal(l, r))) }
+  if bytes.equal(x.op, "!=") { return Ok(VBool(not deep_equal(l, r))) }
+
+  # The scalar fast path, which is most of what a twill program actually does
+  # and the reason Num exists as a distinct case. Anything wider is a kernel.
+  match rank0_number(l) {
+    Some(a) => {
+      match rank0_number(r) {
+        Some(b) => return num_arith(x.op, a, b, x.line),
+        None => unit,
+      }
+    },
+    None => unit,
+  }
+  Err(runtime_error(x.line, bytes.concat("operator ", bytes.concat(quoted(x.op),
+    " on tensors needs the native core (NEEDS-25)"))))
+}
+
+fn num_arith(op: Str, a: F64, b: F64, line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(op, "+") { return Ok(VNum(a + b)) }
+  if bytes.equal(op, "-") { return Ok(VNum(a - b)) }
+  if bytes.equal(op, "*") { return Ok(VNum(a * b)) }
+  # Division by zero produces an infinity rather than an error, matching float64
+  # semantics. A compiler would want the error; a numeric language wants the
+  # IEEE answer, and this is the numeric language.
+  if bytes.equal(op, "/") { return Ok(VNum(a / b)) }
+  if bytes.equal(op, "%") { return Ok(VNum(f64_mod(a, b))) }
+  if bytes.equal(op, "^") { return Ok(VNum(f64_pow(a, b))) }
+  if bytes.equal(op, "<") { return Ok(VBool(a < b)) }
+  if bytes.equal(op, "<=") { return Ok(VBool(a <= b)) }
+  if bytes.equal(op, ">") { return Ok(VBool(a > b)) }
+  if bytes.equal(op, ">=") { return Ok(VBool(a >= b)) }
+  # `@` on two scalars is their product, since a rank-0 matmul is a
+  # multiplication and refusing it would make a generic function fail on the
+  # one-element case.
+  if bytes.equal(op, "@") { return Ok(VNum(a * b)) }
+  Err(runtime_error(line, bytes.concat("unknown operator ", quoted(op))))
+}
+
+# Values of different types are never equal, and that is not an error. Comparing
+# a string to a number is a question with an answer, and the answer is no.
+# internal/interp/equality_test.go pins this rule; see NEEDS-27.
+fn deep_equal(l: Value, r: Value) -> Bool {
+  match l {
+    VNum(a) => {
+      match rank0_number(r) {
+        Some(b) => a == b,
+        None => false,
+      }
+    },
+    VBool(a) => {
+      match r {
+        VBool(b) => a == b,
+        _ => false,
+      }
+    },
+    VStr(a) => {
+      match r {
+        VStr(b) => bytes.equal(a, b),
+        _ => false,
+      }
+    },
+    VUnit => {
+      match r {
+        VUnit => true,
+        _ => false,
+      }
+    },
+    VTensor(a) => {
+      match r {
+        VTensor(b) => tensor_equal(a, b),
+        # A rank-0 tensor equals a number of the same value: the two are the
+        # same thing with different representations and a program cannot tell
+        # them apart anywhere else either.
+        VNum(b) => len(a.shape) == 0 and a.data[0] == b,
+        _ => false,
+      }
+    },
+    VList(a) => {
+      match r {
+        VList(b) => list_equal(a, b),
+        _ => false,
+      }
+    },
+    VRecord(a) => {
+      match r {
+        VRecord(b) => record_equal(a, b),
+        _ => false,
+      }
+    },
+    # Two functions are equal only if they are the same function, and this has
+    # no way to ask that, so it says no. Comparing functions is not something a
+    # twill program has a reason to do.
+    _ => false,
+  }
+}
+
+fn tensor_equal(a: tensor.Tensor, b: tensor.Tensor) -> Bool {
+  if not tensor.shape_equal(a.shape, b.shape) { return false }
+  let i: I64 = 0
+  while i < len(a.data) {
+    if a.data[i] != b.data[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn list_equal(a: ListVal, b: ListVal) -> Bool {
+  if len(a.items) != len(b.items) { return false }
+  let i: I64 = 0
+  while i < len(a.items) {
+    if not deep_equal(a.items[i], b.items[i]) { return false }
+    i = i + 1
+  }
+  true
+}
+
+# Field order does not affect equality: two records with the same fields and
+# the same values are equal whichever order they were written in. Order is kept
+# for printing, not for identity.
+fn record_equal(a: RecordVal, b: RecordVal) -> Bool {
+  if len(a.fields) != len(b.fields) { return false }
+  for k in dict_keys(a.fields) {
+    match dict_get(b.fields, k) {
+      Some(v) => {
+        if not deep_equal(dict_must(a.fields, k), v) { return false }
+      },
+      None => return false,
+    }
+  }
+  true
+}
+
+# ---- calls -----------------------------------------------------------------
+
+fn eval_call(x: ast.Call, env: Env) -> Res[Value, RuntimeError] {
+  let callee: Value = eval_expr(x.callee, env)?
+  let args: Arr[Value] = arr_new()
+  let i: I64 = 0
+  while i < len(x.args) {
+    push(args, eval_expr(x.args[i], env)?)
+    i = i + 1
+  }
+  apply(callee, args, x.line)
+}
+
+fn apply(callee: Value, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  match callee {
+    VClosure(c) => call_closure(c, args, line),
+    # The builtin table is the native core's surface. NEEDS-25.
+    VBuiltin(b) => Err(runtime_error(line, bytes.concat("builtin ", bytes.concat(quoted(b.name),
+      " needs the native core (NEEDS-25)")))),
+    _ => Err(runtime_error(line, bytes.concat("cannot call a ", type_name(callee)))),
+  }
+}
+
+fn call_closure(c: Closure, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if len(c.params) != len(args) {
+    let who: Str = "function"
+    if len(c.name) > 0 {
+      who = bytes.concat("function ", quoted(c.name))
+    }
+    return Err(runtime_error(line, bytes.concat(who, bytes.concat(" expects ",
+      bytes.concat(str(len(c.params)), bytes.concat(" argument(s), got ", str(len(args))))))))
+  }
+  # The call's scope hangs off the closure's captured environment, not off the
+  # caller's. That is the whole of lexical scoping and getting it wrong gives
+  # dynamic scoping, which passes most tests.
+  let scope: Env = new_env(Some(c.env))
+  let i: I64 = 0
+  while i < len(c.params) {
+    env_define(scope, c.params[i].name, args[i])
+    i = i + 1
+  }
+  match c.body {
+    EBlock(blk) => Ok(flow_value(exec_block(blk, scope)?)),
+    _ => eval_expr(c.body, scope),
+  }
+}
+
+# ---- indexing and slicing --------------------------------------------------
+
+fn eval_index(x: ast.Index, env: Env) -> Res[Value, RuntimeError] {
+  let target: Value = eval_expr(x.target, env)?
+  let idx_val: Value = eval_expr(x.index, env)?
+  let idx: I64 = 0
+  match rank0_number(idx_val) {
+    Some(n) => idx = i64_of_f64(n),
+    None => return Err(runtime_error(x.line, "an index must be a number")),
+  }
+  match target {
+    VList(l) => {
+      if idx < 0 or idx >= len(l.items) {
+        return Err(runtime_error(x.line, bytes.concat("index ", bytes.concat(str(idx),
+          bytes.concat(" out of range for a list of length ", str(len(l.items)))))))
+      }
+      Ok(l.items[idx])
+    },
+    VTensor(t) => {
+      if len(t.shape) == 0 {
+        return Err(runtime_error(x.line, "cannot index a scalar"))
+      }
+      if idx < 0 or idx >= t.shape[0] {
+        return Err(runtime_error(x.line, bytes.concat("index ", bytes.concat(str(idx),
+          bytes.concat(" out of range for axis 0 of length ", str(t.shape[0]))))))
+      }
+      Ok(tensor_rows(t)[idx])
+    },
+    VStr(s) => {
+      if idx < 0 or idx >= len(s) {
+        return Err(runtime_error(x.line, bytes.concat("index ", bytes.concat(str(idx),
+          bytes.concat(" out of range for a string of length ", str(len(s)))))))
+      }
+      Ok(VNum(f64_of_i64(s[idx])))
+    },
+    _ => Err(runtime_error(x.line, bytes.concat("cannot index a ", type_name(target)))),
+  }
+}
+
+fn eval_slice(x: ast.Slice, env: Env) -> Res[Value, RuntimeError] {
+  let target: Value = eval_expr(x.target, env)?
+  let n: I64 = 0
+  match target {
+    VList(l) => n = len(l.items),
+    VStr(s) => n = len(s),
+    VTensor(t) => {
+      if len(t.shape) == 0 {
+        return Err(runtime_error(x.line, "cannot slice a scalar"))
+      }
+      n = t.shape[0]
+    },
+    _ => return Err(runtime_error(x.line, bytes.concat("cannot slice a ", type_name(target)))),
+  }
+  let start: I64 = slice_bound(x.start, env, 0)?
+  let end: I64 = slice_bound(x.end, env, n)?
+  # Bounds are clamped rather than refused. A slice that runs past the end is
+  # how a caller asks for "the rest", and erroring on it would make every
+  # windowing loop carry a min().
+  if start < 0 { start = 0 }
+  if end > n { end = n }
+  if end < start { end = start }
+  match target {
+    VList(l) => {
+      let items: Arr[Value] = arr_new()
+      let i: I64 = start
+      while i < end {
+        push(items, l.items[i])
+        i = i + 1
+      }
+      Ok(VList(ListVal { items: items }))
+    },
+    VStr(s) => Ok(VStr(s[start:end])),
+    VTensor(t) => {
+      let rows: Arr[Value] = tensor_rows(t)
+      let shape: Arr[I64] = arr_new()
+      push(shape, end - start)
+      let i: I64 = 1
+      while i < len(t.shape) {
+        push(shape, t.shape[i])
+        i = i + 1
+      }
+      let stride: I64 = tensor.element_count(t.shape) / t.shape[0]
+      let data: Arr[F64] = arr_new()
+      let k: I64 = start * stride
+      while k < end * stride {
+        push(data, t.data[k])
+        k = k + 1
+      }
+      Ok(VTensor(tensor.Tensor { shape: shape, data: data }))
+    },
+    _ => Err(runtime_error(x.line, "unreachable: slice target was validated above")),
+  }
+}
+
+fn slice_bound(e: Opt[ast.Expr], env: Env, dflt: I64) -> Res[I64, RuntimeError] {
+  match e {
+    None => Ok(dflt),
+    Some(x) => {
+      let v: Value = eval_expr(x, env)?
+      match rank0_number(v) {
+        Some(n) => Ok(i64_of_f64(n)),
+        None => Err(runtime_error(ast.expr_line(x), "a slice bound must be a number")),
+      }
+    },
+  }
+}
+
+fn quoted(s: Str) -> Str = str_quote(s)
+
+# is_builtin is the check.tw table again. Shared rather than duplicated is the
+# right end state; today they are separate because the checker's table is the
+# one the diagnostics are compared against and the evaluator's is the one the
+# dispatch uses, and merging them before the dispatch exists would be guessing.
+# NEEDS-37.
+fn is_builtin(name: Str) -> Bool = builtin_exists(name)

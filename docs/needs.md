@@ -754,3 +754,79 @@ would otherwise convert at every call site. Either overload accepts a `Str`, or
 `Str` to `Bytes` is a zero-copy conversion and that is stated, because if it
 copies then the progress bar allocates its whole rendered frame thirty times a
 second.
+
+---
+
+## Runtime primitives the compiler names
+
+These are not language features so much as the surface `src/` calls. Listed
+separately because they are cheap individually and easy to lose track of.
+
+| Primitive | Used by | Go equivalent |
+|---|---|---|
+| `arr_new`, `push`, indexed get and set, `len` | everywhere | Go slices |
+| `dict_new`, `dict_set`, `dict_get`, `dict_has`, `dict_del`, `dict_keys`, `len` | check.tw, lex.tw, tensor.tw | Go maps, plus `Record.Keys` for order |
+| `dict_or(d, k, dflt)` | check.tw unit algebra | the zero value of a Go map read |
+| `dict_must(d, k)` | check.tw, eval.tw | a Go map read with a known-present key |
+| `bytes_new`, `bytes_push`, `bytes_to_str` | bytes.tw | `strings.Builder` |
+| `str(x)` for `I64` and `F64` | every diagnostic | `strconv`, `fmt` |
+| `str_quote(s)` | check.tw, parse.tw | `%q` |
+| `f64_of_str`, `i64_of_str` | parse.tw | `strconv.ParseFloat`, `strconv.Atoi` |
+| `i64_of_f64`, `f64_of_i64` | check.tw, eval.tw | Go conversions |
+| `f64_mod`, `f64_pow` | eval.tw | `math.Mod`, `math.Pow` |
+| `and(a, b)` and the other bitwise ops | lex.tw | Go `&` |
+| `read_file`, `args`, `write_out`, `write_err` | main.tw | `os` |
+| `abort(msg)` | everywhere | `panic` |
+
+## NEEDS-34 — the systems-mode checker policy
+
+**Status:** open, and it is the design decision, not a coding task.
+
+`docs/self-hosting.md` section 1.3: in systems mode a `TUnknown` surviving to
+the end of inference is a diagnostic rather than silence. `src/check.tw`
+implements the numeric policy, because that is what `testdata/` was generated
+against and what the diagnostics are compared to. The systems policy is a second
+policy over the same lattice and it is what would let the checker check `src/`
+itself.
+
+Until it exists, the self-hosted compiler is not type-checked by its own
+checker, which is an uncomfortable place to be and worth naming.
+
+## NEEDS-35 — an out-of-range axis in `transpose`
+
+**Status:** open, low priority. `src/check.tw` `transpose_result`.
+
+An axis outside the tensor's rank makes the result unknown rather than a
+diagnostic, matching `internal/checker/checker.go`. Every other axis-taking
+builtin reports it through `report_axis`. Fixing this means changing the Go side
+too, or the diagnostics diverge.
+
+## NEEDS-36 — the import resolver
+
+**Status:** blocking for `src/eval.tw`. `exec_import`.
+
+The policy is written out in the comment there: relative to the importing file,
+`std/` resolves to the embedded library unless `TWILL_STD` overrides, `.ra` is
+refused outright, a module is evaluated once and cached, and an aliased import
+lands in a record while an unaliased one lands unqualified.
+
+What is missing is file reading (NEEDS-28) and a way to reach the embedded
+standard library from twill, which the bootstrap does with `go:embed`.
+
+## NEEDS-37 — one builtin table, not two
+
+**Status:** open, tidiness. `src/check.tw` and `src/eval.tw`.
+
+The checker's table is what the diagnostics are compared against; the
+evaluator's would be what the dispatch uses. They are separate today because
+merging them before the dispatch exists would be guessing at its shape.
+
+## NEEDS-38 — the formatter
+
+**Status:** not started. `src/main.tw` `cmd_fmt`.
+
+`internal/format/format.go` has not been ported. `twill fmt` reports that rather
+than silently doing nothing.
+
+One rule has to survive the port because it is the one people notice: `fmt
+--write` never renames a file. It refuses a `.ra` file and leaves it alone.
