@@ -864,6 +864,57 @@ The one divergence the run actually found was the float exponent threshold, and
 it is now NEEDS-76. It would not have been caught by the corpus, which contains
 no float literal that reaches `%g`.
 
+### Verification of the float conversions
+
+`src/float.tw` was checked by transcribing it into one executable form and
+comparing that against two independent references: a correctly rounded
+conversion oracle, and the reference binary itself. The second is the one with
+teeth, because it compares against the code the differential harness will
+actually be diffing against, with no third party's notion of correctness in
+between. Three of the reference binary's own commands expose the three
+renderings, which is what made it possible:
+
+- **`twill run`, 42,938 printed values.** A generated program of `print(x)`
+  lines, compared line for line against `format_number`. Zero divergences. The
+  same 42,938 literals parsed back to the same bits, zero divergences.
+- **`twill run --dump=canonical`, 30,014 values.** The canonical dump's `num`
+  fields against `f64_hex`. Zero divergences. Reading the dump's own hex text
+  back gave the original bits in all 30,014, zero divergences.
+- **`twill fmt`, 24,621 literals.** The formatted source against `f64_shortest`,
+  of which 24,178 reached `%g` rather than `internal/format`'s integer fast
+  path. Zero divergences.
+- **115,435 cases against the oracle**, covering what the binary cannot easily
+  be driven over: 40,000 random f64 bit patterns, 16,000 subnormals of both
+  signs, 17,997 values on the `%.6f` half-way boundary, 12,128 integral values
+  across the `int64` fast path and its edges, 3,100 values either side of the
+  `%g` exponent switch, 2,074 float literals lifted out of `testdata/`,
+  `examples/` and `std/`, and 24,074 parse cases including hexadecimal input,
+  underscores, and the range and syntax errors. Zero divergences.
+
+285,960 comparisons, zero divergences.
+
+Three things that had to be right and are worth naming because each was a real
+divergence at some point in the run rather than a hypothetical:
+
+- **`print` is not `%g`.** See NEEDS-87. Reading `internal/` rather than
+  assuming is what turned this up, and assuming would have made every printed
+  non-integer wrong.
+- **`%g`'s exponent threshold is 6.** The same finding the source formatter's
+  run made, from the other side. The corpus cannot catch it: no float literal in
+  the tree reaches `%g`'s exponent form at all, so a corpus-only check passes
+  while being wrong. It was caught by generated values on both sides of the
+  switch.
+- **Underscores and hexadecimal on the parse side.** `f64_of_str` first accepted
+  `_1.0`, which Go rejects, and rejected `0x1p3`, which Go accepts, because the
+  slow path it is ported from relies on a validating reader that runs before it.
+  Both were found by generated input, not by the corpus, which contains neither.
+
+The structural differences that could have broken it and did not: the twill
+version has no unsigned integer, so the shifts that Go runs on `uint` run
+through the helpers in NEEDS-85; and it does the decimal arithmetic on ASCII
+digit bytes in an `Arr[I64]` rather than a Go `[800]byte`, which changes every
+index expression in the file.
+
 ### Verification of the einsum spec parser
 
 `src/tensor.tw`'s `parse_einsum` and `einsum_output_dims` were checked against
@@ -1488,3 +1539,262 @@ sides at once, as with NEEDS-77.
 *Go bootstrap:* `internal/tensor/jet.go`, and the `recordJets` guards in
 `ops.go`, `scan.go`, `gather.go` and `tensor.go` that show exactly which ops
 have a rule there.
+
+## NEEDS-84: `f64_bits` and `f64_from_bits`
+
+**Status:** blocking for `src/float.tw`. Every function in it.
+
+`f64_bits(F64) -> I64` and `f64_from_bits(I64) -> F64`, the IEEE 754 bit
+pattern of a double and its inverse. Go's `math.Float64bits` and
+`math.Float64frombits`, which are a reinterpretation of the same eight bytes and
+not a conversion.
+
+These are the only two primitives `src/float.tw` needs, and that is the point
+worth recording. Formatting and parsing a float are entirely integer and string
+work once the sign, exponent and mantissa are in hand; what cannot be written in
+twill is getting at them. `i64_of_f64` is not a substitute, because it truncates
+toward zero and therefore destroys exactly the information wanted.
+
+They are also the only place the systems subset has to admit that `F64` has a
+representation. Everywhere else it is a number.
+
+*Go bootstrap:* `math.Float64bits`, reached through `strconv`.
+
+## NEEDS-85: `shr` on `I64` is arithmetic, and there is no unsigned anything
+
+**Status:** open, a workaround is in place. `src/float.tw` `ushr`, `udiv10`,
+`unonzero`.
+
+`docs/self-hosting.md` section 1.2 specifies `and or xor shl shr not` on a
+two's-complement `I64` and does not say what `shr` does with the sign bit.
+`src/float.tw` assumes Go's answer, which is arithmetic: `shr` on a negative
+value shifts ones in from the top.
+
+That assumption is load-bearing rather than incidental. The decimal shifts carry
+intermediate values up to `10 * 2^60 + 9`, which is inside 64 bits but past
+`2^63`, so the sign bit is set on values that are not negative numbers at all.
+Go runs that arithmetic on `uint` and picks its shift chunk size for it. The
+subset has no unsigned type, so `src/float.tw` carries three helpers:
+
+- `ushr`, a logical right shift, built by clearing the sign bit and putting it
+  back at its shifted position;
+- `udiv10`, an unsigned divide by ten, built as `(x >>> 1) / 5`, which is exact
+  because `floor(floor(n/2)/5)` is `floor(n/10)`;
+- `unonzero`, spelled out because `x > 0` is false for precisely the values the
+  loops have to keep going on.
+
+Two things would settle this. `shr` being specified as arithmetic, so the
+helpers are correct rather than lucky. And, separately, whether the subset wants
+a `U64`: the answer is probably no, since three helpers in one file is a smaller
+cost than a second integer type in the checker, but the decision should be made
+rather than inherited.
+
+*Go bootstrap:* `uint` in `internal/strconv/decimal.go`.
+
+## NEEDS-86: a file-level `let` initialised by a call
+
+**Status:** open, assumed to work. `src/float.tw` `LC_CUTOFF`, `LC_DELTA`,
+`POWTAB`.
+
+Three constant tables are built by a function and bound at file level:
+
+    let LC_CUTOFF: Arr[Str] = leftcheat_cutoffs()
+
+`src/lex.tw` already does this for its byte constants, so the form is not new,
+but those are scalars from a one-line function and these are 61-element arrays
+built with `push`. What is being assumed is that the initialiser runs once, at
+module load, before any function that reads it, and that the array it returns is
+shared rather than rebuilt per read.
+
+If it is rebuilt per read, `left_shift` reconstructs a 61-entry table on every
+call and the formatter's cost goes from linear to quadratic in the digit count,
+silently. If the initialisers run in a different order than they are written,
+nothing here breaks, because none of the three reads another, but that is luck
+rather than design and the next file will not be so lucky.
+
+This is the same question NEEDS-82 asks about mutable file-level state, from the
+immutable side.
+
+## NEEDS-87: NEEDS-29 is answered, and its advice is now wrong
+
+**Status:** resolved by `src/float.tw`. Recorded because NEEDS-29 still says the
+opposite and a reader will find it first.
+
+NEEDS-29 says a canonical float rendering should be a runtime primitive calling
+the same code the Go side calls, and warns that reimplementing Ryu or Grisu in
+twill is a way to lose a month. That was correct advice while calling into the
+bootstrap was allowed. Under the no-Go rule there is nothing to call, so the
+choice is between a port and no float output at all.
+
+`src/float.tw` is the port, and the warning was avoided rather than ignored: it
+implements Go's exact multiprecision-decimal path, not Ryu. That path is
+definitional rather than heuristic. Go's fast paths are only permitted to answer
+when they can prove they agree with it, so porting it reproduces Go by
+construction, whereas porting Ryu reproduces Go only if six hundred table
+entries survive transcription, and there is no way to run twill to find the one
+that did not.
+
+Three renderings came out of reading `internal/`, not one, and this is the part
+NEEDS-29 obscures by saying "a stable canonical rendering" in the singular:
+
+| Caller | Verb | Entry point |
+|---|---|---|
+| `internal/value.FormatNumber`, which is `print` | `'f'`, precision 6, then trailing zeros and a trailing point trimmed, behind an integer fast path | `format_number` |
+| `internal/format`, the source formatter | `'g'`, precision -1 | `f64_shortest`, NEEDS-76 |
+| `cmd/twill/dump.go`, the canonical dump | `'x'`, precision -1 | `f64_hex` |
+
+Anyone who reads NEEDS-29 and implements `%g` for `print` has written the wrong
+function. `print(0.1)` is `0.1` under both, but `print(1/3)` is `0.333333` and
+not `0.3333333333333333`, and `print(1e300)` is 301 digits and not `1e+300`.
+
+Two more inherited behaviours, both confirmed against the reference binary
+rather than reasoned about, because both look like bugs:
+
+- `print(-0.0)` is `0`. Negative zero equals `float64(int64(-0.0))`, so it takes
+  the integer path, which has no sign to print.
+- `print(-1e-9)` is `-0`. Precision 6 gives `-0.000000` and trimming leaves the
+  sign behind. Any value under half a millionth in magnitude prints as a signed
+  zero.
+
+`f64_of_str` is in the same file for the same reason: NEEDS-29's rendering has
+to round-trip, and a parse that accumulates digits and multiplies by a power of
+ten makes `0.1` a different float from Go's before the program runs.
+
+## NEEDS-88: `format_number` for a `Value` still has no home
+
+**Status:** open, and narrowed. `src/eval.tw`.
+
+NEEDS-57 asks for `format_value(Value) -> Str` and `format_number(F64) -> Str`
+together, and argues that neither can live outside `src/eval.tw` because `Value`
+is declared there and a module holding them would have to import eval while eval
+calls them.
+
+Half of that is now settled: `format_number(F64)` is in `src/float.tw`, which
+imports nothing but `bytes.tw` and knows nothing about `Value`. The scalar case
+never needed eval.
+
+`format_value` genuinely does, because it walks tensors and records. So the
+circular-import problem NEEDS-57 describes is real but smaller than it looked,
+and the answer is that `src/eval.tw` imports `src/float.tw` and keeps only the
+walk. Recorded rather than left implicit, because the obvious reading of
+NEEDS-57 is that both halves have to go in eval, and putting `format_number`
+there would mean the source formatter and the checker cannot reach it.
+
+## NEEDS-89: a round-trip float rendering the standard library can call
+
+**Status:** open, blocking for `std/json.tw`. `number_str`.
+
+`f64_shortest(F64) -> Str`, the shortest decimal that parses back to the same
+double, reachable from `std/`.
+
+`src/float.tw` already implements exactly this algorithm, for the source
+formatter, and answers NEEDS-29 with it. The problem is not the algorithm, it is
+where it lives: `src/` is the compiler and `std/` is the library the compiler
+compiles, so a std module importing the compiler inverts the dependency, and the
+alternative of a second copy in `std/` is the one thing NEEDS-29 warns against
+by name.
+
+The reason the obvious substitute does not work is worth stating, because it
+looks like it should. `str(x)` is `internal/value.FormatNumber`: `'f'` with a
+precision of 6, trailing zeros trimmed, behind an integer fast path. So
+`str(1.0 / 3.0)` is `"0.333333"`, and a JSON document rendered through it and
+parsed back is not the document it started as. Round-tripping is the one
+property a serialiser has to have.
+
+Either `f64_shortest` becomes a runtime primitive alongside `f64_of_str`, or
+`src/float.tw` moves somewhere both halves of the tree can reach. The second is
+probably right and is a layering decision rather than a coding task.
+
+*Go bootstrap:* `strconv.FormatFloat(x, 'g', -1, 64)`, through
+`internal/format`.
+
+## NEEDS-90: an enum whose variant payload contains the enum
+
+**Status:** blocking for `std/json.tw`. `Json`, cases `JArray` and `JObject`.
+
+```
+enum Json {
+  ...
+  JArray(Arr[Json]),
+  JObject(Dict[Str, Json]),
+}
+```
+
+`docs/self-hosting.md` section 1.2 specifies enums with payloads and `Arr[T]`
+with an arbitrary element type, and NEEDS-72 asks for `T` to be allowed to be a
+container. Neither says whether the recursion may close: whether a type may
+appear inside its own payload, through a container.
+
+It has to, and not only for JSON. `src/ast.tw` is already this shape (`Expr`
+contains `Call` which contains `Arr[Expr]`) and gets away without a separate
+entry because the recursion there goes through a struct. Both forms need the
+same thing from the checker, which is that a type being defined is in scope
+inside its own definition and that monomorphisation of `Arr[Json]` terminates
+rather than instantiating forever.
+
+Nothing exotic is wanted: the payload is behind a container, so the size is
+finite and there is no infinite struct. The entry exists because the natural
+reading of "monomorphized by the checker" is a worklist that would not
+terminate here without a memo on the types already instantiated.
+
+*Go bootstrap:* none. `internal/value.Value` is an interface, so recursion
+through it never had to be decided.
+
+## NEEDS-91: asking whether a path exists, without reading it
+
+**Status:** open, a workaround is in place and it is absurd. `std/io.tw`
+`exists`, `is_dir`.
+
+`path_exists(Str) -> Bool`, or better a `stat` returning existence, kind and
+size in one call.
+
+The runtime surface in NEEDS-28 has `read_file`, `write_file` and `list_dir`
+and nothing else, so `exists` is currently: try to read the whole file, and if
+that fails, list the whole parent directory and look for the base name. It is
+correct. It also reads a gigabyte to answer a yes-or-no question about a
+gigabyte file, and lists a hundred thousand entries to answer one about a
+directory with a hundred thousand entries.
+
+The cost is the visible half. The invisible half is that a file which exists but
+cannot be read reports differently depending on which branch answers, and a
+directory that exists but cannot be listed reports false. A `stat` collapses all
+of that into one answer.
+
+*Go bootstrap:* `os.Stat`.
+
+## NEEDS-92: removing a file, and a temporary directory to put one in
+
+**Status:** open, low priority, and it is why `std/tests/io_test.tw` does not
+test reading and writing.
+
+`remove(Str) -> Res[Unit, Str]` and `temp_dir() -> Str`.
+
+`docs/self-hosting.md` deliberately excludes directory operations, and for the
+compiler that is right: it reads files, writes files and reports. A test suite
+is the other caller, and it cannot write a fixture without leaving it behind. So
+`io_test.tw` tests the path handling, which is where the bugs are, and does not
+test the three-line wrappers over `read_file` and `write_file`, which is where a
+runtime bug would be.
+
+That is a real gap and it is recorded rather than papered over with a test that
+writes into the source tree and hopes.
+
+*Go bootstrap:* `os.Remove`, `os.MkdirTemp`, `testing.T.TempDir`.
+
+## NEEDS-93: removing the last element of an `Arr`
+
+**Status:** open, small, a workaround is in place. `std/io.tw` `normalize`.
+
+`pop(a) -> Opt[T]`, or `truncate(a, n)`.
+
+The primitive table has `arr_new`, `push`, indexed get and set, and `len`. There
+is no way to make an array shorter, so `normalize` resolving a `..` component
+rebuilds the whole stack one element shorter, which is O(n^2) over a path with
+many of them. No real path has many of them, so this is a note rather than a
+problem, and it is recorded because a stack is the natural shape for half a
+dozen things in a compiler and every one of them will want the same operation.
+
+The `Arr` is already growable, so the storage exists; this is the missing half
+of `push`.
+
+*Go bootstrap:* `s = s[:len(s)-1]`.
