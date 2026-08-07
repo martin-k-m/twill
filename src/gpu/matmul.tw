@@ -1,0 +1,182 @@
+mode systems
+
+# matmul.tw: the host side of the tiled matmul, and the tile choice.
+#
+# This is the only op in the backend that the feasibility numbers say is worth
+# doing. docs/gpu-feasibility.md measured the RTX 5070 against twill's own CPU
+# matmul at 4.0x for N=256 round trip and 17.5x kernel only, rising to 9.2x and
+# 15.2x at N=1024. Every other op in src/gpu/ exists so that a chain containing
+# a matmul does not have to come back to the host between its links.
+#
+# Parallel decomposition: one work-item per output element, in work-groups of
+# TILE by TILE that stage tiles of both operands through local memory.
+#
+# Each work-item owns exactly one c[i][j] and accumulates the whole k loop into
+# a private register. That ownership is the determinism argument in one line:
+# one accumulator, one writer, ascending k, which is the same order the triple
+# loop in src/tensor.tw mm adds in. Tiling changes which memory the operands are
+# read from. It does not reorder a sum, and a reviewer should check that claim
+# against the kernel rather than take it, because it is the claim the whole
+# guarantee rests on.
+#
+# What tiling buys: without it, each element of a is read n times from global
+# memory and each element of b is read m times. With it, a work-group loads a
+# TILE by TILE block of each into local memory once and the work-items in the
+# group read from there. Global traffic falls by a factor of TILE.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/buffer" as buf
+import "src/gpu/dispatch" as disp
+import "tensor.tw" as tensor
+
+# ---- picking the tile ------------------------------------------------------
+#
+# 16 is the value everything else assumes, and it has to be checked rather than
+# assumed, because a work-group of 16 by 16 is 256 work-items and a device that
+# caps a group at 64 does not run it slowly, it fails to launch.
+#
+# Two limits, both read from the device at open time:
+#
+#   - max_group, the largest work-group the device will accept. A TILE by TILE
+#     group needs TILE*TILE work-items.
+#   - local_bytes, the local memory a group gets. Two TILE by TILE double
+#     arrays is 2 * TILE * TILE * 8 bytes and they have to fit at once.
+#
+# The fallback ladder is 16, 8, 4. Below 4 the staging costs more in barriers
+# than it saves in traffic, so a device that cannot manage 4 gets no matmul
+# kernel at all and its work stays on the CPU, which is the correct answer for
+# a device that constrained.
+#
+# Projection, not measurement: 16 is chosen because it is the size the tiled
+# matmul in docs/gpu-feasibility.md's clrt.c probe used to produce the measured
+# column. Whether 32 would be better on this card has not been tested.
+fn choose_tile(d: dev.Device) -> I64 {
+  let candidates: Arr[I64] = arr_new()
+  push(candidates, 16)
+  push(candidates, 8)
+  push(candidates, 4)
+  let i: I64 = 0
+  while i < len(candidates) {
+    let t: I64 = candidates[i]
+    let items: I64 = t * t
+    let local: I64 = 2 * t * t * 8
+    if items <= d.max_group and local <= d.local_bytes {
+      return t
+    }
+    i = i + 1
+  }
+  0
+}
+
+# ---- the launch ------------------------------------------------------------
+#
+# The global size is rounded up to a multiple of the tile in both dimensions, so
+# the grid is a whole number of work-groups. The out-of-range work-items still
+# run: they stage zeros, hit both barriers with everybody else, and write
+# nothing. That is deliberate and it is in the kernel comment too, because the
+# tempting alternative, an early return for out-of-range work-items, is
+# undefined behaviour rather than a slow path. A barrier that only some
+# work-items in a group reach has no defined meaning, and the failure it
+# produces is a hang or a wrong answer depending on the driver.
+fn matmul(c: disp.Ctx, a: buf.DeviceTensor,
+          b: buf.DeviceTensor) -> Res[buf.DeviceTensor, Str] {
+  let out_shape: Arr[I64] = tensor.matmul_shape(a.shape, b.shape)?
+  let a2: Arr[I64] = tensor.matmul_promote(a.shape, true)
+  let b2: Arr[I64] = tensor.matmul_promote(b.shape, false)
+  let m: I64 = a2[0]
+  let k: I64 = a2[1]
+  let n: I64 = b2[1]
+
+  let ad: buf.DeviceTensor = buf.ensure_device(c.pool, a)?
+  let bd: buf.DeviceTensor = buf.ensure_device(c.pool, b)?
+  # The output buffer is m*n regardless of the result's rank: only the shape
+  # records that a promoted axis was dropped. src/tensor.tw matmul makes the
+  # same point, and it is why the backward pass can treat the incoming
+  # cotangent as flat.
+  let out: buf.DeviceTensor = buf.device_output(c.pool, out_shape)?
+
+  let kern: dev.Kernel = dev.kernel(c.program, "k_matmul")?
+  dev.arg_buffer(kern, 0, ad.buf)?
+  dev.arg_buffer(kern, 1, bd.buf)?
+  dev.arg_buffer(kern, 2, out.buf)?
+  dev.arg_i64(kern, 3, m)?
+  dev.arg_i64(kern, 4, k)?
+  dev.arg_i64(kern, 5, n)?
+
+  let global: Arr[I64] = arr_new()
+  # Dimension 0 is the column and dimension 1 the row, matching the kernel's
+  # get_global_id calls. Backwards from how the shape reads, and that is the
+  # OpenCL convention: dimension 0 varies fastest, and the column is the
+  # contiguous axis of a row-major buffer, so putting the row there would make
+  # every work-group read a strided column of the output.
+  push(global, round_up(n, c.tile))
+  push(global, round_up(m, c.tile))
+  let local: Arr[I64] = arr_new()
+  push(local, c.tile)
+  push(local, c.tile)
+  disp.run(c, kern, global, local)?
+  Ok(out)
+}
+
+# ---- transpose -------------------------------------------------------------
+#
+# Both matmul gradient rules need it: dA is g @ b^T and dB is a^T @ g. It is on
+# the device for one reason, which is that a backward pass that came home to
+# transpose would pay two of the crossings docs/gpu-feasibility.md measured at
+# roughly 80us each, per matmul, per step.
+#
+# One work-item per element, no tiling. A tiled transpose that avoids the
+# strided write is a standard trick and is worth real bandwidth, and it is not
+# written because a transpose next to a matmul that is fifty times more work is
+# not where the time goes. If profiling ever says otherwise, the tile staging
+# from k_matmul is the pattern to copy.
+fn transpose2d(c: disp.Ctx, a: buf.DeviceTensor,
+               rows: I64, cols: I64) -> Res[buf.DeviceTensor, Str] {
+  let ad: buf.DeviceTensor = buf.ensure_device(c.pool, a)?
+  let shape: Arr[I64] = arr_new()
+  push(shape, cols)
+  push(shape, rows)
+  let out: buf.DeviceTensor = buf.device_output(c.pool, shape)?
+  let k: dev.Kernel = dev.kernel(c.program, "k_transpose2d")?
+  dev.arg_buffer(k, 0, ad.buf)?
+  dev.arg_buffer(k, 1, out.buf)?
+  dev.arg_i64(k, 2, rows)?
+  dev.arg_i64(k, 3, cols)?
+  let global: Arr[I64] = arr_new()
+  push(global, cols)
+  push(global, rows)
+  disp.run(c, k, global, arr_new())?
+  Ok(out)
+}
+
+# ---- should this run on the device at all ----------------------------------
+#
+# The one call site that matters. `moved` counts only the operands that are not
+# already resident, which is what turns the measured 0.8x at 64x64 into the
+# measured 7.4x at the same size: the first number included two uploads and a
+# download, and inside a chain there are none.
+fn worth_offloading(c: disp.Ctx, a: buf.DeviceTensor, b: buf.DeviceTensor) -> Bool {
+  let a2: Arr[I64] = tensor.matmul_promote(a.shape, true)
+  let b2: Arr[I64] = tensor.matmul_promote(b.shape, false)
+  let m: I64 = a2[0]
+  let k: I64 = a2[1]
+  let n: I64 = b2[1]
+  # Cold inputs only. The output is not counted, because under the residency
+  # rule it stays on the device and is never read back speculatively. That makes
+  # the model optimistic by exactly one download for the last op of a chain,
+  # which is a known and deliberate bias: the alternative, charging every op for
+  # a download that almost none of them pay, would suppress offloading for whole
+  # chains on the strength of a transfer that happens once.
+  let moved: I64 = cold_elements(a) + cold_elements(b)
+  disp.decide(c.plan, disp.matmul_flops(m, k, n), moved)
+}
+
+fn cold_elements(t: buf.DeviceTensor) -> I64 {
+  match t.loc {
+    LocHost => buf.element_count(t.shape),
+    _ => 0,
+  }
+}
+
+fn round_up(n: I64, m: I64) -> I64 = ((n + m - 1) / m) * m

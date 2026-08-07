@@ -1,0 +1,307 @@
+mode systems
+
+# buffer.tw: where a tensor's numbers live, and when they move.
+#
+# docs/gpu-feasibility.md measured a matmul at 64x64 taking 92.8us round trip
+# against 74.2us on the CPU, a loss, and the same matmul taking 10.0us as a
+# kernel on data already on the device, a 7.4x win. The difference between those
+# two numbers is this file. Roughly 80us per boundary crossing is a fixed cost
+# that no dtype and no faster kernel reduces, and the only defence is to cross
+# the boundary fewer times.
+#
+# The rule the rest of src/gpu/ relies on: an op that runs on the device leaves
+# its output on the device and nobody reads it back until something genuinely
+# needs host bytes. A chain of ten ops is then one upload, ten launches and one
+# download, instead of ten round trips.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+
+# ---- residency -------------------------------------------------------------
+#
+# LocBoth is not a contradiction, it is the common case: a tensor that was
+# uploaded and has not since been modified has a valid copy in each place, and
+# reading it costs nothing.
+#
+# Twill tensors are immutable values and that makes this far simpler than it is
+# in a framework with in-place mutation. Nothing writes through a DeviceTensor
+# after it is built, so a host copy once taken stays valid forever. There is no
+# invalidation protocol, no dirty bit and no coherence problem, and that is the
+# part of a GPU backend that is normally hardest. It is a real dividend of the
+# value semantics src/tensor.tw already commits to.
+enum Loc {
+  LocHost,
+  LocDevice,
+  LocBoth,
+}
+
+# The device-aware tensor. `shape` is the same Arr[I64] a src/tensor.tw Tensor
+# carries and means the same thing. `host` is valid when loc is LocHost or
+# LocBoth, `buf` when loc is LocDevice or LocBoth.
+#
+# This is a separate type rather than a field added to Tensor because
+# src/tensor.tw is the language's tensor semantics and must stay executable with
+# no GPU in the picture at all. The backend converts at its own boundary.
+struct DeviceTensor {
+  shape: Arr[I64],
+  loc: Loc,
+  host: Arr[F64],
+  buf: dev.Buffer,
+  # Monotonic sequence number, assigned at upload. Eviction is oldest-first and
+  # this is the order. Not a timestamp: a clock read per allocation would be a
+  # syscall on the hot path to answer a question a counter answers exactly.
+  seq: I64,
+}
+
+# The residency table for one device. Twill has no finalisers, so a device
+# buffer is freed when its owner is dropped explicitly or when eviction takes
+# it, and this list is what makes the second possible: eviction has to be able
+# to find a candidate it does not hold a reference to from the call site.
+struct Pool {
+  device: dev.Device,
+  live: Arr[DeviceTensor],
+  next_seq: I64,
+  # Bytes currently allocated on the device by this pool. Tracked rather than
+  # queried, because there is no primitive to ask the driver and adding one
+  # would be a sixteenth entry on the native list for information the pool
+  # already has.
+  bytes_used: I64,
+}
+
+fn new_pool(d: dev.Device) -> Pool =
+  Pool { device: d, live: arr_new(), next_seq: 0, bytes_used: 0 }
+
+fn element_count(shape: Arr[I64]) -> I64 {
+  let n: I64 = 1
+  let i: I64 = 0
+  while i < len(shape) {
+    n = n * shape[i]
+    i = i + 1
+  }
+  n
+}
+
+# ---- getting onto the device -----------------------------------------------
+
+# The one entry point ops call to get a device handle for an operand. If the
+# tensor is already resident this is free, which is the case the whole design
+# is arranged to make common.
+fn ensure_device(p: Pool, t: DeviceTensor) -> Res[DeviceTensor, Str] {
+  match t.loc {
+    LocDevice => return Ok(t),
+    LocBoth => return Ok(t),
+    LocHost => unit,
+  }
+  let n: I64 = len(t.host)
+  let b: dev.Buffer = alloc_with_eviction(p, n)?
+  dev.write(b, 0, t.host)?
+  let up: DeviceTensor = DeviceTensor {
+    shape: t.shape,
+    # LocBoth and not LocDevice: the host copy is still valid and still costs
+    # nothing, so throwing it away would mean paying for the download again.
+    # It also makes this tensor an eviction candidate immediately, which is
+    # what keeps a long training run from filling the card with activations
+    # whose host copy was already sitting in memory.
+    loc: LocBoth,
+    host: t.host,
+    buf: b,
+    seq: p.next_seq,
+  }
+  p.next_seq = p.next_seq + 1
+  push(p.live, up)
+  Ok(up)
+}
+
+# The output of a device op: a device buffer with no host copy. Nothing reads
+# this until something asks for host bytes, and most things never do.
+fn device_output(p: Pool, shape: Arr[I64]) -> Res[DeviceTensor, Str] {
+  let n: I64 = element_count(shape)
+  let b: dev.Buffer = alloc_with_eviction(p, n)?
+  let t: DeviceTensor = DeviceTensor {
+    shape: shape,
+    loc: LocDevice,
+    host: arr_new(),
+    buf: b,
+    seq: p.next_seq,
+  }
+  p.next_seq = p.next_seq + 1
+  push(p.live, t)
+  Ok(t)
+}
+
+# ---- getting off the device ------------------------------------------------
+
+# Host bytes, downloading if this is the first ask. Called by printing,
+# comparison against a scalar in twill control flow, to_nested, file writing,
+# and by any op with no device kernel.
+#
+# The download is memoised into the value, so reading the same tensor twice
+# costs one crossing rather than two. That is worth stating because a REPL
+# printing a tensor and then asking for its shape would otherwise pay twice for
+# a question that does not need the data at all.
+fn ensure_host(p: Pool, t: DeviceTensor) -> Res[DeviceTensor, Str] {
+  match t.loc {
+    LocHost => return Ok(t),
+    LocBoth => return Ok(t),
+    LocDevice => unit,
+  }
+  dev.finish(p.device)?
+  let h: Arr[F64] = dev.read(t.buf, 0, t.buf.length)?
+  Ok(DeviceTensor { shape: t.shape, loc: LocBoth, host: h, buf: t.buf, seq: t.seq })
+}
+
+# A plain host tensor, for handing back to src/tensor.tw.
+fn to_host_data(p: Pool, t: DeviceTensor) -> Res[Arr[F64], Str] {
+  let r: DeviceTensor = ensure_host(p, t)?
+  Ok(r.host)
+}
+
+fn from_host(shape: Arr[I64], data: Arr[F64]) -> DeviceTensor =
+  DeviceTensor { shape: shape, loc: LocHost, host: data,
+                 buf: dev.Buffer { handle: 0, device: 0, length: 0 }, seq: -1 }
+
+# ---- eviction --------------------------------------------------------------
+#
+# 8GB on the card in the development machine, shared with the display. Running
+# out is expected, not exceptional, so it is designed for rather than reported.
+#
+# The defined response is: evict device copies whose host copy is already valid,
+# oldest first, and retry once. If that still fails, the caller falls back to
+# the CPU and the run continues with a slower answer and an identical one.
+# Nothing in this backend is allowed to turn memory pressure into a failed
+# program, because a program that trains at 3am and dies at 4am because the
+# display driver took a buffer is worse than a program that was never fast.
+fn alloc_with_eviction(p: Pool, n: I64) -> Res[dev.Buffer, Str] {
+  match dev.alloc(p.device, n) {
+    Ok(b) => {
+      p.bytes_used = p.bytes_used + dev.f64_bytes(n)
+      return Ok(b)
+    },
+    Err(_) => unit,
+  }
+  evict(p, dev.f64_bytes(n))
+  let b2: dev.Buffer = dev.alloc(p.device, n)?
+  p.bytes_used = p.bytes_used + dev.f64_bytes(n)
+  Ok(b2)
+}
+
+# Free device copies until at least `want` bytes have been released, taking only
+# tensors that are LocBoth. A LocDevice tensor is the only copy of its data and
+# evicting it would either lose an answer or force a download that the op about
+# to run would immediately undo.
+#
+# Oldest first, by sequence number. That is not an LRU and it is not trying to
+# be: an LRU needs a touch on every read, which is a write on the hot path to
+# improve a decision that only matters when the card is already full. Oldest
+# first is a good enough proxy because the tensors that stay resident longest
+# are weights, and weights are uploaded first and are exactly the ones that
+# should not be evicted. That is an argument for making weights the *last*
+# candidates rather than the first, and it is the known flaw in this rule: a
+# tuned version would pin anything that is a tape leaf.
+fn evict(p: Pool, want: I64) {
+  let freed: I64 = 0
+  let best: I64 = -1
+  while freed < want {
+    best = oldest_evictable(p)
+    if best < 0 { return }
+    let t: DeviceTensor = p.live[best]
+    freed = freed + dev.f64_bytes(t.buf.length)
+    p.bytes_used = p.bytes_used - dev.f64_bytes(t.buf.length)
+    dev.free(t.buf)
+    remove_at(p.live, best)
+  }
+}
+
+fn oldest_evictable(p: Pool) -> I64 {
+  let best: I64 = -1
+  let best_seq: I64 = 0
+  let i: I64 = 0
+  while i < len(p.live) {
+    let t: DeviceTensor = p.live[i]
+    let ok: Bool = match t.loc { LocBoth => true, _ => false }
+    if ok and (best < 0 or t.seq < best_seq) {
+      best = i
+      best_seq = t.seq
+    }
+    i = i + 1
+  }
+  best
+}
+
+# NEEDS-97 asks for element assignment on a list; there is no removal either.
+# Rebuilding the list is O(n) per eviction, which is acceptable because eviction
+# only runs when the device is full, and unacceptable-looking enough that it is
+# worth saying so rather than letting a reader assume it was considered fine.
+fn remove_at(xs: Arr[DeviceTensor], idx: I64) {
+  let out: Arr[DeviceTensor] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    if i != idx { push(out, xs[i]) }
+    i = i + 1
+  }
+  replace_all(xs, out)
+}
+
+fn replace_all(dst: Arr[DeviceTensor], src: Arr[DeviceTensor]) {
+  arr_clear(dst)
+  let i: I64 = 0
+  while i < len(src) {
+    push(dst, src[i])
+    i = i + 1
+  }
+}
+
+# ---- stride buffers --------------------------------------------------------
+#
+# The elementwise kernels take the output shape and the operands' effective
+# strides as device buffers, because a kernel argument cannot be a list. A
+# broadcast axis gets stride 0, so the kernel reads the same element repeatedly
+# and no expansion is materialised.
+#
+# These are tiny, a few dozen elements, and uploading one per op would be a
+# crossing per op to move 200 bytes, which is precisely the pattern the whole
+# design exists to avoid. They are therefore cached by their contents. The cache
+# key is the shape and strides rendered as a string, which is not elegant and is
+# correct, and the alternative wants NEEDS-4's Dict with a structural key.
+struct MetaCache {
+  keys: Arr[Str],
+  bufs: Arr[dev.Buffer],
+}
+
+fn new_meta_cache() -> MetaCache = MetaCache { keys: arr_new(), bufs: arr_new() }
+
+fn meta_key(vals: Arr[I64]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(vals) {
+    push(parts, str(vals[i]))
+    i = i + 1
+  }
+  bytes.join(parts, ",")
+}
+
+fn meta_buffer(p: Pool, c: MetaCache, vals: Arr[I64]) -> Res[dev.Buffer, Str] {
+  let key: Str = meta_key(vals)
+  let i: I64 = 0
+  while i < len(c.keys) {
+    if c.keys[i] == key { return Ok(c.bufs[i]) }
+    i = i + 1
+  }
+  # The integers ride as doubles and the kernel casts back. Every value here is
+  # a shape or a stride, which cannot exceed 2^53 without the tensor exceeding
+  # any device this will ever run on, so the conversion is exact in both
+  # directions. This is ugly, and it is one entry fewer on the native primitive
+  # list in docs/needs.md, which is the trade being made: an integer transfer
+  # primitive would exist solely to move a few dozen shape values.
+  let as_f: Arr[F64] = arr_new()
+  let j: I64 = 0
+  while j < len(vals) {
+    push(as_f, f64_of_i64(vals[j]))
+    j = j + 1
+  }
+  let b: dev.Buffer = alloc_with_eviction(p, len(as_f))?
+  dev.write(b, 0, as_f)?
+  push(c.keys, key)
+  push(c.bufs, b)
+  Ok(b)
+}

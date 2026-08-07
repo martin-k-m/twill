@@ -1,0 +1,137 @@
+mode systems
+
+# softmax.tw: the host side of softmax, logsumexp and the softmax gradient.
+#
+# Parallel decomposition: one work-item per run, doing all four passes inside
+# itself.
+#
+# The GPU-idiomatic version of softmax is four kernels over the whole tensor,
+# with the run maximum and the run sum computed by work-group reductions. It is
+# faster for long runs. It also reorders the sum, so it is not written. The rule
+# from src/gpu/reduce.tw applies unchanged: parallelise across independent runs,
+# never within one.
+#
+# A [256, 32] softmax, which is one of twill's own benchmark shapes, is 256
+# independent runs of 32. Under this decomposition that is 256 work-items each
+# doing 32 elements four times over, which is not much parallelism, and it does
+# not matter, because at that size src/gpu/dispatch.tw is going to keep the
+# whole thing on the CPU anyway. The decomposition is for the shapes where
+# offloading is chosen, and those have thousands of runs.
+#
+# THESE KERNELS ARE NOT DISPATCHED TO BY DEFAULT TODAY, and the reason is in the
+# one place a reader will not look for it, so it is here as well. Both call
+# exp(). OpenCL specifies exp to within a few ulp of correctly rounded, and
+# NEEDS-68 requires the same bits as Go's math.Exp, because testdata/ compares
+# output byte for byte and a one-ulp exp turns every test touching a sigmoid
+# into a diff. So a device softmax cannot be trusted until the same algorithm
+# that supplies f64_exp is transcribed into src/gpu/source.tw.
+#
+# They are written now rather than then for two reasons. The decomposition
+# question is the hard part and it should be answered while there is time to
+# think about it, not on the day the transcendentals land. And the softmax
+# gradient kernel is useful before that, because vjp_softmax's arithmetic is
+# multiply, subtract and a dot product with no exp in it at all: given a softmax
+# output that was computed on the host and uploaded, the gradient can run on the
+# device today.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/buffer" as buf
+import "src/gpu/dispatch" as disp
+import "tensor.tw" as tensor
+
+# Whether the transcendental kernels are trusted. False, and it stays false
+# until NEEDS-68's algorithm exists in kernel source. It is a function rather
+# than a comment so that the day it flips there is one edit and a compiler that
+# points at every call site.
+fn exp_matches_host() -> Bool = false
+
+# ---- softmax ---------------------------------------------------------------
+#
+# The maximum shift is reproduced exactly and is not an optimisation. exp of a
+# large positive number overflows to infinity and the ratio becomes NaN;
+# subtracting the run maximum leaves the answer unchanged because it cancels
+# between numerator and denominator. A shorter kernel without it would work on
+# every test input and fail on the first real logit vector.
+fn softmax(c: disp.Ctx, t: buf.DeviceTensor, axis_in: I64) -> Res[buf.DeviceTensor, Str] {
+  if !exp_matches_host() {
+    return Err("gpu: softmax stays on the host until exp matches (NEEDS-68)")
+  }
+  let axis: I64 = tensor.normalize_axis(axis_in, len(t.shape))?
+  let sp: tensor.Spans = tensor.axis_spans(t.shape, axis)
+  let td: buf.DeviceTensor = buf.ensure_device(c.pool, t)?
+  # Softmax keeps the axis, so the output has the input's shape. It is a fresh
+  # buffer rather than an in-place rewrite because the tape holds the input and
+  # the gradient of the op that produced it may still need those values.
+  let out: buf.DeviceTensor = buf.device_output(c.pool, t.shape)?
+  let k: dev.Kernel = dev.kernel(c.program, "k_softmax")?
+  dev.arg_buffer(k, 0, td.buf)?
+  dev.arg_buffer(k, 1, out.buf)?
+  dev.arg_i64(k, 2, sp.before)?
+  dev.arg_i64(k, 3, sp.length)?
+  dev.arg_i64(k, 4, sp.after)?
+  disp.run(c, k, grid2(sp.after, sp.before), arr_new())?
+  Ok(out)
+}
+
+# logsumexp drops the axis. The maximum added back at the end is what makes it
+# exact rather than merely non-overflowing, and it is the reason a cross-entropy
+# written as logsumexp minus the true logit backpropagates to softmax minus
+# onehot, which is the cleanest gradient in src/tensor.tw and worth not breaking.
+fn logsumexp(c: disp.Ctx, t: buf.DeviceTensor, axis_in: I64) -> Res[buf.DeviceTensor, Str] {
+  if !exp_matches_host() {
+    return Err("gpu: logsumexp stays on the host until exp matches (NEEDS-68)")
+  }
+  let axis: I64 = tensor.normalize_axis(axis_in, len(t.shape))?
+  let sp: tensor.Spans = tensor.axis_spans(t.shape, axis)
+  let td: buf.DeviceTensor = buf.ensure_device(c.pool, t)?
+  let out: buf.DeviceTensor =
+    buf.device_output(c.pool, tensor.remove_axis(t.shape, axis))?
+  let k: dev.Kernel = dev.kernel(c.program, "k_logsumexp")?
+  dev.arg_buffer(k, 0, td.buf)?
+  dev.arg_buffer(k, 1, out.buf)?
+  dev.arg_i64(k, 2, sp.before)?
+  dev.arg_i64(k, 3, sp.length)?
+  dev.arg_i64(k, 4, sp.after)?
+  disp.run(c, k, grid2(sp.after, sp.before), arr_new())?
+  Ok(out)
+}
+
+# ---- the gradient ----------------------------------------------------------
+#
+# s * (g - dot(g, s)) within each run, where s is the softmax output and g the
+# upstream cotangent, and the dot is over the run.
+#
+# The subtraction is the whole content of the rule. A softmax's outputs sum to 1
+# along the run, so any change that raises one must lower the others, and the
+# dot term is exactly that constraint. Dropping it gives a gradient that is
+# wrong by a rank-1 term and still looks plausible, which is why src/tensor.tw
+# spells it out and why this kernel is checked against it rather than derived
+# again.
+#
+# No exp. This one is dispatchable today, and it is the reason the guard above
+# is per function rather than at the top of the file.
+fn softmax_vjp(c: disp.Ctx, s: buf.DeviceTensor, g: buf.DeviceTensor,
+               axis_in: I64) -> Res[buf.DeviceTensor, Str] {
+  let axis: I64 = tensor.normalize_axis(axis_in, len(s.shape))?
+  let sp: tensor.Spans = tensor.axis_spans(s.shape, axis)
+  let sd: buf.DeviceTensor = buf.ensure_device(c.pool, s)?
+  let gd: buf.DeviceTensor = buf.ensure_device(c.pool, g)?
+  let out: buf.DeviceTensor = buf.device_output(c.pool, s.shape)?
+  let k: dev.Kernel = dev.kernel(c.program, "k_softmax_vjp")?
+  dev.arg_buffer(k, 0, sd.buf)?
+  dev.arg_buffer(k, 1, gd.buf)?
+  dev.arg_buffer(k, 2, out.buf)?
+  dev.arg_i64(k, 3, sp.before)?
+  dev.arg_i64(k, 4, sp.length)?
+  dev.arg_i64(k, 5, sp.after)?
+  disp.run(c, k, grid2(sp.after, sp.before), arr_new())?
+  Ok(out)
+}
+
+fn grid2(fast: I64, slow: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, fast)
+  push(g, slow)
+  g
+}

@@ -1,0 +1,188 @@
+mode systems
+
+# reduce.tw: the host side of the reduction kernels.
+#
+# This is where a GPU backend normally breaks twill's determinism guarantee, and
+# where this one does not. README.md says "across CPU cores, deterministically:
+# parallelism never changes a result", internal/tensor/parallel.go says the
+# result is bit-identical to a serial run, and docs/finance.md sells
+# reproducibility. A tree reduction across work-items produces an answer whose
+# shape depends on the work-group size the driver chose, and an atomic produces
+# an answer that depends on arrival order. Neither is acceptable by default.
+#
+# Parallel decomposition: one work-item per output element. Never across a
+# reduction.
+#
+# The observation that makes this work is that a reduction along an axis is not
+# one sum. Summing a [512, 768] tensor along axis 1 is 512 independent sums of
+# 768 elements, strided by `after`. Give each output element one work-item,
+# have it walk its own run in ascending index order, and every output is the sum
+# of the same numbers in the same order that src/tensor.tw reduce_axis produced.
+# Bit-identical, with no barrier, no local memory and no atomic anywhere.
+#
+# What it costs: parallelism is `before * after`, not `before * length * after`.
+# For the shapes reductions actually appear in, that is plenty. For the shape it
+# is not plenty in, a whole-tensor reduction where the output is a single
+# number, see whole_tensor below.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/buffer" as buf
+import "src/gpu/dispatch" as disp
+import "tensor.tw" as tensor
+
+# Kernel reduction codes. As with op_code in elementwise.tw, this is the only
+# place that knows both the Op enum and the #define table in source.tw.
+fn red_code(op: tensor.Op) -> I64 {
+  match op {
+    OpSum => 0, OpMean => 1, OpMax => 2, OpMin => 3, OpProd => 4,
+    _ => -1,
+  }
+}
+
+# ---- along an axis ---------------------------------------------------------
+#
+# The grid is `before` by `after` and the kernel strides its run by `after`,
+# which is literally the loop src/tensor.tw writes. Two implementations of the
+# same loop nest, one of which happens to run its outer two levels in parallel.
+fn reduce_axis(c: disp.Ctx, op: tensor.Op, t: buf.DeviceTensor,
+               axis_in: I64) -> Res[buf.DeviceTensor, Str] {
+  let code: I64 = red_code(op)
+  if code < 0 {
+    return Err(bytes.concat("gpu: no device reduction for ", tensor.op_name(op)))
+  }
+  let axis: I64 = tensor.normalize_axis(axis_in, len(t.shape))?
+  let sp: tensor.Spans = tensor.axis_spans(t.shape, axis)
+  let td: buf.DeviceTensor = buf.ensure_device(c.pool, t)?
+  let out: buf.DeviceTensor =
+    buf.device_output(c.pool, tensor.remove_axis(t.shape, axis))?
+
+  let k: dev.Kernel = dev.kernel(c.program, "k_reduce_axis")?
+  dev.arg_buffer(k, 0, td.buf)?
+  dev.arg_buffer(k, 1, out.buf)?
+  dev.arg_i64(k, 2, sp.before)?
+  dev.arg_i64(k, 3, sp.length)?
+  dev.arg_i64(k, 4, sp.after)?
+  dev.arg_i64(k, 5, code)?
+  disp.run(c, k, grid2(sp.after, sp.before), arr_new())?
+  Ok(out)
+}
+
+# argmax and argmin, and the winner index the gradient of max and min needs.
+#
+# Computed here rather than recomputed during the backward pass, for the same
+# reason src/tensor.tw records maxpool's winners on the tape: the tie-break is
+# `>` and not `>=`, so the first extreme in scan order wins, and a recomputation
+# that got that one character wrong would produce a gradient that is plausible,
+# different, and silent.
+fn arg_axis(c: disp.Ctx, t: buf.DeviceTensor, axis_in: I64,
+            want_max: Bool) -> Res[buf.DeviceTensor, Str] {
+  let axis: I64 = tensor.normalize_axis(axis_in, len(t.shape))?
+  let sp: tensor.Spans = tensor.axis_spans(t.shape, axis)
+  let td: buf.DeviceTensor = buf.ensure_device(c.pool, t)?
+  let out: buf.DeviceTensor =
+    buf.device_output(c.pool, tensor.remove_axis(t.shape, axis))?
+  let k: dev.Kernel = dev.kernel(c.program, "k_arg_axis")?
+  dev.arg_buffer(k, 0, td.buf)?
+  dev.arg_buffer(k, 1, out.buf)?
+  dev.arg_i64(k, 2, sp.before)?
+  dev.arg_i64(k, 3, sp.length)?
+  dev.arg_i64(k, 4, sp.after)?
+  dev.arg_i64(k, 5, bool_to_int(want_max))?
+  disp.run(c, k, grid2(sp.after, sp.before), arr_new())?
+  Ok(out)
+}
+
+# ---- the whole tensor ------------------------------------------------------
+#
+# One output means one work-item under the rule above, which on a 36-CU card is
+# absurd. The escape is that a deterministic tree already exists and is already
+# specified: internal/tensor/parallel.go sums fixed 4096-element blocks
+# independently and then combines the partials in block order, and the block
+# size is fixed rather than derived from the core count precisely so that the
+# answer does not depend on the machine. That makes it a specification a GPU
+# kernel can reproduce exactly, which is what k_sum_blocks and k_sum_combine do.
+#
+# The parallelism is then n/4096 work-items in the first pass, which for any
+# tensor large enough to be worth offloading is thousands, and one work-item in
+# the second pass doing n/4096 additions. For a 64M-element tensor that is 16384
+# serial additions against 64M parallel ones, so the serial tail is a rounding
+# error despite looking like the whole problem.
+#
+# A DIVERGENCE, and it is not a GPU problem. src/tensor.tw reduce_all is a plain
+# running sum with no blocking at all, so for n >= 8192 it already disagrees
+# with internal/tensor in the last bits, before any device is involved. Three
+# implementations cannot all be right. This one follows the Go form, because it
+# is the one that is both pinned and parallelisable, and because a GPU kernel
+# reproducing the twill form would have to be entirely serial. docs/needs.md
+# NEEDS-109 records that src/tensor.tw should adopt the blocking, and until it
+# does, this kernel is bit-identical to the bootstrap and not to src/tensor.tw.
+# That is stated here rather than buried because it is the one place in this
+# backend where two twill-visible answers differ.
+fn sum_chunk() -> I64 = 4096
+fn min_parallel() -> I64 = 8192
+
+fn whole_tensor_sum(c: disp.Ctx, t: buf.DeviceTensor) -> Res[buf.DeviceTensor, Str] {
+  let td: buf.DeviceTensor = buf.ensure_device(c.pool, t)?
+  let n: I64 = td.buf.length
+  let scalar_shape: Arr[I64] = arr_new()
+  let out: buf.DeviceTensor = buf.device_output(c.pool, scalar_shape)?
+
+  # Below minParallel the bootstrap does a plain running sum, so the device has
+  # to as well. One work-item, and that is correct rather than lazy: a tensor
+  # under 8192 elements is not one this backend should have been handed anyway,
+  # and matching the answer is the requirement.
+  # k_sum_combine is reused rather than given a twin, because a serial sum over
+  # a buffer in ascending order is exactly what it already is. The only thing
+  # that changes is that its input is the tensor instead of a partials array.
+  if n < min_parallel() {
+    let kb1: dev.Kernel = dev.kernel(c.program, "k_sum_combine")?
+    dev.arg_buffer(kb1, 0, td.buf)?
+    dev.arg_buffer(kb1, 1, out.buf)?
+    dev.arg_i64(kb1, 2, n)?
+    disp.run(c, kb1, one_dim(1), arr_new())?
+    return Ok(out)
+  }
+
+  let nblocks: I64 = (n + sum_chunk() - 1) / sum_chunk()
+  let pshape: Arr[I64] = arr_new()
+  push(pshape, nblocks)
+  let partials: buf.DeviceTensor = buf.device_output(c.pool, pshape)?
+
+  let kb: dev.Kernel = dev.kernel(c.program, "k_sum_blocks")?
+  dev.arg_buffer(kb, 0, td.buf)?
+  dev.arg_buffer(kb, 1, partials.buf)?
+  dev.arg_i64(kb, 2, n)?
+  disp.run(c, kb, one_dim(nblocks), arr_new())?
+
+  let kc: dev.Kernel = dev.kernel(c.program, "k_sum_combine")?
+  dev.arg_buffer(kc, 0, partials.buf)?
+  dev.arg_buffer(kc, 1, out.buf)?
+  dev.arg_i64(kc, 2, nblocks)?
+  disp.run(c, kc, one_dim(1), arr_new())?
+  Ok(out)
+}
+
+# ---- shared ----------------------------------------------------------------
+
+# Dimension 0 varies fastest in OpenCL, and `after` is the contiguous direction
+# of the run grid, so it goes first. Getting this backwards costs nothing in
+# correctness and a great deal in bandwidth, because adjacent work-items would
+# then read addresses `length * after` apart and no access would coalesce.
+fn grid2(fast: I64, slow: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, fast)
+  push(g, slow)
+  g
+}
+
+fn one_dim(n: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, n)
+  g
+}
+
+fn bool_to_int(b: Bool) -> I64 {
+  if b { return 1 }
+  0
+}

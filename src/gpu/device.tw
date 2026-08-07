@@ -1,0 +1,333 @@
+mode systems
+
+# device.tw: the entire native surface a GPU backend needs, in one file.
+#
+# This file exists so that the answer to "what does twill have to be able to
+# call in order to run on a GPU" is a list you can read in one sitting, rather
+# than a property you would have to derive by reading five kernel files. Every
+# other file in src/gpu/ calls only through here. Nothing else in the repository
+# names a foreign symbol.
+#
+# There are fifteen primitives. They are NEEDS-100 through NEEDS-107 in
+# docs/needs.md, and NEEDS-108 records the larger problem, which is that twill
+# has no foreign function interface at all and no place to put one under the
+# no-Go rule. So none of this runs today. The point of writing it down is that
+# the requirement is small and named: fifteen symbols out of a driver library
+# that is already installed on any machine with a GPU, resolved at run time with
+# no SDK and nothing added to the build.
+#
+# The surface is deliberately at the level docs/gpu.md asked for, which is
+# buffer allocate and free, host to device, device to host, kernel compile,
+# kernel launch and synchronise, plus the four things that cannot be avoided
+# around them: finding a device, describing it well enough to calibrate against,
+# binding kernel arguments, and copying device to device so that a slice does
+# not have to round trip through the host.
+#
+# Where a primitive maps onto OpenCL, the mapping is named in a comment. That is
+# not because the surface is OpenCL-specific, it is so the implementer of the
+# native side has somewhere to start. The same fifteen calls sit on top of CUDA
+# driver API or Vulkan compute with more work behind each one.
+
+import "bytes.tw" as bytes
+
+# ---- handles ---------------------------------------------------------------
+#
+# Every native object is an opaque I64 handle rather than a twill value with
+# structure. That is a decision, not a limitation: a device buffer has no
+# meaningful twill-side representation, and giving it one would invite code that
+# reads a field off it and gets a lie. An I64 that only device.tw knows how to
+# interpret cannot be misused quietly.
+#
+# Zero is never a valid handle. Every constructor returns Res, and an Err carries
+# the driver's own message, because a driver error string is the only diagnostic
+# available when a kernel fails to build on somebody else's hardware.
+
+struct Device {
+  handle: I64,
+  # Cached from gpu_device_info at open time. The calibration cache in
+  # dispatch.tw is keyed on these two strings, so a driver update invalidates a
+  # measurement taken against the old driver.
+  name: Str,
+  driver: Str,
+  # Compute units and maximum work-group size. matmul.tw picks its tile size
+  # against the second, because a 16 by 16 tile needs 256 work-items per group
+  # and a device that caps groups at 64 would fail to launch.
+  compute_units: I64,
+  max_group: I64,
+  # Whether cl_khr_fp64 is present. Both GPUs in the development machine report
+  # it, per docs/gpu-feasibility.md, but an f64 kernel on a device without it
+  # does not run slowly, it does not build.
+  has_f64: Bool,
+  # Bytes of local memory per work-group. The tiled matmul stages two tiles into
+  # local memory and cannot be launched if they do not fit.
+  local_bytes: I64,
+}
+
+struct Buffer {
+  handle: I64,
+  device: I64,
+  # Length in F64 elements, not bytes. Every transfer below is in elements,
+  # because every caller in src/gpu/ counts in elements and a units mismatch at
+  # this boundary is the kind of bug that reads as a wrong answer rather than as
+  # a crash.
+  length: I64,
+}
+
+struct Program {
+  handle: I64,
+  device: I64,
+}
+
+struct Kernel {
+  handle: I64,
+}
+
+# ---- 1. is there a device at all -------------------------------------------
+#
+# NEEDS-100.
+#
+# gpu_available is the whole graceful-degradation story. It is false when the
+# driver library is absent, when it is present and exports nothing usable, and
+# when it reports zero devices. Any of those means every tensor stays on the
+# host and every answer is unchanged, which is why the GPU path can be absent
+# from a build entirely without the language changing.
+#
+# It must not fail. A missing driver is the normal case on most machines and is
+# not an error condition.
+fn available() -> Bool = gpu_available()
+
+fn device_count() -> I64 = gpu_device_count()
+
+# OpenCL: clGetPlatformIDs, clGetDeviceIDs, clCreateContext, clCreateCommandQueue,
+# flattened so that twill sees one list of devices and not a list of platforms
+# each holding a list of devices. The nesting buys nothing here: the development
+# machine has two platforms with one device each, and code that wanted to pick
+# "the fastest device" would have to flatten it anyway.
+fn open(index: I64) -> Res[Device, Str] {
+  let h: I64 = gpu_device_open(index)?
+  Ok(Device {
+    handle: h,
+    name: gpu_device_info(h, "name"),
+    driver: gpu_device_info(h, "driver"),
+    compute_units: gpu_device_info_i64(h, "compute_units"),
+    max_group: gpu_device_info_i64(h, "max_group"),
+    has_f64: gpu_device_info_i64(h, "has_f64") != 0,
+    local_bytes: gpu_device_info_i64(h, "local_bytes"),
+  })
+}
+
+fn close(d: Device) {
+  gpu_device_close(d.handle)
+}
+
+# The device this build would pick, or Err with a reason a user can act on.
+# Preferring the device with more compute units is a crude rule and it is the
+# right crude rule here: docs/gpu-feasibility.md measured the 36-CU discrete
+# card beating the 128-CU integrated one at everything, so CU count alone would
+# choose wrong. Rather than encode a vendor preference, the choice is left to
+# the calibration in dispatch.tw, which measures both and picks on the measured
+# throughput. This function exists for the single-device case and for
+# --gpu=device=N.
+fn open_first() -> Res[Device, Str] {
+  if !available() {
+    return Err("no GPU driver library could be loaded")
+  }
+  if device_count() == 0 {
+    return Err("a GPU driver loaded but reported no devices")
+  }
+  let d: Device = open(0)?
+  if !d.has_f64 {
+    return Err(bytes.concat(d.name, " does not support f64 (cl_khr_fp64)"))
+  }
+  Ok(d)
+}
+
+# ---- 2. buffers ------------------------------------------------------------
+#
+# NEEDS-101 (allocate, free) and NEEDS-102 (the three transfers).
+#
+# alloc must return Err rather than abort on an out-of-memory, because
+# buffer.tw's eviction path depends on being able to catch that and retry. This
+# is the one primitive whose failure mode is designed around: 8GB on the card in
+# the development machine is shared with the display, so a large training run
+# running out of device memory is expected rather than exceptional, and the
+# defined response is to evict, retry once and then fall back to the host with
+# an identical answer.
+#
+# OpenCL: clCreateBuffer with CL_MEM_READ_WRITE.
+fn alloc(d: Device, n: I64) -> Res[Buffer, Str] {
+  let h: I64 = gpu_alloc(d.handle, n)?
+  Ok(Buffer { handle: h, device: d.handle, length: n })
+}
+
+# OpenCL: clReleaseMemObject. Returns nothing: a failure to free is not
+# something a caller can do anything about, and a Res here would put a `?` on
+# every cleanup path for no decision.
+fn free(b: Buffer) {
+  gpu_free(b.handle)
+}
+
+# Host to device. `src` is a whole twill buffer and `dst_off` is where in the
+# device buffer it lands, in elements. The offset exists for concat, which
+# writes several host tensors into one device buffer without joining them on the
+# host first.
+#
+# Blocking, in this version. docs/gpu.md section 3 explains why nothing here is
+# asynchronous yet: a non-blocking write reports its error at a point unrelated
+# to the op that caused it, and the first version is trying to be trusted rather
+# than fast.
+#
+# OpenCL: clEnqueueWriteBuffer with blocking_write = CL_TRUE.
+fn write(b: Buffer, dst_off: I64, src: Arr[F64]) -> Res[Unit, Str] {
+  if dst_off < 0 or dst_off + len(src) > b.length {
+    return Err("gpu.write: range is outside the buffer")
+  }
+  gpu_write(b.handle, dst_off, src)
+}
+
+# Device to host. Allocates and returns a fresh twill buffer of `n` elements,
+# rather than filling one the caller supplies, because twill has no way to hand
+# out a writable window into an existing Arr and pretending otherwise would put
+# an aliasing rule into the one place in the codebase that cannot check it.
+#
+# OpenCL: clEnqueueReadBuffer, blocking.
+fn read(b: Buffer, src_off: I64, n: I64) -> Res[Arr[F64], Str] {
+  if src_off < 0 or src_off + n > b.length {
+    return Err("gpu.read: range is outside the buffer")
+  }
+  gpu_read(b.handle, src_off, n)
+}
+
+# Device to device. This is the primitive that keeps slice, concat, index and
+# split resident: without it, taking a row out of a device tensor means reading
+# the row down and writing it back up, which is two of the 80us crossings
+# docs/gpu-feasibility.md measured, to move data that never needed to leave.
+#
+# OpenCL: clEnqueueCopyBuffer.
+fn copy(dst: Buffer, dst_off: I64, src: Buffer, src_off: I64, n: I64) -> Res[Unit, Str] {
+  if src_off + n > src.length or dst_off + n > dst.length {
+    return Err("gpu.copy: range is outside a buffer")
+  }
+  gpu_copy(dst.handle, dst_off, src.handle, src_off, n)
+}
+
+# ---- 3. programs and kernels -----------------------------------------------
+#
+# NEEDS-103.
+#
+# Compiling from source at run time is the property that made OpenCL the
+# recommendation in docs/gpu.md rather than Vulkan. The kernels are text in
+# src/gpu/source.tw, readable in the repository, with no build step and no
+# opaque binary artifact. It also means a kernel can be specialised on the
+# shapes it is about to run, which matmul.tw uses to bake its tile size in as a
+# compile-time constant rather than passing it as an argument.
+#
+# `options` is the compile options string. What is in it and what is deliberately
+# absent from it is the subject of docs/gpu.md section 5 rule 3, and the string
+# itself is built in source.tw so there is exactly one of it.
+#
+# The Err path here is the most important error message in the backend. A kernel
+# that fails to build fails on somebody else's driver, on hardware nobody
+# developing twill owns, and the driver's build log is the only evidence. It is
+# returned verbatim.
+#
+# OpenCL: clCreateProgramWithSource then clBuildProgram, returning the build log
+# on failure.
+fn build(d: Device, src: Str, options: Str) -> Res[Program, Str] {
+  let h: I64 = gpu_program_build(d.handle, src, options)?
+  Ok(Program { handle: h, device: d.handle })
+}
+
+# OpenCL: clCreateKernel. Separate from build because one program holds every
+# kernel in source.tw and is built once per device per run, while a kernel
+# handle is looked up per op.
+fn kernel(p: Program, name: Str) -> Res[Kernel, Str] {
+  let h: I64 = gpu_kernel(p.handle, name)?
+  Ok(Kernel { handle: h })
+}
+
+# ---- 4. arguments ----------------------------------------------------------
+#
+# NEEDS-104.
+#
+# Four setters rather than one, because a kernel argument is typed on the device
+# side and passing an I64 where a buffer was expected is undefined rather than an
+# error. Twill has no variadic call and no way to describe a heterogeneous
+# argument list, so the alternative would be an encoding, and an encoding here
+# would be a second place for the types to disagree.
+#
+# set_local reserves work-group local memory for an argument declared __local
+# with no size in the kernel. Only the tiled matmul uses it.
+#
+# OpenCL: clSetKernelArg, four times over.
+fn arg_buffer(k: Kernel, i: I64, b: Buffer) -> Res[Unit, Str] =
+  gpu_set_arg_buffer(k.handle, i, b.handle)
+
+fn arg_i64(k: Kernel, i: I64, v: I64) -> Res[Unit, Str] =
+  gpu_set_arg_i64(k.handle, i, v)
+
+fn arg_f64(k: Kernel, i: I64, v: F64) -> Res[Unit, Str] =
+  gpu_set_arg_f64(k.handle, i, v)
+
+fn arg_local(k: Kernel, i: I64, bytes_n: I64) -> Res[Unit, Str] =
+  gpu_set_arg_local(k.handle, i, bytes_n)
+
+# ---- 5. launch and synchronise ---------------------------------------------
+#
+# NEEDS-105 and NEEDS-106.
+#
+# `global` is the total number of work-items per dimension, 1 to 3 dimensions.
+# `local` is the work-group shape, or an empty list to let the driver choose.
+# Letting the driver choose is the default everywhere except the tiled matmul,
+# which needs a specific group shape for its local-memory staging to be correct
+# and not merely fast.
+#
+# Note what launch does not take: a stream, an event, or a dependency. There is
+# one queue and every launch is followed by a finish. docs/gpu.md section 3
+# argues for that and also argues that it is the first thing to change once the
+# answers are trusted, which is why finish is its own primitive rather than
+# folded in here.
+#
+# OpenCL: clEnqueueNDRangeKernel.
+fn launch(d: Device, k: Kernel, global: Arr[I64], local: Arr[I64]) -> Res[Unit, Str] {
+  if len(global) < 1 or len(global) > 3 {
+    return Err("gpu.launch: global size must have 1, 2 or 3 dimensions")
+  }
+  if len(local) != 0 and len(local) != len(global) {
+    return Err("gpu.launch: local size must match the global dimensions or be empty")
+  }
+  gpu_launch(d.handle, k.handle, global, local)
+}
+
+# Block until every command queued on this device has completed. This is where
+# a kernel's error surfaces, because an enqueue that returns Ok has only been
+# accepted and not run.
+#
+# OpenCL: clFinish.
+fn finish(d: Device) -> Res[Unit, Str] = gpu_finish(d.handle)
+
+# ---- 6. rounding out -------------------------------------------------------
+#
+# NEEDS-107 asks for nothing new here on purpose.
+#
+# Calibration in dispatch.tw needs a clock, and NEEDS-39 already asks for
+# `now_ms()`. A millisecond is far too coarse to time an 80us launch directly,
+# so calibration times a loop of several thousand repetitions and divides,
+# which puts the total comfortably into the tens of milliseconds. That is worth
+# doing rather than asking for a nanosecond clock, because the primitive list in
+# this file is the deliverable and every entry that is not on it is a thing the
+# native layer does not have to provide.
+#
+# The one genuinely new requirement is that the driver library be resolvable by
+# name at run time, which is NEEDS-107, and it is separate from the fourteen
+# calls above because it is the mechanism rather than an entry point: without a
+# way to load a shared library and look up a symbol, none of the fourteen can be
+# reached, and with it every one of them is a signature and nothing more.
+
+fn now_ms() -> I64 = clock_now_ms()
+
+# The bytes an F64 buffer of n elements occupies. In one place because the
+# eviction accounting in buffer.tw and the tile-fits check in matmul.tw both ask
+# it, and a backend that disagreed with itself about the size of a double would
+# be an entertaining afternoon.
+fn f64_bytes(n: I64) -> I64 = n * 8

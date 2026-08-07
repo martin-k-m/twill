@@ -1,0 +1,319 @@
+mode systems
+
+# dispatch.tw: whether an op runs on the device at all.
+#
+# docs/gpu-feasibility.md measured 64x64 matmul at 92.8us on the GPU against
+# 74.2us on the CPU. A 0.8x. That is not a bad kernel, it is roughly 80us of
+# fixed launch and transfer overhead against a problem too small to amortise it.
+# So there is a size below which the CPU wins, and this file decides where.
+#
+# The tempting implementation is a constant, by analogy with minParallel = 8192
+# in internal/tensor/parallel.go. It would be wrong, and it is worth being
+# precise about why rather than just asserting it. minParallel chooses between
+# one core and sixteen cores of the same CPU, and the ratio between those is a
+# property of the program, near enough the same on every machine that runs it.
+# A GPU threshold chooses between two different pieces of silicon whose ratio
+# varies by two orders of magnitude. The feasibility numbers show it: on the RTX
+# 5070 the crossover sits between N=64 and N=128, and on the Arc 140T in the
+# same laptop the GPU never beats the CPU until N=1024. A constant tuned on the
+# first sends work to the second that the second loses on, on every machine that
+# only has the second.
+#
+# So the threshold is measured on the machine it will run on. A fixed constant
+# is a guess, and it will be wrong on hardware nobody developing twill owns,
+# which is most hardware.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/source" as src
+import "src/gpu/buffer" as buf
+
+# ---- the cost model --------------------------------------------------------
+#
+# Three numbers per device, plus one for the host. Deliberately crude: a crude
+# model that was measured beats a precise model that was assumed, and every term
+# added here is a term that can be measured wrong.
+struct Costs {
+  # Microseconds for one kernel launch plus one synchronise, with no useful
+  # work. This is the term that made 64x64 a loss.
+  launch_us: F64,
+  # Microseconds per megabyte, one way. Measured as a slope across two sizes so
+  # that the fixed part falls out into launch_us instead of being counted twice.
+  transfer_us_per_mb: F64,
+  # Device throughput on the matmul kernel, device-resident, so it is throughput
+  # and not throughput plus overhead.
+  device_flops_per_us: F64,
+  # Host throughput on the same operation, measured the same way. Not assumed
+  # from a core count: docs/gpu-feasibility.md measured the CPU at 7.1 GFLOP/s
+  # at N=64 and 27.0 at N=512, so a single number for "the CPU" would be wrong
+  # by a factor of four depending on which size it was taken at. This one is
+  # taken at the size the crossover is expected near.
+  host_flops_per_us: F64,
+  valid: Bool,
+}
+
+fn unknown_costs() -> Costs =
+  Costs { launch_us: 0.0, transfer_us_per_mb: 0.0, device_flops_per_us: 0.0,
+          host_flops_per_us: 0.0, valid: false }
+
+# The asymmetry is deliberate and it is the only tuning constant in this file.
+# Being wrong towards the CPU costs a speedup that was available. Being wrong
+# towards the GPU costs a regression on a workload that used to be fine. Those
+# are not the same size of mistake, so the rule is not symmetric: the device has
+# to win by 20% before it gets the work.
+fn margin() -> F64 = 1.2
+
+# ---- the decision ----------------------------------------------------------
+#
+# `flops` is the arithmetic the op does, `moved` the elements that would have to
+# cross the boundary. `moved` is zero for operands already resident, which is
+# not a detail of the formula, it is the point of it. The same 64x64 matmul that
+# measured a 0.8x round trip measured 10.0us as a kernel alone against the CPU's
+# 74.2us, which is a 7.4x. Residency and dispatch are one mechanism, and this is
+# where they meet.
+fn should_offload(c: Costs, flops: F64, moved: I64) -> Bool {
+  if !c.valid { return false }
+  let mb: F64 = f64_of_i64(moved * 8) / 1048576.0
+  let gpu_us: F64 = c.launch_us
+    + mb * c.transfer_us_per_mb
+    + flops / c.device_flops_per_us
+  let cpu_us: F64 = flops / c.host_flops_per_us
+  gpu_us * margin() < cpu_us
+}
+
+# The arithmetic each op does, for the model. Counted as multiply-accumulate
+# pairs the way the feasibility table counts them, so 2*m*n*k for a matmul,
+# because that is the convention its GFLOP/s column uses and a model calibrated
+# against those numbers has to count the same way they did.
+fn matmul_flops(m: I64, k: I64, n: I64) -> F64 =
+  2.0 * f64_of_i64(m) * f64_of_i64(k) * f64_of_i64(n)
+
+# Elementwise is one operation per output element. The model will almost always
+# say no for these, and that is the right answer: an elementwise op is memory
+# bound, so its ceiling is the transfer it would need, and it is only worth
+# doing on the device when its operands are already there. Which the model
+# already expresses, because `moved` is then zero.
+fn elementwise_flops(n: I64) -> F64 = f64_of_i64(n)
+
+fn conv_flops(cout: I64, oh: I64, ow: I64, cin: I64, kh: I64, kw: I64) -> F64 =
+  2.0 * f64_of_i64(cout * oh * ow) * f64_of_i64(cin * kh * kw)
+
+# ---- calibration -----------------------------------------------------------
+#
+# Runs once per device, the first time a GPU dispatch is considered.
+#
+# Everything here is timed over a repetition count rather than once, for two
+# reasons. NEEDS-39's clock is `now_ms()`, and a millisecond is far too coarse
+# to time an 80us launch directly. And a single timing of anything on a machine
+# with a display compositor is noise. Repeating until the total is tens of
+# milliseconds solves both, and it is why this file does not ask for a
+# nanosecond clock: the native primitive list in docs/needs.md is the
+# deliverable, and an entry avoided is worth more than a tidier loop here.
+fn calibrate(d: dev.Device, p: buf.Pool) -> Res[Costs, Str] {
+  let prog: dev.Program = dev.build(d, src.program_source(16), src.options())?
+  let c: Costs = unknown_costs()
+
+  # 1. Launch latency. An empty kernel over one work-item, so the only thing
+  #    being timed is enqueue plus finish.
+  let probe: dev.Kernel = dev.kernel(prog, "k_probe")?
+  let one: dev.Buffer = dev.alloc(d, 1)?
+  dev.arg_buffer(probe, 0, one)?
+  let reps: I64 = 2000
+  let g1: Arr[I64] = one_dim(1)
+  let empty: Arr[I64] = arr_new()
+  # A warm-up round that is not timed. The first launch after a build pays for
+  # the driver finishing its lazy work, and counting that as launch latency
+  # would overstate the fixed cost and suppress offloading for the whole run.
+  dev.launch(d, probe, g1, empty)?
+  dev.finish(d)?
+  let t0: I64 = dev.now_ms()
+  let i: I64 = 0
+  while i < reps {
+    dev.launch(d, probe, g1, empty)?
+    dev.finish(d)?
+    i = i + 1
+  }
+  let t1: I64 = dev.now_ms()
+  c.launch_us = f64_of_i64((t1 - t0) * 1000) / f64_of_i64(reps)
+
+  # 2. Transfer slope. Two sizes, and the slope between them, so that the fixed
+  #    part per transfer lands in launch_us rather than being counted twice in
+  #    the model. Round trip, because an op that moves data moves it both ways
+  #    often enough that measuring one direction and doubling would be a guess.
+  let small: I64 = 65536
+  let large: I64 = 4194304
+  let us_small: F64 = time_roundtrip(d, small, 20)?
+  let us_large: F64 = time_roundtrip(d, large, 20)?
+  let mb_small: F64 = f64_of_i64(small * 8) / 1048576.0
+  let mb_large: F64 = f64_of_i64(large * 8) / 1048576.0
+  c.transfer_us_per_mb = (us_large - us_small) / (mb_large - mb_small)
+
+  # 3. Device matmul throughput, device-resident. Timed at N=512, which is where
+  #    the feasibility table shows the kernel-only number has stopped being
+  #    dominated by launch overhead and has not yet run out of card.
+  c.device_flops_per_us = time_matmul(d, prog, 512, 5)?
+
+  dev.free(one)
+  c.valid = true
+  Ok(c)
+}
+
+fn one_dim(n: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, n)
+  g
+}
+
+fn time_roundtrip(d: dev.Device, n: I64, reps: I64) -> Res[F64, Str] {
+  let b: dev.Buffer = dev.alloc(d, n)?
+  let host: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(host, 1.0)
+    i = i + 1
+  }
+  dev.write(b, 0, host)?
+  dev.finish(d)?
+  let t0: I64 = dev.now_ms()
+  i = 0
+  while i < reps {
+    dev.write(b, 0, host)?
+    dev.read(b, 0, n)?
+    i = i + 1
+  }
+  dev.finish(d)?
+  let t1: I64 = dev.now_ms()
+  dev.free(b)
+  Ok(f64_of_i64((t1 - t0) * 1000) / f64_of_i64(reps))
+}
+
+fn time_matmul(d: dev.Device, prog: dev.Program, n: I64, reps: I64) -> Res[F64, Str] {
+  let k: dev.Kernel = dev.kernel(prog, "k_matmul")?
+  let a: dev.Buffer = dev.alloc(d, n * n)?
+  let b: dev.Buffer = dev.alloc(d, n * n)?
+  let c: dev.Buffer = dev.alloc(d, n * n)?
+  dev.arg_buffer(k, 0, a)?
+  dev.arg_buffer(k, 1, b)?
+  dev.arg_buffer(k, 2, c)?
+  dev.arg_i64(k, 3, n)?
+  dev.arg_i64(k, 4, n)?
+  dev.arg_i64(k, 5, n)?
+  let global: Arr[I64] = arr_new()
+  push(global, round_up(n, 16))
+  push(global, round_up(n, 16))
+  let local: Arr[I64] = arr_new()
+  push(local, 16)
+  push(local, 16)
+  dev.launch(d, k, global, local)?
+  dev.finish(d)?
+  let t0: I64 = dev.now_ms()
+  let i: I64 = 0
+  while i < reps {
+    dev.launch(d, k, global, local)?
+    i = i + 1
+  }
+  dev.finish(d)?
+  let t1: I64 = dev.now_ms()
+  dev.free(a)
+  dev.free(b)
+  dev.free(c)
+  let us: F64 = f64_of_i64((t1 - t0) * 1000) / f64_of_i64(reps)
+  Ok(matmul_flops(n, n, n) / us)
+}
+
+fn round_up(n: I64, m: I64) -> I64 = ((n + m - 1) / m) * m
+
+# ---- caching ---------------------------------------------------------------
+#
+# Calibration is a handful of milliseconds and would be absurd to repeat per
+# process for a script that runs for two hundred. It is cached on disk, keyed by
+# the device name and the driver version string, so that a driver update
+# invalidates a measurement taken against the old driver. Drivers change
+# scheduling behaviour between versions and a stale calibration is worse than
+# none, because none is honest about not knowing.
+#
+# A missing, unreadable or malformed cache means recalibrate. It never means
+# guess, and it never means fail: this whole path is an optimisation and an
+# optimisation that can break a run is not one.
+#
+# The file format is one line of five fields. It is not JSON and does not want
+# to be; the parsing is in src/gpu/ because putting it in std/ would make a
+# format twill programs could depend on, and this is an internal cache whose
+# shape should be free to change.
+fn cache_key(d: dev.Device) -> Str =
+  bytes.concat(d.name, bytes.concat("|", d.driver))
+
+fn cache_line(d: dev.Device, c: Costs) -> Str {
+  let parts: Arr[Str] = arr_new()
+  push(parts, cache_key(d))
+  push(parts, str(c.launch_us))
+  push(parts, str(c.transfer_us_per_mb))
+  push(parts, str(c.device_flops_per_us))
+  push(parts, str(c.host_flops_per_us))
+  bytes.join(parts, "\t")
+}
+
+# ---- the mode switch -------------------------------------------------------
+#
+# GpuAuto is the default and is what everything above is for.
+#
+# GpuOff never touches the device, never loads the driver, never calibrates.
+# It is the state a machine with no GPU is in permanently, and it must be
+# indistinguishable from a build with no GPU support at all.
+#
+# GpuForce offloads everything that has a kernel, ignoring the model. It exists
+# for one reason, which is that the dispatch rule has to be testable: --gpu=force
+# and --gpu=off must produce identical output on every case in testdata/, and if
+# they do not then the threshold is changing an answer, which it is never
+# allowed to do. It is not a performance option and using it as one will be
+# slower.
+enum GpuMode {
+  GpuOff,
+  GpuAuto,
+  GpuForce,
+}
+
+struct Plan {
+  mode: GpuMode,
+  costs: Costs,
+  # --gpu-fast. Off by default, on every device, forever. See docs/gpu.md
+  # section 5: when this is on the run header prints
+  # `determinism: relaxed (--gpu-fast)` on stderr every time, `twill check`
+  # refuses it, and the differential harness refuses to run under it.
+  relaxed: Bool,
+}
+
+fn decide(p: Plan, flops: F64, moved: I64) -> Bool {
+  match p.mode {
+    GpuOff => false,
+    GpuForce => true,
+    GpuAuto => should_offload(p.costs, flops, moved),
+  }
+}
+
+# ---- the context every op file takes ---------------------------------------
+#
+# One value threaded through every entry point in src/gpu/, rather than module
+# state. Twill has no globals in the systems subset, and it is better this way:
+# a backend whose device, program and calibration are an argument can be
+# instantiated twice, which is exactly what testing against both GPUs in the
+# development machine requires.
+struct Ctx {
+  device: dev.Device,
+  program: dev.Program,
+  pool: buf.Pool,
+  meta: buf.MetaCache,
+  plan: Plan,
+  # The matmul tile edge that `program` was compiled with. Baked into the
+  # program source, so a context and a tile size are inseparable.
+  tile: I64,
+}
+
+# Every host-side op in src/gpu/ ends the same way: bind arguments, launch,
+# synchronise. Written once because the synchronise is the part that is easy to
+# forget, and forgetting it does not fail, it returns the previous contents of
+# the output buffer, which is the worst possible failure mode.
+fn run(c: Ctx, k: dev.Kernel, global: Arr[I64], local: Arr[I64]) -> Res[Unit, Str] {
+  dev.launch(c.device, k, global, local)?
+  dev.finish(c.device)
+}

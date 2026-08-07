@@ -1,0 +1,214 @@
+mode systems
+
+# conv.tw: the host side of conv2d and maxpool2d.
+#
+# Parallel decomposition: one work-item per output pixel, walking its whole
+# receptive field in scan order.
+#
+# For conv2d the grid is [cout, oh, ow] and each work-item accumulates over
+# cin * kh * kw into a private register. Determinism comes for free by the same
+# argument as everywhere else in this backend: one accumulator, one writer, and
+# the loop order copied from src/tensor.tw, which is channel outermost then
+# kernel row then kernel column. Every permutation of those three loops computes
+# the same mathematical quantity and a different floating point one, so the
+# order is not free to change even though nothing about the GPU cares.
+#
+# The parallelism is ample. A [64, 32, 32] output is 65536 independent
+# work-items on a 36-CU card, so there is no reason to look for more by
+# splitting the reduction, which is the thing that would cost the guarantee.
+#
+# NOT im2col. The standard trick reshapes the input into a cin*kh*kw by oh*ow
+# matrix and calls one matmul, and on a CPU it is several times faster.
+# src/tensor.tw declines it because the loop nest is the definition of the
+# operation and the gradient rule is read against it. That reason holds here and
+# a second one joins it: im2col materialises a matrix kh*kw times the size of
+# the input, and device memory is the scarcest resource in this design. On the
+# 8GB card in the development machine, shared with the display, spending a
+# 9-times blowup of every activation to make a convolution faster is the wrong
+# trade for a language whose convolutions are small.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/buffer" as buf
+import "src/gpu/dispatch" as disp
+import "tensor.tw" as tensor
+
+# ---- conv2d ----------------------------------------------------------------
+#
+# Cross-correlation, which machine learning calls convolution: the kernel is not
+# flipped. input is [Cin, H, W], weight is [Cout, Cin, KH, KW], output is
+# [Cout, H-KH+1, W-KW+1]. Valid padding, unit stride, no dilation, no groups,
+# exactly as src/tensor.tw conv2d and internal/tensor/conv.go.
+#
+# The shape validation is done on the host and not in the kernel, because a
+# kernel cannot return an error and a device that has already been handed bad
+# sizes reads out of bounds rather than complaining. Every error message here is
+# the one src/tensor.tw produces for the same mistake, character for character,
+# because a user who turns the GPU on should not get different diagnostics.
+fn conv2d(c: disp.Ctx, input: buf.DeviceTensor,
+          weight: buf.DeviceTensor) -> Res[buf.DeviceTensor, Str] {
+  if len(input.shape) != 3 {
+    return Err(bytes.concat("conv2d: input must be [channels, height, width], got ",
+      tensor.shape_string(input.shape)))
+  }
+  if len(weight.shape) != 4 {
+    return Err(bytes.concat("conv2d: weight must be [out, in, kh, kw], got ",
+      tensor.shape_string(weight.shape)))
+  }
+  let cin: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let cout: I64 = weight.shape[0]
+  let wcin: I64 = weight.shape[1]
+  let kh: I64 = weight.shape[2]
+  let kw: I64 = weight.shape[3]
+  if wcin != cin {
+    return Err(bytes.concat("conv2d: input has ", bytes.concat(str(cin),
+      bytes.concat(" channels but weight expects ", str(wcin)))))
+  }
+  if kh > h or kw > w {
+    return Err("conv2d: kernel is larger than input")
+  }
+  let oh: I64 = h - kh + 1
+  let ow: I64 = w - kw + 1
+
+  let id: buf.DeviceTensor = buf.ensure_device(c.pool, input)?
+  # Weights are uploaded once and stay resident for the life of the program,
+  # because nothing can write to them. That is the single largest saving this
+  # backend gets on a convolution: a training loop pays for the weight upload
+  # on step one and never again.
+  let wd: buf.DeviceTensor = buf.ensure_device(c.pool, weight)?
+
+  let shape: Arr[I64] = arr_new()
+  push(shape, cout)
+  push(shape, oh)
+  push(shape, ow)
+  let out: buf.DeviceTensor = buf.device_output(c.pool, shape)?
+
+  let k: dev.Kernel = dev.kernel(c.program, "k_conv2d")?
+  dev.arg_buffer(k, 0, id.buf)?
+  dev.arg_buffer(k, 1, wd.buf)?
+  dev.arg_buffer(k, 2, out.buf)?
+  dev.arg_i64(k, 3, cin)?
+  dev.arg_i64(k, 4, h)?
+  dev.arg_i64(k, 5, w)?
+  dev.arg_i64(k, 6, kh)?
+  dev.arg_i64(k, 7, kw)?
+  dev.arg_i64(k, 8, oh)?
+  dev.arg_i64(k, 9, ow)?
+  # Dimension 0 is the output column, which is the contiguous axis, so adjacent
+  # work-items write adjacent addresses and the writes coalesce. Dimension 2 is
+  # the output channel, which is the slowest axis and the one whose work-items
+  # share nothing.
+  disp.run(c, k, grid3(ow, oh, cout), arr_new())?
+  Ok(out)
+}
+
+# ---- maxpool2d -------------------------------------------------------------
+#
+# Non-overlapping k by k max pooling per channel of a [C, H, W], giving
+# [C, H/k, W/k]. A ragged remainder along either spatial axis is dropped rather
+# than padded, because padding with anything finite would let an invented value
+# win a max.
+#
+# Two outputs: the pooled values, and the winner index per window. The second is
+# what the backward pass scatters into, and it is computed here rather than
+# recomputed later because the tie-break has to be reproduced exactly. The rule
+# is `>` and not `>=`, so the FIRST maximum in scan order wins, and that one
+# character is the difference between a gradient that matches the bootstrap and
+# one that is wrong on repeated values. Every pooled relu output has a flat
+# region in it, so "repeated values" is not an edge case, it is the normal case.
+fn maxpool2d(c: disp.Ctx, input: buf.DeviceTensor,
+             k: I64) -> Res[Arr[buf.DeviceTensor], Str] {
+  if len(input.shape) != 3 {
+    return Err(bytes.concat("maxpool2d: input must be [channels, height, width], got ",
+      tensor.shape_string(input.shape)))
+  }
+  let ch: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let oh: I64 = h / k
+  let ow: I64 = w / k
+  if oh < 1 or ow < 1 {
+    return Err("maxpool2d: window is larger than the input")
+  }
+  let id: buf.DeviceTensor = buf.ensure_device(c.pool, input)?
+  let shape: Arr[I64] = arr_new()
+  push(shape, ch)
+  push(shape, oh)
+  push(shape, ow)
+  let out: buf.DeviceTensor = buf.device_output(c.pool, shape)?
+  let arg: buf.DeviceTensor = buf.device_output(c.pool, shape)?
+
+  let kern: dev.Kernel = dev.kernel(c.program, "k_maxpool2d")?
+  dev.arg_buffer(kern, 0, id.buf)?
+  dev.arg_buffer(kern, 1, out.buf)?
+  dev.arg_buffer(kern, 2, arg.buf)?
+  dev.arg_i64(kern, 3, h)?
+  dev.arg_i64(kern, 4, w)?
+  dev.arg_i64(kern, 5, k)?
+  dev.arg_i64(kern, 6, oh)?
+  dev.arg_i64(kern, 7, ow)?
+  disp.run(c, kern, grid3(ow, oh, ch), arr_new())?
+
+  let both: Arr[buf.DeviceTensor] = arr_new()
+  push(both, out)
+  push(both, arg)
+  Ok(both)
+}
+
+# The pooling gradient: each output cell's cotangent goes to the one input that
+# won its window.
+#
+# A plain scatter with no atomic, which is only safe because the windows do not
+# overlap, so no two output cells can name the same input. Overlapping pooling
+# would need an atomic add, an atomic add on doubles is an extension rather than
+# a core feature, and an atomic add is nondeterministic. So overlapping pooling
+# is not merely unimplemented here, it is a design question this backend has not
+# answered, and adding a stride parameter to maxpool2d would reopen it.
+fn maxpool2d_vjp(c: disp.Ctx, g: buf.DeviceTensor, arg: buf.DeviceTensor,
+                 in_shape: Arr[I64]) -> Res[buf.DeviceTensor, Str] {
+  let gd: buf.DeviceTensor = buf.ensure_device(c.pool, g)?
+  let ad: buf.DeviceTensor = buf.ensure_device(c.pool, arg)?
+  # Zero-filled, because the scatter only writes the winners and every other
+  # input gets no gradient. device_output does not zero its buffer, so this is
+  # the one place that has to say so explicitly.
+  let out: buf.DeviceTensor = buf.device_output(c.pool, in_shape)?
+  zero_fill(c, out)?
+  let k: dev.Kernel = dev.kernel(c.program, "k_maxpool2d_vjp")?
+  dev.arg_buffer(k, 0, gd.buf)?
+  dev.arg_buffer(k, 1, ad.buf)?
+  dev.arg_buffer(k, 2, out.buf)?
+  dev.arg_i64(k, 3, gd.buf.length)?
+  disp.run(c, k, one_dim(gd.buf.length), arr_new())?
+  Ok(out)
+}
+
+# Writing zeros from the host, which is a transfer this backend otherwise spends
+# its whole design avoiding. It is here because a fill kernel would be a
+# fifteenth kernel to serve one call site, and because the cotangent of a
+# pooling layer is the size of its input, which is small next to the matmuls
+# around it. If a profile ever disagrees, a k_fill is three lines.
+fn zero_fill(c: disp.Ctx, t: buf.DeviceTensor) -> Res[Unit, Str] {
+  let zeros: Arr[F64] = arr_new()
+  let i: I64 = 0
+  while i < t.buf.length {
+    push(zeros, 0.0)
+    i = i + 1
+  }
+  dev.write(t.buf, 0, zeros)
+}
+
+fn grid3(fast: I64, mid: I64, slow: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, fast)
+  push(g, mid)
+  push(g, slow)
+  g
+}
+
+fn one_dim(n: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, n)
+  g
+}

@@ -1,0 +1,671 @@
+mode systems
+
+# source.tw: every kernel, as text, and the compile options that decide whether
+# the answers match the CPU.
+#
+# The kernels are OpenCL C. They are in this file as twill string lists rather
+# than in .cl files beside it for one reason: docs/needs.md does not yet have a
+# way for the compiler to embed a data file (NEEDS-28 asks for read_file, which
+# is not the same thing), and a backend that reads its own kernels off disk at
+# run time would break the moment the binary moved. When embedding exists this
+# file becomes a directory of .cl files and nothing else changes.
+#
+# Read docs/gpu.md section 5 before editing anything here. Several of the shapes
+# below look like they could be written more idiomatically for a GPU, and the
+# idiomatic version reorders a floating point sum, which twill is not allowed to
+# do. Specifically:
+#
+#   - No kernel uses an atomic. Anywhere.
+#   - No kernel reduces across work-items in a work-group.
+#   - Every accumulation loop runs in ascending index order, matching the loop
+#     src/tensor.tw writes for the same op.
+#   - No native_* or half_* function appears. Their accuracy is unspecified.
+#
+# Those four rules are what make the results bit-identical rather than close,
+# and a test greps this file for the last one.
+
+import "bytes.tw" as bytes
+
+# ---- compile options -------------------------------------------------------
+#
+# What is absent matters more than what is present, so the absences are listed.
+#
+#   -cl-fast-relaxed-math        permits reassociation. Reassociating a sum is
+#                                exactly the thing the determinism guarantee
+#                                forbids.
+#   -cl-unsafe-math-optimizations  same, plus it permits x/y as x*(1/y).
+#   -cl-mad-enable               permits a*b+c to be computed with a single
+#                                rounding. That is more accurate and it is not
+#                                what the CPU does, and matching is the
+#                                requirement, not accuracy.
+#   -cl-no-signed-zeros          f64_max(-0, +0) is +0 in src/tensor.tw and
+#                                NEEDS-69 exists because telling the two zeros
+#                                apart is load-bearing.
+#   -cl-opt-disable              would be correct and would cost most of the
+#                                speedup. FP_CONTRACT OFF in the source is the
+#                                narrow version of the same idea.
+#
+# -w is not passed either: a driver warning about a kernel is worth reading.
+fn options() -> Str = "-cl-std=CL1.2"
+
+# The relaxed options, reachable only through --gpu-fast. Kept next to the
+# strict ones so that the difference between them is one diff and not an
+# archaeology exercise.
+fn options_fast() -> Str = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable"
+
+# ---- the prelude -----------------------------------------------------------
+#
+# Prepended to every kernel. The pragma is not decoration: without it, whether
+# `a*b+c` contracts into an FMA is implementation-defined, and an FMA carries a
+# rounding the CPU's separate multiply and add does not. One ulp per k step in a
+# matmul is the difference between matching and not.
+fn prelude() -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, "#pragma OPENCL EXTENSION cl_khr_fp64 : enable")
+  push(l, "#pragma OPENCL FP_CONTRACT OFF")
+  push(l, "")
+  push(l, "// Op codes. These are assigned in src/gpu/elementwise.tw op_code(),")
+  push(l, "// which is the only place that knows both this table and the Op enum")
+  push(l, "// in src/tensor.tw. Do not renumber one without the other.")
+  push(l, "#define OP_ADD  0")
+  push(l, "#define OP_SUB  1")
+  push(l, "#define OP_MUL  2")
+  push(l, "#define OP_DIV  3")
+  push(l, "#define OP_MOD  4")
+  push(l, "#define OP_MAX  5")
+  push(l, "#define OP_MIN  6")
+  push(l, "#define OP_GT   7")
+  push(l, "#define OP_LT   8")
+  push(l, "#define OP_GE   9")
+  push(l, "#define OP_LE  10")
+  push(l, "#define OP_EQ  11")
+  push(l, "")
+  push(l, "#define UN_NEG    0")
+  push(l, "#define UN_RELU   1")
+  push(l, "#define UN_SQUARE 2")
+  push(l, "#define UN_CLIP   3")
+  push(l, "")
+  push(l, "// The reduction codes reduce.tw passes. Sum and mean share a kernel")
+  push(l, "// because mean is sum with one division at the end, and giving mean")
+  push(l, "// its own loop would be a second place for the order to drift.")
+  push(l, "#define RED_SUM  0")
+  push(l, "#define RED_MEAN 1")
+  push(l, "#define RED_MAX  2")
+  push(l, "#define RED_MIN  3")
+  push(l, "#define RED_PROD 4")
+  push(l, "")
+  l
+}
+
+# ---- the calibration probe -------------------------------------------------
+#
+# An empty kernel over one work-item. dispatch.tw launches it a few thousand
+# times to measure launch plus synchronise latency, which is the term that made
+# 64x64 matmul a 0.8x in docs/gpu-feasibility.md. It writes one element so that
+# a driver cannot optimise the launch away entirely.
+fn probe_src() -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, "__kernel void k_probe(__global double* out) {")
+  push(l, "  if (get_global_id(0) == 0) out[0] = 1.0;")
+  push(l, "}")
+  push(l, "")
+  l
+}
+
+# ---- elementwise -----------------------------------------------------------
+#
+# Decomposition: one work-item per output element. Every output depends on one
+# element of each operand, there is nothing shared to exploit and nothing to
+# order, so this is the only decomposition that makes sense.
+#
+# Broadcasting is done by recomputing each operand's source offset from the
+# output index, using the same effective-stride trick src/tensor.tw eff_strides
+# uses: a broadcast axis gets stride 0, so the index arithmetic reads the same
+# element repeatedly and no expansion is materialised. That is not a micro
+# optimisation. Materialising a [1, 768] bias against a [512, 768] activation
+# would be 512 times the device memory traffic for a tensor that is already
+# scarce on an 8GB card.
+#
+# The strides arrive as one flat buffer holding rank values for a then rank for
+# b, because a kernel argument list is fixed and passing two arrays of unknown
+# length would need two more arguments to describe them.
+fn elementwise_src() -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, "// src_offset walks the output index backwards through the shape,")
+  push(l, "// accumulating the operand offset. Backwards because the trailing")
+  push(l, "// axis varies fastest in a row-major buffer, so the division peels")
+  push(l, "// coordinates off in the order they are cheapest to peel.")
+  push(l, "//")
+  push(l, "// shape and stride arrive as doubles, not longs. Every device buffer")
+  push(l, "// in this backend is a double buffer, and keeping it that way means")
+  push(l, "// one transfer primitive on the native list in docs/needs.md instead")
+  push(l, "// of two. Shapes and strides cannot exceed 2^53 without the tensor")
+  push(l, "// exceeding any device this will run on, so the round trip through a")
+  push(l, "// double is exact. See src/gpu/buffer.tw meta_buffer.")
+  push(l, "static long src_offset(long idx, __global const double* shape,")
+  push(l, "                       __global const double* stride, int rank) {")
+  push(l, "  long off = 0;")
+  push(l, "  for (int d = rank - 1; d >= 0; d--) {")
+  push(l, "    long dim = (long)shape[d];")
+  push(l, "    long coord = idx % dim;")
+  push(l, "    idx /= dim;")
+  push(l, "    off += coord * (long)stride[d];")
+  push(l, "  }")
+  push(l, "  return off;")
+  push(l, "}")
+  push(l, "")
+  push(l, "static double apply_binary(int op, double x, double y) {")
+  push(l, "  switch (op) {")
+  push(l, "    case OP_ADD: return x + y;")
+  push(l, "    case OP_SUB: return x - y;")
+  push(l, "    case OP_MUL: return x * y;")
+  push(l, "    case OP_DIV: return x / y;")
+  push(l, "    // fmod and not remainder: fmod takes the sign of the dividend,")
+  push(l, "    // which is what Go's math.Mod does and therefore what")
+  push(l, "    // src/tensor.tw apply_binary means by OpMod. remainder rounds to")
+  push(l, "    // nearest and would disagree on every negative dividend.")
+  push(l, "    case OP_MOD: return fmod(x, y);")
+  push(l, "    // fmax and not a ternary. A ternary on a NaN picks whichever")
+  push(l, "    // branch the comparison falls through to; fmax is specified to")
+  push(l, "    // return the non-NaN operand, which is what math.Max does.")
+  push(l, "    case OP_MAX: return fmax(x, y);")
+  push(l, "    case OP_MIN: return fmin(x, y);")
+  push(l, "    case OP_GT:  return x >  y ? 1.0 : 0.0;")
+  push(l, "    case OP_LT:  return x <  y ? 1.0 : 0.0;")
+  push(l, "    case OP_GE:  return x >= y ? 1.0 : 0.0;")
+  push(l, "    case OP_LE:  return x <= y ? 1.0 : 0.0;")
+  push(l, "    case OP_EQ:  return x == y ? 1.0 : 0.0;")
+  push(l, "  }")
+  push(l, "  return 0.0;")
+  push(l, "}")
+  push(l, "")
+  push(l, "__kernel void k_binary(__global const double* a,")
+  push(l, "                       __global const double* b,")
+  push(l, "                       __global double* out,")
+  push(l, "                       __global const double* shape,")
+  push(l, "                       __global const double* strides,")
+  push(l, "                       int rank, int op, long n) {")
+  push(l, "  long i = get_global_id(0);")
+  push(l, "  if (i >= n) return;")
+  push(l, "  long ao = src_offset(i, shape, strides, rank);")
+  push(l, "  long bo = src_offset(i, shape, strides + rank, rank);")
+  push(l, "  out[i] = apply_binary(op, a[ao], b[bo]);")
+  push(l, "}")
+  push(l, "")
+  push(l, "// The unary kernel carries only the ops whose derivative and value")
+  push(l, "// are pure arithmetic. exp, log, sin, cos, tanh, sigmoid and sqrt are")
+  push(l, "// deliberately absent: OpenCL specifies them to within a few ulp and")
+  push(l, "// a few ulp is not the same bits as Go's math package, which")
+  push(l, "// NEEDS-68 requires. docs/gpu.md section 5 has the argument and the")
+  push(l, "// route out of it.")
+  push(l, "__kernel void k_unary(__global const double* a, __global double* out,")
+  push(l, "                      int op, double p0, double p1, long n) {")
+  push(l, "  long i = get_global_id(0);")
+  push(l, "  if (i >= n) return;")
+  push(l, "  double x = a[i];")
+  push(l, "  switch (op) {")
+  push(l, "    case UN_NEG:    out[i] = -x; break;")
+  push(l, "    // > 0 and not >= 0, matching src/tensor.tw, so relu(0) is 0 and")
+  push(l, "    // the value carries no sign from a negative zero.")
+  push(l, "    case UN_RELU:   out[i] = x > 0.0 ? x : 0.0; break;")
+  push(l, "    case UN_SQUARE: out[i] = x * x; break;")
+  push(l, "    case UN_CLIP:   out[i] = fmin(fmax(x, p0), p1); break;")
+  push(l, "  }")
+  push(l, "}")
+  push(l, "")
+  push(l, "// where(cond, a, b), the one three-operand elementwise op. Broadcast")
+  push(l, "// over three operands, so three stride blocks.")
+  push(l, "__kernel void k_where(__global const double* c,")
+  push(l, "                      __global const double* a,")
+  push(l, "                      __global const double* b,")
+  push(l, "                      __global double* out,")
+  push(l, "                      __global const double* shape,")
+  push(l, "                      __global const double* strides,")
+  push(l, "                      int rank, long n) {")
+  push(l, "  long i = get_global_id(0);")
+  push(l, "  if (i >= n) return;")
+  push(l, "  long co = src_offset(i, shape, strides, rank);")
+  push(l, "  long ao = src_offset(i, shape, strides + rank, rank);")
+  push(l, "  long bo = src_offset(i, shape, strides + 2 * rank, rank);")
+  push(l, "  out[i] = c[co] != 0.0 ? a[ao] : b[bo];")
+  push(l, "}")
+  push(l, "")
+  push(l, "// Cotangent accumulation for the backward pass: dst += src,")
+  push(l, "// in place. The only kernel in this file that writes a buffer it did")
+  push(l, "// not allocate. It is safe because a cotangent slot is private to one")
+  push(l, "// backward pass and no two nodes accumulate into it concurrently:")
+  push(l, "// the tape is walked in reverse index order on the host, one node at")
+  push(l, "// a time. See src/gpu/autodiff.tw.")
+  push(l, "__kernel void k_accumulate(__global double* dst,")
+  push(l, "                           __global const double* src, long n) {")
+  push(l, "  long i = get_global_id(0);")
+  push(l, "  if (i < n) dst[i] = dst[i] + src[i];")
+  push(l, "}")
+  push(l, "")
+  l
+}
+
+# ---- matmul ----------------------------------------------------------------
+#
+# Decomposition: one work-item per output element, work-groups of TILE by TILE
+# cooperatively staging tiles of a and b through local memory.
+#
+# Each work-item owns exactly one c[i][j] and accumulates the whole k loop into
+# a private register. That ownership is what makes the kernel deterministic:
+# there is one accumulator per output, written by one work-item, in ascending k
+# order, which is the same order the triple loop in src/tensor.tw mm adds in.
+#
+# Tiling changes where the operands are read from and not the order they are
+# added in. Without it, each element of a is read n times and each element of b
+# m times, all from global memory. With it, a work-group loads a TILE by TILE
+# block of each into local memory once, and the TILE work-items in a row read
+# their operands from local memory, which is roughly an order of magnitude
+# closer. That is the entire optimisation and it is worth several times.
+#
+# TILE is a compile-time constant substituted at build time rather than a kernel
+# argument, because a compile-time bound lets the compiler fully unroll the
+# inner loop and size the local arrays statically. Run-time kernel compilation
+# is what makes that possible, and it is one of the reasons docs/gpu.md picks
+# OpenCL over a precompiled-SPIR-V backend.
+fn matmul_src(tile: I64) -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, bytes.concat("#define TILE ", str(tile)))
+  push(l, "")
+  push(l, "__kernel __attribute__((reqd_work_group_size(TILE, TILE, 1)))")
+  push(l, "void k_matmul(__global const double* a, __global const double* b,")
+  push(l, "              __global double* c, long m, long k, long n) {")
+  push(l, "  // Group coordinates give the tile, local coordinates the element")
+  push(l, "  // within it. row and col are this work-item's output element.")
+  push(l, "  const int lr = get_local_id(1);")
+  push(l, "  const int lc = get_local_id(0);")
+  push(l, "  const long row = (long)get_group_id(1) * TILE + lr;")
+  push(l, "  const long col = (long)get_group_id(0) * TILE + lc;")
+  push(l, "")
+  push(l, "  __local double as[TILE][TILE];")
+  push(l, "  __local double bs[TILE][TILE];")
+  push(l, "")
+  push(l, "  double acc = 0.0;")
+  push(l, "  const long ntiles = (k + TILE - 1) / TILE;")
+  push(l, "  for (long t = 0; t < ntiles; t++) {")
+  push(l, "    const long ak = t * TILE + lc;")
+  push(l, "    const long bk = t * TILE + lr;")
+  push(l, "    // Out-of-range staging is zero rather than skipped. A zero")
+  push(l, "    // contributes nothing to the sum and keeps every work-item in")
+  push(l, "    // the group hitting both barriers, which a conditional skip")
+  push(l, "    // would not: a barrier that only some work-items in a group")
+  push(l, "    // reach is undefined behaviour, not a slow path.")
+  push(l, "    as[lr][lc] = (row < m && ak < k) ? a[row * k + ak] : 0.0;")
+  push(l, "    bs[lr][lc] = (bk < k && col < n) ? b[bk * n + col] : 0.0;")
+  push(l, "    barrier(CLK_LOCAL_MEM_FENCE);")
+  push(l, "")
+  push(l, "    for (int p = 0; p < TILE; p++) {")
+  push(l, "      // The zero skip is copied from src/tensor.tw mm, where it is")
+  push(l, "      // documented as load-bearing rather than a speed hack: zero")
+  push(l, "      // times an infinity is NaN, so a sparse row against a buffer")
+  push(l, "      // holding an infinity would be poisoned without it. Dropping")
+  push(l, "      // it here would make the GPU disagree with the CPU on exactly")
+  push(l, "      // the inputs nobody tests.")
+  push(l, "      const double av = as[lr][p];")
+  push(l, "      if (av != 0.0) acc += av * bs[p][lc];")
+  push(l, "    }")
+  push(l, "    barrier(CLK_LOCAL_MEM_FENCE);")
+  push(l, "  }")
+  push(l, "")
+  push(l, "  if (row < m && col < n) c[row * n + col] = acc;")
+  push(l, "}")
+  push(l, "")
+  push(l, "// Transpose, which the matmul gradient rules need on both sides:")
+  push(l, "// dA is g @ b^T and dB is a^T @ g. Doing it on the device keeps a")
+  push(l, "// backward pass resident. One work-item per element, no sharing.")
+  push(l, "__kernel void k_transpose2d(__global const double* a,")
+  push(l, "                            __global double* out,")
+  push(l, "                            long rows, long cols) {")
+  push(l, "  long i = get_global_id(1);")
+  push(l, "  long j = get_global_id(0);")
+  push(l, "  if (i < rows && j < cols) out[j * rows + i] = a[i * cols + j];")
+  push(l, "}")
+  push(l, "")
+  l
+}
+
+# ---- reductions ------------------------------------------------------------
+#
+# Decomposition: one work-item per output element. This is the rule that lets a
+# GPU reduction stay bit-identical, and it is worth restating why it works.
+#
+# A reduction along an axis is not one sum, it is `before * after` independent
+# sums of `length` elements each, strided by `after`. A [512, 768] tensor summed
+# along axis 1 is 512 independent sums. Give each one work-item and let it walk
+# its own run sequentially in ascending index order, and every output is the sum
+# of the same numbers in the same order as src/tensor.tw reduce_axis produced.
+# No barrier, no local memory, no atomic, and nothing about the answer depends
+# on the work-group size the driver chose.
+#
+# The obvious GPU idiom, a tree reduction across work-items, is faster for long
+# runs and produces a different answer whose shape depends on the group size.
+# It is not used. --gpu-fast is where that lives.
+fn reduce_src() -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, "// One work-item per (i, j) in the before-by-after grid. The run is")
+  push(l, "// walked with stride `after`, exactly as src/tensor.tw does, so the")
+  push(l, "// addition order is identical and so is the last bit.")
+  push(l, "__kernel void k_reduce_axis(__global const double* a,")
+  push(l, "                            __global double* out,")
+  push(l, "                            long before, long length, long after,")
+  push(l, "                            int red) {")
+  push(l, "  long i = get_global_id(1);")
+  push(l, "  long j = get_global_id(0);")
+  push(l, "  if (i >= before || j >= after) return;")
+  push(l, "  const long base = i * length * after + j;")
+  push(l, "")
+  push(l, "  // Seeded from the first element rather than from an identity, for")
+  push(l, "  // max and min: seeding from -INFINITY would make max of a run of")
+  push(l, "  // NaNs return -INFINITY, where seeding from element 0 and using a")
+  push(l, "  // bare > comparison propagates whatever src/tensor.tw propagates.")
+  push(l, "  double acc = a[base];")
+  push(l, "  if (red == RED_SUM || red == RED_MEAN) acc = 0.0;")
+  push(l, "  if (red == RED_PROD) acc = 1.0;")
+  push(l, "")
+  push(l, "  const long start = (red == RED_MAX || red == RED_MIN) ? 1 : 0;")
+  push(l, "  for (long p = start; p < length; p++) {")
+  push(l, "    const double v = a[base + p * after];")
+  push(l, "    switch (red) {")
+  push(l, "      case RED_SUM:")
+  push(l, "      case RED_MEAN: acc = acc + v; break;")
+  push(l, "      case RED_PROD: acc = acc * v; break;")
+  push(l, "      // > and not fmax, and > and not >=, because the tie-break")
+  push(l, "      // decides which input the gradient reaches in vjp_extreme and")
+  push(l, "      // src/tensor.tw makes the first maximum in scan order win.")
+  push(l, "      case RED_MAX: if (v > acc) acc = v; break;")
+  push(l, "      case RED_MIN: if (v < acc) acc = v; break;")
+  push(l, "    }")
+  push(l, "  }")
+  push(l, "  if (red == RED_MEAN) acc = acc / (double)length;")
+  push(l, "  out[i * after + j] = acc;")
+  push(l, "}")
+  push(l, "")
+  push(l, "// The index of the winner, for argmax, argmin and for the gradient of")
+  push(l, "// max and min. Computed rather than recomputed later, because the")
+  push(l, "// tie-break has to be reproduced exactly and the only way to be sure")
+  push(l, "// is to not do it twice.")
+  push(l, "__kernel void k_arg_axis(__global const double* a,")
+  push(l, "                         __global double* out,")
+  push(l, "                         long before, long length, long after,")
+  push(l, "                         int want_max) {")
+  push(l, "  long i = get_global_id(1);")
+  push(l, "  long j = get_global_id(0);")
+  push(l, "  if (i >= before || j >= after) return;")
+  push(l, "  const long base = i * length * after + j;")
+  push(l, "  double best = a[base];")
+  push(l, "  long arg = 0;")
+  push(l, "  for (long p = 1; p < length; p++) {")
+  push(l, "    const double v = a[base + p * after];")
+  push(l, "    if (want_max ? (v > best) : (v < best)) { best = v; arg = p; }")
+  push(l, "  }")
+  push(l, "  out[i * after + j] = (double)arg;")
+  push(l, "}")
+  push(l, "")
+  push(l, "// The whole-tensor sum, in two kernels, reproducing the fixed")
+  push(l, "// blocking in internal/tensor/parallel.go parallelSum rather than")
+  push(l, "// inventing a tree. sumChunk is 4096 there and it is 4096 here, and")
+  push(l, "// it is fixed rather than derived from the device's compute-unit")
+  push(l, "// count for exactly the reason it is fixed there: a block size that")
+  push(l, "// depended on the hardware would make the answer depend on the")
+  push(l, "// hardware.")
+  push(l, "//")
+  push(l, "// Note that src/tensor.tw reduce_all does a plain running sum with no")
+  push(l, "// blocking, so for n >= 8192 the twill reference and the Go bootstrap")
+  push(l, "// already disagree in the last bits before any GPU is involved. This")
+  push(l, "// kernel follows the Go form, which is the one that is both pinned")
+  push(l, "// and parallelisable. docs/needs.md NEEDS-109 records the divergence.")
+  push(l, "#define SUM_CHUNK 4096")
+  push(l, "")
+  push(l, "__kernel void k_sum_blocks(__global const double* a,")
+  push(l, "                           __global double* partials, long n) {")
+  push(l, "  long blk = get_global_id(0);")
+  push(l, "  long start = blk * SUM_CHUNK;")
+  push(l, "  if (start >= n) return;")
+  push(l, "  long end = start + SUM_CHUNK;")
+  push(l, "  if (end > n) end = n;")
+  push(l, "  double s = 0.0;")
+  push(l, "  for (long i = start; i < end; i++) s = s + a[i];")
+  push(l, "  partials[blk] = s;")
+  push(l, "}")
+  push(l, "")
+  push(l, "// One work-item. Combining the partials in ascending block order is")
+  push(l, "// what pins the answer, and there are at most n/4096 of them, so a")
+  push(l, "// serial pass over a 64M-element tensor is 16384 additions. That is")
+  push(l, "// nothing next to the 64M the first pass did, which is why this")
+  push(l, "// scheme costs almost no parallelism despite looking like it should.")
+  push(l, "__kernel void k_sum_combine(__global const double* partials,")
+  push(l, "                            __global double* out, long nblocks) {")
+  push(l, "  if (get_global_id(0) != 0) return;")
+  push(l, "  double total = 0.0;")
+  push(l, "  for (long b = 0; b < nblocks; b++) total = total + partials[b];")
+  push(l, "  out[0] = total;")
+  push(l, "}")
+  push(l, "")
+  l
+}
+
+# ---- softmax and logsumexp -------------------------------------------------
+#
+# Decomposition: one work-item per run, doing all four passes inside itself.
+#
+# The GPU-idiomatic version is four kernels over the whole tensor with the run
+# maximum and the run sum computed by work-group reductions. It is faster for
+# long runs, it reorders the sum, and so it is not written.
+#
+# The maximum shift is kept exactly. It is not an optimisation and it cannot be
+# dropped for a shorter kernel: exp of a large positive number overflows to
+# infinity and the ratio becomes NaN, and subtracting the run maximum leaves the
+# answer unchanged because it cancels between numerator and denominator.
+#
+# Both kernels call exp(), and that is the reason neither is dispatched to by
+# default today. OpenCL specifies exp to within a few ulp and NEEDS-68 requires
+# the same bits as Go's math.Exp. They are written because they become correct
+# the day the same algorithm is transcribed into this file, and writing them
+# after that would mean designing the decomposition under time pressure.
+fn softmax_src() -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, "__kernel void k_softmax(__global const double* a,")
+  push(l, "                        __global double* out,")
+  push(l, "                        long before, long length, long after) {")
+  push(l, "  long i = get_global_id(1);")
+  push(l, "  long j = get_global_id(0);")
+  push(l, "  if (i >= before || j >= after) return;")
+  push(l, "  const long base = i * length * after + j;")
+  push(l, "")
+  push(l, "  double m = a[base];")
+  push(l, "  for (long p = 1; p < length; p++) {")
+  push(l, "    const double v = a[base + p * after];")
+  push(l, "    if (v > m) m = v;")
+  push(l, "  }")
+  push(l, "  double total = 0.0;")
+  push(l, "  for (long p = 0; p < length; p++) {")
+  push(l, "    const double e = exp(a[base + p * after] - m);")
+  push(l, "    out[base + p * after] = e;")
+  push(l, "    total = total + e;")
+  push(l, "  }")
+  push(l, "  for (long p = 0; p < length; p++) {")
+  push(l, "    out[base + p * after] = out[base + p * after] / total;")
+  push(l, "  }")
+  push(l, "}")
+  push(l, "")
+  push(l, "// logsumexp drops the axis. The maximum is added back at the end,")
+  push(l, "// which is what makes it exact rather than merely non-overflowing.")
+  push(l, "__kernel void k_logsumexp(__global const double* a,")
+  push(l, "                          __global double* out,")
+  push(l, "                          long before, long length, long after) {")
+  push(l, "  long i = get_global_id(1);")
+  push(l, "  long j = get_global_id(0);")
+  push(l, "  if (i >= before || j >= after) return;")
+  push(l, "  const long base = i * length * after + j;")
+  push(l, "  double m = a[base];")
+  push(l, "  for (long p = 1; p < length; p++) {")
+  push(l, "    const double v = a[base + p * after];")
+  push(l, "    if (v > m) m = v;")
+  push(l, "  }")
+  push(l, "  double total = 0.0;")
+  push(l, "  for (long p = 0; p < length; p++) {")
+  push(l, "    total = total + exp(a[base + p * after] - m);")
+  push(l, "  }")
+  push(l, "  out[i * after + j] = m + log(total);")
+  push(l, "}")
+  push(l, "")
+  push(l, "// The softmax gradient: s * (g - dot(g, s)) within each run. The dot")
+  push(l, "// is over the run and is the whole content of the rule, because a")
+  push(l, "// softmax's outputs sum to 1 so raising one must lower the others.")
+  push(l, "// Same decomposition, and the dot accumulates in ascending order for")
+  push(l, "// the same reason everything else here does.")
+  push(l, "__kernel void k_softmax_vjp(__global const double* s,")
+  push(l, "                            __global const double* g,")
+  push(l, "                            __global double* out,")
+  push(l, "                            long before, long length, long after) {")
+  push(l, "  long i = get_global_id(1);")
+  push(l, "  long j = get_global_id(0);")
+  push(l, "  if (i >= before || j >= after) return;")
+  push(l, "  const long base = i * length * after + j;")
+  push(l, "  double dot = 0.0;")
+  push(l, "  for (long p = 0; p < length; p++) {")
+  push(l, "    const long o = base + p * after;")
+  push(l, "    dot = dot + g[o] * s[o];")
+  push(l, "  }")
+  push(l, "  for (long p = 0; p < length; p++) {")
+  push(l, "    const long o = base + p * after;")
+  push(l, "    out[o] = s[o] * (g[o] - dot);")
+  push(l, "  }")
+  push(l, "}")
+  push(l, "")
+  l
+}
+
+# ---- convolution and pooling -----------------------------------------------
+#
+# Decomposition: one work-item per output pixel, walking its whole receptive
+# field in scan order.
+#
+# This is the direct loop nest and not im2col. im2col turns a convolution into
+# one matmul and is several times faster on a CPU, and on a GPU it would
+# materialise a cin*kh*kw by oh*ow matrix, which on an 8GB card shared with the
+# display is the wrong thing to spend memory on. src/tensor.tw makes the same
+# choice for a different reason, that the loop nest is the definition of the
+# operation and the gradient rule is read against it, and both reasons hold.
+#
+# The parallelism is ample without it: a [64, 32, 32] output is 65536
+# independent work-items on a 36-CU card.
+fn conv_src() -> Arr[Str] {
+  let l: Arr[Str] = arr_new()
+  push(l, "// Cross-correlation, which machine learning calls convolution: the")
+  push(l, "// kernel is not flipped. Valid padding, unit stride, no dilation, no")
+  push(l, "// groups, exactly as src/tensor.tw conv2d.")
+  push(l, "__kernel void k_conv2d(__global const double* input,")
+  push(l, "                       __global const double* weight,")
+  push(l, "                       __global double* out,")
+  push(l, "                       long cin, long h, long w,")
+  push(l, "                       long kh, long kw, long oh, long ow) {")
+  push(l, "  const long co = get_global_id(2);")
+  push(l, "  const long i  = get_global_id(1);")
+  push(l, "  const long j  = get_global_id(0);")
+  push(l, "  if (i >= oh || j >= ow) return;")
+  push(l, "  const long hw = h * w;")
+  push(l, "  const long khw = kh * kw;")
+  push(l, "  const long cinkhw = cin * khw;")
+  push(l, "  double sum = 0.0;")
+  push(l, "  // Channel outermost, then kernel row, then kernel column. This is")
+  push(l, "  // the src/tensor.tw loop order and it is the addition order, so it")
+  push(l, "  // is not free to change even though every permutation of it")
+  push(l, "  // computes the same mathematical quantity.")
+  push(l, "  for (long ci = 0; ci < cin; ci++) {")
+  push(l, "    for (long a = 0; a < kh; a++) {")
+  push(l, "      for (long b = 0; b < kw; b++) {")
+  push(l, "        sum = sum + input[ci * hw + (i + a) * w + (j + b)]")
+  push(l, "                  * weight[co * cinkhw + ci * khw + a * kw + b];")
+  push(l, "      }")
+  push(l, "    }")
+  push(l, "  }")
+  push(l, "  out[co * oh * ow + i * ow + j] = sum;")
+  push(l, "}")
+  push(l, "")
+  push(l, "// Non-overlapping k by k max pooling per channel. A ragged remainder")
+  push(l, "// along either spatial axis is dropped rather than padded, because")
+  push(l, "// padding with anything finite would let an invented value win a max.")
+  push(l, "//")
+  push(l, "// The tie-break is > and not >=, so the FIRST maximum in scan order")
+  push(l, "// wins. That one character decides which input receives the gradient,")
+  push(l, "// and every pooled relu output has a flat region in it, so a kernel")
+  push(l, "// using >= would produce a different and equally plausible gradient")
+  push(l, "// on essentially every real input.")
+  push(l, "__kernel void k_maxpool2d(__global const double* input,")
+  push(l, "                          __global double* out,")
+  push(l, "                          __global double* arg,")
+  push(l, "                          long h, long w, long k,")
+  push(l, "                          long oh, long ow) {")
+  push(l, "  const long ch = get_global_id(2);")
+  push(l, "  const long i  = get_global_id(1);")
+  push(l, "  const long j  = get_global_id(0);")
+  push(l, "  if (i >= oh || j >= ow) return;")
+  push(l, "  const long hw = h * w;")
+  push(l, "  long best_idx = ch * hw + (i * k) * w + (j * k);")
+  push(l, "  double best = input[best_idx];")
+  push(l, "  for (long a = 0; a < k; a++) {")
+  push(l, "    for (long b = 0; b < k; b++) {")
+  push(l, "      const long idx = ch * hw + (i * k + a) * w + (j * k + b);")
+  push(l, "      if (input[idx] > best) { best = input[idx]; best_idx = idx; }")
+  push(l, "    }")
+  push(l, "  }")
+  push(l, "  const long o = ch * oh * ow + i * ow + j;")
+  push(l, "  out[o] = best;")
+  push(l, "  // The winner index, kept so the backward pass does not recompute")
+  push(l, "  // the tie-break and get it subtly different. It is a double because")
+  push(l, "  // every device buffer in this backend is a double buffer, and an")
+  push(l, "  // index into a tensor cannot exceed 2^53 without the tensor being")
+  push(l, "  // larger than any device this will run on.")
+  push(l, "  arg[o] = (double)best_idx;")
+  push(l, "}")
+  push(l, "")
+  push(l, "// Scatter for the pooling gradient: each output cell's cotangent goes")
+  push(l, "// to the one input that won its window. No two windows share a")
+  push(l, "// winner, because the windows do not overlap, which is why this can")
+  push(l, "// be a plain scatter with no atomic. Overlapping pooling would need")
+  push(l, "// one and would therefore need a different design.")
+  push(l, "__kernel void k_maxpool2d_vjp(__global const double* g,")
+  push(l, "                              __global const double* arg,")
+  push(l, "                              __global double* out, long n) {")
+  push(l, "  long i = get_global_id(0);")
+  push(l, "  if (i < n) out[(long)arg[i]] = g[i];")
+  push(l, "}")
+  push(l, "")
+  l
+}
+
+# ---- assembly --------------------------------------------------------------
+#
+# One program per device holding every kernel, built once per run. Kernel lookup
+# is cheap; program build is not, so building forty kernels the program might
+# not use is still cheaper than building the three it does use in three separate
+# programs.
+#
+# `tile` is baked in here rather than passed at launch, which is why the whole
+# program is a function of it. matmul.tw picks it from the device's maximum
+# work-group size and its local memory, and a device that changed its mind
+# between runs would simply build a different program.
+fn program_source(tile: I64) -> Str {
+  let lines: Arr[Str] = arr_new()
+  append_all(lines, prelude())
+  append_all(lines, probe_src())
+  append_all(lines, elementwise_src())
+  append_all(lines, matmul_src(tile))
+  append_all(lines, reduce_src())
+  append_all(lines, softmax_src())
+  append_all(lines, conv_src())
+  bytes.join(lines, "\n")
+}
+
+fn append_all(dst: Arr[Str], src: Arr[Str]) {
+  let i: I64 = 0
+  while i < len(src) {
+    push(dst, src[i])
+    i = i + 1
+  }
+}

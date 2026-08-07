@@ -1,0 +1,183 @@
+mode systems
+
+# autodiff.tw: how the tape and the backward pass interact with a device.
+#
+# src/tensor.tw records a flat tape: each TapeEntry holds an op, the indices of
+# earlier entries, and the output tensor, and `backward` walks it in reverse
+# accumulating cotangents. The question this file answers is what changes when
+# `out` may live on a GPU, and the short answer is less than it looks.
+#
+# The tape never inspects the bytes of `out`. It stores it and hands it to a vjp
+# function. Only the vjp functions look inside, and the vjp functions are built
+# from the same forward kernels: vjp_matmul is a transpose2d and two mm calls,
+# vjp_softmax is a dot along a run and two elementwise ops, vjp_binary is
+# elementwise plus a sum_to_shape. So the backward pass introduces no primitive
+# the forward pass does not already have, and if the forward kernels are
+# device-resident then the backward ones are too, by construction. There is no
+# separate backward device path to write, and that is worth stating because it
+# is the part of this design most likely to be assumed hard.
+#
+# Two places would force a transfer per node if written naively, and both are
+# avoidable. They are the whole content of this file.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/buffer" as buf
+import "src/gpu/dispatch" as disp
+import "tensor.tw" as tensor
+
+# ---- 1. accumulate ---------------------------------------------------------
+#
+# `accumulate` adds an incoming cotangent into a node's slot. On the host it is
+# a loop over a buffer. Written naively on a device it would be: download the
+# slot, add on the host, upload the slot. That is two crossings per tape node,
+# which for a hundred-node graph is two hundred crossings at roughly 80us each
+# per training step, and it would make a device backward pass slower than the
+# host one by a wide margin regardless of how fast the kernels were.
+#
+# So it is the elementwise add kernel writing into the existing device buffer.
+# This is the only place in the backend where a buffer is written twice, and the
+# only place that departs from the value semantics the rest of the design leans
+# on, so it needs the safety argument spelled out rather than assumed:
+#
+#   - A cotangent slot is private to one backward pass. Nothing outside
+#     `backward` holds a reference to it.
+#   - The tape is walked in reverse index order on the host, one node at a time,
+#     with a finish after each launch. Two accumulations into the same slot are
+#     therefore separated by a synchronise and cannot race.
+#   - The slot is never a tensor the user can observe. `backward` returns fresh
+#     tensors built from the finished slots.
+#
+# Take any of those three away and this becomes unsafe. In particular, the day
+# the queue is allowed to run ahead (docs/gpu.md section 3 says that is the
+# first optimisation to take), the second point stops holding and this needs an
+# explicit dependency between the two launches.
+fn accumulate(c: disp.Ctx, slot: buf.DeviceTensor,
+              incoming: buf.DeviceTensor) -> Res[Unit, Str] {
+  let inc: buf.DeviceTensor = buf.ensure_device(c.pool, incoming)?
+  if slot.buf.length != inc.buf.length {
+    return Err("gpu.accumulate: cotangent and slot differ in length")
+  }
+  let k: dev.Kernel = dev.kernel(c.program, "k_accumulate")?
+  dev.arg_buffer(k, 0, slot.buf)?
+  dev.arg_buffer(k, 1, inc.buf)?
+  dev.arg_i64(k, 2, slot.buf.length)?
+  let g: Arr[I64] = arr_new()
+  push(g, slot.buf.length)
+  disp.run(c, k, g, arr_new())
+}
+
+# ---- 2. touched ------------------------------------------------------------
+#
+# `touched` is the flag array saying whether a cotangent slot has been written
+# yet, so that the first contribution can be a move rather than an add into
+# zeros. It is host-side bookkeeping over node indices and never touches tensor
+# data, so it stays on the host and costs nothing.
+#
+# This is recorded rather than left implicit because it is the kind of array
+# that gets swept onto the device by a well-meaning refactor that notices it is
+# indexed in the same loop as the tensors. It is Arr[Bool] over the tape, not
+# over elements, and moving it would be pure loss.
+struct BackwardState {
+  # One slot per tape entry. LocHost with an empty host buffer means untouched.
+  cot: Arr[buf.DeviceTensor],
+  touched: Arr[Bool],
+}
+
+fn new_state(n: I64) -> BackwardState {
+  let cot: Arr[buf.DeviceTensor] = arr_new()
+  let touched: Arr[Bool] = arr_new()
+  let i: I64 = 0
+  while i < n {
+    push(cot, buf.from_host(arr_new(), arr_new()))
+    push(touched, false)
+    i = i + 1
+  }
+  BackwardState { cot: cot, touched: touched }
+}
+
+# The first contribution to a slot takes the incoming tensor whole, which saves
+# both an allocation and a zero-fill. Every later one accumulates in place.
+# src/tensor.tw's accumulate makes the same distinction for the same reason.
+fn contribute(c: disp.Ctx, st: BackwardState, node: I64,
+              g: buf.DeviceTensor) -> Res[Unit, Str] {
+  if !st.touched[node] {
+    st.cot[node] = g
+    st.touched[node] = true
+    return Ok(unit)
+  }
+  accumulate(c, st.cot[node], g)
+}
+
+# ---- device memory is the resource that runs out ---------------------------
+#
+# A tape entry pins its output alive. On the host that costs memory. On a device
+# it costs device memory, which on the card in the development machine is 8GB
+# shared with the display, and a training step whose activations are all
+# resident can exceed that where the host copy would have been fine.
+#
+# The eviction rule in src/gpu/buffer.tw covers it, because an activation whose
+# host copy exists is LocBoth and therefore evictable. But the honest statement
+# is that this is the resource this design is most likely to exhaust first, and
+# the mitigation is a fallback rather than a fix: the run gets slower, not
+# wrong.
+#
+# There is a known flaw in the eviction order for exactly this case. Oldest
+# first evicts weights before activations, and weights are the tensors that
+# should never be evicted, because they are re-uploaded every step forever while
+# an activation is used once. Pinning tape leaves is the fix and it is not
+# written, because pinning without a measurement of how often it bites would be
+# tuning against an imagined profile.
+fn should_pin(tp: tensor.Tape, node: I64) -> Bool {
+  let i: I64 = 0
+  while i < len(tp.leaves) {
+    if tp.leaves[i] == node { return true }
+    i = i + 1
+  }
+  false
+}
+
+# ---- ops with no device kernel ---------------------------------------------
+#
+# sort, argsort, topk, median and einsum have no kernel. Their operands come
+# down, they run on the host, and their result stays on the host. That is
+# correct and it is slow, and the dispatch model already accounts for it,
+# because the next device op will see a cold operand and charge itself for the
+# re-upload.
+#
+# A backward pass through a median is going to be slow. That is a true statement
+# about the op and not a flaw in the design, and it is written down so that the
+# first person to profile it does not go looking for a bug.
+fn has_device_kernel(op: tensor.Op) -> Bool {
+  match op {
+    OpAdd => true, OpSub => true, OpMul => true, OpDiv => true, OpMod => true,
+    OpMaximum => true, OpMinimum => true,
+    OpGreater => true, OpLess => true, OpGreaterEqual => true,
+    OpLessEqual => true, OpEqual => true,
+    OpNeg => true, OpRelu => true, OpSquare => true, OpClip => true,
+    OpWhere => true, OpMatMul => true,
+    OpSum => true, OpMean => true, OpMax => true, OpMin => true, OpProd => true,
+    OpArgmax => true, OpArgmin => true,
+    OpConv2D => true, OpMaxPool2D => true,
+    OpTranspose => true,
+    # Softmax and logsumexp have kernels and are not listed, because they call
+    # exp and src/gpu/softmax.tw refuses them until NEEDS-68's algorithm exists
+    # in kernel source. Listing them here would be the one edit that turns a
+    # correct backend into one that is off by an ulp on every sigmoid.
+    _ => false,
+  }
+}
+
+# ---- second order ----------------------------------------------------------
+#
+# `hessian` in src/tensor.tw runs forward-mode jets over the same kernels. A jet
+# doubles the arithmetic and keeps the shapes, so nothing about residency
+# changes and every kernel here would work over a jet's value and derivative
+# parts as two buffers.
+#
+# No device work is planned for jets in the first version and a jet run stays on
+# the host entirely. That is a decision and not an omission: doubling the
+# kernel count to serve an op that appears in one place would be a lot of
+# surface for no measured demand, and the pair-of-buffers representation should
+# be designed once rather than twice.
+fn jets_on_device() -> Bool = false

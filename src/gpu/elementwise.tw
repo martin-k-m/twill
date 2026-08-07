@@ -1,0 +1,182 @@
+mode systems
+
+# elementwise.tw: the host side of the binary, unary and where kernels.
+#
+# Parallel decomposition: one work-item per output element.
+#
+# That is the only decomposition that makes sense here and it is worth saying
+# why rather than treating it as obvious. Every output element depends on
+# exactly one element of each operand. There is no reuse to exploit, so local
+# memory buys nothing; there is no accumulation, so there is no order to
+# preserve and nothing about determinism is at risk. The kernel is bandwidth
+# bound from the first line and the only thing that matters is that each element
+# is read once and written once.
+#
+# Which is also why the dispatch model will almost always refuse to offload one
+# of these on its own. An elementwise op over n elements moves 3n doubles and
+# does n operations, so on a cold operand the transfer dominates by orders of
+# magnitude and the CPU wins every time. These kernels earn their place only
+# when their operands are already on the device, which is the ordinary case
+# inside a chain and never the case for an isolated op. src/gpu/dispatch.tw
+# should_offload expresses exactly that, because `moved` is zero for a resident
+# operand.
+
+import "bytes.tw" as bytes
+import "src/gpu/device" as dev
+import "src/gpu/buffer" as buf
+import "src/gpu/dispatch" as disp
+import "tensor.tw" as tensor
+
+# The kernel's op codes. This function is the only place in the repository that
+# knows both the Op enum in src/tensor.tw and the #define table in
+# src/gpu/source.tw, which is why both sides say so: renumbering one without the
+# other produces a wrong answer and not an error, since every code is a valid
+# code for something.
+#
+# Returns -1 for an op with no elementwise kernel, which is the signal to stay
+# on the host. The transcendentals are all in that group, and not by accident:
+# OpenCL specifies exp, log, sin, cos, tanh and sqrt to within a few ulp, and
+# NEEDS-68 requires the same bits as Go's math package rather than within a few
+# ulp. docs/gpu.md section 5 has the full argument and the two routes out.
+fn op_code(op: tensor.Op) -> I64 {
+  match op {
+    OpAdd => 0, OpSub => 1, OpMul => 2, OpDiv => 3, OpMod => 4,
+    OpMaximum => 5, OpMinimum => 6,
+    OpGreater => 7, OpLess => 8, OpGreaterEqual => 9, OpLessEqual => 10,
+    OpEqual => 11,
+    _ => -1,
+  }
+}
+
+fn unary_code(op: tensor.Op) -> I64 {
+  match op {
+    OpNeg => 0, OpRelu => 1, OpSquare => 2, OpClip => 3,
+    _ => -1,
+  }
+}
+
+# ---- binary ----------------------------------------------------------------
+#
+# The broadcast metadata is built here rather than in the kernel: the output
+# shape and each operand's effective strides, with a zero stride on every
+# broadcast axis. That zero is what makes a broadcast free. The kernel reads the
+# same element repeatedly instead of reading an expanded copy, so a [1, 768]
+# bias against a [512, 768] activation costs 768 doubles of device memory and
+# not 393216. On an 8GB card shared with a display that is not a micro
+# optimisation, it is the difference between fitting and not.
+fn binary(c: disp.Ctx, op: tensor.Op,
+          a: buf.DeviceTensor, b: buf.DeviceTensor) -> Res[buf.DeviceTensor, Str] {
+  let code: I64 = op_code(op)
+  if code < 0 {
+    return Err(bytes.concat("gpu: no device kernel for ", tensor.op_name(op)))
+  }
+  let out_shape: Arr[I64] = tensor.broadcast_shape(a.shape, b.shape)?
+  let n: I64 = buf.element_count(out_shape)
+  let rank: I64 = len(out_shape)
+
+  let ad: buf.DeviceTensor = buf.ensure_device(c.pool, a)?
+  let bd: buf.DeviceTensor = buf.ensure_device(c.pool, b)?
+  let out: buf.DeviceTensor = buf.device_output(c.pool, out_shape)?
+
+  let shape_buf: dev.Buffer = buf.meta_buffer(c.pool, c.meta, out_shape)?
+  # One buffer holding a's strides then b's, because a kernel argument list is
+  # fixed at compile time and passing two arrays would need two more arguments
+  # to describe their lengths. The kernel offsets into the second half by rank.
+  let strides: Arr[I64] = arr_new()
+  append_i64(strides, tensor.eff_strides(a.shape, out_shape))
+  append_i64(strides, tensor.eff_strides(b.shape, out_shape))
+  let stride_buf: dev.Buffer = buf.meta_buffer(c.pool, c.meta, strides)?
+
+  let k: dev.Kernel = dev.kernel(c.program, "k_binary")?
+  dev.arg_buffer(k, 0, ad.buf)?
+  dev.arg_buffer(k, 1, bd.buf)?
+  dev.arg_buffer(k, 2, out.buf)?
+  dev.arg_buffer(k, 3, shape_buf)?
+  dev.arg_buffer(k, 4, stride_buf)?
+  dev.arg_i64(k, 5, rank)?
+  dev.arg_i64(k, 6, code)?
+  dev.arg_i64(k, 7, n)?
+  disp.run(c, k, one_dim(n), arr_new())?
+  Ok(out)
+}
+
+# ---- unary -----------------------------------------------------------------
+#
+# No broadcast, no metadata, no strides. The simplest kernel in the backend and
+# the one whose host side is therefore worth keeping visibly simple, so that the
+# complexity in binary above reads as necessary rather than as habit.
+fn unary(c: disp.Ctx, op: tensor.Op, a: buf.DeviceTensor,
+         p0: F64, p1: F64) -> Res[buf.DeviceTensor, Str] {
+  let code: I64 = unary_code(op)
+  if code < 0 {
+    return Err(bytes.concat("gpu: no device kernel for ", tensor.op_name(op)))
+  }
+  let ad: buf.DeviceTensor = buf.ensure_device(c.pool, a)?
+  let out: buf.DeviceTensor = buf.device_output(c.pool, a.shape)?
+  let n: I64 = ad.buf.length
+  let k: dev.Kernel = dev.kernel(c.program, "k_unary")?
+  dev.arg_buffer(k, 0, ad.buf)?
+  dev.arg_buffer(k, 1, out.buf)?
+  dev.arg_i64(k, 2, code)?
+  dev.arg_f64(k, 3, p0)?
+  dev.arg_f64(k, 4, p1)?
+  dev.arg_i64(k, 5, n)?
+  disp.run(c, k, one_dim(n), arr_new())?
+  Ok(out)
+}
+
+# ---- where -----------------------------------------------------------------
+#
+# Three operands, three stride blocks, one work-item per output. The condition
+# is a tensor of ones and zeros rather than a bool tensor, because src/tensor.tw
+# has no bool tensor and a comparison produces 1.0 or 0.0. The kernel tests
+# `!= 0.0` for the same reason, which means a NaN condition selects the `a`
+# branch. That matches the host, which is the requirement; whether it is a good
+# rule is a question for src/tensor.tw and not for this file.
+fn where3(c: disp.Ctx, cond: buf.DeviceTensor, a: buf.DeviceTensor,
+          b: buf.DeviceTensor) -> Res[buf.DeviceTensor, Str] {
+  let ab: Arr[I64] = tensor.broadcast_shape(a.shape, b.shape)?
+  let out_shape: Arr[I64] = tensor.broadcast_shape(cond.shape, ab)?
+  let rank: I64 = len(out_shape)
+  let n: I64 = buf.element_count(out_shape)
+
+  let cd: buf.DeviceTensor = buf.ensure_device(c.pool, cond)?
+  let ad: buf.DeviceTensor = buf.ensure_device(c.pool, a)?
+  let bd: buf.DeviceTensor = buf.ensure_device(c.pool, b)?
+  let out: buf.DeviceTensor = buf.device_output(c.pool, out_shape)?
+
+  let shape_buf: dev.Buffer = buf.meta_buffer(c.pool, c.meta, out_shape)?
+  let strides: Arr[I64] = arr_new()
+  append_i64(strides, tensor.eff_strides(cond.shape, out_shape))
+  append_i64(strides, tensor.eff_strides(a.shape, out_shape))
+  append_i64(strides, tensor.eff_strides(b.shape, out_shape))
+  let stride_buf: dev.Buffer = buf.meta_buffer(c.pool, c.meta, strides)?
+
+  let k: dev.Kernel = dev.kernel(c.program, "k_where")?
+  dev.arg_buffer(k, 0, cd.buf)?
+  dev.arg_buffer(k, 1, ad.buf)?
+  dev.arg_buffer(k, 2, bd.buf)?
+  dev.arg_buffer(k, 3, out.buf)?
+  dev.arg_buffer(k, 4, shape_buf)?
+  dev.arg_buffer(k, 5, stride_buf)?
+  dev.arg_i64(k, 6, rank)?
+  dev.arg_i64(k, 7, n)?
+  disp.run(c, k, one_dim(n), arr_new())?
+  Ok(out)
+}
+
+# ---- shared ----------------------------------------------------------------
+
+fn one_dim(n: I64) -> Arr[I64] {
+  let g: Arr[I64] = arr_new()
+  push(g, n)
+  g
+}
+
+fn append_i64(dst: Arr[I64], src: Arr[I64]) {
+  let i: I64 = 0
+  while i < len(src) {
+    push(dst, src[i])
+    i = i + 1
+  }
+}
