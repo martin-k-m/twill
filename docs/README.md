@@ -25,6 +25,7 @@ The [README](../README.md) is the tour; this is the index.
 | [design.md](design.md) | Why twill is built the way it is, the principles it holds to, and the roadmap. |
 | [finance.md](finance.md) | Where twill can beat a Python stack for financial ML, and where it cannot. Written as an assessment, not a pitch. |
 | [gpu-feasibility.md](gpu-feasibility.md) | Should twill get a GPU backend? Measured on one machine, with the numbers. The answer is not yet, and the reasoning is the useful part. |
+| [gpu.md](gpu.md) | The design for the backend the feasibility document says not to build yet. Which API, how the offload threshold gets measured rather than guessed, how tensors stay resident, and how the determinism guarantee survives a GPU. |
 
 ## The implementation, and where it is going
 
