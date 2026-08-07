@@ -555,6 +555,13 @@ either the implementation ropes them or a `Bytes` builder is exposed and these
 files are rewritten against it. Flagging it now rather than discovering it on a
 200-column progress bar.
 
+*Already half answered.* `src/bytes.tw` exists and wraps exactly this surface
+(`bytes_new`, `bytes_push`, `bytes_to_str`, plus `concat`, `join` and `repeat`).
+The CLI should be moved onto it once the primitives land, which would delete the
+private `join` in `src/term/ansi.tw` and the private `repeat` in
+`src/term/width.tw`. They are written out here only because `src/term/` was
+built before that file existed.
+
 ## NEEDS-36 - `arr(...)` as a literal constructor
 
 **Status:** blocking.
