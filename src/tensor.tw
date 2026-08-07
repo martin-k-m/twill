@@ -1951,3 +1951,358 @@ fn gather(x: Tensor, idx: Arr[I64]) -> Res[Tensor, Str] {
   shape[0] = len(idx)
   Ok(Tensor { shape: shape, data: out })
 }
+# ---- einsum ----------------------------------------------------------------
+#
+# Complete, and complete on purpose: src/check.tw calls parse_einsum to validate
+# a literal spec, and a second implementation of the parser would mean a second
+# set of error messages for the same mistake. Sharing it is the reason the
+# checker's einsum diagnostics read the same as the runtime's.
+
+struct EinsumSpec {
+  inputs: Arr[Str],
+  output: Str,
+}
+
+# parse_einsum parses a spec like "ij,jk->ik" for n inputs. Without an explicit
+# "->", the output is the labels that appear exactly once, in sorted order,
+# which is the NumPy implicit convention. Repeated labels within a single input
+# subscript, which would mean a trace or a diagonal, are not supported.
+fn parse_einsum(spec_in: Str, n: I64) -> Res[EinsumSpec, Str] {
+  let spec: Str = remove_spaces(spec_in)
+  let in_part: Str = spec
+  let out_sub: Str = ""
+  let explicit: Bool = false
+  let arrow: I64 = bytes.index_of(spec, "->")
+  if arrow >= 0 {
+    in_part = spec[0:arrow]
+    out_sub = spec[arrow + 2:len(spec)]
+    explicit = true
+  }
+  let in_subs: Arr[Str] = split_on(in_part, 44)
+  if len(in_subs) != n {
+    return Err(bytes.concat("einsum: spec has ", bytes.concat(str(len(in_subs)),
+      bytes.concat(" operands but got ", str(n)))))
+  }
+
+  # counts is label to occurrence count across all operands. It decides the
+  # implicit output and validates an explicit one, so it is built first.
+  let counts: Dict[Str, I64] = dict_new()
+  let k: I64 = 0
+  while k < len(in_subs) {
+    let sub: Str = in_subs[k]
+    let seen: Dict[Str, Bool] = dict_new()
+    let i: I64 = 0
+    while i < len(sub) {
+      let ch: Str = sub[i:i + 1]
+      if sub[i] < 97 or sub[i] > 122 {
+        return Err(bytes.concat("einsum: labels must be lowercase letters, found ", quoted(ch)))
+      }
+      if dict_has(seen, ch) {
+        return Err(bytes.concat("einsum: repeated label ", bytes.concat(quoted(ch),
+          " within one operand is not supported")))
+      }
+      dict_set(seen, ch, true)
+      dict_set(counts, ch, dict_or(counts, ch, 0) + 1)
+      i = i + 1
+    }
+    k = k + 1
+  }
+
+  if not explicit {
+    # A label that appears once is a free index and survives; one that appears
+    # twice or more is summed over. Sorted so the result does not depend on the
+    # order the labels happened to be written in, which is the property that
+    # makes the implicit form usable at all.
+    let once: Arr[Str] = arr_new()
+    for ch in dict_keys(counts) {
+      if dict_must(counts, ch) == 1 {
+        push(once, ch)
+      }
+    }
+    sort_labels(once)
+    out_sub = bytes.join(once, "")
+  }
+
+  let oseen: Dict[Str, Bool] = dict_new()
+  let i: I64 = 0
+  while i < len(out_sub) {
+    let ch: Str = out_sub[i:i + 1]
+    if dict_or(counts, ch, 0) == 0 {
+      return Err(bytes.concat("einsum: output label ", bytes.concat(quoted(ch),
+        " does not appear in the inputs")))
+    }
+    if dict_has(oseen, ch) {
+      return Err(bytes.concat("einsum: repeated output label ", quoted(ch)))
+    }
+    dict_set(oseen, ch, true)
+    i = i + 1
+  }
+  Ok(EinsumSpec { inputs: in_subs, output: out_sub })
+}
+
+# einsum_output_dims resolves the output shape from the input shapes. A
+# dimension may be -1 for unknown, which is how the checker calls it; at run
+# time every dimension is known and the inconsistency check below is exact.
+fn einsum_output_dims(in_subs: Arr[Str], out_sub: Str, input_dims: Arr[Arr[I64]]) -> Res[Arr[I64], Str] {
+  let label_dim: Dict[Str, I64] = dict_new()
+  let k: I64 = 0
+  while k < len(in_subs) {
+    let sub: Str = in_subs[k]
+    if len(sub) != len(input_dims[k]) {
+      return Err(bytes.concat("einsum: operand ", bytes.concat(str(k),
+        bytes.concat(" has rank ", bytes.concat(str(len(input_dims[k])),
+        bytes.concat(" but subscript ", bytes.concat(quoted(sub),
+        bytes.concat(" has ", bytes.concat(str(len(sub)), " labels")))))))))
+    }
+    let a: I64 = 0
+    while a < len(sub) {
+      let ch: Str = sub[a:a + 1]
+      let d: I64 = input_dims[k][a]
+      match dict_get(label_dim, ch) {
+        Some(prev) => {
+          if prev >= 0 and d >= 0 and prev != d {
+            return Err(bytes.concat("einsum: label ", bytes.concat(quoted(ch),
+              bytes.concat(" has inconsistent sizes ", bytes.concat(str(prev),
+              bytes.concat(" and ", str(d)))))))
+          }
+          # An unknown recorded earlier is replaced by a known size found later,
+          # so the order the operands are written in does not change the answer.
+          if prev < 0 {
+            dict_set(label_dim, ch, d)
+          }
+        },
+        None => dict_set(label_dim, ch, d),
+      }
+      a = a + 1
+    }
+    k = k + 1
+  }
+  let out: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < len(out_sub) {
+    push(out, dict_or(label_dim, out_sub[i:i + 1], -1))
+    i = i + 1
+  }
+  Ok(out)
+}
+
+fn remove_spaces(s: Str) -> Str {
+  let b: Bytes = bytes.new()
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] != 32 {
+      bytes.push(b, s[i])
+    }
+    i = i + 1
+  }
+  bytes.to_str(b)
+}
+
+# Split on a single byte, keeping empty fields. Empty fields matter: "ij,,k" has
+# three operands and the count check has to see all three, or the error names
+# the wrong number.
+fn split_on(s: Str, sep: I64) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i <= len(s) {
+    if i == len(s) or s[i] == sep {
+      push(out, s[start:i])
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+# Single-byte labels, so a bytewise insertion sort is a full sort. Same shape as
+# the one in check.tw and kept separate rather than shared, because a module
+# that both the checker and the runtime depend on for a two-line sort is a
+# dependency edge that buys nothing.
+fn sort_labels(xs: Arr[Str]) {
+  let i: I64 = 1
+  while i < len(xs) {
+    let v: Str = xs[i]
+    let j: I64 = i - 1
+    while j >= 0 and xs[j][0] > v[0] {
+      xs[j + 1] = xs[j]
+      j = j - 1
+    }
+    xs[j + 1] = v
+    i = i + 1
+  }
+}
+
+fn quoted(s: Str) -> Str = str_quote(s)
+
+# ---- the einsum contraction ------------------------------------------------
+#
+# The parser above says which labels each operand carries and which survive into
+# the output. The contraction is what is left: walk the product space of every
+# distinct label once, multiply one element from each operand, and accumulate
+# into the output slot the free labels select.
+#
+# Summation falls out of that rather than being coded: a label that is not in
+# the output subscript has an output stride of zero, so every position along it
+# accumulates into the same output element. That is the whole trick, and it is
+# why this handles a trace-free einsum of any arity with one loop.
+
+# The distinct labels across all operands, in first-appearance order, with their
+# sizes. Order does not affect the result, only the traversal, but a fixed order
+# makes a dumped tape reproducible.
+struct EinsumPlan {
+  labels: Arr[Str],
+  dims: Arr[I64],
+  # contrib[k][li] is the stride into operand k when label li advances; the last
+  # entry is the output.
+  contrib: Arr[Arr[I64]],
+  out_shape: Arr[I64],
+}
+
+fn einsum_plan(in_subs: Arr[Str], out_sub: Str, inputs: Arr[Tensor]) -> Res[EinsumPlan, Str] {
+  let k: I64 = 0
+  while k < len(in_subs) {
+    if len(in_subs[k]) != len(inputs[k].shape) {
+      return Err(bytes.concat("einsum: operand ", bytes.concat(str(k),
+        bytes.concat(" has rank ", bytes.concat(str(len(inputs[k].shape)),
+        bytes.concat(" but subscript ", bytes.concat(quoted(in_subs[k]),
+        bytes.concat(" has ", bytes.concat(str(len(in_subs[k])), " labels")))))))))
+    }
+    k = k + 1
+  }
+  let input_dims: Arr[Arr[I64]] = arr_new()
+  k = 0
+  while k < len(inputs) {
+    push(input_dims, inputs[k].shape)
+    k = k + 1
+  }
+  let out_shape: Arr[I64] = einsum_output_dims(in_subs, out_sub, input_dims)?
+
+  let label_dim: Dict[Str, I64] = dict_new()
+  let labels: Arr[Str] = arr_new()
+  k = 0
+  while k < len(in_subs) {
+    let a: I64 = 0
+    while a < len(in_subs[k]) {
+      let ch: Str = in_subs[k][a:a + 1]
+      if not dict_has(label_dim, ch) {
+        dict_set(label_dim, ch, inputs[k].shape[a])
+        push(labels, ch)
+      }
+      a = a + 1
+    }
+    k = k + 1
+  }
+  let l: I64 = len(labels)
+  let dims: Arr[I64] = arr_new()
+  let label_index: Dict[Str, I64] = dict_new()
+  let i: I64 = 0
+  while i < l {
+    push(dims, dict_must(label_dim, labels[i]))
+    dict_set(label_index, labels[i], i)
+    i = i + 1
+  }
+
+  # One contribution row per operand, plus one for the output. Strides are
+  # added into the row rather than assigned. The parser rejects a repeated label
+  # within one operand today, so the add never fires twice; it is written as an
+  # add so that allowing a trace later ("ii->i") is a parser change and not a
+  # contraction change, because summing the two strides is exactly what walking
+  # a diagonal means.
+  let contrib: Arr[Arr[I64]] = arr_new()
+  k = 0
+  while k < len(inputs) + 1 {
+    let row: Arr[I64] = arr_new()
+    i = 0
+    while i < l {
+      push(row, 0)
+      i = i + 1
+    }
+    push(contrib, row)
+    k = k + 1
+  }
+  k = 0
+  while k < len(inputs) {
+    let st: Arr[I64] = strides_of(inputs[k].shape)
+    let a: I64 = 0
+    while a < len(in_subs[k]) {
+      let li: I64 = dict_must(label_index, in_subs[k][a:a + 1])
+      contrib[k][li] = contrib[k][li] + st[a]
+      a = a + 1
+    }
+    k = k + 1
+  }
+  let out_str: Arr[I64] = strides_of(out_shape)
+  let a: I64 = 0
+  while a < len(out_sub) {
+    let li: I64 = dict_must(label_index, out_sub[a:a + 1])
+    contrib[len(inputs)][li] = out_str[a]
+    a = a + 1
+  }
+  Ok(EinsumPlan { labels: labels, dims: dims, contrib: contrib, out_shape: out_shape })
+}
+
+fn einsum_raw(in_subs: Arr[Str], out_sub: Str, inputs: Arr[Tensor]) -> Res[Tensor, Str] {
+  let plan: EinsumPlan = einsum_plan(in_subs, out_sub, inputs)?
+  let out: Arr[F64] = alloc(element_count(plan.out_shape))
+  let total: I64 = element_count(plan.dims)
+  let odo: Odometer = odo_new(plan.dims, plan.contrib)
+  let out_slot: I64 = len(inputs)
+  let step: I64 = 0
+  while step < total {
+    let prod: F64 = 1.0
+    let k: I64 = 0
+    while k < len(inputs) {
+      prod = prod * inputs[k].data[odo.offs[k]]
+      k = k + 1
+    }
+    out[odo.offs[out_slot]] = out[odo.offs[out_slot]] + prod
+    odo_step(odo)
+    step = step + 1
+  }
+  Ok(Tensor { shape: plan.out_shape, data: out })
+}
+
+# einsum parses the spec and contracts.
+#
+# Gradient: an einsum is multilinear in its operands, so the derivative with
+# respect to operand p is another einsum. Take the original, replace operand p
+# by the upstream cotangent, swap operand p's subscript into the output position
+# and the old output subscript into the input position, and contract. In symbols,
+# for "ij,jk->ik", the gradient of the first operand is "ik,jk->ij" over
+# (g, b), which is the g @ b^T everyone writes by hand for a matmul.
+#
+# The reason this is exactly right and not an analogy: einsum computes a sum of
+# products over an index space, each output element is a sum of terms each
+# linear in one element of operand p, and the coefficient of that element is the
+# product of the other operands' entries at the same point in the index space.
+# Summing coefficient times upstream over the contracted labels is precisely the
+# swapped einsum.
+#
+# The one thing it does not handle is a label that appears in an operand and not
+# in the output *and* not in any other operand, which sums an axis away with no
+# partner. The swapped einsum then has a label in its output that is in none of
+# its inputs, and the parser rejects it. That case is a plain sum and could be
+# special-cased; it is left as an error rather than guessed at, and it is the
+# one place below where the gradient is knowingly incomplete.
+fn einsum(spec: Str, inputs: Arr[Tensor]) -> Res[Tensor, Str] {
+  let parsed: EinsumSpec = parse_einsum(spec, len(inputs))?
+  einsum_raw(parsed.inputs, parsed.output, inputs)
+}
+
+# The gradient of operand p of an einsum, given the upstream cotangent.
+fn einsum_grad(parsed: EinsumSpec, inputs: Arr[Tensor], p: I64, g: Tensor) -> Res[Tensor, Str] {
+  let g_inputs: Arr[Tensor] = arr_new()
+  let g_subs: Arr[Str] = arr_new()
+  push(g_inputs, g)
+  push(g_subs, parsed.output)
+  let j: I64 = 0
+  while j < len(inputs) {
+    if j != p {
+      push(g_inputs, inputs[j])
+      push(g_subs, parsed.inputs[j])
+    }
+    j = j + 1
+  }
+  einsum_raw(g_subs, parsed.inputs[p], g_inputs)
+}
