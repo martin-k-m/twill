@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`tensor(...)` no longer discards the shape of its argument.** It returned an
+  unknown type, so `tensor([[1.0, 2.0], [3.0, 4.0]]) @ tensor([[1.0, 2.0, 3.0]])`
+  passed the checker and failed at run time. The literal already had a shape; the
+  call was throwing it away at the door.
+
+  A ragged literal still reports nothing here. It is already an error, and
+  inventing a shape for it would produce a second, imaginary error downstream
+  instead of the real one.
+
 ## [1.2.0] - 2026-08-06
 
 ### Added

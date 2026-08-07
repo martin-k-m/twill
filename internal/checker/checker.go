@@ -442,6 +442,60 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 	return tUnknown{}
 }
 
+// listDims reads the shape of a nested list literal, when it is one a tensor
+// can be built from.
+//
+// Ragged input reports no shape rather than the first row's. `[[1, 2], [3]]` is
+// an error at run time, and inventing a shape for it here would produce a
+// second, imaginary error somewhere downstream instead of the real one.
+func listDims(t Type) ([]int, bool) {
+	lst, ok := t.(tList)
+	if !ok || lst.elems == nil {
+		return nil, false
+	}
+	if len(lst.elems) == 0 {
+		return []int{0}, true
+	}
+
+	// Every element has to agree, both on being a list and on its shape, or the
+	// literal is ragged.
+	if _, nested := lst.elems[0].(tList); nested {
+		first, ok := listDims(lst.elems[0])
+		if !ok {
+			return nil, false
+		}
+		for _, el := range lst.elems[1:] {
+			d, ok := listDims(el)
+			if !ok || !sameDims(d, first) {
+				return nil, false
+			}
+		}
+		return append([]int{len(lst.elems)}, first...), true
+	}
+
+	// A flat list of scalars is one dimension. A scalar here is a tensor with
+	// no dimensions, which is how a number types in this checker.
+	for _, el := range lst.elems {
+		e, ok := el.(tTensor)
+		if !ok || len(e.dims) != 0 {
+			return nil, false
+		}
+	}
+	return []int{len(lst.elems)}, true
+}
+
+func sameDims(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *checker) inferTensorLit(ex *ast.TensorLit) Type {
 	var dims []int
 	ok := true
@@ -1038,7 +1092,24 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	case "str":
 		return tStr{}
-	case "grad", "grads", "value_and_grad", "jacobian", "hessian", "tensor":
+	case "tensor":
+		// A tensor built from a literal has a shape the checker can read, and
+		// reading it is most of what makes the checker worth running. The
+		// mistake people actually make is `tensor([[1, 2], [3, 4]]) @
+		// tensor([[1, 2, 3]])`, and it used to pass, because this returned
+		// unknown for every argument. Anything that is not a literal still does.
+		if len(argTypes) == 1 {
+			// A tensor literal was already given a shape on the way in, and
+			// `tensor(...)` around it was throwing that away.
+			if t, ok := argTypes[0].(tTensor); ok {
+				return t
+			}
+			if dims, ok := listDims(argTypes[0]); ok {
+				return tTensor{dims: dims}
+			}
+		}
+		return tUnknown{}
+	case "grad", "grads", "value_and_grad", "jacobian", "hessian":
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}

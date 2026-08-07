@@ -77,3 +77,38 @@ func TestDynamicCodeNoFalsePositive(t *testing.T) {
 			w = w - g * 0.1
 		}`)
 }
+
+// tensor(...) used to return an unknown type, which meant the shape of every
+// literal was thrown away at the door and the checker had nothing to check.
+func TestTensorLiteralKeepsItsShape(t *testing.T) {
+	wantOne(t, `let a = tensor([[1.0, 2.0], [3.0, 4.0]])
+let b = tensor([[1.0, 2.0, 3.0]])
+print(a @ b)`, "inner 2 != 1")
+}
+
+func TestATensorLiteralThatFitsIsNotReported(t *testing.T) {
+	// The half that decides whether anybody leaves the checker on.
+	src := `let a = tensor([[1.0, 2.0], [3.0, 4.0]])
+let b = tensor([[1.0], [2.0]])
+print(a @ b)`
+	if diags := diagnostics(t, src); len(diags) != 0 {
+		t.Fatalf("a valid multiply was reported: %v", diags)
+	}
+}
+
+func TestAFlatLiteralIsOneDimensional(t *testing.T) {
+	wantOne(t, `let v = tensor([1.0, 2.0, 3.0])
+let m = zeros(2, 2)
+print(m @ v)`, "inner 2 != 3")
+}
+
+func TestARaggedLiteralIsLeftToTheRuntime(t *testing.T) {
+	// It is already an error, and inventing a shape for it here would report a
+	// second, imaginary problem somewhere downstream instead of the real one.
+	for _, d := range diagnostics(t, `let a = tensor([[1.0, 2.0], [3.0]])
+print(a @ a)`) {
+		if strings.Contains(d.Msg, "inner") {
+			t.Errorf("a ragged literal produced an invented shape error: %v", d.Msg)
+		}
+	}
+}
