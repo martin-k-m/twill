@@ -883,15 +883,15 @@ renderings, which is what made it possible:
 - **`twill fmt`, 24,621 literals.** The formatted source against `f64_shortest`,
   of which 24,178 reached `%g` rather than `internal/format`'s integer fast
   path. Zero divergences.
-- **115,435 cases against the oracle**, covering what the binary cannot easily
+- **116,980 cases against the oracle**, covering what the binary cannot easily
   be driven over: 40,000 random f64 bit patterns, 16,000 subnormals of both
   signs, 17,997 values on the `%.6f` half-way boundary, 12,128 integral values
   across the `int64` fast path and its edges, 3,100 values either side of the
-  `%g` exponent switch, 2,074 float literals lifted out of `testdata/`,
+  `%g` exponent switch, 3,619 float literals lifted out of `testdata/`,
   `examples/` and `std/`, and 24,074 parse cases including hexadecimal input,
   underscores, and the range and syntax errors. Zero divergences.
 
-285,960 comparisons, zero divergences.
+287,505 comparisons, zero divergences.
 
 Three things that had to be right and are worth naming because each was a real
 divergence at some point in the run rather than a hypothetical:

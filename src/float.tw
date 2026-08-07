@@ -1,0 +1,1516 @@
+mode systems
+
+# float.tw: decimal rendering and parsing of F64, in twill.
+#
+# WHY THIS FILE EXISTS AT ALL
+#
+# docs/needs.md NEEDS-29 says a canonical float rendering should be a runtime
+# primitive that calls the same code the Go side calls, and warns that
+# reimplementing it is a way to lose a month. That advice was written when
+# calling into the bootstrap was allowed. It is not: there is no Go to call, so
+# the choice is not between a primitive and a port, it is between a port and
+# nothing. This file is the port. NEEDS-29 is answered here rather than by a
+# primitive, and NEEDS-76's `f64_shortest` and NEEDS-57's `format_number` are
+# the two entry points that answer it.
+#
+# WHY THE EXACT-DECIMAL ALGORITHM AND NOT RYU
+#
+# Ryu and Grisu are faster and neither is the algorithm Go falls back to. Go's
+# `strconv` has a fast path and an exact multiprecision-decimal path, and the
+# exact path is definitional: when the fast path declines, the decimal path
+# decides, and the two agree because the fast path is only allowed to answer
+# when it can prove it matches. Porting the exact path therefore reproduces Go
+# for every input by construction. Porting Ryu reproduces Go only if six hundred
+# table entries are transcribed without a typo, and there is no way to run twill
+# to find the typo. Speed is the wrong thing to buy with that risk: a compiler
+# prints a few thousand numbers, not a few billion.
+#
+# So this is `internal/strconv`'s `decimal.go`, `ftoa.go` and the slow path of
+# `atof.go`, line for line, with the deviations named where they occur. The fast
+# paths (Dragonbox for shortest, Eisel-Lemire for parsing) are deliberately
+# absent: they exist to be faster, not to be different, and every one of them is
+# only correct when it agrees with the code below.
+#
+# WHAT DEPENDS ON THIS BEING EXACT
+#
+# The differential harness compares program output byte for byte. `print(0.1)`
+# goes through `format_number` here and through `internal/value.FormatNumber`
+# there. One digit of disagreement anywhere and every test that prints a number
+# diverges, so the self-hosted compiler can never be shown equivalent to the
+# bootstrap. That is the whole acceptance criterion, resting on this file.
+#
+# THREE RENDERINGS, NOT ONE, AND THEY DISAGREE ON PURPOSE
+#
+# Reading `internal/` rather than assuming turned up that the three callers ask
+# for three different things, and conflating them is the easiest way to lose:
+#
+#   internal/value.FormatNumber   'f' with precision 6, then trailing zeros and
+#                                 a trailing point trimmed, behind an integer
+#                                 fast path. This is `print`. It is NOT %g, it
+#                                 never uses exponent form, and it rounds 1/3 to
+#                                 "0.333333".
+#   internal/format               'g' with precision -1. This is the source
+#                                 formatter writing a literal back out.
+#   cmd/twill/dump.go             'x' with precision -1. This is the canonical
+#                                 dump, which prints the exact bits.
+#
+# `format_number`, `f64_shortest` and `f64_hex` below are those three, in that
+# order.
+
+import "bytes.tw" as bytes
+
+# ---- unsigned arithmetic over a signed I64 ---------------------------------
+#
+# The decimal shifts below carry intermediate values up to 10 * 2^60 + 9, which
+# is under 2^64 but over 2^63, so it sets the sign bit of an I64. Go runs this
+# arithmetic on `uint` and the shift chunk size is chosen for it: maxShift is
+# 60 because `9 << k` has to fit.
+#
+# The alternative was to drop the chunk size to 59 so every intermediate stays
+# positive. That is one deviation from the reference, and a deviation in the
+# chunking of an exact computation is the kind of thing that is fine until the
+# 800-digit buffer truncates and then is not. Three helpers are cheaper than
+# reasoning about when truncation can happen, so the chunk size stays at Go's
+# and the sign bit is handled explicitly.
+
+let SIGN_BIT: I64 = shl(1, 63)
+
+# Logical right shift. `shr` on I64 is arithmetic, so a value with the sign bit
+# set smears ones down from the top. Clearing the bit before the shift and
+# adding it back at its shifted position is the standard fix and costs three
+# operations.
+fn ushr(x: I64, k: I64) -> I64 {
+  if k == 0 { return x }
+  if x >= 0 { return shr(x, k) }
+  or(shr(and(x, not(SIGN_BIT)), k), shl(1, 63 - k))
+}
+
+# Unsigned divide by ten. Halving first drops the value below 2^63, where signed
+# division is correct, and floor(floor(n/2)/5) is floor(n/10) for every
+# non-negative n.
+fn udiv10(x: I64) -> I64 = ushr(x, 1) / 5
+
+# True when x, read as an unsigned 64-bit value, is not zero. Spelled out
+# because `x > 0` is false for exactly the values this file has to keep.
+fn unonzero(x: I64) -> Bool = x != 0
+
+# ---- the multiprecision decimal --------------------------------------------
+#
+# internal/strconv/decimal.go. Digits are held as their ASCII bytes rather than
+# as 0..9, matching the reference: the rounding rules index them, the left-shift
+# cheat sheet compares them against decimal strings, and a representation change
+# here is a transcription error waiting to happen for no gain.
+#
+# 800 digits is Go's constant and is not arbitrary: the longest exact decimal
+# expansion of an F64 is 767 digits, so the buffer never truncates during
+# formatting. It can truncate on input, where a caller is free to write a
+# thousand digits, and `trunc` is what carries that fact into the rounding
+# decision.
+
+let DIGITS: I64 = 800
+
+let C_ZERO: I64 = 48
+let C_FIVE: I64 = 53
+let C_NINE: I64 = 57
+
+struct Dec {
+  d: Arr[I64],
+  nd: I64,
+  dp: I64,
+  neg: Bool,
+  trunc: Bool,
+}
+
+fn dec_new() -> Dec {
+  let d: Arr[I64] = arr_new()
+  let i: I64 = 0
+  while i < DIGITS {
+    push(d, 0)
+    i = i + 1
+  }
+  Dec { d: d, nd: 0, dp: 0, neg: false, trunc: false }
+}
+
+# Trailing zeros carry no information, because the decimal point is tracked
+# separately from the digit count.
+fn dec_trim(a: Dec) {
+  while a.nd > 0 and a.d[a.nd - 1] == C_ZERO {
+    a.nd = a.nd - 1
+  }
+  if a.nd == 0 {
+    a.dp = 0
+  }
+}
+
+fn dec_assign(a: Dec, v: I64) {
+  let buf: Arr[I64] = arr_new()
+  let n: I64 = 0
+  while v > 0 {
+    let v1: I64 = v / 10
+    push(buf, (v - 10 * v1) + C_ZERO)
+    n = n + 1
+    v = v1
+  }
+  a.nd = 0
+  n = n - 1
+  while n >= 0 {
+    a.d[a.nd] = buf[n]
+    a.nd = a.nd + 1
+    n = n - 1
+  }
+  a.dp = a.nd
+  dec_trim(a)
+}
+
+# Go's maxShift for a 64-bit uint. See the note on the unsigned helpers.
+let MAX_SHIFT: I64 = 60
+
+# Divide by 2^k, exactly. k <= MAX_SHIFT.
+fn right_shift(a: Dec, k: I64) {
+  let r: I64 = 0
+  let w: I64 = 0
+  let n: I64 = 0
+
+  # Pick up enough leading digits to cover the first shift.
+  while true {
+    if ushr(n, k) != 0 { break }
+    if r >= a.nd {
+      if n == 0 {
+        # a == 0. The caller filters this out, but a shift of nothing is
+        # nothing rather than an error.
+        a.nd = 0
+        return
+      }
+      while ushr(n, k) == 0 {
+        n = n * 10
+        r = r + 1
+      }
+      break
+    }
+    n = n * 10 + a.d[r] - C_ZERO
+    r = r + 1
+  }
+  a.dp = a.dp - (r - 1)
+
+  let mask: I64 = shl(1, k) - 1
+
+  # Pick up a digit, put down a digit.
+  while r < a.nd {
+    let c: I64 = a.d[r]
+    let dig: I64 = ushr(n, k)
+    n = and(n, mask)
+    a.d[w] = dig + C_ZERO
+    w = w + 1
+    n = n * 10 + c - C_ZERO
+    r = r + 1
+  }
+
+  # Put down the digits the shift produced past the end of the input.
+  while unonzero(n) {
+    let dig: I64 = ushr(n, k)
+    n = and(n, mask)
+    if w < DIGITS {
+      a.d[w] = dig + C_ZERO
+      w = w + 1
+    } else {
+      if dig > 0 {
+        a.trunc = true
+      }
+    }
+    n = n * 10
+  }
+
+  a.nd = w
+  dec_trim(a)
+}
+
+# The left-shift cheat sheet, from decimal.go: for a shift of k, how many digits
+# the result gains, and the prefix below which it gains one fewer. The entries
+# are the leading digits of 5^k. Recomputing them at run time would need exactly
+# the arbitrary-precision arithmetic this file is trying to be.
+fn leftcheat_cutoffs() -> Arr[Str] {
+  let c: Arr[Str] = arr_new()
+  push(c, "")
+  push(c, "5")
+  push(c, "25")
+  push(c, "125")
+  push(c, "625")
+  push(c, "3125")
+  push(c, "15625")
+  push(c, "78125")
+  push(c, "390625")
+  push(c, "1953125")
+  push(c, "9765625")
+  push(c, "48828125")
+  push(c, "244140625")
+  push(c, "1220703125")
+  push(c, "6103515625")
+  push(c, "30517578125")
+  push(c, "152587890625")
+  push(c, "762939453125")
+  push(c, "3814697265625")
+  push(c, "19073486328125")
+  push(c, "95367431640625")
+  push(c, "476837158203125")
+  push(c, "2384185791015625")
+  push(c, "11920928955078125")
+  push(c, "59604644775390625")
+  push(c, "298023223876953125")
+  push(c, "1490116119384765625")
+  push(c, "7450580596923828125")
+  push(c, "37252902984619140625")
+  push(c, "186264514923095703125")
+  push(c, "931322574615478515625")
+  push(c, "4656612873077392578125")
+  push(c, "23283064365386962890625")
+  push(c, "116415321826934814453125")
+  push(c, "582076609134674072265625")
+  push(c, "2910383045673370361328125")
+  push(c, "14551915228366851806640625")
+  push(c, "72759576141834259033203125")
+  push(c, "363797880709171295166015625")
+  push(c, "1818989403545856475830078125")
+  push(c, "9094947017729282379150390625")
+  push(c, "45474735088646411895751953125")
+  push(c, "227373675443232059478759765625")
+  push(c, "1136868377216160297393798828125")
+  push(c, "5684341886080801486968994140625")
+  push(c, "28421709430404007434844970703125")
+  push(c, "142108547152020037174224853515625")
+  push(c, "710542735760100185871124267578125")
+  push(c, "3552713678800500929355621337890625")
+  push(c, "17763568394002504646778106689453125")
+  push(c, "88817841970012523233890533447265625")
+  push(c, "444089209850062616169452667236328125")
+  push(c, "2220446049250313080847263336181640625")
+  push(c, "11102230246251565404236316680908203125")
+  push(c, "55511151231257827021181583404541015625")
+  push(c, "277555756156289135105907917022705078125")
+  push(c, "1387778780781445675529539585113525390625")
+  push(c, "6938893903907228377647697925567626953125")
+  push(c, "34694469519536141888238489627838134765625")
+  push(c, "173472347597680709441192448139190673828125")
+  push(c, "867361737988403547205962240695953369140625")
+  c
+}
+
+fn leftcheat_deltas() -> Arr[I64] {
+  let d: Arr[I64] = arr_new()
+  let i: I64 = 0
+  # delta[k] is int(log10(2)*k + 1), which is the digit count of 2^k. Written as
+  # the closed form rather than a second table because the two must agree and a
+  # second table is a second thing to mistype.
+  while i <= MAX_SHIFT {
+    push(d, (30103 * i) / 100000 + 1)
+    i = i + 1
+  }
+  d[0] = 0
+  d
+}
+
+let LC_CUTOFF: Arr[Str] = leftcheat_cutoffs()
+let LC_DELTA: Arr[I64] = leftcheat_deltas()
+
+fn prefix_is_less_than(a: Dec, s: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(s) {
+    if i >= a.nd { return true }
+    if a.d[i] != s[i] { return a.d[i] < s[i] }
+    i = i + 1
+  }
+  false
+}
+
+# Multiply by 2^k, exactly. k <= MAX_SHIFT.
+fn left_shift(a: Dec, k: I64) {
+  let delta: I64 = LC_DELTA[k]
+  if prefix_is_less_than(a, LC_CUTOFF[k]) {
+    delta = delta - 1
+  }
+
+  let r: I64 = a.nd
+  let w: I64 = a.nd + delta
+
+  let n: I64 = 0
+  r = r - 1
+  while r >= 0 {
+    n = n + shl(a.d[r] - C_ZERO, k)
+    let quo: I64 = udiv10(n)
+    let rem: I64 = n - 10 * quo
+    w = w - 1
+    if w < DIGITS {
+      a.d[w] = rem + C_ZERO
+    } else {
+      if rem != 0 {
+        a.trunc = true
+      }
+    }
+    n = quo
+    r = r - 1
+  }
+
+  while unonzero(n) {
+    let quo: I64 = udiv10(n)
+    let rem: I64 = n - 10 * quo
+    w = w - 1
+    if w < DIGITS {
+      a.d[w] = rem + C_ZERO
+    } else {
+      if rem != 0 {
+        a.trunc = true
+      }
+    }
+    n = quo
+  }
+
+  a.nd = a.nd + delta
+  if a.nd >= DIGITS {
+    a.nd = DIGITS
+  }
+  a.dp = a.dp + delta
+  dec_trim(a)
+}
+
+fn dec_shift(a: Dec, k: I64) {
+  if a.nd == 0 { return }
+  if k > 0 {
+    while k > MAX_SHIFT {
+      left_shift(a, MAX_SHIFT)
+      k = k - MAX_SHIFT
+    }
+    left_shift(a, k)
+    return
+  }
+  if k < 0 {
+    while k < 0 - MAX_SHIFT {
+      right_shift(a, MAX_SHIFT)
+      k = k + MAX_SHIFT
+    }
+    right_shift(a, 0 - k)
+  }
+}
+
+# Chopping at nd digits: round up, or down?
+#
+# The tie rule is the one place a reimplementation usually drifts. An exact half
+# rounds to even, but only if the digits are exact: if anything was truncated on
+# the way in the true value is a little above the half and rounds up regardless.
+fn should_round_up(a: Dec, nd: I64) -> Bool {
+  if nd < 0 or nd >= a.nd { return false }
+  if a.d[nd] == C_FIVE and nd + 1 == a.nd {
+    if a.trunc { return true }
+    return nd > 0 and ((a.d[nd - 1] - C_ZERO) % 2) != 0
+  }
+  a.d[nd] >= C_FIVE
+}
+
+fn dec_round_down(a: Dec, nd: I64) {
+  if nd < 0 or nd >= a.nd { return }
+  a.nd = nd
+  dec_trim(a)
+}
+
+fn dec_round_up(a: Dec, nd: I64) {
+  if nd < 0 or nd >= a.nd { return }
+  let i: I64 = nd - 1
+  while i >= 0 {
+    let c: I64 = a.d[i]
+    if c < C_NINE {
+      a.d[i] = c + 1
+      a.nd = i + 1
+      return
+    }
+    i = i - 1
+  }
+  # All nines: 999 becomes 1 with the point moved, not 1000.
+  a.d[0] = C_ZERO + 1
+  a.nd = 1
+  a.dp = a.dp + 1
+}
+
+fn dec_round(a: Dec, nd: I64) {
+  if nd < 0 or nd >= a.nd { return }
+  if should_round_up(a, nd) {
+    dec_round_up(a, nd)
+    return
+  }
+  dec_round_down(a, nd)
+}
+
+fn dec_rounded_integer(a: Dec) -> I64 {
+  # Go returns all ones here. Nothing in this file reaches it: the only caller
+  # has already scaled the value into the 53-bit window.
+  if a.dp > 20 { return -1 }
+  let i: I64 = 0
+  let n: I64 = 0
+  while i < a.dp and i < a.nd {
+    n = n * 10 + (a.d[i] - C_ZERO)
+    i = i + 1
+  }
+  while i < a.dp {
+    n = n * 10
+    i = i + 1
+  }
+  if should_round_up(a, a.dp) {
+    n = n + 1
+  }
+  n
+}
+
+# ---- the bit layout of an F64 ----------------------------------------------
+
+let MANT_BITS: I64 = 52
+let EXP_BITS: I64 = 11
+let BIAS: I64 = -1023
+
+let MANT_MASK: I64 = shl(1, MANT_BITS) - 1
+let EXP_MASK: I64 = shl(1, EXP_BITS) - 1
+let IMPLICIT_BIT: I64 = shl(1, MANT_BITS)
+
+let KIND_FINITE: I64 = 0
+let KIND_INF: I64 = 1
+let KIND_NAN: I64 = 2
+
+# A float pulled apart: the value is `mant * 2^(exp - 52)` when kind is finite.
+struct Unpacked {
+  neg: Bool,
+  kind: I64,
+  mant: I64,
+  exp: I64,
+}
+
+fn unpack(bits: I64) -> Unpacked {
+  let neg: Bool = ushr(bits, 63) != 0
+  let be: I64 = and(ushr(bits, MANT_BITS), EXP_MASK)
+  let mant: I64 = and(bits, MANT_MASK)
+  if be == EXP_MASK {
+    let k: I64 = KIND_INF
+    if mant != 0 { k = KIND_NAN }
+    return Unpacked { neg: neg, kind: k, mant: 0, exp: 0 }
+  }
+  let exp: I64 = be
+  if be == 0 {
+    # Subnormal: no implicit bit, and the exponent is the one the smallest
+    # normal uses rather than zero.
+    exp = 1
+  } else {
+    mant = or(mant, IMPLICIT_BIT)
+  }
+  Unpacked { neg: neg, kind: KIND_FINITE, mant: mant, exp: exp + BIAS }
+}
+
+fn assemble(neg: Bool, mant: I64, exp: I64) -> I64 {
+  let bits: I64 = and(mant, MANT_MASK)
+  bits = or(bits, shl(and(exp - BIAS, EXP_MASK), MANT_BITS))
+  if neg {
+    bits = or(bits, SIGN_BIT)
+  }
+  bits
+}
+
+# ---- shortest round-trip digits --------------------------------------------
+
+# roundShortest from ftoa.go. `d` holds the exact decimal expansion of
+# `mant * 2^(exp-52)`; this cuts it at the first digit position where no other
+# F64 could round to what is left.
+fn round_shortest(d: Dec, mant: I64, exp: I64) {
+  if mant == 0 {
+    d.nd = 0
+    return
+  }
+
+  let minexp: I64 = BIAS + 1
+
+  # A cheap test that the answer is already shortest, using log2(10) > 3.32. It
+  # is an optimisation in Go and it is kept because it is also the guard that
+  # keeps the interval arithmetic below off the values where it is fiddliest.
+  if exp > minexp and 332 * (d.dp - d.nd) >= 100 * (exp - MANT_BITS) {
+    return
+  }
+
+  # The upper bound is halfway to the next float up.
+  let upper: Dec = dec_new()
+  dec_assign(upper, mant * 2 + 1)
+  dec_shift(upper, exp - MANT_BITS - 1)
+
+  # And the lower bound halfway to the next float down, which is not symmetric:
+  # at a power of two the gap below is half the gap above.
+  let mantlo: I64 = 0
+  let explo: I64 = 0
+  if mant > IMPLICIT_BIT or exp == minexp {
+    mantlo = mant - 1
+    explo = exp
+  } else {
+    mantlo = mant * 2 - 1
+    explo = exp - 1
+  }
+  let lower: Dec = dec_new()
+  dec_assign(lower, mantlo * 2 + 1)
+  dec_shift(lower, explo - MANT_BITS - 1)
+
+  # The bounds themselves are only reachable when the mantissa is even, because
+  # that is when IEEE round-to-nearest-even lands back on this float.
+  let inclusive: Bool = (mant % 2) == 0
+
+  # How far d has diverged from upper: 0 means identical so far, 1 means a
+  # single-digit difference followed by 9s against 0s, 2 means rounding up is
+  # definitely inside the bound.
+  let upperdelta: I64 = 0
+
+  let ui: I64 = 0
+  while true {
+    # The three decimals put their points in different places; upper is the
+    # longest, so ui drives and the other two indices may start negative.
+    let mi: I64 = ui - upper.dp + d.dp
+    if mi >= d.nd { break }
+    let li: I64 = ui - upper.dp + lower.dp
+
+    let l: I64 = C_ZERO
+    if li >= 0 and li < lower.nd { l = lower.d[li] }
+    let m: I64 = C_ZERO
+    if mi >= 0 { m = d.d[mi] }
+    let u: I64 = C_ZERO
+    if ui < upper.nd { u = upper.d[ui] }
+
+    let okdown: Bool = l != m or (inclusive and li + 1 == lower.nd)
+
+    if upperdelta == 0 and m + 1 < u {
+      upperdelta = 2
+    } else {
+      if upperdelta == 0 and m != u {
+        upperdelta = 1
+      } else {
+        if upperdelta == 1 and (m != C_NINE or u != C_ZERO) {
+          upperdelta = 2
+        }
+      }
+    }
+
+    let okup: Bool = upperdelta > 0 and (inclusive or upperdelta > 1 or ui + 1 < upper.nd)
+
+    if okdown and okup {
+      dec_round(d, mi + 1)
+      return
+    }
+    if okdown {
+      dec_round_down(d, mi + 1)
+      return
+    }
+    if okup {
+      dec_round_up(d, mi + 1)
+      return
+    }
+    ui = ui + 1
+  }
+}
+
+# ---- emitters --------------------------------------------------------------
+
+# -d.ddddde±dd
+fn fmt_e(neg: Bool, d: Dec, prec: I64) -> Str {
+  let out: Bytes = bytes.new()
+  if neg { bytes.push(out, 45) }
+
+  let ch: I64 = C_ZERO
+  if d.nd != 0 { ch = d.d[0] }
+  bytes.push(out, ch)
+
+  if prec > 0 {
+    bytes.push(out, 46)
+    let i: I64 = 1
+    let m: I64 = d.nd
+    if prec + 1 < m { m = prec + 1 }
+    while i < m {
+      bytes.push(out, d.d[i])
+      i = i + 1
+    }
+    while i <= prec {
+      bytes.push(out, C_ZERO)
+      i = i + 1
+    }
+  }
+
+  bytes.push(out, 101)
+
+  let exp: I64 = d.dp - 1
+  if d.nd == 0 { exp = 0 }
+  if exp < 0 {
+    bytes.push(out, 45)
+    exp = 0 - exp
+  } else {
+    bytes.push(out, 43)
+  }
+
+  # At least two digits, always. NEEDS-76 names this as the part that is easy to
+  # get wrong: `1e-07`, not `1e-7`.
+  if exp < 10 {
+    bytes.push(out, C_ZERO)
+    bytes.push(out, C_ZERO + exp)
+  } else {
+    if exp < 100 {
+      bytes.push(out, C_ZERO + exp / 10)
+      bytes.push(out, C_ZERO + exp % 10)
+    } else {
+      bytes.push(out, C_ZERO + exp / 100)
+      bytes.push(out, C_ZERO + (exp / 10) % 10)
+      bytes.push(out, C_ZERO + exp % 10)
+    }
+  }
+
+  bytes.to_str(out)
+}
+
+# -ddddddd.ddddd
+fn fmt_f(neg: Bool, d: Dec, prec: I64) -> Str {
+  let out: Bytes = bytes.new()
+  if neg { bytes.push(out, 45) }
+
+  if d.dp > 0 {
+    let m: I64 = d.nd
+    if d.dp < m { m = d.dp }
+    let i: I64 = 0
+    while i < m {
+      bytes.push(out, d.d[i])
+      i = i + 1
+    }
+    while m < d.dp {
+      bytes.push(out, C_ZERO)
+      m = m + 1
+    }
+  } else {
+    bytes.push(out, C_ZERO)
+  }
+
+  if prec > 0 {
+    bytes.push(out, 46)
+    let i: I64 = 0
+    while i < prec {
+      let ch: I64 = C_ZERO
+      let j: I64 = d.dp + i
+      if j >= 0 and j < d.nd { ch = d.d[j] }
+      bytes.push(out, ch)
+      i = i + 1
+    }
+  }
+
+  bytes.to_str(out)
+}
+
+let VERB_E: I64 = 0
+let VERB_F: I64 = 1
+let VERB_G: I64 = 2
+
+fn format_digits(shortest: Bool, neg: Bool, d: Dec, prec: I64, verb: I64) -> Str {
+  if verb == VERB_E { return fmt_e(neg, d, prec) }
+  if verb == VERB_F { return fmt_f(neg, d, prec) }
+
+  # 'g'. The threshold, spelled out because it is the single most load-bearing
+  # constant in this file: exponent form when the decimal exponent is below -4
+  # or at least the precision, and when the precision is "shortest" the decision
+  # uses 6. Not 21, which is what a reader coming from JavaScript expects.
+  let eprec: I64 = prec
+  if eprec > d.nd and d.nd >= d.dp {
+    eprec = d.nd
+  }
+  if shortest {
+    eprec = 6
+  }
+  let exp: I64 = d.dp - 1
+  if exp < -4 or exp >= eprec {
+    if prec > d.nd { prec = d.nd }
+    return fmt_e(neg, d, prec - 1)
+  }
+  if prec > d.dp { prec = d.nd }
+  let fprec: I64 = prec - d.dp
+  if fprec < 0 { fprec = 0 }
+  fmt_f(neg, d, fprec)
+}
+
+fn big_ftoa(prec: I64, verb: I64, neg: Bool, mant: I64, exp: I64) -> Str {
+  let d: Dec = dec_new()
+  dec_assign(d, mant)
+  dec_shift(d, exp - MANT_BITS)
+
+  let shortest: Bool = prec < 0
+  if shortest {
+    round_shortest(d, mant, exp)
+    if verb == VERB_E {
+      prec = d.nd - 1
+    } else {
+      if verb == VERB_F {
+        prec = d.nd - d.dp
+        if prec < 0 { prec = 0 }
+      } else {
+        prec = d.nd
+      }
+    }
+  } else {
+    if verb == VERB_E {
+      dec_round(d, prec + 1)
+    } else {
+      if verb == VERB_F {
+        dec_round(d, d.dp + prec)
+      } else {
+        if prec == 0 { prec = 1 }
+        dec_round(d, prec)
+      }
+    }
+  }
+  format_digits(shortest, neg, d, prec, verb)
+}
+
+let HEXDIGITS: Str = "0123456789abcdef"
+
+# -0x1.yyyyyyyyp±ddd, the exact bits. cmd/twill/dump.go's rendering.
+fn fmt_x(prec: I64, neg: Bool, mant: I64, exp: I64) -> Str {
+  if mant == 0 { exp = 0 }
+
+  # Put the leading 1, if there is one, at bit 60. A subnormal arrives with a
+  # shorter mantissa and is normalised here, which is why a subnormal prints
+  # with a p-exponent below -1022.
+  mant = shl(mant, 60 - MANT_BITS)
+  while mant != 0 and and(mant, shl(1, 60)) == 0 {
+    mant = shl(mant, 1)
+    exp = exp - 1
+  }
+
+  if prec >= 0 and prec < 15 {
+    let shift: I64 = prec * 4
+    let extra: I64 = and(shl(mant, shift), shl(1, 60) - 1)
+    mant = ushr(mant, 60 - shift)
+    if or(extra, and(mant, 1)) > shl(1, 59) {
+      mant = mant + 1
+    }
+    mant = shl(mant, 60 - shift)
+    if and(mant, shl(1, 61)) != 0 {
+      mant = ushr(mant, 1)
+      exp = exp + 1
+    }
+  }
+
+  let out: Bytes = bytes.new()
+  if neg { bytes.push(out, 45) }
+  bytes.push(out, 48)
+  bytes.push(out, 120)
+  bytes.push(out, C_ZERO + and(ushr(mant, 60), 1))
+
+  mant = shl(mant, 4)
+  if prec < 0 and mant != 0 {
+    bytes.push(out, 46)
+    while mant != 0 {
+      bytes.push(out, HEXDIGITS[and(ushr(mant, 60), 15)])
+      mant = shl(mant, 4)
+    }
+  } else {
+    if prec > 0 {
+      bytes.push(out, 46)
+      let i: I64 = 0
+      while i < prec {
+        bytes.push(out, HEXDIGITS[and(ushr(mant, 60), 15)])
+        mant = shl(mant, 4)
+        i = i + 1
+      }
+    }
+  }
+
+  bytes.push(out, 112)
+  if exp < 0 {
+    bytes.push(out, 45)
+    exp = 0 - exp
+  } else {
+    bytes.push(out, 43)
+  }
+
+  # Two digits minimum here as well, but up to four, because a subnormal's
+  # binary exponent reaches -1074.
+  if exp < 100 {
+    bytes.push(out, C_ZERO + exp / 10)
+    bytes.push(out, C_ZERO + exp % 10)
+  } else {
+    if exp < 1000 {
+      bytes.push(out, C_ZERO + exp / 100)
+      bytes.push(out, C_ZERO + (exp / 10) % 10)
+      bytes.push(out, C_ZERO + exp % 10)
+    } else {
+      bytes.push(out, C_ZERO + exp / 1000)
+      bytes.push(out, C_ZERO + (exp / 100) % 10)
+      bytes.push(out, C_ZERO + (exp / 10) % 10)
+      bytes.push(out, C_ZERO + exp % 10)
+    }
+  }
+
+  bytes.to_str(out)
+}
+
+# genericFtoa. `verb` is one of VERB_E, VERB_F, VERB_G, or -1 for hex.
+let VERB_X: I64 = -1
+
+fn ftoa_bits(bits: I64, verb: I64, prec: I64) -> Str {
+  let u: Unpacked = unpack(bits)
+
+  # Go's spellings, and the plus on infinity is not a typo: FormatFloat returns
+  # "+Inf", so `print(1.0/0.0)` prints "+Inf" and anything that trims the sign
+  # here diverges on the first division by zero in the corpus.
+  if u.kind == KIND_NAN { return "NaN" }
+  if u.kind == KIND_INF {
+    if u.neg { return "-Inf" }
+    return "+Inf"
+  }
+
+  if verb == VERB_X {
+    return fmt_x(prec, u.neg, u.mant, u.exp)
+  }
+
+  # Zero never reaches the decimal machinery, and it keeps its sign: -0.0 is
+  # "-0" out of %g. `format_number` is the one that drops it, later and on
+  # purpose.
+  if u.mant == 0 {
+    return format_digits(prec < 0, u.neg, dec_new(), prec, verb)
+  }
+
+  big_ftoa(prec, verb, u.neg, u.mant, u.exp)
+}
+
+# ---- the three public renderings -------------------------------------------
+
+# NEEDS-76. Equal to Go's strconv.FormatFloat(x, 'g', -1, 64): the shortest
+# decimal that parses back to x, exponent form outside [-4, 6), exponent always
+# signed and at least two digits, "-0" for negative zero. This is what
+# `src/fmt.tw` writes a numeric literal with.
+fn f64_shortest(x: F64) -> Str = ftoa_bits(f64_bits(x), VERB_G, -1)
+
+# NEEDS-29. Equal to strconv.FormatFloat(x, 'x', -1, 64), the exact bits, which
+# is what the canonical dump in `testdata/` compares.
+fn f64_hex(x: F64) -> Str = ftoa_bits(f64_bits(x), VERB_X, -1)
+
+# strconv.FormatFloat(x, 'f', prec, 64), which `format_number` needs and nothing
+# else does.
+fn f64_fixed(x: F64, prec: I64) -> Str = ftoa_bits(f64_bits(x), VERB_F, prec)
+
+# ---- format_number ---------------------------------------------------------
+#
+# NEEDS-57, and the one that matters most, because it is `print`.
+#
+# internal/value.FormatNumber, which is NOT %g and is the thing NEEDS-29 would
+# have led a reader to implement by mistake. It is:
+#
+#     if n == float64(int64(n)) { return strconv.FormatInt(int64(n), 10) }
+#     s := strconv.FormatFloat(n, 'f', 6, 64)
+#     s = strings.TrimRight(s, "0")
+#     s = strings.TrimRight(s, ".")
+#
+# Three consequences that are only visible if you run it, and all three were
+# confirmed against the reference binary rather than reasoned about:
+#
+#   print(-0.0)   is "0",  because -0.0 == float64(int64(-0.0)) and the integer
+#                 path has no sign to print. The %g path would say "-0".
+#   print(-1e-9)  is "-0", because 'f' with precision 6 gives "-0.000000" and
+#                 trimming leaves the sign behind. A tiny negative prints as
+#                 negative zero and that is the reference behaviour.
+#   print(1e300)  is 301 digits, because there is no exponent form on this path
+#                 at all.
+
+let MIN_I64_TEXT: Str = "-9223372036854775808"
+
+# `float64(int64(n)) == n` as Go evaluates it. Out-of-range and non-finite
+# conversions are implementation-defined in Go and give the indefinite value
+# -2^63 on amd64, which equals n only when n is -2^63 already. So the test is:
+# finite, integral, and in [-2^63, 2^63). Written from the bit pattern rather
+# than by calling a conversion, because the conversion's behaviour at the edge
+# is exactly what is in question.
+fn is_int64_exact(u: Unpacked) -> Bool {
+  if u.kind != KIND_FINITE { return false }
+  if u.mant == 0 { return true }
+
+  let sh: I64 = u.exp - MANT_BITS
+  if sh >= 0 {
+    # value = mant << sh, integral by construction. mant has at most 53
+    # significant bits and its top bit is bit 52 for a normal, so the value is
+    # below 2^(53+sh).
+    if 53 + sh <= 63 { return true }
+    # -2^63 is the one value at the boundary that survives the round trip.
+    return u.neg and u.mant == IMPLICIT_BIT and sh == 11
+  }
+
+  # A fractional part exists unless the low -sh bits are clear.
+  if 0 - sh > MANT_BITS + 1 { return false }
+  and(u.mant, shl(1, 0 - sh) - 1) == 0
+}
+
+# The value as an I64. Only called when `is_int64_exact` said yes.
+#
+# The one input that looks like it should break is -2^63, where the shift
+# produces 2^63 and wraps to -2^63, and negating that wraps it back to itself.
+# Two wraps cancel and the answer is right. Wrapping is defined in the subset
+# rather than undefined, which is what makes that a fact instead of a hope.
+fn int64_value(u: Unpacked) -> I64 {
+  let sh: I64 = u.exp - MANT_BITS
+  let v: I64 = 0
+  if sh >= 0 {
+    v = shl(u.mant, sh)
+  } else {
+    v = ushr(u.mant, 0 - sh)
+  }
+  if u.neg { return 0 - v }
+  v
+}
+
+fn format_i64(v: I64) -> Str {
+  # -2^63 has no representable negation, and it is a value this path really
+  # reaches, since float64(-2^63) is exact.
+  if v == shl(1, 63) { return MIN_I64_TEXT }
+  if v == 0 { return "0" }
+
+  let neg: Bool = v < 0
+  if neg { v = 0 - v }
+
+  let rev: Arr[I64] = arr_new()
+  while v > 0 {
+    let q: I64 = v / 10
+    push(rev, C_ZERO + (v - q * 10))
+    v = q
+  }
+
+  let out: Bytes = bytes.new()
+  if neg { bytes.push(out, 45) }
+  let i: I64 = len(rev) - 1
+  while i >= 0 {
+    bytes.push(out, rev[i])
+    i = i - 1
+  }
+  bytes.to_str(out)
+}
+
+fn format_number(x: F64) -> Str {
+  let bits: I64 = f64_bits(x)
+  let u: Unpacked = unpack(bits)
+  if is_int64_exact(u) {
+    return format_i64(int64_value(u))
+  }
+
+  let s: Str = ftoa_bits(bits, VERB_F, 6)
+
+  # TrimRight "0" then TrimRight ".". Applied to the whole string, as Go does,
+  # which is why it is safe on "NaN" and "+Inf" (no trailing zero or point) and
+  # why "100.000000" becomes "1" -- no, it does not: an integral value never
+  # gets here, it took the fast path above. That asymmetry is load-bearing and
+  # is the reason the two trims can be this blunt.
+  let n: I64 = len(s)
+  while n > 0 and s[n - 1] == C_ZERO {
+    n = n - 1
+  }
+  while n > 0 and s[n - 1] == 46 {
+    n = n - 1
+  }
+  s[0:n]
+}
+
+# ---- parsing ---------------------------------------------------------------
+#
+# The inverse of the renderings above, and required by them: a rendering that
+# does not round-trip is not canonical. A parse that accumulates digits and
+# multiplies by a power of ten makes 0.1 a different float from the one Go
+# produces, and then every program containing the literal 0.1 has already
+# diverged before it runs a single statement.
+#
+# This is atof.go's slow path: build the exact decimal, scale it into the 53-bit
+# window by powers of two, and round once. The fast paths are omitted for the
+# reason given at the top of the file.
+
+let INF_BITS: I64 = shl(2047, MANT_BITS)
+
+fn is_digit(c: I64) -> Bool = c >= C_ZERO and c <= C_NINE
+
+fn lower_byte(c: I64) -> I64 {
+  if c >= 65 and c <= 90 { return c + 32 }
+  c
+}
+
+fn is_hex_digit(c: I64) -> Bool {
+  if is_digit(c) { return true }
+  let l: I64 = lower_byte(c)
+  l >= 97 and l <= 102
+}
+
+fn hex_digit_value(c: I64) -> I64 {
+  if is_digit(c) { return c - C_ZERO }
+  lower_byte(c) - 97 + 10
+}
+
+# underscoreOK from atoi.go. Go accepts `1_0.5` and rejects `_1.0`, `1__0` and
+# `1_.0`, and the rule is exactly "an underscore separates two digits". The
+# decimal reader below skips underscores without looking, as the reference's
+# does, because the reference has already run this check; omitting it would make
+# `f64_of_str("_1")` succeed here and fail there.
+fn underscore_ok(s: Str) -> Bool {
+  # saw: 0 for the start, 1 for a digit or a base prefix, 2 for an underscore,
+  # 3 for anything else.
+  let saw: I64 = 0
+  let i: I64 = 0
+  let start: I64 = 0
+  if len(s) >= 1 and (s[0] == 45 or s[0] == 43) {
+    start = 1
+  }
+
+  let hex: Bool = false
+  if len(s) - start >= 2 and s[start] == C_ZERO {
+    let b: I64 = lower_byte(s[start + 1])
+    if b == 98 or b == 111 or b == 120 {
+      i = 2
+      saw = 1
+      hex = b == 120
+    }
+  }
+
+  while i < len(s) - start {
+    let c: I64 = s[start + i]
+    if is_digit(c) or (hex and is_hex_digit(c)) {
+      saw = 1
+      i = i + 1
+      continue
+    }
+    if c == 95 {
+      if saw != 1 { return false }
+      saw = 2
+      i = i + 1
+      continue
+    }
+    if saw == 2 { return false }
+    saw = 3
+    i = i + 1
+  }
+  saw != 2
+}
+
+# decimal.set: the string into an exact decimal. False on a syntax error, and
+# the whole string must be consumed, which is ParseFloat's rule rather than
+# readFloat's prefix rule.
+fn dec_set(b: Dec, s: Str) -> Bool {
+  let i: I64 = 0
+  b.neg = false
+  b.trunc = false
+  if i >= len(s) { return false }
+
+  if s[i] == 43 {
+    i = i + 1
+  } else {
+    if s[i] == 45 {
+      i = i + 1
+      b.neg = true
+    }
+  }
+
+  let sawdot: Bool = false
+  let sawdigits: Bool = false
+  while i < len(s) {
+    let c: I64 = s[i]
+    if c == 95 {
+      # Underscores are a Go literal convenience the reference checks
+      # separately; nothing in twill source produces one.
+      i = i + 1
+      continue
+    }
+    if c == 46 {
+      if sawdot { return false }
+      sawdot = true
+      b.dp = b.nd
+      i = i + 1
+      continue
+    }
+    if is_digit(c) {
+      sawdigits = true
+      if c == C_ZERO and b.nd == 0 {
+        # Leading zeros move the point instead of taking a digit slot.
+        b.dp = b.dp - 1
+        i = i + 1
+        continue
+      }
+      if b.nd < DIGITS {
+        b.d[b.nd] = c
+        b.nd = b.nd + 1
+      } else {
+        if c != C_ZERO {
+          b.trunc = true
+        }
+      }
+      i = i + 1
+      continue
+    }
+    break
+  }
+  if not sawdigits { return false }
+  if not sawdot { b.dp = b.nd }
+
+  if i < len(s) and lower_byte(s[i]) == 101 {
+    i = i + 1
+    if i >= len(s) { return false }
+    let esign: I64 = 1
+    if s[i] == 43 {
+      i = i + 1
+    } else {
+      if s[i] == 45 {
+        i = i + 1
+        esign = -1
+      }
+    }
+    if i >= len(s) or not is_digit(s[i]) { return false }
+    let e: I64 = 0
+    while i < len(s) and (is_digit(s[i]) or s[i] == 95) {
+      if s[i] == 95 {
+        i = i + 1
+        continue
+      }
+      # Capped, because the exponent only has to be large enough to overflow or
+      # underflow, and an unbounded one overflows the accumulator instead.
+      if e < 10000 {
+        e = e * 10 + s[i] - C_ZERO
+      }
+      i = i + 1
+    }
+    b.dp = b.dp + e * esign
+  }
+
+  i == len(s)
+}
+
+# Decimal powers of ten to binary powers of two, from atof.go.
+fn powtab() -> Arr[I64] {
+  let p: Arr[I64] = arr_new()
+  push(p, 1)
+  push(p, 3)
+  push(p, 6)
+  push(p, 9)
+  push(p, 13)
+  push(p, 16)
+  push(p, 19)
+  push(p, 23)
+  push(p, 26)
+  p
+}
+
+let POWTAB: Arr[I64] = powtab()
+
+struct Bits {
+  bits: I64,
+  overflow: Bool,
+}
+
+fn float_bits(d: Dec) -> Bits {
+  if d.nd == 0 {
+    return Bits { bits: assemble(d.neg, 0, BIAS), overflow: false }
+  }
+  if d.dp > 310 {
+    return Bits { bits: assemble(d.neg, 0, EXP_MASK + BIAS), overflow: true }
+  }
+  if d.dp < -330 {
+    return Bits { bits: assemble(d.neg, 0, BIAS), overflow: false }
+  }
+
+  # Scale by powers of two until the value is in [0.5, 1).
+  let exp: I64 = 0
+  while d.dp > 0 {
+    let n: I64 = 27
+    if d.dp < len(POWTAB) { n = POWTAB[d.dp] }
+    dec_shift(d, 0 - n)
+    exp = exp + n
+  }
+  while d.dp < 0 or (d.dp == 0 and d.d[0] < C_FIVE) {
+    let n: I64 = 27
+    if 0 - d.dp < len(POWTAB) { n = POWTAB[0 - d.dp] }
+    dec_shift(d, n)
+    exp = exp - n
+  }
+
+  # [0.5, 1) to [1, 2).
+  exp = exp - 1
+
+  # Below the smallest exponent the result is subnormal: keep the exponent and
+  # let the mantissa lose bits, which is what makes the rounding below correct
+  # for subnormals with no separate case.
+  if exp < BIAS + 1 {
+    let n: I64 = BIAS + 1 - exp
+    dec_shift(d, 0 - n)
+    exp = exp + n
+  }
+
+  if exp - BIAS >= EXP_MASK {
+    return Bits { bits: assemble(d.neg, 0, EXP_MASK + BIAS), overflow: true }
+  }
+
+  # One rounding, on the full 53 bits, which is the whole reason this path is
+  # correct where an accumulate-and-multiply parse is not.
+  dec_shift(d, 1 + MANT_BITS)
+  let mant: I64 = dec_rounded_integer(d)
+
+  if mant == shl(2, MANT_BITS) {
+    mant = ushr(mant, 1)
+    exp = exp + 1
+    if exp - BIAS >= EXP_MASK {
+      return Bits { bits: assemble(d.neg, 0, EXP_MASK + BIAS), overflow: true }
+    }
+  }
+
+  if and(mant, IMPLICIT_BIT) == 0 {
+    exp = BIAS
+  }
+  Bits { bits: assemble(d.neg, mant, exp), overflow: false }
+}
+
+# "inf", "infinity", "nan", any case, with an optional sign on the infinities
+# only. Go's `special` reaches the infinity branch by falling through the sign
+# branch, so a signed NaN is a syntax error and "-nan" does not parse.
+fn parse_special(s: Str) -> Opt[I64] {
+  if len(s) == 0 { return None }
+  let i: I64 = 0
+  let neg: Bool = false
+  if s[0] == 43 or s[0] == 45 {
+    neg = s[0] == 45
+    i = 1
+  }
+  let rest: Bytes = bytes.new()
+  let j: I64 = i
+  while j < len(s) {
+    bytes.push(rest, lower_byte(s[j]))
+    j = j + 1
+  }
+  let r: Str = bytes.to_str(rest)
+  if bytes.equal(r, "inf") or bytes.equal(r, "infinity") {
+    if neg { return Some(or(INF_BITS, SIGN_BIT)) }
+    return Some(INF_BITS)
+  }
+  if i == 0 and bytes.equal(r, "nan") {
+    # The quiet NaN Go's math.NaN returns. No twill operation can observe a
+    # payload, so one spelling is enough; cmd/twill/dump.go says the same.
+    return Some(or(INF_BITS, shl(1, MANT_BITS - 1)))
+  }
+  None
+}
+
+# The bits, plus whether the value was out of range. Out of range is not a
+# syntax error: Go returns ±Inf and an ErrRange alongside it, and a caller that
+# treats it as a parse failure rejects "1e400", which parses.
+struct ParsedF64 {
+  bits: I64,
+  ok: Bool,
+  out_of_range: Bool,
+}
+
+# ---- hexadecimal input -----------------------------------------------------
+#
+# `0x1.999999999999ap-04`. Only reachable through `read_csv` and through
+# anything that reads a canonical dump back, but it is the exact inverse of
+# `f64_hex` above, and a rendering with no reader is half a contract.
+
+struct HexRead {
+  mant: I64,
+  exp: I64,
+  neg: Bool,
+  trunc: Bool,
+  ok: Bool,
+}
+
+fn hex_fail() -> HexRead = HexRead { mant: 0, exp: 0, neg: false, trunc: false, ok: false }
+
+# readFloat's hexadecimal branch. The mantissa takes at most 16 hex digits,
+# which is a full 64 bits, so it uses the whole width of an I64 including the
+# sign bit; every read of it below goes through `ushr`.
+fn read_hex_float(s: Str) -> HexRead {
+  let i: I64 = 0
+  let neg: Bool = false
+  if i < len(s) {
+    if s[i] == 43 {
+      i = i + 1
+    } else {
+      if s[i] == 45 {
+        i = i + 1
+        neg = true
+      }
+    }
+  }
+
+  # Go requires a character after the prefix before it commits to hex.
+  if not (i + 2 < len(s) and s[i] == C_ZERO and lower_byte(s[i + 1]) == 120) {
+    return hex_fail()
+  }
+  i = i + 2
+
+  let mant: I64 = 0
+  let exp: I64 = 0
+  let trunc: Bool = false
+  let sawdot: Bool = false
+  let sawdigits: Bool = false
+  let nd: I64 = 0
+  let nd_mant: I64 = 0
+  let dp: I64 = 0
+
+  while i < len(s) {
+    let c: I64 = s[i]
+    if c == 95 {
+      i = i + 1
+      continue
+    }
+    if c == 46 {
+      if sawdot { break }
+      sawdot = true
+      dp = nd
+      i = i + 1
+      continue
+    }
+    if is_digit(c) {
+      sawdigits = true
+      if c == C_ZERO and nd == 0 {
+        dp = dp - 1
+        i = i + 1
+        continue
+      }
+      nd = nd + 1
+      if nd_mant < 16 {
+        mant = mant * 16 + (c - C_ZERO)
+        nd_mant = nd_mant + 1
+      } else {
+        if c != C_ZERO {
+          trunc = true
+        }
+      }
+      i = i + 1
+      continue
+    }
+    if is_hex_digit(c) {
+      sawdigits = true
+      nd = nd + 1
+      if nd_mant < 16 {
+        mant = mant * 16 + hex_digit_value(c)
+        nd_mant = nd_mant + 1
+      } else {
+        # An a-f digit past the limit is nonzero by construction, so unlike the
+        # decimal branch there is nothing to test.
+        trunc = true
+      }
+      i = i + 1
+      continue
+    }
+    break
+  }
+
+  if not sawdigits { return hex_fail() }
+  if not sawdot { dp = nd }
+
+  dp = dp * 4
+  nd_mant = nd_mant * 4
+
+  # The binary exponent is mandatory for hex. `0x1` is not a float.
+  if not (i < len(s) and lower_byte(s[i]) == 112) { return hex_fail() }
+  i = i + 1
+  if i >= len(s) { return hex_fail() }
+  let esign: I64 = 1
+  if s[i] == 43 {
+    i = i + 1
+  } else {
+    if s[i] == 45 {
+      i = i + 1
+      esign = -1
+    }
+  }
+  if i >= len(s) or not is_digit(s[i]) { return hex_fail() }
+  let e: I64 = 0
+  while i < len(s) and (is_digit(s[i]) or s[i] == 95) {
+    if s[i] == 95 {
+      i = i + 1
+      continue
+    }
+    if e < 10000 {
+      e = e * 10 + s[i] - C_ZERO
+    }
+    i = i + 1
+  }
+  dp = dp + e * esign
+
+  if mant != 0 {
+    exp = dp - nd_mant
+  }
+  if i != len(s) { return hex_fail() }
+
+  HexRead { mant: mant, exp: exp, neg: neg, trunc: trunc, ok: true }
+}
+
+# atofHex. Rounding is done on two guard bits, the lower of which is sticky: it
+# carries "something nonzero was dropped", which is what makes an exactly-half
+# case distinguishable from a just-above-half one.
+fn atof_hex(h: HexRead) -> Bits {
+  let max_exp: I64 = shl(1, EXP_BITS) + BIAS - 2
+  let min_exp: I64 = BIAS + 1
+  let mant: I64 = h.mant
+  let exp: I64 = h.exp + MANT_BITS
+
+  while mant != 0 and ushr(mant, MANT_BITS + 2) == 0 {
+    mant = shl(mant, 1)
+    exp = exp - 1
+  }
+  if h.trunc {
+    mant = or(mant, 1)
+  }
+  while ushr(mant, 1 + MANT_BITS + 2) != 0 {
+    mant = or(ushr(mant, 1), and(mant, 1))
+    exp = exp + 1
+  }
+
+  # Too small to normalise: shed bits into the sticky one and hope for a
+  # subnormal.
+  while ushr(mant, 1) != 0 and exp < min_exp - 2 {
+    mant = or(ushr(mant, 1), and(mant, 1))
+    exp = exp + 1
+  }
+
+  let round: I64 = and(mant, 3)
+  mant = ushr(mant, 2)
+  round = or(round, and(mant, 1))
+  exp = exp + 2
+  if round == 3 {
+    mant = mant + 1
+    if mant == shl(1, 1 + MANT_BITS) {
+      mant = ushr(mant, 1)
+      exp = exp + 1
+    }
+  }
+
+  if ushr(mant, MANT_BITS) == 0 {
+    exp = BIAS
+  }
+  if exp > max_exp {
+    return Bits { bits: assemble(h.neg, 0, max_exp + 1), overflow: true }
+  }
+  Bits { bits: assemble(h.neg, mant, exp), overflow: false }
+}
+
+fn f64_parse(s: Str) -> ParsedF64 {
+  match parse_special(s) {
+    Some(b) => return ParsedF64 { bits: b, ok: true, out_of_range: false },
+    None => {},
+  }
+  if not underscore_ok(s) {
+    return ParsedF64 { bits: 0, ok: false, out_of_range: false }
+  }
+
+  let h: HexRead = read_hex_float(s)
+  if h.ok {
+    let hr: Bits = atof_hex(h)
+    return ParsedF64 { bits: hr.bits, ok: true, out_of_range: hr.overflow }
+  }
+
+  let d: Dec = dec_new()
+  if not dec_set(d, s) {
+    return ParsedF64 { bits: 0, ok: false, out_of_range: false }
+  }
+  let r: Bits = float_bits(d)
+  ParsedF64 { bits: r.bits, ok: true, out_of_range: r.overflow }
+}
+
+# The runtime primitive table's `f64_of_str`, in twill. None on a syntax error;
+# an out-of-range literal yields the infinity Go yields, because that is what
+# `internal/parser` sees and a checker diagnostic that disagreed would be a
+# divergence of its own.
+fn f64_of_str(s: Str) -> Opt[F64] {
+  let p: ParsedF64 = f64_parse(s)
+  if not p.ok { return None }
+  Some(f64_from_bits(p.bits))
+}
