@@ -199,7 +199,7 @@
 - **`broadcast_to(t, ...shape)`**, differentiable, expanding a tensor to a named
   shape. Broadcasting was already implicit inside every binary op, which covers
   everything until the shape you need to expand against is not one of the
-  operands — the case being a reduction result you want to subtract from what
+  operands, the case being a reduction result you want to subtract from what
   you reduced. The gradient sums over each broadcast axis.
 
 - **`split(t, n | sizes[, axis])`**, differentiable, the inverse of `concat`.
@@ -250,7 +250,7 @@ stability promise, fixed now.
 
 **The standard library ships inside the binary, and `std/` is its own namespace.**
 
-- `import "std/nn"` — no extension, no directory. A path starting with `std/`
+- `import "std/nn"`: no extension, no directory. A path starting with `std/`
   names a module of the standard library, which is compiled into the `raster`
   binary with `go:embed`, so the import means the same thing from any working
   directory and an installed binary can find it. Before, `std/` was read off the
@@ -283,7 +283,7 @@ stability promise, fixed now.
 - A tensor's shape is now part of its value: `[[1.0, 2.0], [3.0, 4.0]]` and
   `[1.0, 2.0, 3.0, 4.0]` hold the same numbers and are no longer equal. This is
   the one change here that can flip a `true` to a `false`.
-- `()` equals `()`. Functions compare by identity — a function equals itself,
+- `()` equals `()`. Functions compare by identity, a function equals itself,
   two separately written `fn(x) = x` do not. Values of different types are
   never equal, which is an answer rather than an error. `!=` is the negation of
   `==` in every case.
@@ -332,7 +332,7 @@ Also fixed:
 
 Differentiable element indexing.
 
-- `x[i]` (indexing a single element or row) is now differentiable — gradient
+- `x[i]` (indexing a single element or row) is now differentiable, gradient
   flows to the indexed component, and `hessian` passes through it too. Before,
   element indexing silently broke the gradient graph (it returned an untracked
   tensor, so `grad` through `x[i]` was zero); slicing `x[i:i+1]` was the only
@@ -344,8 +344,8 @@ Differentiable element indexing.
 
 Second-order autodiff through structural ops.
 
-- `hessian` now flows through the linear/structural ops — slicing (`x[a:b]`),
-  `reshape`, `transpose`, `concat`, and `gather` — so component-wise functions
+- `hessian` now flows through the linear/structural ops: slicing (`x[a:b]`),
+  `reshape`, `transpose`, `concat`, and `gather`, so component-wise functions
   and reshaping objectives get exact Hessians too (previously they errored).
 - `examples/hessian.ra` adds a component-wise case: the Hessian of
   `(x0-x1)² + x1²` computed through slicing is `[[2,-2],[-2,4]]`.
@@ -354,7 +354,7 @@ Second-order autodiff through structural ops.
 
 ## 0.24.1
 
-Internal QA for the second-order engine — no API or behavior change.
+Internal QA for the second-order engine, no API or behavior change.
 
 - Forward-mode (jet) closures are now wired only while a Hessian is being
   computed, and the per-node jet state is boxed behind one pointer, so ordinary
@@ -365,7 +365,7 @@ Internal QA for the second-order engine — no API or behavior change.
 
 ## 0.24.0
 
-Second-order autodiff — exact Hessians.
+Second-order autodiff: exact Hessians.
 
 - New `hessian(f)(x)` returns the matrix of second partial derivatives of a
   scalar function, exact (not finite differences). Together with `grad` it
@@ -373,7 +373,7 @@ Second-order autodiff — exact Hessians.
 - Implemented as forward-mode 2-jets: each supported op now propagates a first
   and second directional derivative alongside its value, and a full Hessian
   follows by seeding basis directions and polarization. The reverse-mode engine
-  is untouched — every existing gradient check still passes.
+  is untouched, every existing gradient check still passes.
 - Supported ops: `+ - * / %`, the unary math (`exp`, `log`, `sin`, `cos`,
   `tanh`, `sigmoid`, `sqrt`, `square`, `relu`, `abs`, `pow`, `neg`),
   `matmul`/`@`, `sum`, `mean`, and comparisons. A function using an op outside
@@ -383,59 +383,59 @@ Second-order autodiff — exact Hessians.
 
 ## 0.23.0
 
-Full Jacobians — differentiation beyond scalar outputs.
+Full Jacobians: differentiation beyond scalar outputs.
 
 - New `jacobian(f)(x)` returns the whole `[m, n]` matrix of partial derivatives
   of a vector output `f(x)` (length `m`) with respect to a vector input `x`
-  (length `n`) — every output's sensitivity to every input, exact, by one
+  (length `n`), every output's sensitivity to every input, exact, by one
   reverse-mode pass per output. This is the reverse-mode Jacobian (`jacrev`).
 - New example `jacobian.ra`: the Jacobian of a linear map recovers its matrix,
   and a nonlinear map matches its analytic derivatives. Uses include
   risk/sensitivity matrices, input attribution, and Jacobian regularization.
-- (Second-order autodiff — `grad(grad(f))`, Hessians — remains future work: it
+- (Second-order autodiff (`grad(grad(f))` and Hessians) remains future work: it
   needs a re-differentiable reverse pass, a dedicated engine change.)
 
 ## 0.22.0
 
-Sequences and attention — embeddings and a transformer, not just tables and
+Sequences and attention: embeddings and a transformer, not just tables and
 images.
 
 - `std/nn.ra` gains `embed(table, ids)` (a differentiable embedding lookup built
   on `gather`, so embeddings are learned), `embedding_init`, and
-  `self_attention(Wq, Wk, Wv, X)` — single-head self-attention, the core
+  `self_attention(Wq, Wk, Wv, X)`: single-head self-attention, the core
   transformer operation, differentiable end to end.
-- New elementwise builtins `floor`, `ceil`, `round` (forward-only) — e.g. to turn
+- New elementwise builtins `floor`, `ceil`, `round` (forward-only), e.g. to turn
   random draws into integer token ids.
 - New example `attention.ra`: a self-attention sequence classifier (embed →
   self-attention → pool → dense) trained with Adam; `grad` differentiates the
   attention softmax and the embeddings together.
 - Raster now spans tabular (boosted trees), vision (CNNs), and sequences
-  (attention) — one autodiff engine, one static checker, one binary.
+  (attention), one autodiff engine, one static checker, one binary.
 
 ## 0.21.0
 
 Data pipeline and real minibatch training.
 
 - New differentiable builtin `gather(x, indices)` selects rows of `x` by an index
-  list or 1-D tensor (gradient scatter-adds back, so repeated indices — e.g.
-  embedding lookups — accumulate correctly). Gradient-checked.
+  list or 1-D tensor (gradient scatter-adds back, so repeated indices, e.g.
+  embedding lookups, accumulate correctly). Gradient-checked.
 - New `permutation(n)` returns a seeded random ordering of `0..n-1`, and `int(x)`
-  truncates a scalar — together enabling reproducible shuffling and sizing.
+  truncates a scalar, together enabling reproducible shuffling and sizing.
 - New `std/data.ra`: `standardize` (per-column z-score, returns the transform),
   `apply_standardize`, `train_test_split`, and `shuffle` (features/labels kept
   aligned).
-- New example `minibatch.ra`: a genuine training loop — standardize, hold out a
+- New example `minibatch.ra`: a genuine training loop, standardize, hold out a
   test set, then train a classifier with Adam over reshuffled minibatches each
   epoch (96%+ held-out accuracy). This is the mechanics real models train with,
   not full-batch toys.
 
 ## 0.20.0
 
-Model persistence — train once, save, and deploy.
+Model persistence: train once, save, and deploy.
 
-- New builtins `save(value, path)` and `load(path)` write and read any value —
+- New builtins `save(value, path)` and `load(path)` write and read any value,
   tensors, records, lists (a model's whole pytree), scalars, strings, bools, and
-  fitted gradient-boosted models — in a compact, exact binary format (float64
+  fitted gradient-boosted models, in a compact, exact binary format (float64
   bit patterns round-trip bit-for-bit).
 - `gbm.Model` now implements `encoding.BinaryMarshaler`/`BinaryUnmarshaler`, so a
   trained forest can be persisted and reloaded with identical predictions.
@@ -447,7 +447,7 @@ Model persistence — train once, save, and deploy.
 
 ## 0.19.0
 
-Convolutional neural networks — general deep learning, not just MLPs.
+Convolutional neural networks: general deep learning, not just MLPs.
 
 - New differentiable builtins `conv2d(input, weight)` and `maxpool2d(input, k)`.
   `conv2d` is a 2-D cross-correlation (`input` `[Cin, H, W]`, `weight`
@@ -460,8 +460,8 @@ Convolutional neural networks — general deep learning, not just MLPs.
   sigmoid) that learns to tell vertical from horizontal bars in noisy images,
   trained with Adam over the whole model (the nested conv kernel included).
 - The checker infers conv/pool output shapes where the inputs are known.
-- Positioning: Raster now spans the ML stack — neural nets (incl. CNNs),
-  gradient-boosted trees, and backtesting — in one dependency-free binary.
+- Positioning: Raster now spans the ML stack: neural nets (incl. CNNs),
+  gradient-boosted trees, and backtesting, in one dependency-free binary.
 
 ## 0.18.0
 
@@ -469,7 +469,7 @@ Gradient-optimized trading signals.
 
 - Because the backtest Sharpe is differentiable in the return series and a smooth
   signal's returns are differentiable in its weights, `grad` gives the gradient
-  of Sharpe with respect to the weights — so a signal can be tuned by gradient
+  of Sharpe with respect to the weights, so a signal can be tuned by gradient
   ascent, straight through a backtest. This is the kind of end-to-end autodiff a
   plain Python backtest can't do without JAX.
 - New example `signal_opt.ra`: learns a linear signal's weights on a synthetic
@@ -484,7 +484,7 @@ Gradient-optimized trading signals.
 
 Backtesting toolkit (finance roadmap #6).
 
-- New cumulative-scan builtins: `cumsum`, `cumprod`, `cummax`, `cummin` — the
+- New cumulative-scan builtins: `cumsum`, `cumprod`, `cummax`, `cummin`: the
   vectorized primitives for signals, equity curves, and running peaks.
 - New `std/backtest.ra` library: `returns`/`log_returns`, `sma` (moving average
   via prefix sums), `equity` (cumulative-product equity curve), `max_drawdown`,
@@ -502,7 +502,7 @@ Native gradient-boosted trees (finance roadmap #5).
 
 - A pure-Go gradient boosting engine (`internal/gbm`) using the second-order
   (Newton) formulation, so squared-error regression and logistic binary
-  classification share one tree builder. No XGBoost, no Python, no native deps —
+  classification share one tree builder. No XGBoost, no Python, no native deps;
   it stays a single static binary.
 - `gbm_fit(X, y)` or `gbm_fit(X, y, opts)` trains on a `[n, d]` feature matrix
   and an `[n]` target/label vector. `opts` is a record of hyperparameters:
@@ -512,7 +512,7 @@ Native gradient-boosted trees (finance roadmap #5).
   for regression or probabilities for a logistic model.
 - Deterministic: exact-greedy splits with pre-sorted features, and the
   per-feature split search parallelizes across cores while reducing in fixed
-  order — so fits are bit-identical run to run regardless of scheduling.
+  order, so fits are bit-identical run to run regardless of scheduling.
 - New example `gbm.ra`: a train/test split on a synthetic loan book, fitting a
   logistic default classifier and a regression model on the same features.
 
@@ -527,8 +527,8 @@ Units of measure (finance roadmap #4).
   `+`/`-`/comparisons require a match, `^` with a constant exponent raises them,
   and `sqrt` halves them. `exp`/`log`/`sin`/`cos`/`tanh`/`sigmoid` require a
   dimensionless argument. `matmul`/`dot` multiply the operand units.
-- Introduce a unit on a value with a `let` annotation — `let px: USD/share =
-  150.0` — bare numeric literals are dimensionless and adopted into the
+- Introduce a unit on a value with a `let` annotation (`let px: USD/share =
+  150.0`); bare numeric literals are dimensionless and adopted into the
   declared unit. Undeclared unit names in an annotation are reported.
 - Units are checked statically and fully erased at runtime: annotated code
   computes the same plain numbers with zero overhead, and unannotated code is
@@ -540,7 +540,7 @@ Units of measure (finance roadmap #4).
 
 Data frames (finance roadmap #3).
 
-- A frame is a record whose fields are named column tensors — so field access,
+- A frame is a record whose fields are named column tensors, so field access,
   slicing, and `grad` all work on it, and a numeric time column makes it a time
   series. No new type, and it composes with everything.
 - `read_frame(path)` loads a CSV with a header row into such a record;
@@ -549,7 +549,7 @@ Data frames (finance roadmap #3).
   string, and `with_field(rec, name, value)` returns a copy with a field set.
 - New example `frames.ra`: loads prices, computes daily log returns and realized
   (annualized) volatility, and adds a column with `with_field`.
-- Kept pure Go / zero dependencies — Parquet/Arrow would need a third-party
+- Kept pure Go / zero dependencies, Parquet/Arrow would need a third-party
   module, so it's deferred.
 
 ## 0.13.0
@@ -562,7 +562,7 @@ Faster core numerics (finance roadmap #2).
   million-element reduction.
 - The backward passes for same-shape elementwise and unary ops run across cores
   too (each goroutine writes a disjoint slice of the gradient), so gradient
-  computation on large tensors uses all cores — not just the forward pass.
+  computation on large tensors uses all cores, not just the forward pass.
 - Together with v0.12's parallel forward ops, both the value and the gradient of
   large-tensor work (Monte Carlo, backtesting) are now multicore. Matmul is
   already row-parallel and cache-friendly; explicit blocking is left for later.
@@ -573,7 +573,7 @@ Multicore tensor ops (finance roadmap #1).
 
 - Large elementwise, unary, and matmul forward passes now run across CPU cores.
   Each goroutine writes a disjoint slice of the output, so it's race-free and
-  **bit-identical to a serial run** — parallelism never changes a program's
+  **bit-identical to a serial run**, parallelism never changes a program's
   result, and randomness stays deterministic. Small tensors (typical training
   parameters) run serially, below a size threshold.
 - Measured scaling on large ops (1 core -> 16): `exp` ~3.8x, 256x256 matmul
@@ -590,7 +590,7 @@ Deterministic randomness, and the first finance step.
   what model governance and audit require. (Because runs are reproducible, the
   formatter's behavior-equivalence test now covers the stochastic examples too.)
 - New example `montecarlo_option.ra`: prices a European call by Monte Carlo and
-  computes its Greeks (delta, vega) by autodiff — matching Black-Scholes closed
+  computes its Greeks (delta, vega) by autodiff, matching Black-Scholes closed
   form, with no bump-and-revalue.
 - `docs/finance.md`: an honest assessment of where Raster can beat a Python
   stack for financial ML under a pure-Go, no-native-deps constraint, and the
@@ -637,7 +637,7 @@ Einsum and earlier error detection.
 - The checker infers an einsum's output shape from a literal spec and known
   input shapes, and reports malformed specs and rank mismatches.
 - The checker now checks each function body at its definition, using the
-  parameter annotations — so shape mistakes, field typos, and return mismatches
+  parameter annotations, so shape mistakes, field typos, and return mismatches
   are caught even in functions that are never called. Unannotated parameters
   stay unknown, so this adds no false positives.
 - New example `einsum.ra`.
@@ -666,7 +666,7 @@ Records and modules.
 - Records with named fields: `{ w: [1.0, 2.0], b: 0.5 }`, accessed with `.`
   (`p.w`). A `{` is a record when followed by `name:`, otherwise a block.
 - `grad` follows record structure: differentiating a loss over a record of
-  parameters returns a record of gradients with the same fields — so a model can
+  parameters returns a record of gradients with the same fields, so a model can
   live in a record instead of a positional list.
 - Namespaced imports: `import "std/nn.ra" as nn` binds the module's definitions
   as a record, called as `nn.dense(...)`. Plain `import` still shares scope.
@@ -687,7 +687,7 @@ Slicing, shape variables, and a faster tensor engine.
   `fn mm(A: [n, k], B: [k, m]) -> [n, m]`.
 - The checker also reports argument rank mismatches against an annotation.
 - Performance: the elementwise/broadcast path was rewritten to avoid per-element
-  division — fast paths for equal shapes and scalar operands, and an
+  division: fast paths for equal shapes and scalar operands, and an
   odometer-style walk for general broadcasting (~3x on the broadcast benchmark).
   All gradient-check tests still pass.
 - The email in the git history was replaced with a GitHub noreply address.

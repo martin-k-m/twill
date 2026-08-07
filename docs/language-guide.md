@@ -92,7 +92,7 @@ The details:
 - Records compare field by field, **matched by name**, so declaration order
   doesn't change the answer: `{ a: 1.0, b: 2.0 } == { b: 2.0, a: 1.0 }`. A record
   with an extra field is not equal.
-- Values of different types are never equal — `[1.0] == 1.0` is false, not an
+- Values of different types are never equal: `[1.0] == 1.0` is false, not an
   error.
 - Functions have no structure worth walking, so they compare by **identity**: a
   function equals itself, and two separately written `fn(x) = x` do not.
@@ -102,7 +102,7 @@ The ordering operators (`<`, `<=`, `>`, `>=`) are only defined on scalars;
 applying one to a list, record, string, or non-scalar tensor is an error.
 
 For elementwise comparison of two tensors into a tensor of 1s and 0s, use the
-`equal` builtin — `==` on tensors gives one Bool for the whole value.
+`equal` builtin. `==` on tensors gives one Bool for the whole value.
 
 ## Bindings and assignment
 
@@ -181,7 +181,7 @@ let v = [10.0, 20.0, 30.0]
 v[0]                  # 10 (scalar)
 
 let m = [[1.0, 2.0], [3.0, 4.0]]
-m[1]                  # tensor([3, 4], shape=[2]) — a row
+m[1]                  # tensor([3, 4], shape=[2]), a row
 m[1][0]               # 3
 ```
 
@@ -190,7 +190,7 @@ Indexing a tensor along the first axis returns a scalar (rank-1) or a slice
 
 Slicing takes a half-open range along the first axis; either bound may be
 omitted. Both indexing (`x[i]`) and slicing (`x[a:b]`) a tensor are
-differentiable — gradient flows to the selected element or rows.
+differentiable: gradient flows to the selected element or rows.
 
 ```rust
 v[1:3]                # tensor([20, 30], shape=[2])
@@ -213,8 +213,8 @@ hessian(f)         # -> function returning the [n, n] Hessian of a scalar output
 `grad`, `grads`, and `value_and_grad` require the differentiated function to
 return a scalar; a gradient has the same shape as the argument it corresponds to,
 including nested lists. `jacobian(f)(x)` instead takes a function with a *vector*
-output and returns the full matrix of partials — row `i` is the gradient of
-output `i` — computed by one reverse-mode pass per output. See
+output and returns the full matrix of partials, where row `i` is the gradient of
+output `i`, computed by one reverse-mode pass per output. See
 `examples/jacobian.tw`.
 
 ```rust
@@ -230,7 +230,7 @@ Differentiable primitives: `+ - * / % @ ^`, `relu`, `sigmoid`, `tanh`, `exp`,
 `log`, `sin`, `cos`, `sqrt`, `sum`, `mean`, `abs`, `pow`.
 
 `hessian(f)(x)` gives the exact matrix of second partial derivatives of a scalar
-function — second-order autodiff via forward-mode jets (see `examples/hessian.tw`
+function, by second-order autodiff via forward-mode jets (see `examples/hessian.tw`
 for Newton's method). It supports functions built from arithmetic, the unary
 math functions, `matmul`, `sum`, `mean`, and the structural ops indexing
 (`x[i]`), slicing (`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a
@@ -261,7 +261,7 @@ mistake is caught even if the function is never called.
 
 Declare a base unit at the top level with `unit`, then annotate scalar
 quantities with it. The checker tracks units through arithmetic and reports a
-mismatch, the same way it does for shapes — but units are erased at runtime, so
+mismatch, the same way it does for shapes, but units are erased at runtime, so
 annotated code runs as plain numbers with zero overhead.
 
 ```rust
@@ -277,14 +277,14 @@ checker applies the natural rules:
 
 - `*` multiplies units, `/` divides them, and `^` with a constant integer
   exponent raises them (`sqrt` halves them).
-- `+`, `-`, `%`, and comparisons require both sides to share a unit — adding
+- `+`, `-`, `%`, and comparisons require both sides to share a unit. Adding
   `USD` to `share` is an error.
 - `matmul`/`dot` multiply the operand units; indexing and slicing preserve them.
 - `exp`, `log`, `sin`, `cos`, `tanh`, and `sigmoid` require a dimensionless
   argument (their result is dimensionless).
 
 A bare numeric literal is dimensionless. To give a value a unit, annotate the
-`let` that binds it — the literal is adopted into the declared unit:
+`let` that binds it: the literal is adopted into the declared unit:
 
 ```rust
 let price: USD/share = 150.0
@@ -343,7 +343,7 @@ import "helpers.tw"         # a file, relative to the importing file
 
 A path beginning with `std/` names a **module** of the standard library, not a
 file: no extension, no directory, and it means the same thing from anywhere,
-because the library is compiled into the `twill` binary. `std/` is reserved — a
+because the library is compiled into the `twill` binary. `std/` is reserved, so a
 directory called `std` next to your program does not shadow it. Every other path
 is a **file**, resolved relative to the importing file first, then the working
 directory; `import "./std/local.tw"` reaches a real directory named `std`.
@@ -362,7 +362,7 @@ its definitions under `name`, so you call `nn.dense(...)`. That record's fields
 are in the module's declaration order, so printing or iterating a namespace gives
 the same result on every run.
 
-A standard-library module may only import other `std/` modules — it has no
+A standard-library module may only import other `std/` modules. It has no
 directory of its own to resolve a relative path against.
 
 To work on the library itself without rebuilding, set `TWILL_STD` to a directory
@@ -386,7 +386,7 @@ All of them are differentiable, including the two order-based ones, though what
 that means is worth being clear about. `median` routes the whole gradient to
 whichever element was selected, the way `max` does, and splits it in half
 between the middle two when the run has even length. `prod` gives each factor
-the product of the others, which is the total divided by that factor — except
+the product of the others, which is the total divided by that factor, except
 where a factor is zero and the division is not available. There, a single zero
 takes the product of the rest and everything else gets nothing, and two or more
 zeros flatten the gradient entirely, because every product of the others still
@@ -462,7 +462,7 @@ Linear algebra / shape: `matmul(a, b)` / `dot(a, b)` (same as `@`),
 `einsum(spec, ...tensors)`.
 
 Indexing / batching: `gather(x, indices)` selects rows of `x` (its first axis)
-by an index list or 1-D tensor, and is differentiable — the gradient scatters
+by an index list or 1-D tensor, and is differentiable: the gradient scatters
 back to the selected rows, so repeated indices (embedding lookups) accumulate.
 `permutation(n)` returns a seeded random ordering of `0..n-1` (for shuffling),
 and `int(x)` truncates a scalar toward zero.
@@ -472,7 +472,7 @@ with `input` shaped `[Cin, H, W]` and `weight` shaped `[Cout, Cin, KH, KW]`,
 producing `[Cout, H-KH+1, W-KW+1]` (valid padding, unit stride).
 `maxpool2d(input, k)` does non-overlapping `k×k` max pooling over each channel of
 a `[C, H, W]` tensor. `grad` flows through both, so a convolutional net trains
-like any other model — see `examples/cnn.tw`.
+like any other model. See `examples/cnn.tw`.
 
 `einsum` is a general Einstein-summation contraction and is differentiable:
 
@@ -485,14 +485,14 @@ einsum("i,ij,j->", x, W, y) # bilinear form x' W y
 
 Each label names an axis; repeated labels across operands are summed, and only
 the labels in the output remain. Omitting `->` keeps the labels that appear once.
-(A label repeated within one operand — a trace or diagonal — isn't supported
+(A label repeated within one operand, a trace or diagonal, is not supported
 yet.)
 
 Construction: `tensor(list)`, `scalar(x)`, `zeros(...shape)`, `ones(...shape)`,
 `fill(value, ...shape)`, `eye(n)`, `randn(...shape)` (standard normal),
 `rand(...shape)` (uniform), `seed(n)`. Shapes may be separate args or a list.
-Randomness is **deterministic by default** — a program gives the same result
-every run — and `seed(n)` chooses the starting point. That reproducibility
+Randomness is **deterministic by default**: a program gives the same result
+every run, and `seed(n)` chooses the starting point. That reproducibility
 matters for model governance and audit.
 
 Lists / higher-order: `range(...)`, `list(...)`, `map(f, xs)`, `zip(...)`,
@@ -508,8 +508,8 @@ Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
 Data: `read_csv(path)` loads a file of numeric rows (comma- or
 whitespace-separated, `#` lines skipped) into a `[rows, cols]` tensor.
 
-Persistence: `save(value, path)` writes any value — a tensor, a record or list
-of tensors (a model's whole parameter tree), or a fitted `gbm` model — to a file
+Persistence: `save(value, path)` writes any value, whether a tensor, a record or list
+of tensors (a model's whole parameter tree), or a fitted `gbm` model, to a file
 in an exact binary format, and `load(path)` reads it back. Paths are relative to
 the running script. This is the deploy path: train once, `save` the model, and
 ship it with the single binary for inference (`examples/save_load.tw`).
@@ -524,7 +524,7 @@ string, and `with_field(rec, name, value)` returns a copy with a field set. See
 Gradient-boosted trees: `gbm_fit(X, y)` (or `gbm_fit(X, y, opts)`) trains a
 native gradient-boosting model on a `[n, d]` feature matrix and an `[n]`
 target/label vector, and `gbm_predict(model, X)` scores a `[n, d]` matrix into an
-`[n]` vector. `opts` is a record of hyperparameters — `rounds`, `learning_rate`,
+`[n]` vector. `opts` is a record of hyperparameters: `rounds`, `learning_rate`,
 `max_depth`, `min_leaf`, `lambda`, `gamma`, and `objective` (`"squared"` for
 regression, `"logistic"` for binary classification, where predictions are
 probabilities). The engine is pure Go and deterministic. See `examples/gbm.tw`.
@@ -533,10 +533,10 @@ Libraries written in Twill ship inside the binary and are imported as
 `std/<module>`: `std/nn` (layers including `dense`, `conv`, `embed`, and
 `self_attention`; activations, initializers, losses), `std/optim` (SGD,
 momentum, Adam), `std/data` (`standardize`, `train_test_split`, `shuffle` for
-real training loops — see `examples/minibatch.tw`), and `std/backtest`
+real training loops, see `examples/minibatch.tw`), and `std/backtest`
 (returns, moving averages, equity curves, drawdown, Sharpe, Sortino, volatility,
 CAGR). Their sources are the `.tw` files in `std/` in the repository. The
-optimizers are container-agnostic — the same `sgd_step`/`adam_step`
+optimizers are container-agnostic: the same `sgd_step`/`adam_step`
 update a model held in a positional list or a named record. The backtest Sharpe
 and Sortino are differentiable in the return series, so a smooth signal can be
 tuned by gradient ascent through the backtest (`examples/signal_opt.tw`).

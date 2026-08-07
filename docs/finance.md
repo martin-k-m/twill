@@ -2,7 +2,7 @@
 
 This is an honest assessment of where Twill can beat a Python + NumPy/PyTorch
 stack for financial machine learning, and a roadmap to get there. The design
-constraint is deliberate: **pure Go, no native dependencies** — one static,
+constraint is deliberate: **pure Go, no native dependencies**: one static,
 auditable binary, no CUDA, no BLAS via cgo, no Python.
 
 ## What that constraint means
@@ -19,12 +19,12 @@ Being clear up front avoids a costly surprise later:
 - **We win on the non-speed axes regardless.** Static shape checking catches
   bugs before a model runs; results are deterministic and reproducible by
   default; the whole thing deploys as one binary with nothing to install. In
-  regulated finance those are not nice-to-haves — they are the job.
+  regulated finance those are not nice-to-haves. They are the job.
 
 ## The edge Twill already has
 
 - **Greeks by autodiff.** Differentiate a pricer and get delta/vega/etc.
-  directly — no bump-and-revalue, no finite-difference noise. See
+  directly, with no bump-and-revalue, no finite-difference noise. See
   `examples/montecarlo_option.tw`: a Monte-Carlo European call whose price and
   Greeks match Black-Scholes closed form, computed with `grad`.
 - **Deterministic by default.** Randomness is seeded, so a run reproduces
@@ -32,7 +32,7 @@ Being clear up front avoids a costly surprise later:
   governance and audit trails require.
 - **Static shape and unit checking.** A shape mistake is caught before a single
   path is simulated, and dimensioned quantities (currency, rates, time) are
-  checked at compile time too — so adding dollars to shares, or passing a rate
+  checked at compile time too, so adding dollars to shares, or passing a rate
   where money is expected, is a compile error, not a silent production bug. This
   catches a whole class of finance bugs Python cannot.
 - **One auditable binary.** No environment drift between research and
@@ -42,7 +42,7 @@ Being clear up front avoids a costly surprise later:
 
 This is the workload where pure-Go Twill can be *provably better than Python
 soon*, because it wins on speed (parallel), correctness, reproducibility, and
-deployment at the same time — and its infrastructure (fast RNG, parallelism,
+deployment at the same time, and its infrastructure (fast RNG, parallelism,
 autodiff at scale) is shared with backtesting and MC risk.
 
 Delivered so far: deterministic seeded RNG and the Monte-Carlo pricer with
@@ -54,13 +54,13 @@ Ordered so each step is usable on its own and compounds toward the beachhead,
 then widens to the other workloads.
 
 1. **Parallelism.** *(delivered v0.12)* Elementwise, unary, and matmul forward
-   passes run across cores for large tensors — deterministic and race-free
+   passes run across cores for large tensors, deterministic and race-free
    (each goroutine writes disjoint outputs, so results are bit-identical to a
    serial run). Measured ~2–4.5× on large ops; small tensors stay serial. This
    is the single biggest pure-Go speed lever for Monte-Carlo and backtesting.
 2. **Faster core numerics.** *(delivered v0.13)* Full reductions (`sum`/`mean`)
    are parallel and deterministic (fixed-block partials, ~3.3× on large data),
-   and the backward passes for elementwise/unary ops run across cores too — so
+   and the backward passes for elementwise/unary ops run across cores too, so
    both the forward and the gradient use all cores on large tensors. (Matmul is
    already row-parallel and cache-friendly; explicit blocking is a later
    micro-optimization.)
@@ -74,7 +74,7 @@ then widens to the other workloads.
    annotate scalars with units or unit expressions (`px: USD/share`, `-> USD`).
    The checker tracks units through arithmetic, `matmul`/`dot`, and powers,
    requires dimensionless arguments to transcendentals, and rejects nonsense
-   like dollars + shares — all statically, then fully erased at runtime for zero
+   like dollars + shares, all statically, then fully erased at runtime for zero
    overhead. See `examples/units.tw`. This is correctness Python structurally
    cannot offer.
 5. **Gradient-boosted trees.** *(delivered v0.16)* A native, pure-Go GBM engine
@@ -90,20 +90,20 @@ then widens to the other workloads.
 6. **Backtesting toolkit.** *(delivered v0.17)* Cumulative-scan builtins
    (`cumsum`/`cumprod`/`cummax`/`cummin`) plus a `std/backtest` library:
    returns, moving averages, equity curves, drawdown, Sharpe, volatility, and
-   CAGR — all vectorized on tensors, no event loop needed. The Sharpe ratio is
+   CAGR, all vectorized on tensors, no event loop needed. The Sharpe ratio is
    differentiable in the return series, so a smooth signal can be *tuned by
-   gradient ascent* — a genuine edge over a Python backtest. See
+   gradient ascent*, a genuine edge over a Python backtest. See
    `examples/backtest.tw`.
 
 With #1–#6 delivered, the original roadmap is complete: Twill now covers
 parallel numerics, data frames, dimensioned types, gradient-boosted trees, and
-backtesting — the pure-Go, deterministic, single-binary core of the finance
+backtesting, the pure-Go, deterministic, single-binary core of the finance
 pitch.
 
 Beyond the roadmap, the first follow-up is delivered: **gradient-optimized
 signals** *(v0.18)*. Because the backtest Sharpe/Sortino are differentiable in
 the return series, `grad` differentiates a whole backtest, so a signal's weights
-can be tuned by gradient ascent on risk-adjusted return — see
+can be tuned by gradient ascent on risk-adjusted return, see
 `examples/signal_opt.tw`. Remaining ideas live in each item's notes above (GBM
 early stopping / feature importance / histogram splits, Parquet I/O, second-order
 autodiff for risk sensitivities, and a vectorized interpreter backend for speed).

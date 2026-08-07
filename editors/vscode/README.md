@@ -21,6 +21,6 @@ and run `vsce package` inside `editors/vscode`.
 
 ## What's here
 
-- `syntaxes/twill.tmLanguage.json` — the TextMate grammar.
-- `language-configuration.json` — comments, brackets, auto-closing pairs.
-- `package.json` — the extension manifest.
+- `syntaxes/twill.tmLanguage.json`: the TextMate grammar.
+- `language-configuration.json`: comments, brackets, auto-closing pairs.
+- `package.json`: the extension manifest.

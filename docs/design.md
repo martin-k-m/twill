@@ -4,7 +4,7 @@ Why Twill is built the way it is, and what's left to do.
 
 ## The idea
 
-The usual machine-learning stack — Python plus a numeric framework — was
+The usual machine-learning stack, Python plus a numeric framework, was
 assembled over time, not designed as a whole. Autodiff, shapes, and device
 placement are all added on top of a language that came first. Twill asks a
 narrower question: if you designed a language around differentiable tensor
@@ -32,7 +32,7 @@ TypeScript prototype, then a look at Rust). Go won for this stage: it builds to
 a single dependency-free binary, it's quick to compile and easy to read, and the
 standard library covers everything the interpreter needs. Rust would give better
 numeric performance and a real ML crate ecosystem (Burn, candle, ndarray), and
-it's a reasonable target later — the language design doesn't depend on the host.
+it's a reasonable target later; the language design does not depend on the host.
 For a small, readable reference implementation, Go is the better fit.
 
 ## Architecture
@@ -47,15 +47,15 @@ source ─lexer─▶ tokens ─parser─▶ AST ─┬─ checker ─▶ shape 
                                            tensor engine (autodiff)
 ```
 
-- `internal/lexer` — a hand-written scanner with source positions.
-- `internal/parser` — recursive descent with a Pratt loop for operators.
+- `internal/lexer`: a hand-written scanner with source positions.
+- `internal/parser`: recursive descent with a Pratt loop for operators.
   Expression-oriented, so `if` and blocks produce values.
-- `internal/tensor` — the autodiff engine. A tensor is a flat `[]float64` plus a
+- `internal/tensor`: the autodiff engine. A tensor is a flat `[]float64` plus a
   shape; operations optionally record a reverse-mode graph.
-- `internal/interp` — evaluates the AST against lexical scopes. All arithmetic
+- `internal/interp`: evaluates the AST against lexical scopes. All arithmetic
   lowers to tensor-engine ops, so any computed value can be differentiated.
-- `internal/checker` — static shape inference over the AST.
-- `cmd/twill` — the CLI and REPL.
+- `internal/checker`: static shape inference over the AST.
+- `cmd/twill`: the CLI and REPL.
 
 ## How autodiff works
 
@@ -65,13 +65,13 @@ and JAX, implemented directly in the tensor engine.
 Besides computing its output, each operation can record the inputs it depended
 on and a closure that pushes gradient from the output back to those inputs using
 the local derivatives. That graph is only built when an input requires
-gradients, so ordinary evaluation allocates nothing extra — the tape appears
+gradients, so ordinary evaluation allocates nothing extra: the tape appears
 only inside a `grad(...)` call.
 
 `grad(f)` re-wraps the call's arguments as fresh gradient-tracking leaves, runs
 `f` (which builds the graph as a side effect), seeds the scalar output's
 gradient to 1, and walks the graph in reverse topological order. Arguments can
-be nested lists, in which case the returned gradient mirrors that structure —
+be nested lists, in which case the returned gradient mirrors that structure,
 which is how a whole model held in a list gets differentiated at once.
 
 So differentiation is just running the program with gradients turned on.
@@ -79,7 +79,7 @@ So differentiation is just running the program with gradients turned on.
 ## The shape checker
 
 The checker infers a shape (or "unknown") for every expression and reports a
-diagnostic only when a mismatch is certain — both operand shapes fully known and
+diagnostic only when a mismatch is certain: both operand shapes fully known and
 incompatible. Everything it can't determine stays unknown, so it never flags
 correct dynamic code. That bias toward precision over recall is deliberate: a
 checker that cries wolf gets turned off.
@@ -88,7 +88,7 @@ It knows the shapes of tensor literals, of construction builtins called with
 literal sizes (`zeros(4)`, `randn(4, 2)`), and of the operations that combine
 them. Optional parameter annotations give it more to work with and let it check
 call sites against a declared contract. It does not follow shapes through
-`grad`, loops that reshape, or values read at runtime — those are left unknown.
+`grad`, loops that reshape, or values read at runtime. Those are left unknown.
 
 ## Known limitations (v0.8)
 
@@ -100,11 +100,11 @@ Deliberate, for a prototype:
   here need a bigger change (tensor/closure pooling or a bytecode VM). The
   interpreter is the reference semantics.
 - Reverse-mode, first-order autodiff. No `grad(grad(f))`.
-- Shape checking is stronger than it was — shape variables, declared record
-  types, and annotated bodies checked at definition — but it's still best-effort:
+- Shape checking is stronger than it was (shape variables, declared record
+  types, and annotated bodies checked at definition), but it is still best-effort:
   it can't infer shapes for unannotated parameters, so mismatches that depend on
   them are only caught at call sites (or not at all).
-- Record fields aren't mutable in place — you rebuild the record.
+- Record fields aren't mutable in place; you rebuild the record.
 - No named axes; broadcasting and reductions work on positional axes.
 
 ## Roadmap
