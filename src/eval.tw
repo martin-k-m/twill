@@ -550,20 +550,25 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
       }
       Ok(VRecord(RecordVal { fields: fields }))
     },
-    EField(x) => {
-      let target: Value = eval_expr(x.target, env)?
-      match target {
-        VRecord(r) => {
-          match dict_get(r.fields, x.name) {
-            Some(v) => Ok(v),
-            None => Err(runtime_error(x.line, bytes.concat("record has no field ", quoted(x.name)))),
-          }
-        },
-        _ => Err(runtime_error(x.line, bytes.concat("cannot read a field of a ", type_name(target)))),
-      }
-    },
+    EField(x) => field_value(eval_expr(x.target, env)?, x.name, x.line),
     EIf(x) => eval_if(x, env),
     EBlock(b) => Ok(flow_value(exec_block(b, new_env(Some(env)))?)),
+  }
+}
+
+# Field access on an already-evaluated target, shared by eval_expr and
+# eval_call. eval_call evaluates the target itself so that `t.to(f32)` can be
+# recognised before field access refuses a tensor, and without evaluating the
+# target twice; the error text lives here once for both.
+fn field_value(target: Value, name: Str, line: I64) -> Res[Value, RuntimeError] {
+  match target {
+    VRecord(r) => {
+      match dict_get(r.fields, name) {
+        Some(v) => Ok(v),
+        None => Err(runtime_error(line, bytes.concat("record has no field ", quoted(name)))),
+      }
+    },
+    _ => Err(runtime_error(line, bytes.concat("cannot read a field of a ", type_name(target)))),
   }
 }
 
@@ -785,14 +790,115 @@ fn record_equal(a: RecordVal, b: RecordVal) -> Bool {
 # ---- calls -----------------------------------------------------------------
 
 fn eval_call(x: ast.Call, env: Env) -> Res[Value, RuntimeError] {
-  let callee: Value = eval_expr(x.callee, env)?
+  # A call whose callee is a field access is looked at before the callee is
+  # evaluated the ordinary way, because `t.to(f32)` is the cast method on a
+  # tensor (NEEDS-110) and plain field access refuses a tensor target. The
+  # target is evaluated exactly once whichever way the dispatch goes, so a
+  # record with a field named `to` keeps meaning what it meant.
+  let callee: Value = VUnit
+  match x.callee {
+    EField(f) => {
+      let target: Value = eval_expr(f.target, env)?
+      if bytes.equal(f.name, "to") {
+        match as_tensor(target) {
+          Some(t) => return eval_cast(t, x),
+          None => unit,
+        }
+      }
+      callee = field_value(target, f.name, f.line)?
+    },
+    _ => callee = eval_expr(x.callee, env)?,
+  }
+  # A trailing dtype name on a tensor constructor: `zeros([784, 128], bf16)`.
+  # The seven dtype names are contextual rather than reserved, and the reading
+  # is decided here while the argument is still syntax: the last argument
+  # counts as a dtype only on a maker, only when it names one of the seven,
+  # and only when nothing in scope binds it, so a program that uses f32 as an
+  # ordinary variable keeps meaning what it meant.
+  let dt: I64 = -1
+  let maker: Str = ""
+  match callee {
+    VBuiltin(b) => {
+      if in_words(DTYPE_MAKERS, b.name) and len(x.args) > 0 {
+        match contextual_dtype(x.args[len(x.args) - 1], env) {
+          Some(code) => {
+            dt = code
+            maker = b.name
+          },
+          None => unit,
+        }
+      }
+    },
+    _ => unit,
+  }
+  let n: I64 = len(x.args)
+  if dt >= 0 {
+    n = n - 1
+  }
   let args: Arr[Value] = arr_new()
   let i: I64 = 0
-  while i < len(x.args) {
+  while i < n {
     push(args, eval_expr(x.args[i], env)?)
     i = i + 1
   }
+  if dt >= 0 {
+    # The same arity check apply makes, against the list with the dtype
+    # stripped, so `scalar(1.5, f32)` passes and a wrong count is reported
+    # against the arguments the maker actually received.
+    let want: I64 = builtin_arity(maker)
+    if want >= 0 and want != len(args) {
+      return Err(runtime_error(x.line, bytes.concat(maker, bytes.concat(" expects ",
+        bytes.concat(str(want), bytes.concat(" argument(s), got ", str(len(args))))))))
+    }
+    return bi_make(maker, args, dt, x.line)
+  }
   apply(callee, args, x.line)
+}
+
+# `t.to(f32)`: the explicit cast, docs/dtypes.md "The cast is spelled .to(dt)".
+# It lowers to tensor.cast, which re-rounds once from the source value. The
+# argument is the one position that exists for nothing but a dtype, so the
+# name is read as one without consulting the environment: `x.to(f32)` casts
+# even in a scope that binds f32. Constructors read the other way around, see
+# contextual_dtype below.
+#
+# Forward-only, like the elementwise rounding builtins: src/tensor.tw has no
+# taped twin for a cast, so a cast inside a differentiated function detaches
+# its input from the graph rather than carrying a gradient through the
+# rounding.
+fn eval_cast(t: tensor.Tensor, x: ast.Call) -> Res[Value, RuntimeError] {
+  if len(x.args) != 1 {
+    return Err(runtime_error(x.line, bytes.concat("to expects 1 argument(s), got ",
+      str(len(x.args)))))
+  }
+  match x.args[0] {
+    EIdent(id) => {
+      match tensor.dtype_of_name(id.name) {
+        Some(dt) => return Ok(VTensor(tensor.cast(t, dt))),
+        None => unit,
+      }
+    },
+    _ => unit,
+  }
+  Err(runtime_error(x.line, "to expects a dtype name (bool, i8, i32, f16, bf16, f32, f64)"))
+}
+
+# The contextual reading of a dtype name in a constructor's trailing argument.
+# The name resolves to a dtype only when the argument is a bare identifier,
+# only when tensor.dtype_of_name knows it, and only when the environment does
+# not bind it. A binding wins because the trailing position is shared with
+# shape dimensions: `let f32 = 5` followed by `zeros(f32)` meant a 5-vector
+# before dtypes existed and has to keep meaning one.
+fn contextual_dtype(e: ast.Expr, env: Env) -> Opt[I64] {
+  match e {
+    EIdent(x) => {
+      match env_get(env, x.name) {
+        Some(_) => None,
+        None => tensor.dtype_of_name(x.name),
+      }
+    },
+    _ => None,
+  }
 }
 
 fn apply(callee: Value, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -1125,6 +1231,24 @@ fn shape_from_args(args: Arr[Value], who: Str, line: I64) -> Res[Arr[I64], Runti
         }
         return Ok(dims)
       },
+      # A bracketed shape like `[784, 128]` is a tensor literal by the
+      # parse-time rule (is_numeric_elem in parse.tw), so it arrives here as a
+      # 1-D tensor rather than a list. Reading its elements as dimensions is
+      # what makes `zeros([784, 128], bf16)` mean what it writes. For a
+      # one-element tensor this coincides with the spread reading below, so
+      # nothing that worked changes meaning. The bootstrap refuses this form;
+      # the divergence is deliberate and came in with NEEDS-110.
+      VTensor(t) => {
+        if len(t.shape) == 1 {
+          let dims: Arr[I64] = arr_new()
+          let i: I64 = 0
+          while i < len(t.data) {
+            push(dims, i64_of_f64(f64_trunc(t.data[i])))
+            i = i + 1
+          }
+          return Ok(dims)
+        }
+      },
       _ => unit,
     }
   }
@@ -1184,6 +1308,9 @@ let DERIVATIVES: Str = "grad grads value_and_grad jacobian hessian"
 let DERIVED: Str = "grad(fn) grads(fn) value_and_grad(fn) jacobian(fn) hessian(fn)"
 let TREE_OPS: Str = "map zip fold append enumerate map_leaves zip_leaves"
 let MAKERS: Str = "tensor scalar zeros ones fill randn rand seed permutation eye"
+# The makers whose trailing argument may be a dtype name (NEEDS-110). seed and
+# permutation are the two MAKERS left out: neither makes a tensor.
+let DTYPE_MAKERS: Str = "tensor scalar zeros ones fill randn rand eye"
 let INSPECT: Str = "shape len item range list str int"
 let FILE_OPS: Str = "read_csv read_frame write_frame save load columns field with_field"
 
@@ -1214,7 +1341,7 @@ fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, Runtim
   if in_words(DERIVATIVES, name) { return bi_derivative(name, args, line) }
   if in_words(DERIVED, name) { return bi_derived(b, args, line) }
   if in_words(TREE_OPS, name) { return bi_tree(name, args, line) }
-  if in_words(MAKERS, name) { return bi_make(name, args, line) }
+  if in_words(MAKERS, name) { return bi_make(name, args, -1, line) }
   if in_words(INSPECT, name) { return bi_inspect(name, args, line) }
   if in_words(FILE_OPS, name) { return bi_files(name, args, line) }
   if in_words("gbm_fit gbm_predict", name) { return bi_gbm(name, args, line) }
@@ -2616,38 +2743,54 @@ fn zip_leaf_call(f: Value, trees: Arr[Value]) -> Res[Value, RuntimeError] {
 
 # ---- tensor construction ---------------------------------------------------
 
-fn bi_make(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+# dt is the dtype code of a trailing dtype-name argument, already resolved and
+# stripped from args by eval_call, or -1 when the call named none. The default
+# stays f64, docs/dtypes.md "The default for a literal is f64": narrow dtypes
+# are asked for, never inferred.
+fn bi_make(name: Str, args: Arr[Value], dt: I64, line: I64) -> Res[Value, RuntimeError] {
   if bytes.equal(name, "tensor") {
     match args[0] {
       # Already a tensor: returned as it is, graph and all. Rebuilding it from
       # its numbers would silently detach it from the tape, so `tensor(x)` in
-      # the middle of a loss would zero the gradient.
-      VTensor(t) => return Ok(VTensor(t)),
+      # the middle of a loss would zero the gradient. With a dtype it is a
+      # cast, and a cast is forward-only, so there the detachment is asked for.
+      VTensor(t) => {
+        if dt >= 0 { return Ok(VTensor(tensor.cast(t, dt))) }
+        return Ok(VTensor(t))
+      },
       _ => unit,
     }
-    return lift_v(tensor.from_nested(value_to_nested(args[0], line)?), line)
+    let made: tensor.Tensor = lift(tensor.from_nested(value_to_nested(args[0], line)?), line)?
+    if dt >= 0 { made = tensor.cast(made, dt) }
+    return Ok(VTensor(made))
   }
   if bytes.equal(name, "scalar") {
-    return Ok(VTensor(tensor.scalar(scalar_of(args[0], "scalar", line)?)))
+    return Ok(VTensor(tensor.scalar_of(scalar_of(args[0], "scalar", line)?, maker_dtype(dt))))
   }
   if bytes.equal(name, "zeros") {
-    return Ok(VTensor(tensor.filled(shape_from_args(args, "zeros", line)?, 0.0)))
+    return Ok(VTensor(tensor.filled_of(shape_from_args(args, "zeros", line)?, 0.0, maker_dtype(dt))))
   }
   if bytes.equal(name, "ones") {
-    return Ok(VTensor(tensor.filled(shape_from_args(args, "ones", line)?, 1.0)))
+    return Ok(VTensor(tensor.filled_of(shape_from_args(args, "ones", line)?, 1.0, maker_dtype(dt))))
   }
   if bytes.equal(name, "fill") {
     if len(args) < 1 {
       return Err(runtime_error(line, "fill expects (value, ...shape)"))
     }
     let v: F64 = scalar_of(args[0], "fill", line)?
-    return Ok(VTensor(tensor.filled(shape_from_args(rest(args, 1), "fill", line)?, v)))
+    return Ok(VTensor(tensor.filled_of(shape_from_args(rest(args, 1), "fill", line)?, v, maker_dtype(dt))))
   }
+  # A random draw with a dtype is the f64 draw rounded once into it, which is
+  # the cast rule applied to a sample.
   if bytes.equal(name, "randn") {
-    return Ok(VTensor(random_tensor(shape_from_args(args, "randn", line)?, true)))
+    let t: tensor.Tensor = random_tensor(shape_from_args(args, "randn", line)?, true)
+    if dt >= 0 { t = tensor.cast(t, dt) }
+    return Ok(VTensor(t))
   }
   if bytes.equal(name, "rand") {
-    return Ok(VTensor(random_tensor(shape_from_args(args, "rand", line)?, false)))
+    let t: tensor.Tensor = random_tensor(shape_from_args(args, "rand", line)?, false)
+    if dt >= 0 { t = tensor.cast(t, dt) }
+    return Ok(VTensor(t))
   }
   # seed makes subsequent randn/rand reproducible from a chosen starting point.
   if bytes.equal(name, "seed") {
@@ -2685,7 +2828,18 @@ fn bi_make(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let shape: Arr[I64] = arr_new()
   push(shape, n)
   push(shape, n)
-  Ok(VTensor(tensor.mk_raw(shape, d, tensor.DT_F64)))
+  # Zero and one are representable in every dtype, so an eye with a dtype is
+  # the f64 eye cast, with nothing to round.
+  let out: tensor.Tensor = tensor.mk_raw(shape, d, tensor.DT_F64)
+  if dt >= 0 { out = tensor.cast(out, dt) }
+  Ok(VTensor(out))
+}
+
+# The dtype a maker builds in: the trailing dtype argument when the call named
+# one, f64 otherwise.
+fn maker_dtype(dt: I64) -> I64 {
+  if dt >= 0 { return dt }
+  tensor.DT_F64
 }
 
 # Nested arrays for `tensor([[1, 2], [3, 4]])`. Only numbers, tensors and lists
