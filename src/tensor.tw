@@ -26,7 +26,7 @@ mode systems
 # message the bootstrap produces for the same mistake.
 #
 # Values and shapes:
-#   Tensor { shape: Arr[I64], data: Arr[F64], dtype: I64 }
+#   Tensor { shape: Arr[I64], data: Buf, dtype: I64 }
 #   rank, is_scalar, element_count, strides_of, shape_string, shape_equal
 #   scalar(x), filled(shape, v), zeros_like(t), clone(t)
 #   broadcast_shape(a, b), matmul_shape(a, b)
@@ -85,6 +85,8 @@ mode systems
 #   t_binary, t_unary, t_pow_scalar, t_clip, t_where, t_matmul, t_einsum,
 #   t_sum_all, t_mean_all, ... (one per differentiable op)
 #   backward(tp, root, seed) -> Res[Arr[Tensor], Str]
+#   backward_scaled(tp, root, seed, scale) -> Res[Arr[Tensor], Str]
+#   grads_finite(gs) -> Bool
 #
 # The split between `binary` and `t_binary` is deliberate. eval.tw does most of
 # its arithmetic with nothing differentiating, and a taped op that is never
@@ -94,6 +96,7 @@ mode systems
 
 import "bytes.tw" as bytes
 import "float.tw" as flt
+import "buf.tw" as buf
 
 # ---- the value ------------------------------------------------------------
 
@@ -106,30 +109,33 @@ import "float.tw" as flt
 # what lets `x + 1` broadcast with no rule for scalars, and it is why `shape` of
 # a number is `[]` rather than an error.
 #
-# WHY `data` IS STILL Arr[F64] WHEN THE POINT WAS TO STOP STORING F64
+# THE BUFFER IS PACKED. NEEDS-111 landed here.
 #
 # The dtype is the *semantics* of the element: which values exist, what a store
 # rounds to, and what an operation accumulates in. The buffer is the *physical
-# layout*. This change lands the first and leaves the second to NEEDS-111,
-# because they are separable and the semantics is the part that can be specified
-# and checked without a byte-addressable buffer primitive to write into.
+# layout*: `data` is the packed byte buffer from src/buf.tw, element i in
+# elem_bytes(dtype) bytes at offset i times that, little-endian. A bf16 element
+# occupies sixteen bits, so the memory drop docs/dtypes.md promises is real now
+# and `martin-k-m/shuttle` stops being right that quantisation shrinks nothing.
 #
-# The invariant that makes them separable: every element of `data` is exactly
-# the F64 widening of a value representable in `dtype`. Nothing writes into a
-# buffer except through `mk`, which enforces it, or `mk_raw`, whose callers copy
-# elements that already satisfy it. So a bf16 tensor holds bf16 values today and
-# will hold them in sixteen bits each when NEEDS-111 lands, and no kernel above
-# this line changes when it does.
+# The invariant that let the semantics land before the layout is unchanged, and
+# the layout now enforces it rather than trusting it: every element read out of
+# `data` is exactly the F64 widening of a value representable in `dtype`,
+# because `buf.set` can only store such a bit pattern and `buf.get` can only
+# widen one. Nothing writes into a buffer except through `mk`, whose packing
+# rounds, or `mk_raw`, whose callers copy elements that already satisfy the
+# invariant and for which the packing is therefore the identity.
 #
-# What that does not buy, and it should be said plainly rather than discovered:
-# no memory is saved yet. `martin-k-m/shuttle` reports that quantisation shrinks
-# nothing, and it stays right about the bytes until NEEDS-111. What it stops
-# being right about is that quantisation does nothing at all: an int8 or bf16
-# tensor now holds the values int8 or bf16 can hold, and the error that
-# introduces is measurable from twill.
+# The kernels kept their text, which is the property the two-step landing was
+# for: `t.data[i]` became `buf.get(t.data, t.dtype, i)`, `len(t.data)` became
+# `element_count(t.shape)`, and nothing else about them moved. A kernel still
+# computes into a plain Arr[F64] at full width and hands it to `mk`, so the
+# accumulation story in docs/dtypes.md is untouched. No slicing, no views: a
+# Buf is never shared between two tensors, every kernel allocates its own
+# output, and the primitive deliberately offers nothing that would change that.
 struct Tensor {
   shape: Arr[I64],
-  data: Arr[F64],
+  data: Buf,
   dtype: I64,
 }
 
@@ -180,9 +186,11 @@ fn dtype_of_name(s: Str) -> Opt[I64] {
   None
 }
 
-# Storage width per element. Nothing reads this yet except a diagnostic; it is
-# here because NEEDS-111's packed buffer needs exactly this table and a second
-# copy of it elsewhere is a second thing to get wrong.
+# Storage width per element. src/buf.tw `elem_bytes` is this table divided by
+# eight. It is declared there rather than read from here because the import
+# points the other way, the same trade src/gpu/buffer.tw makes with
+# `element_count`; a dtype added to one table is added to both in the same
+# change.
 fn dtype_bits(dt: I64) -> I64 {
   if dt == DT_BOOL { return 8 }
   if dt == DT_I8 { return 8 }
@@ -233,6 +241,47 @@ fn dt_round(dt: I64, x: F64) -> F64 {
   if v < lo { return lo }
   if v > hi { return hi }
   v
+}
+
+# The shortest decimal that reads a stored element back to itself, at the
+# element's own dtype. It mirrors dt_round: the import points tensor -> float,
+# so the DT_* codes cannot reach float.tw and the dispatch on them has to live
+# here, next to the rounding it is the printing half of.
+#
+# The point is precision, not width. A bf16 element is stored as the F64
+# widening of a bf16 value, so format_number would print seventeen digits of a
+# number that distinguishes about three; f_shortest cuts the decimal at the
+# first digit no other bf16 could round back from, which is the honest reading.
+# DT_F64 keeps format_number unchanged, because the differential harness
+# compares that text byte for byte against the bootstrap and every golden in
+# testdata/ depends on it.
+fn dt_shortest(dt: I64, x: F64) -> Str {
+  if dt == DT_F64 { return flt.format_number(x) }
+  if dt == DT_F32 { return flt.f32_shortest(x) }
+  if dt == DT_BF16 { return flt.bf16_shortest(x) }
+  if dt == DT_F16 { return flt.f16_shortest(x) }
+  # bool and the integers hold integer-valued F64s, which format_number renders
+  # exactly and at their natural length. The dtype tag that tells a bool 1 from
+  # an i8 1 apart prints beside the tensor and is eval.tw's, not this function's.
+  flt.format_number(x)
+}
+
+# A decimal literal parsed straight to its dtype, ready to store. For the narrow
+# floats this rounds once, at the format, rather than parsing at f64 and letting
+# dt_round round a second time; docs/dtypes.md notes that decimal double
+# rounding is almost always harmless and that "almost always" is not a
+# specification. The integers and bool have no such hazard, because a literal
+# small enough to be one is exact in f64, so they parse at f64 and take
+# dt_round's single rounding. None on a malformed literal, as f64_of_str does.
+fn dt_of_str(dt: I64, s: Str) -> Opt[F64] {
+  if dt == DT_F64 { return flt.f64_of_str(s) }
+  if dt == DT_F32 { return flt.f32_of_str(s) }
+  if dt == DT_BF16 { return flt.bf16_of_str(s) }
+  if dt == DT_F16 { return flt.f16_of_str(s) }
+  match flt.f64_of_str(s) {
+    Some(x) => Some(dt_round(dt, x)),
+    None => None,
+  }
 }
 
 # The dtype a mixed-dtype operation produces.
@@ -380,10 +429,11 @@ fn copy_shape(s: Arr[I64]) -> Arr[I64] {
   out
 }
 
-# Every kernel below allocates its own output rather than writing into one the
-# caller supplied. Nothing in this file hands out an alias, which is the
-# property that lets `split` copy instead of view and lets the tape hold a
-# tensor without fearing a later write to it.
+# Every kernel below computes into a fresh wide buffer like this one and hands
+# it to `mk`, which packs it; no kernel writes into a buffer the caller
+# supplied. Nothing in this file hands out an alias, which is the property that
+# lets `split` copy instead of view and lets the tape hold a tensor without
+# fearing a later write to it.
 fn alloc(n: I64) -> Arr[F64] {
   let d: Arr[F64] = arr_new()
   let i: I64 = 0
@@ -394,36 +444,38 @@ fn alloc(n: I64) -> Arr[F64] {
   d
 }
 
-# The two ways a tensor is built, and the reason there are two.
+# The two ways a tensor is built, and the reason there are still two.
 #
 # `mk` is for a buffer a kernel computed: the values came out of an accumulator
 # that is wider than the dtype, so every one of them is rounded on the way in.
-# This is the single enforcement point for the storage invariant, and it is why
-# no kernel below has to remember to round.
+# The rounding now lives in `buf.set`, which cannot store anything but a
+# representable bit pattern, so the invariant no longer depends on this
+# function remembering anything; what `mk` still owns is the claim that
+# rounding *here* is correct, which is the one-rounding-on-store argument in
+# docs/dtypes.md.
 #
 # `mk_raw` is for a buffer whose every element was copied from a tensor of the
 # same dtype. Transposing, gathering, concatenating and sorting move values
-# without computing any, so rounding them again would be a full pass over the
-# buffer to change nothing. The cost is that `mk_raw` is a promise rather than a
-# check, so it takes the dtype it is being told and the call sites that use it
-# are exactly the rearrangements.
+# without computing any, so the packing's narrowing is the identity on them.
+# The body is `mk`'s body, because a packed store narrows whether or not the
+# caller needed it to; what is left of the distinction is the caller's claim,
+# and the claim is still worth reading at the call sites, which are exactly the
+# rearrangements.
 fn mk(shape: Arr[I64], data: Arr[F64], dt: I64) -> Tensor {
-  if dt != DT_F64 {
-    let i: I64 = 0
-    while i < len(data) {
-      data[i] = dt_round(dt, data[i])
-      i = i + 1
-    }
+  let d: Buf = buf.alloc_elems(len(data), dt)
+  let i: I64 = 0
+  while i < len(data) {
+    buf.set(d, dt, i, data[i])
+    i = i + 1
   }
-  Tensor { shape: shape, data: data, dtype: dt }
+  Tensor { shape: shape, data: d, dtype: dt }
 }
 
-fn mk_raw(shape: Arr[I64], data: Arr[F64], dt: I64) -> Tensor =
-  Tensor { shape: shape, data: data, dtype: dt }
+fn mk_raw(shape: Arr[I64], data: Arr[F64], dt: I64) -> Tensor = mk(shape, data, dt)
 
 fn scalar_of(x: F64, dt: I64) -> Tensor {
-  let d: Arr[F64] = arr_new()
-  push(d, dt_round(dt, x))
+  let d: Buf = buf.alloc_elems(1, dt)
+  buf.set(d, dt, 0, x)
   Tensor { shape: arr_new(), data: d, dtype: dt }
 }
 
@@ -437,10 +489,10 @@ fn scalar(x: F64) -> Tensor = scalar_of(x, DT_F64)
 fn filled_of(shape: Arr[I64], v: F64, dt: I64) -> Tensor {
   let n: I64 = element_count(shape)
   let r: F64 = dt_round(dt, v)
-  let d: Arr[F64] = arr_new()
+  let d: Buf = buf.alloc_elems(n, dt)
   let i: I64 = 0
   while i < n {
-    push(d, r)
+    buf.set(d, dt, i, r)
     i = i + 1
   }
   Tensor { shape: copy_shape(shape), data: d, dtype: dt }
@@ -455,14 +507,22 @@ fn zeros_like(t: Tensor) -> Tensor = filled_of(t.shape, 0.0, t.dtype)
 
 fn zeros_dt(shape: Arr[I64], dt: I64) -> Tensor = filled_of(shape, 0.0, dt)
 
-fn clone(t: Tensor) -> Tensor {
+fn clone(t: Tensor) -> Tensor = mk_raw(copy_shape(t.shape), data_arr(t), t.dtype)
+
+# The elements of `t` as a fresh Arr[F64], row-major. The helpers that operate
+# on plain wide buffers (`mm`, `transpose2d`, `sort_offsets`, `accumulate`)
+# take one of these rather than a Buf, because they are also handed buffers no
+# tensor owns: an accumulator, a transposed copy, a vjp contribution. The copy
+# is the point; handing out the packed buffer itself would alias the tensor.
+fn data_arr(t: Tensor) -> Arr[F64] {
   let d: Arr[F64] = arr_new()
+  let n: I64 = element_count(t.shape)
   let i: I64 = 0
-  while i < len(t.data) {
-    push(d, t.data[i])
+  while i < n {
+    push(d, buf.get(t.data, t.dtype, i))
     i = i + 1
   }
-  mk_raw(copy_shape(t.shape), d, t.dtype)
+  d
 }
 
 # The explicit cast. `docs/dtypes.md` spells it `x.to(f32)` in surface syntax;
@@ -475,10 +535,10 @@ fn clone(t: Tensor) -> Tensor {
 # handful of wrong elements in a tensor and nothing else.
 fn cast(t: Tensor, dt: I64) -> Tensor {
   if t.dtype == dt { return clone(t) }
-  let d: Arr[F64] = alloc(len(t.data))
+  let d: Arr[F64] = alloc(element_count(t.shape))
   let i: I64 = 0
-  while i < len(t.data) {
-    d[i] = dt_round(dt, t.data[i])
+  while i < element_count(t.shape) {
+    d[i] = dt_round(dt, buf.get(t.data, t.dtype, i))
     i = i + 1
   }
   mk_raw(copy_shape(t.shape), d, dt)
@@ -516,6 +576,11 @@ fn f64_min(x: F64, y: F64) -> F64 {
   if x <= y { return x }
   y
 }
+
+# Finite means neither an infinity nor a NaN. x - x is zero for every finite x
+# and NaN for the other three values, so one subtraction asks the whole
+# question without an infinity literal in the language.
+fn f64_is_finite(x: F64) -> Bool = x - x == 0.0
 
 # ---- op codes -------------------------------------------------------------
 #
@@ -877,7 +942,8 @@ fn binary(op: Op, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
 
   let o: I64 = 0
   while o < n {
-    out[o] = apply_binary(op, a.data[odo.offs[0]], b.data[odo.offs[1]])
+    out[o] = apply_binary(op, buf.get(a.data, a.dtype, odo.offs[0]),
+      buf.get(b.data, b.dtype, odo.offs[1]))
     odo_step(odo)
     o = o + 1
   }
@@ -943,11 +1009,11 @@ fn unary_result_dtype(op: Op, dt: I64) -> I64 {
 
 fn unary_p(op: Op, a: Tensor, p0: F64, p1: F64) -> Tensor {
   let dt: I64 = unary_result_dtype(op, a.dtype)
-  let n: I64 = len(a.data)
+  let n: I64 = element_count(a.shape)
   let out: Arr[F64] = alloc(n)
   let i: I64 = 0
   while i < n {
-    out[i] = apply_unary(op, a.data[i], p0, p1)
+    out[i] = apply_unary(op, buf.get(a.data, a.dtype, i), p0, p1)
     i = i + 1
   }
   mk(copy_shape(a.shape), out, dt)
@@ -991,10 +1057,10 @@ fn where3(cond: Tensor, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
 
   let o: I64 = 0
   while o < n {
-    if cond.data[odo.offs[0]] != 0.0 {
-      out[o] = a.data[odo.offs[1]]
+    if buf.get(cond.data, cond.dtype, odo.offs[0]) != 0.0 {
+      out[o] = buf.get(a.data, a.dtype, odo.offs[1])
     } else {
-      out[o] = b.data[odo.offs[2]]
+      out[o] = buf.get(b.data, b.dtype, odo.offs[2])
     }
     odo_step(odo)
     o = o + 1
@@ -1126,7 +1192,7 @@ fn matmul(a: Tensor, b: Tensor) -> Res[Tensor, Str] {
   let a2: Arr[I64] = matmul_promote(a.shape, true)
   let b2: Arr[I64] = matmul_promote(b.shape, false)
   let dt: I64 = promote(a.dtype, b.dtype)
-  let data: Arr[F64] = mm(a.data, a2[0], a2[1], b.data, b2[1], acc_dtype(dt))
+  let data: Arr[F64] = mm(data_arr(a), a2[0], a2[1], data_arr(b), b2[1], acc_dtype(dt))
   # The buffer is m*n either way; only the shape records that a promoted axis
   # was dropped. That is why the backward pass can treat the incoming cotangent
   # as flat regardless of the result's rank.
@@ -1223,11 +1289,11 @@ fn reduce_all(a: Tensor, mean: Bool) -> Tensor {
   # sum is not in the last bits: a bf16 accumulator stops moving once the sum
   # exceeds 256 times a typical term.
   let acc: I64 = acc_dtype(dt)
-  let n: I64 = len(a.data)
+  let n: I64 = element_count(a.shape)
   let s: F64 = 0.0
   let i: I64 = 0
   while i < n {
-    s = acc_add(acc, s, a.data[i])
+    s = acc_add(acc, s, buf.get(a.data, a.dtype, i))
     i = i + 1
   }
   if mean { return scalar_of(s / f64_of_i64(n), dt) }
@@ -1261,7 +1327,7 @@ fn reduce_axis(t: Tensor, axis_in: I64, mean: Bool) -> Res[Tensor, Str] {
       let k: I64 = 0
       while k < sp.length {
         # Accumulated wider than it is stored. See `acc_dtype`.
-        s = acc_add(acc, s, t.data[base + k * sp.after])
+        s = acc_add(acc, s, buf.get(t.data, t.dtype, base + k * sp.after))
         k = k + 1
       }
       out[i * sp.after + j] = s * scale
@@ -1321,10 +1387,10 @@ fn extreme_axis(t: Tensor, axis_in: I64, want_max: Bool) -> Res[Tensor, Str] {
     let j: I64 = 0
     while j < sp.after {
       let base: I64 = i * sp.length * sp.after + j
-      let best: F64 = t.data[base]
+      let best: F64 = buf.get(t.data, t.dtype, base)
       let k: I64 = 1
       while k < sp.length {
-        let v: F64 = t.data[base + k * sp.after]
+        let v: F64 = buf.get(t.data, t.dtype, base + k * sp.after)
         if (want_max and v > best) or ((not want_max) and v < best) { best = v }
         k = k + 1
       }
@@ -1359,11 +1425,11 @@ fn extreme_axis_origins(t: Tensor, axis: I64, want_max: Bool) -> Arr[I64] {
     let j: I64 = 0
     while j < sp.after {
       let base: I64 = i * sp.length * sp.after + j
-      let best: F64 = t.data[base]
+      let best: F64 = buf.get(t.data, t.dtype, base)
       let best_idx: I64 = base
       let k: I64 = 1
       while k < sp.length {
-        let v: F64 = t.data[base + k * sp.after]
+        let v: F64 = buf.get(t.data, t.dtype, base + k * sp.after)
         if (want_max and v > best) or ((not want_max) and v < best) {
           best = v
           best_idx = base + k * sp.after
@@ -1392,11 +1458,11 @@ fn arg_extreme_axis(t: Tensor, axis_in: I64, want_max: Bool) -> Res[Tensor, Str]
     let j: I64 = 0
     while j < sp.after {
       let base: I64 = i * sp.length * sp.after + j
-      let best: F64 = t.data[base]
+      let best: F64 = buf.get(t.data, t.dtype, base)
       let best_k: I64 = 0
       let k: I64 = 1
       while k < sp.length {
-        let v: F64 = t.data[base + k * sp.after]
+        let v: F64 = buf.get(t.data, t.dtype, base + k * sp.after)
         if (want_max and v > best) or ((not want_max) and v < best) {
           best = v
           best_k = k
@@ -1419,15 +1485,15 @@ fn argmin_axis(t: Tensor, axis: I64) -> Res[Tensor, Str] = arg_extreme_axis(t, a
 # max or min over every element. Same gradient argument as the axis form: the
 # whole upstream scalar goes to the one offset that was selected.
 fn extreme_all(t: Tensor, want_max: Bool) -> Tensor {
-  scalar_of(t.data[extreme_all_origin(t, want_max)], t.dtype)
+  scalar_of(buf.get(t.data, t.dtype, extreme_all_origin(t, want_max)), t.dtype)
 }
 
 fn extreme_all_origin(t: Tensor, want_max: Bool) -> I64 {
-  let best: F64 = t.data[0]
+  let best: F64 = buf.get(t.data, t.dtype, 0)
   let best_idx: I64 = 0
   let i: I64 = 1
-  while i < len(t.data) {
-    let v: F64 = t.data[i]
+  while i < element_count(t.shape) {
+    let v: F64 = buf.get(t.data, t.dtype, i)
     if (want_max and v > best) or ((not want_max) and v < best) {
       best = v
       best_idx = i
@@ -1465,23 +1531,23 @@ fn softmax(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   # total is the largest term and nothing else.
   let acc: I64 = acc_dtype(dt)
   let sp: Spans = axis_spans(t.shape, axis)
-  let out: Arr[F64] = alloc(len(t.data))
+  let out: Arr[F64] = alloc(element_count(t.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
     while j < sp.after {
       let base: I64 = i * sp.length * sp.after + j
-      let m: F64 = t.data[base]
+      let m: F64 = buf.get(t.data, t.dtype, base)
       let k: I64 = 1
       while k < sp.length {
-        let v: F64 = t.data[base + k * sp.after]
+        let v: F64 = buf.get(t.data, t.dtype, base + k * sp.after)
         if v > m { m = v }
         k = k + 1
       }
       let total: F64 = 0.0
       k = 0
       while k < sp.length {
-        let e: F64 = dt_round(acc, f64_exp(t.data[base + k * sp.after] - m))
+        let e: F64 = dt_round(acc, f64_exp(buf.get(t.data, t.dtype, base + k * sp.after) - m))
         out[base + k * sp.after] = e
         total = acc_add(acc, total, e)
         k = k + 1
@@ -1518,10 +1584,10 @@ fn logsumexp_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
     let j: I64 = 0
     while j < sp.after {
       let base: I64 = i * sp.length * sp.after + j
-      let m: F64 = t.data[base]
+      let m: F64 = buf.get(t.data, t.dtype, base)
       let k: I64 = 1
       while k < sp.length {
-        let v: F64 = t.data[base + k * sp.after]
+        let v: F64 = buf.get(t.data, t.dtype, base + k * sp.after)
         if v > m { m = v }
         k = k + 1
       }
@@ -1530,7 +1596,7 @@ fn logsumexp_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
       while k < sp.length {
         # Accumulated wider than it is stored, as in `softmax`, and for the same
         # reason: the terms differ by orders of magnitude on purpose.
-        total = acc_add(acc, total, f64_exp(t.data[base + k * sp.after] - m))
+        total = acc_add(acc, total, f64_exp(buf.get(t.data, t.dtype, base + k * sp.after) - m))
         k = k + 1
       }
       out[i * sp.after + j] = m + f64_log(total)
@@ -1591,7 +1657,7 @@ fn prod_over(t: Tensor, l: I64, before: I64, after: I64, acc: I64) -> ProdAux {
       let nzeros: I64 = 0
       let k: I64 = 0
       while k < l {
-        let v: F64 = t.data[base + k * after]
+        let v: F64 = buf.get(t.data, t.dtype, base + k * after)
         p = acc_mul(acc, p, v)
         if v == 0.0 {
           nzeros = nzeros + 1
@@ -1612,7 +1678,7 @@ fn prod_over(t: Tensor, l: I64, before: I64, after: I64, acc: I64) -> ProdAux {
 }
 
 fn prod_all(t: Tensor) -> Tensor {
-  let aux: ProdAux = prod_over(t, len(t.data), 1, 1, acc_dtype(t.dtype))
+  let aux: ProdAux = prod_over(t, element_count(t.shape), 1, 1, acc_dtype(t.dtype))
   mk(arr_new(), aux.out, t.dtype)
 }
 
@@ -1641,6 +1707,10 @@ struct MedianAux {
 }
 
 fn median_over(t: Tensor, l: I64, before: I64, after: I64) -> MedianAux {
+  # One widened copy for the sort keys, taken up front: sort_offsets orders
+  # plain wide buffers, and reading the packed buffer once per comparison would
+  # widen the same element l log l times.
+  let keys: Arr[F64] = data_arr(t)
   let out_n: I64 = before * after
   let out: Arr[F64] = alloc(out_n)
   let lo: Arr[I64] = arr_new()
@@ -1662,17 +1732,18 @@ fn median_over(t: Tensor, l: I64, before: I64, after: I64) -> MedianAux {
         push(idx_buf, base + k * after)
         k = k + 1
       }
-      sort_offsets(idx_buf, t.data, false)
+      sort_offsets(idx_buf, keys, false)
       let idx: I64 = i * after + j
       let mid: I64 = l / 2
       if l % 2 == 1 {
         lo[idx] = idx_buf[mid]
         hi[idx] = idx_buf[mid]
-        out[idx] = t.data[idx_buf[mid]]
+        out[idx] = buf.get(t.data, t.dtype, idx_buf[mid])
       } else {
         lo[idx] = idx_buf[mid - 1]
         hi[idx] = idx_buf[mid]
-        out[idx] = (t.data[idx_buf[mid - 1]] + t.data[idx_buf[mid]]) / 2.0
+        out[idx] = (buf.get(t.data, t.dtype, idx_buf[mid - 1])
+          + buf.get(t.data, t.dtype, idx_buf[mid])) / 2.0
       }
       j = j + 1
     }
@@ -1682,7 +1753,7 @@ fn median_over(t: Tensor, l: I64, before: I64, after: I64) -> MedianAux {
 }
 
 fn median_all(t: Tensor) -> Tensor {
-  let aux: MedianAux = median_over(t, len(t.data), 1, 1)
+  let aux: MedianAux = median_over(t, element_count(t.shape), 1, 1)
   # An even-length run averages its two middle values, so a median is a mean in
   # the one respect that decides the dtype: it need not be an integer.
   mk(arr_new(), aux.out, reduce_result_dtype(t.dtype, true))
@@ -1740,10 +1811,10 @@ fn sorts_before(x: F64, y: F64, descending: Bool) -> Bool {
 fn sort_axis(t: Tensor, axis_in: I64, descending: Bool) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let origin: Arr[I64] = sort_origins(t, axis, descending, sp_length(t, axis))
-  let out: Arr[F64] = alloc(len(t.data))
+  let out: Arr[F64] = alloc(element_count(t.shape))
   let i: I64 = 0
   while i < len(origin) {
-    out[i] = t.data[origin[i]]
+    out[i] = buf.get(t.data, t.dtype, origin[i])
     i = i + 1
   }
   Ok(mk_raw(copy_shape(t.shape), out, t.dtype))
@@ -1758,6 +1829,8 @@ fn sp_length(t: Tensor, axis: I64) -> I64 = t.shape[axis]
 # `keep` is how many of each sorted run survive into the output: the whole run
 # for a sort, k for a topk.
 fn sort_origins(t: Tensor, axis: I64, descending: Bool, keep: I64) -> Arr[I64] {
+  # The same up-front widening median_over does, for the same reason.
+  let keys: Arr[F64] = data_arr(t)
   let sp: Spans = axis_spans(t.shape, axis)
   let origin: Arr[I64] = arr_new()
   let z: I64 = 0
@@ -1776,7 +1849,7 @@ fn sort_origins(t: Tensor, axis: I64, descending: Bool, keep: I64) -> Arr[I64] {
         push(offs, base + k * sp.after)
         k = k + 1
       }
-      sort_offsets(offs, t.data, descending)
+      sort_offsets(offs, keys, descending)
       k = 0
       while k < keep {
         origin[i * keep * sp.after + k * sp.after + j] = offs[k]
@@ -1795,7 +1868,7 @@ fn argsort_axis(t: Tensor, axis_in: I64, descending: Bool) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
   let origin: Arr[I64] = sort_origins(t, axis, descending, sp.length)
-  let out: Arr[F64] = alloc(len(t.data))
+  let out: Arr[F64] = alloc(element_count(t.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -1840,7 +1913,7 @@ fn topk_axis(t: Tensor, k: I64, axis_in: I64, largest: Bool) -> Res[Tensor, Str]
   let out: Arr[F64] = alloc(len(origin))
   let i: I64 = 0
   while i < len(origin) {
-    out[i] = t.data[origin[i]]
+    out[i] = buf.get(t.data, t.dtype, origin[i])
     i = i + 1
   }
   let shape: Arr[I64] = copy_shape(t.shape)
@@ -1890,7 +1963,7 @@ fn argtopk_axis(t: Tensor, k: I64, axis_in: I64, largest: Bool) -> Res[Tensor, S
 fn flip_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
-  let out: Arr[F64] = alloc(len(t.data))
+  let out: Arr[F64] = alloc(element_count(t.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -1898,7 +1971,7 @@ fn flip_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
       let base: I64 = i * sp.length * sp.after + j
       let k: I64 = 0
       while k < sp.length {
-        out[base + k * sp.after] = t.data[base + (sp.length - 1 - k) * sp.after]
+        out[base + k * sp.after] = buf.get(t.data, t.dtype, base + (sp.length - 1 - k) * sp.after)
         k = k + 1
       }
       j = j + 1
@@ -1916,12 +1989,15 @@ fn flip_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
 # the input, so the cotangent is copied straight back, only wearing the input's
 # shape again. This is the one op where the gradient is genuinely nothing.
 fn reshape(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
-  if element_count(shape) != len(t.data) {
-    return Err(bytes.concat("reshape: cannot fit ", bytes.concat(str(len(t.data)),
+  if element_count(shape) != element_count(t.shape) {
+    return Err(bytes.concat("reshape: cannot fit ", bytes.concat(str(element_count(t.shape)),
       bytes.concat(" elements into shape ", shape_string(shape)))))
   }
+  # The clone's buffer is adopted whole rather than repacked through mk_raw,
+  # which takes the wide Arr[F64] form; the elements are already packed and
+  # already the right dtype, and only the shape changes.
   let c: Tensor = clone(t)
-  Ok(mk_raw(copy_shape(shape), c.data, t.dtype))
+  Ok(Tensor { shape: copy_shape(shape), data: c.data, dtype: t.dtype })
 }
 
 # Resolve a permutation argument. An empty `axes` reverses them, which is the
@@ -2007,7 +2083,7 @@ fn transpose(t: Tensor, axes: Arr[I64]) -> Res[Tensor, Str] {
   let out: Arr[F64] = alloc(len(origin))
   let o: I64 = 0
   while o < len(origin) {
-    out[o] = t.data[origin[o]]
+    out[o] = buf.get(t.data, t.dtype, origin[o])
     o = o + 1
   }
   Ok(mk_raw(out_shape, out, t.dtype))
@@ -2056,7 +2132,7 @@ fn broadcast_to(t: Tensor, shape: Arr[I64]) -> Res[Tensor, Str] {
   let odo: Odometer = odo_new(shape, contrib)
   let o: I64 = 0
   while o < n {
-    out[o] = t.data[odo.offs[0]]
+    out[o] = buf.get(t.data, t.dtype, odo.offs[0])
     odo_step(odo)
     o = o + 1
   }
@@ -2082,10 +2158,10 @@ fn sum_to_shape(g: Tensor, target: Arr[I64]) -> Res[Tensor, Str] {
   push(contrib, eff_strides(target, g.shape))
   let odo: Odometer = odo_new(g.shape, contrib)
   let o: I64 = 0
-  while o < len(g.data) {
+  while o < element_count(g.shape) {
     # A reduction, so the running total is held at the accumulation dtype and
     # rounded once by `mk`, exactly as `reduce_axis` does it.
-    out[odo.offs[0]] = acc_add(acc, out[odo.offs[0]], g.data[o])
+    out[odo.offs[0]] = acc_add(acc, out[odo.offs[0]], buf.get(g.data, g.dtype, o))
     odo_step(odo)
     o = o + 1
   }
@@ -2140,7 +2216,7 @@ fn concat(ts: Arr[Tensor], axis_in: I64) -> Res[Tensor, Str] {
         let j: I64 = 0
         while j < sp.after {
           out[i * total * sp.after + (offset + k) * sp.after + j] =
-            ts[p].data[i * l * sp.after + k * sp.after + j]
+            buf.get(ts[p].data, ts[p].dtype, i * l * sp.after + k * sp.after + j)
           j = j + 1
         }
         k = k + 1
@@ -2221,7 +2297,7 @@ fn split_piece(t: Tensor, axis: I64, offset: I64, size: I64) -> Res[Tensor, Str]
       let j: I64 = 0
       while j < sp.after {
         data[i * size * sp.after + k * sp.after + j] =
-          t.data[i * sp.length * sp.after + (offset + k) * sp.after + j]
+          buf.get(t.data, t.dtype, i * sp.length * sp.after + (offset + k) * sp.after + j)
         j = j + 1
       }
       k = k + 1
@@ -2283,7 +2359,7 @@ fn index_axis0(t: Tensor, idx: I64) -> Res[Tensor, Str] {
   let data: Arr[F64] = alloc(rs)
   let i: I64 = 0
   while i < rs {
-    data[i] = t.data[off + i]
+    data[i] = buf.get(t.data, t.dtype, off + i)
     i = i + 1
   }
   Ok(mk_raw(remove_axis(t.shape, 0), data, t.dtype))
@@ -2310,7 +2386,7 @@ fn slice_axis0(t: Tensor, start_in: I64, end_in: I64) -> Res[Tensor, Str] {
   let data: Arr[F64] = alloc(n)
   let i: I64 = 0
   while i < n {
-    data[i] = t.data[start * rs + i]
+    data[i] = buf.get(t.data, t.dtype, start * rs + i)
     i = i + 1
   }
   let shape: Arr[I64] = copy_shape(t.shape)
@@ -2340,7 +2416,7 @@ fn gather(x: Tensor, idx: Arr[I64]) -> Res[Tensor, Str] {
     }
     let j: I64 = 0
     while j < rs {
-      out[i * rs + j] = x.data[ix * rs + j]
+      out[i * rs + j] = buf.get(x.data, x.dtype, ix * rs + j)
       j = j + 1
     }
     i = i + 1
@@ -2662,7 +2738,7 @@ fn einsum_raw(in_subs: Arr[Str], out_sub: Str, inputs: Arr[Tensor]) -> Res[Tenso
     let prod: F64 = 1.0
     let k: I64 = 0
     while k < len(inputs) {
-      prod = prod * inputs[k].data[odo.offs[k]]
+      prod = prod * buf.get(inputs[k].data, inputs[k].dtype, odo.offs[k])
       k = k + 1
     }
     out[odo.offs[out_slot]] = acc_add(acc, out[odo.offs[out_slot]], prod)
@@ -3023,12 +3099,12 @@ fn int_to_bool(i: I64) -> Bool = i != 0
 # rounding to the gradient's own dtype happens here, once per contribution, at
 # the dtype `backward` chose. A rule that wanted to round earlier would be
 # rounding an intermediate, which is the thing `acc_dtype` exists to forbid.
-fn accumulate(cot: Arr[Tensor], touched: Arr[Bool], node: I64, buf: Arr[F64]) {
-  let dst: Arr[F64] = cot[node].data
+fn accumulate(cot: Arr[Tensor], touched: Arr[Bool], node: I64, part: Arr[F64]) {
+  let dst: Buf = cot[node].data
   let dt: I64 = cot[node].dtype
   let i: I64 = 0
-  while i < len(buf) {
-    dst[i] = acc_add(dt, dst[i], buf[i])
+  while i < len(part) {
+    buf.set(dst, dt, i, acc_add(dt, buf.get(dst, dt, i), part[i]))
     i = i + 1
   }
   touched[node] = true
@@ -3039,7 +3115,7 @@ fn accumulate(cot: Arr[Tensor], touched: Arr[Bool], node: I64, buf: Arr[F64]) {
 # axis-wise gradient below serve both forms with no branch.
 fn spans_for(t: Tensor, axis: I64) -> Spans {
   if axis < 0 {
-    return Spans { before: 1, length: len(t.data), after: 1 }
+    return Spans { before: 1, length: element_count(t.shape), after: 1 }
   }
   axis_spans(t.shape, axis)
 }
@@ -3077,7 +3153,7 @@ fn backward(tp: Tape, root: I64, seed: Tensor) -> Res[Arr[Tensor], Str] {
     push(touched, false)
     i = i + 1
   }
-  accumulate(cot, touched, root, seed.data)
+  accumulate(cot, touched, root, data_arr(seed))
 
   i = n - 1
   while i >= 0 {
@@ -3094,6 +3170,46 @@ fn backward(tp: Tape, root: I64, seed: Tensor) -> Res[Arr[Tensor], Str] {
     i = i + 1
   }
   Ok(out)
+}
+
+# Loss scaling, for f16. docs/dtypes.md "Loss scaling, and the f16 story" is
+# the design and NEEDS-112 is the entry; this is the surface, and it is two
+# functions rather than a loop left to callers because a hand-written loop that
+# forgets the skip below looks like it works.
+#
+# The seed is multiplied by `scale` before the walk, so by the chain rule every
+# gradient comes back scaled by exactly that factor, and the caller divides it
+# out after checking grads_finite. The multiply runs at f64, by `scalar` and
+# promotion, not in the seed's own dtype: a scale of 65536 is representable in
+# every float format except f16, and rounding it into an f16 seed would turn
+# the scale itself into the infinity the scaling exists to avoid. The widened
+# seed costs nothing downstream, because `backward` allocates every cotangent
+# at `grad_dtype` of its own node and `accumulate` rounds on store.
+fn backward_scaled(tp: Tape, root: I64, seed: Tensor, scale: F64) -> Res[Arr[Tensor], Str] {
+  let scaled: Tensor = binary(OpMul, seed, scalar(scale))?
+  backward(tp, root, scaled)
+}
+
+# True iff every element of every gradient is finite. This is the overflow
+# check that decides whether a step happens at all, and the decision it feeds
+# is skip-or-step, never clip: on false the caller skips the step entirely and
+# shrinks the scale. Clipping an infinity to a large finite number instead is a
+# plausible-looking update in an arbitrary direction, and a loop that does it
+# trains to a worse model while reporting nothing, which is why the skip is the
+# load-bearing half of the design and not an implementation detail.
+fn grads_finite(gs: Arr[Tensor]) -> Bool {
+  let i: I64 = 0
+  while i < len(gs) {
+    let g: Tensor = gs[i]
+    let n: I64 = element_count(g.shape)
+    let j: I64 = 0
+    while j < n {
+      if not f64_is_finite(buf.get(g.data, g.dtype, j)) { return false }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  true
 }
 
 # vjp adds node i's contribution to each of its inputs' cotangents.
@@ -3130,7 +3246,7 @@ fn vjp(tp: Tape, i: I64, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] 
   if is_same_op(e.op, OpSoftmax) { return vjp_softmax(tp, e, g, cot, touched) }
   if is_same_op(e.op, OpReshape) {
     # The identity on the buffer, which is why it has no helper.
-    accumulate(cot, touched, e.inputs[0], g.data)
+    accumulate(cot, touched, e.inputs[0], data_arr(g))
     return Ok(0)
   }
   if is_same_op(e.op, OpTranspose) { return vjp_permutation(tp, e, g, cot, touched) }
@@ -3200,10 +3316,10 @@ fn vjp_binary(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   let a: Tensor = value_of(tp, e.inputs[0])
   let b: Tensor = value_of(tp, e.inputs[1])
   let shape: Arr[I64] = e.out.shape
-  let n: I64 = len(e.out.data)
+  let n: I64 = element_count(e.out.shape)
 
-  let ga: Arr[F64] = alloc(len(a.data))
-  let gb: Arr[F64] = alloc(len(b.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
+  let gb: Arr[F64] = alloc(element_count(b.shape))
 
   let contrib: Arr[Arr[I64]] = arr_new()
   push(contrib, eff_strides(a.shape, shape))
@@ -3212,11 +3328,12 @@ fn vjp_binary(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
 
   let o: I64 = 0
   while o < n {
-    let x: F64 = a.data[odo.offs[0]]
-    let y: F64 = b.data[odo.offs[1]]
-    let gv: F64 = g.data[o]
-    ga[odo.offs[0]] = ga[odo.offs[0]] + d_binary_a(e.op, x, y, e.out.data[o]) * gv
-    gb[odo.offs[1]] = gb[odo.offs[1]] + d_binary_b(e.op, x, y, e.out.data[o]) * gv
+    let x: F64 = buf.get(a.data, a.dtype, odo.offs[0])
+    let y: F64 = buf.get(b.data, b.dtype, odo.offs[1])
+    let ov: F64 = buf.get(e.out.data, e.out.dtype, o)
+    let gv: F64 = buf.get(g.data, g.dtype, o)
+    ga[odo.offs[0]] = ga[odo.offs[0]] + d_binary_a(e.op, x, y, ov) * gv
+    gb[odo.offs[1]] = gb[odo.offs[1]] + d_binary_b(e.op, x, y, ov) * gv
     odo_step(odo)
     o = o + 1
   }
@@ -3233,10 +3350,10 @@ fn vjp_unary(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[B
   let p1: F64 = 0.0
   if len(e.fattr) > 0 { p0 = e.fattr[0] }
   if len(e.fattr) > 1 { p1 = e.fattr[1] }
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
-  while i < len(a.data) {
-    ga[i] = d_unary(e.op, a.data[i], e.out.data[i], p0, p1) * g.data[i]
+  while i < element_count(a.shape) {
+    ga[i] = d_unary(e.op, buf.get(a.data, a.dtype, i), buf.get(e.out.data, e.out.dtype, i), p0, p1) * buf.get(g.data, g.dtype, i)
     i = i + 1
   }
   accumulate(cot, touched, e.inputs[0], ga)
@@ -3254,8 +3371,8 @@ fn vjp_where(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[B
   let a: Tensor = value_of(tp, e.inputs[1])
   let b: Tensor = value_of(tp, e.inputs[2])
   let shape: Arr[I64] = e.out.shape
-  let ga: Arr[F64] = alloc(len(a.data))
-  let gb: Arr[F64] = alloc(len(b.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
+  let gb: Arr[F64] = alloc(element_count(b.shape))
 
   let contrib: Arr[Arr[I64]] = arr_new()
   push(contrib, eff_strides(cond.shape, shape))
@@ -3264,11 +3381,11 @@ fn vjp_where(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[B
   let odo: Odometer = odo_new(shape, contrib)
 
   let o: I64 = 0
-  while o < len(e.out.data) {
-    if cond.data[odo.offs[0]] != 0.0 {
-      ga[odo.offs[1]] = ga[odo.offs[1]] + g.data[o]
+  while o < element_count(e.out.shape) {
+    if buf.get(cond.data, cond.dtype, odo.offs[0]) != 0.0 {
+      ga[odo.offs[1]] = ga[odo.offs[1]] + buf.get(g.data, g.dtype, o)
     } else {
-      gb[odo.offs[2]] = gb[odo.offs[2]] + g.data[o]
+      gb[odo.offs[2]] = gb[odo.offs[2]] + buf.get(g.data, g.dtype, o)
     }
     odo_step(odo)
     o = o + 1
@@ -3308,12 +3425,13 @@ fn vjp_matmul(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   # backward accumulator to bf16 because the weights are bf16 would undo exactly
   # what the wider gradient was for.
   let gacc: I64 = acc_dtype(g.dtype)
+  let gd: Arr[F64] = data_arr(g)
 
-  let bt: Arr[F64] = transpose2d(b.data, k, n)
-  accumulate(cot, touched, e.inputs[0], mm(g.data, m, n, bt, k, gacc))
+  let bt: Arr[F64] = transpose2d(data_arr(b), k, n)
+  accumulate(cot, touched, e.inputs[0], mm(gd, m, n, bt, k, gacc))
 
-  let at: Arr[F64] = transpose2d(a.data, m, k)
-  accumulate(cot, touched, e.inputs[1], mm(at, k, m, g.data, n, gacc))
+  let at: Arr[F64] = transpose2d(data_arr(a), m, k)
+  accumulate(cot, touched, e.inputs[1], mm(at, k, m, gd, n, gacc))
   Ok(0)
 }
 
@@ -3330,7 +3448,7 @@ fn vjp_einsum(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   i = 0
   while i < len(e.inputs) {
     let gp: Tensor = einsum_grad(parsed, vals, i, g)?
-    accumulate(cot, touched, e.inputs[i], gp.data)
+    accumulate(cot, touched, e.inputs[i], data_arr(gp))
     i = i + 1
   }
   Ok(0)
@@ -3348,12 +3466,12 @@ fn vjp_sum_mean(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Ar
   let sp: Spans = spans_for(a, e.iattr[0])
   let scale: F64 = 1.0
   if is_same_op(e.op, OpMean) { scale = 1.0 / f64_of_i64(sp.length) }
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
     while j < sp.after {
-      let gv: F64 = g.data[i * sp.after + j] * scale
+      let gv: F64 = buf.get(g.data, g.dtype, i * sp.after + j) * scale
       let base: I64 = i * sp.length * sp.after + j
       let k: I64 = 0
       while k < sp.length {
@@ -3374,15 +3492,15 @@ fn vjp_sum_mean(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Ar
 fn vjp_extreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let want_max: Bool = is_same_op(e.op, OpMax)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   if e.iattr[0] < 0 {
     let idx: I64 = extreme_all_origin(a, want_max)
-    ga[idx] = ga[idx] + g.data[0]
+    ga[idx] = ga[idx] + buf.get(g.data, g.dtype, 0)
   } else {
     let origin: Arr[I64] = extreme_axis_origins(a, e.iattr[0], want_max)
     let o: I64 = 0
     while o < len(origin) {
-      ga[origin[o]] = ga[origin[o]] + g.data[o]
+      ga[origin[o]] = ga[origin[o]] + buf.get(g.data, g.dtype, o)
       o = o + 1
     }
   }
@@ -3397,13 +3515,13 @@ fn vjp_prod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
   # The same accumulation dtype the forward pass used, so the recomputed
   # products are the ones it produced rather than merely close to them.
   let aux: ProdAux = prod_over(a, sp.length, sp.before, sp.after, acc_dtype(a.dtype))
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
     while j < sp.after {
       let idx: I64 = i * sp.after + j
-      let gv: F64 = g.data[idx]
+      let gv: F64 = buf.get(g.data, g.dtype, idx)
       if gv != 0.0 {
         let base: I64 = i * sp.length * sp.after + j
         let k: I64 = 0
@@ -3412,13 +3530,13 @@ fn vjp_prod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
           if aux.zeros[idx] == 0 {
             # Every factor is non-zero, so the product of the others is the
             # whole product divided by this one.
-            ga[p] = ga[p] + gv * aux.out[idx] / a.data[p]
+            ga[p] = ga[p] + gv * aux.out[idx] / buf.get(a.data, a.dtype, p)
           } else {
             # Exactly one zero: only that factor has a non-zero derivative,
             # because every other factor's product of the rest still contains
             # the zero. With two or more zeros nothing survives, which is why
             # there is no third branch.
-            if aux.zeros[idx] == 1 and a.data[p] == 0.0 {
+            if aux.zeros[idx] == 1 and buf.get(a.data, a.dtype, p) == 0.0 {
               ga[p] = ga[p] + gv * aux.nz_prod[idx]
             }
           }
@@ -3439,10 +3557,10 @@ fn vjp_median(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
   let aux: MedianAux = median_over(a, sp.length, sp.before, sp.after)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let idx: I64 = 0
   while idx < len(aux.out) {
-    let gv: F64 = g.data[idx]
+    let gv: F64 = buf.get(g.data, g.dtype, idx)
     if gv != 0.0 {
       if aux.lo[idx] == aux.hi[idx] {
         ga[aux.lo[idx]] = ga[aux.lo[idx]] + gv
@@ -3468,7 +3586,7 @@ fn vjp_median(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
 fn vjp_logsumexp(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -3478,7 +3596,7 @@ fn vjp_logsumexp(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: A
       let k: I64 = 0
       while k < sp.length {
         let p: I64 = base + k * sp.after
-        ga[p] = ga[p] + f64_exp(a.data[p] - e.out.data[oi]) * g.data[oi]
+        ga[p] = ga[p] + f64_exp(buf.get(a.data, a.dtype, p) - buf.get(e.out.data, e.out.dtype, oi)) * buf.get(g.data, g.dtype, oi)
         k = k + 1
       }
       j = j + 1
@@ -3500,7 +3618,7 @@ fn vjp_logsumexp(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: A
 fn vjp_softmax(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = axis_spans(a.shape, e.iattr[0])
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -3510,13 +3628,13 @@ fn vjp_softmax(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr
       let k: I64 = 0
       while k < sp.length {
         let p: I64 = base + k * sp.after
-        dot = dot + g.data[p] * e.out.data[p]
+        dot = dot + buf.get(g.data, g.dtype, p) * buf.get(e.out.data, e.out.dtype, p)
         k = k + 1
       }
       k = 0
       while k < sp.length {
         let p: I64 = base + k * sp.after
-        ga[p] = ga[p] + e.out.data[p] * (g.data[p] - dot)
+        ga[p] = ga[p] + buf.get(e.out.data, e.out.dtype, p) * (buf.get(g.data, g.dtype, p) - dot)
         k = k + 1
       }
       j = j + 1
@@ -3533,10 +3651,10 @@ fn vjp_softmax(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr
 fn vjp_permutation(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let origin: Arr[I64] = transpose_origins(a.shape, e.iattr, e.out.shape)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let o: I64 = 0
   while o < len(origin) {
-    ga[origin[o]] = ga[origin[o]] + g.data[o]
+    ga[origin[o]] = ga[origin[o]] + buf.get(g.data, g.dtype, o)
     o = o + 1
   }
   accumulate(cot, touched, e.inputs[0], ga)
@@ -3548,7 +3666,7 @@ fn vjp_permutation(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched:
 fn vjp_flip(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = axis_spans(a.shape, e.iattr[0])
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -3557,7 +3675,7 @@ fn vjp_flip(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
       let k: I64 = 0
       while k < sp.length {
         let dst: I64 = base + (sp.length - 1 - k) * sp.after
-        ga[dst] = ga[dst] + g.data[base + k * sp.after]
+        ga[dst] = ga[dst] + buf.get(g.data, g.dtype, base + k * sp.after)
         k = k + 1
       }
       j = j + 1
@@ -3583,10 +3701,10 @@ fn vjp_selection(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: A
     direction = int_to_bool(e.iattr[2])
   }
   let origin: Arr[I64] = sort_origins(a, axis, direction, keep)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let o: I64 = 0
   while o < len(origin) {
-    ga[origin[o]] = ga[origin[o]] + g.data[o]
+    ga[origin[o]] = ga[origin[o]] + buf.get(g.data, g.dtype, o)
     o = o + 1
   }
   accumulate(cot, touched, e.inputs[0], ga)
@@ -3598,13 +3716,13 @@ fn vjp_selection(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: A
 # scatter as vjp_binary and the same reasoning; see the comment on broadcast_to.
 fn vjp_broadcast_to(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let contrib: Arr[Arr[I64]] = arr_new()
   push(contrib, eff_strides(a.shape, e.out.shape))
   let odo: Odometer = odo_new(e.out.shape, contrib)
   let o: I64 = 0
-  while o < len(e.out.data) {
-    ga[odo.offs[0]] = ga[odo.offs[0]] + g.data[o]
+  while o < element_count(e.out.shape) {
+    ga[odo.offs[0]] = ga[odo.offs[0]] + buf.get(g.data, g.dtype, o)
     odo_step(odo)
     o = o + 1
   }
@@ -3628,7 +3746,7 @@ fn vjp_concat(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   while p < len(e.inputs) {
     let l: I64 = vals[p].shape[axis]
     let offset: I64 = concat_offset(vals, axis, p)
-    let ga: Arr[F64] = alloc(len(vals[p].data))
+    let ga: Arr[F64] = alloc(element_count(vals[p].shape))
     let i: I64 = 0
     while i < sp.before {
       let k: I64 = 0
@@ -3637,7 +3755,7 @@ fn vjp_concat(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
         while j < sp.after {
           ga[i * l * sp.after + k * sp.after + j] =
             ga[i * l * sp.after + k * sp.after + j] +
-            g.data[i * total * sp.after + (offset + k) * sp.after + j]
+            buf.get(g.data, g.dtype, i * total * sp.after + (offset + k) * sp.after + j)
           j = j + 1
         }
         k = k + 1
@@ -3660,7 +3778,7 @@ fn vjp_split(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[B
   let offset: I64 = e.iattr[1]
   let size: I64 = e.iattr[2]
   let sp: Spans = axis_spans(a.shape, axis)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let k: I64 = 0
@@ -3668,7 +3786,7 @@ fn vjp_split(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[B
       let j: I64 = 0
       while j < sp.after {
         let dst: I64 = i * sp.length * sp.after + (offset + k) * sp.after + j
-        ga[dst] = ga[dst] + g.data[i * size * sp.after + k * sp.after + j]
+        ga[dst] = ga[dst] + buf.get(g.data, g.dtype, i * size * sp.after + k * sp.after + j)
         j = j + 1
       }
       k = k + 1
@@ -3685,10 +3803,10 @@ fn vjp_rows(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
   let a: Tensor = value_of(tp, e.inputs[0])
   let rs: I64 = row_size(a.shape)
   let start: I64 = e.iattr[0]
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
-  while i < len(g.data) {
-    ga[start * rs + i] = ga[start * rs + i] + g.data[i]
+  while i < element_count(g.shape) {
+    ga[start * rs + i] = ga[start * rs + i] + buf.get(g.data, g.dtype, i)
     i = i + 1
   }
   accumulate(cot, touched, e.inputs[0], ga)
@@ -3702,14 +3820,14 @@ fn vjp_rows(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
 fn vjp_gather(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let rs: I64 = row_size(a.shape)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < len(e.iattr) {
     let base: I64 = e.iattr[i] * rs
     let obase: I64 = i * rs
     let j: I64 = 0
     while j < rs {
-      ga[base + j] = ga[base + j] + g.data[obase + j]
+      ga[base + j] = ga[base + j] + buf.get(g.data, g.dtype, obase + j)
       j = j + 1
     }
     i = i + 1
@@ -3782,8 +3900,8 @@ fn conv2d(input: Tensor, weight: Tensor) -> Res[Tensor, Str] {
           while a < kh {
             let b: I64 = 0
             while b < kw {
-              sum = acc_add(acc, sum, input.data[ci * hw + (i + a) * w + (j + b)]
-                * weight.data[co * cinkhw + ci * khw + a * kw + b])
+              sum = acc_add(acc, sum, buf.get(input.data, input.dtype, ci * hw + (i + a) * w + (j + b))
+                * buf.get(weight.data, weight.dtype, co * cinkhw + ci * khw + a * kw + b))
               b = b + 1
             }
             a = a + 1
@@ -3830,14 +3948,14 @@ fn maxpool_argmax(input: Tensor, k: I64) -> Arr[I64] {
       let j: I64 = 0
       while j < ow {
         let best_idx: I64 = ch * hw + (i * k) * w + (j * k)
-        let best: F64 = input.data[best_idx]
+        let best: F64 = buf.get(input.data, input.dtype, best_idx)
         let a: I64 = 0
         while a < k {
           let b: I64 = 0
           while b < k {
             let idx: I64 = ch * hw + (i * k + a) * w + (j * k + b)
-            if input.data[idx] > best {
-              best = input.data[idx]
+            if buf.get(input.data, input.dtype, idx) > best {
+              best = buf.get(input.data, input.dtype, idx)
               best_idx = idx
             }
             b = b + 1
@@ -3876,7 +3994,7 @@ fn maxpool2d(input: Tensor, k: I64) -> Res[Tensor, Str] {
   let out: Arr[F64] = alloc(len(arg))
   let o: I64 = 0
   while o < len(arg) {
-    out[o] = input.data[arg[o]]
+    out[o] = buf.get(input.data, input.dtype, arg[o])
     o = o + 1
   }
   let shape: Arr[I64] = arr_new()
@@ -3939,20 +4057,20 @@ fn scan_run(op: Op, t: Tensor, sp: Spans, out: Arr[F64], arg: Arr[I64], acc: I64
       while k < sp.length {
         let p: I64 = base + k * sp.after
         if is_same_op(op, OpCumSum) {
-          run = acc_add(acc, run, t.data[p])
+          run = acc_add(acc, run, buf.get(t.data, t.dtype, p))
           out[p] = run
         }
         if is_same_op(op, OpCumProd) {
-          run = acc_mul(acc, run, t.data[p])
+          run = acc_mul(acc, run, buf.get(t.data, t.dtype, p))
           out[p] = run
         }
         if want_extreme {
           if k == 0 {
-            out[p] = t.data[p]
+            out[p] = buf.get(t.data, t.dtype, p)
             arg[p] = p
           } else {
             let prev: F64 = out[p - sp.after]
-            let v: F64 = t.data[p]
+            let v: F64 = buf.get(t.data, t.dtype, p)
             # A tie keeps the earlier element. Whichever rule is chosen has to
             # be the one sort and argmax use as well, or a gradient moves when a
             # value is merely repeated.
@@ -3979,9 +4097,9 @@ fn scan_all_by(t: Tensor, op: Op) -> Res[Tensor, Str] {
   if not is_scan_op(op) {
     return Err(bytes.concat("scan_all_by: not a scan: ", op_name(op)))
   }
-  let sp: Spans = Spans { before: 1, length: len(t.data), after: 1 }
-  let out: Arr[F64] = alloc(len(t.data))
-  scan_run(op, t, sp, out, alloc_ints(len(t.data)), acc_dtype(t.dtype))
+  let sp: Spans = Spans { before: 1, length: element_count(t.shape), after: 1 }
+  let out: Arr[F64] = alloc(element_count(t.shape))
+  scan_run(op, t, sp, out, alloc_ints(element_count(t.shape)), acc_dtype(t.dtype))
   Ok(mk(copy_shape(t.shape), out, t.dtype))
 }
 
@@ -3991,8 +4109,8 @@ fn scan_axis_by(t: Tensor, axis_in: I64, op: Op) -> Res[Tensor, Str] {
   }
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
-  let out: Arr[F64] = alloc(len(t.data))
-  scan_run(op, t, sp, out, alloc_ints(len(t.data)), acc_dtype(t.dtype))
+  let out: Arr[F64] = alloc(element_count(t.shape))
+  scan_run(op, t, sp, out, alloc_ints(element_count(t.shape)), acc_dtype(t.dtype))
   Ok(mk(copy_shape(t.shape), out, t.dtype))
 }
 
@@ -4038,7 +4156,7 @@ fn diff_axis(t: Tensor, axis_in: I64) -> Res[Tensor, Str] {
       let dst: I64 = i * (sp.length - 1) * sp.after + j
       let k: I64 = 0
       while k < sp.length - 1 {
-        out[dst + k * sp.after] = t.data[src + (k + 1) * sp.after] - t.data[src + k * sp.after]
+        out[dst + k * sp.after] = buf.get(t.data, t.dtype, src + (k + 1) * sp.after) - buf.get(t.data, t.dtype, src + k * sp.after)
         k = k + 1
       }
       j = j + 1
@@ -4058,7 +4176,7 @@ fn roll_axis(t: Tensor, shift: I64, axis_in: I64) -> Res[Tensor, Str] {
   let axis: I64 = normalize_axis(axis_in, len(t.shape))?
   let sp: Spans = axis_spans(t.shape, axis)
   let s: I64 = roll_amount(shift, sp.length)
-  let out: Arr[F64] = alloc(len(t.data))
+  let out: Arr[F64] = alloc(element_count(t.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -4066,7 +4184,7 @@ fn roll_axis(t: Tensor, shift: I64, axis_in: I64) -> Res[Tensor, Str] {
       let base: I64 = i * sp.length * sp.after + j
       let k: I64 = 0
       while k < sp.length {
-        out[base + ((k + s) % sp.length) * sp.after] = t.data[base + k * sp.after]
+        out[base + ((k + s) % sp.length) * sp.after] = buf.get(t.data, t.dtype, base + k * sp.after)
         k = k + 1
       }
       j = j + 1
@@ -4155,7 +4273,7 @@ struct NestedAt {
 }
 
 fn to_nested(t: Tensor) -> Nested {
-  if is_scalar(t) { return NLeaf(t.data[0]) }
+  if is_scalar(t) { return NLeaf(buf.get(t.data, t.dtype, 0)) }
   to_nested_at(t, 0, 0).value
 }
 
@@ -4164,7 +4282,7 @@ fn to_nested_at(t: Tensor, offset: I64, dim: I64) -> NestedAt {
     let row: Arr[Nested] = arr_new()
     let i: I64 = 0
     while i < t.shape[dim] {
-      push(row, NLeaf(t.data[offset + i]))
+      push(row, NLeaf(buf.get(t.data, t.dtype, offset + i)))
       i = i + 1
     }
     return NestedAt { value: NList(row), next: offset + t.shape[dim] }
@@ -4298,15 +4416,15 @@ fn vjp_conv2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
   let khw: I64 = kh * kw
   let cinkhw: I64 = cin * khw
   let ohw: I64 = oh * ow
-  let gi: Arr[F64] = alloc(len(input.data))
-  let gw: Arr[F64] = alloc(len(weight.data))
+  let gi: Arr[F64] = alloc(element_count(input.shape))
+  let gw: Arr[F64] = alloc(element_count(weight.shape))
   let co: I64 = 0
   while co < cout {
     let i: I64 = 0
     while i < oh {
       let j: I64 = 0
       while j < ow {
-        let gv: F64 = g.data[co * ohw + i * ow + j]
+        let gv: F64 = buf.get(g.data, g.dtype, co * ohw + i * ow + j)
         if gv != 0.0 {
           let ci: I64 = 0
           while ci < cin {
@@ -4316,8 +4434,8 @@ fn vjp_conv2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
               while b < kw {
                 let in_idx: I64 = ci * hw + (i + a) * w + (j + b)
                 let w_idx: I64 = co * cinkhw + ci * khw + a * kw + b
-                gi[in_idx] = gi[in_idx] + gv * weight.data[w_idx]
-                gw[w_idx] = gw[w_idx] + gv * input.data[in_idx]
+                gi[in_idx] = gi[in_idx] + gv * buf.get(weight.data, weight.dtype, w_idx)
+                gw[w_idx] = gw[w_idx] + gv * buf.get(input.data, input.dtype, in_idx)
                 b = b + 1
               }
               a = a + 1
@@ -4346,12 +4464,12 @@ fn vjp_conv2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
 # has to contribute.
 fn vjp_maxpool2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let input: Tensor = value_of(tp, e.inputs[0])
-  let gi: Arr[F64] = alloc(len(input.data))
+  let gi: Arr[F64] = alloc(element_count(input.shape))
   let o: I64 = 0
-  while o < len(g.data) {
+  while o < element_count(g.shape) {
     # iattr[0] is the window, so the winners start at 1.
     let src: I64 = e.iattr[o + 1]
-    gi[src] = gi[src] + g.data[o]
+    gi[src] = gi[src] + buf.get(g.data, g.dtype, o)
     o = o + 1
   }
   accumulate(cot, touched, e.inputs[0], gi)
@@ -4365,7 +4483,7 @@ fn vjp_maxpool2d(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: A
 fn vjp_cumsum(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -4374,7 +4492,7 @@ fn vjp_cumsum(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
       let run: F64 = 0.0
       let k: I64 = sp.length - 1
       while k >= 0 {
-        run = run + g.data[base + k * sp.after]
+        run = run + buf.get(g.data, g.dtype, base + k * sp.after)
         ga[base + k * sp.after] = ga[base + k * sp.after] + run
         k = k - 1
       }
@@ -4403,7 +4521,7 @@ fn vjp_cumsum(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[
 fn vjp_cumprod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -4417,13 +4535,13 @@ fn vjp_cumprod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr
         let without: F64 = 1.0
         let m: I64 = 0
         while m < k {
-          without = without * a.data[base + m * sp.after]
+          without = without * buf.get(a.data, a.dtype, base + m * sp.after)
           m = m + 1
         }
         let n: I64 = k
         while n < sp.length {
-          if n > k { without = without * a.data[base + n * sp.after] }
-          total = total + g.data[base + n * sp.after] * without
+          if n > k { without = without * buf.get(a.data, a.dtype, base + n * sp.after) }
+          total = total + buf.get(g.data, g.dtype, base + n * sp.after) * without
           n = n + 1
         }
         ga[base + k * sp.after] = ga[base + k * sp.after] + total
@@ -4446,15 +4564,15 @@ fn vjp_cumprod(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr
 fn vjp_cumextreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
-  let out: Arr[F64] = alloc(len(a.data))
-  let arg: Arr[I64] = alloc_ints(len(a.data))
+  let out: Arr[F64] = alloc(element_count(a.shape))
+  let arg: Arr[I64] = alloc_ints(element_count(a.shape))
   # The forward pass's accumulation dtype, so the replay reproduces it rather
   # than approximating it.
   scan_run(e.op, a, sp, out, arg, acc_dtype(a.dtype))
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let p: I64 = 0
-  while p < len(a.data) {
-    ga[arg[p]] = ga[arg[p]] + g.data[p]
+  while p < element_count(a.shape) {
+    ga[arg[p]] = ga[arg[p]] + buf.get(g.data, g.dtype, p)
     p = p + 1
   }
   accumulate(cot, touched, e.inputs[0], ga)
@@ -4469,7 +4587,7 @@ fn vjp_diff(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
   let a: Tensor = value_of(tp, e.inputs[0])
   let axis: I64 = e.iattr[0]
   let sp: Spans = axis_spans(a.shape, axis)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -4478,7 +4596,7 @@ fn vjp_diff(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
       let dst: I64 = i * (sp.length - 1) * sp.after + j
       let k: I64 = 0
       while k < sp.length - 1 {
-        let gv: F64 = g.data[dst + k * sp.after]
+        let gv: F64 = buf.get(g.data, g.dtype, dst + k * sp.after)
         ga[src + (k + 1) * sp.after] = ga[src + (k + 1) * sp.after] + gv
         ga[src + k * sp.after] = ga[src + k * sp.after] - gv
         k = k + 1
@@ -4500,7 +4618,7 @@ fn vjp_roll(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
   let axis: I64 = e.iattr[0]
   let s: I64 = e.iattr[1]
   let sp: Spans = axis_spans(a.shape, axis)
-  let ga: Arr[F64] = alloc(len(a.data))
+  let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
@@ -4509,7 +4627,7 @@ fn vjp_roll(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
       let k: I64 = 0
       while k < sp.length {
         ga[base + k * sp.after] = ga[base + k * sp.after]
-          + g.data[base + ((k + s) % sp.length) * sp.after]
+          + buf.get(g.data, g.dtype, base + ((k + s) % sp.length) * sp.after)
         k = k + 1
       }
       j = j + 1
@@ -4555,8 +4673,8 @@ fn jets_new(tp: Tape) -> Jets {
   let dd: Arr[Arr[F64]] = arr_new()
   let i: I64 = 0
   while i < len(tp.entries) {
-    push(d, alloc(len(tp.entries[i].out.data)))
-    push(dd, alloc(len(tp.entries[i].out.data)))
+    push(d, alloc(element_count(tp.entries[i].out.shape)))
+    push(dd, alloc(element_count(tp.entries[i].out.shape)))
     i = i + 1
   }
   Jets { d: d, dd: dd }
@@ -4710,9 +4828,9 @@ fn jet_rearrangement(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] 
   let out_d: Tensor = replay_rearrangement(tp, e, src_d)?
   let out_dd: Tensor = replay_rearrangement(tp, e, src_dd)?
   let i: I64 = 0
-  while i < len(e.out.data) {
-    js.d[n][i] = out_d.data[i]
-    js.dd[n][i] = out_dd.data[i]
+  while i < element_count(e.out.shape) {
+    js.d[n][i] = buf.get(out_d.data, out_d.dtype, i)
+    js.dd[n][i] = buf.get(out_dd.data, out_dd.dtype, i)
     i = i + 1
   }
   Ok(0)
@@ -4744,11 +4862,11 @@ fn jet_select_by_value(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str
   let a: I64 = e.inputs[0]
   let x: Tensor = value_of(tp, a)
   let sp: Spans = spans_for(x, e.iattr[0])
-  let out: Arr[F64] = alloc(len(x.data))
-  let arg: Arr[I64] = alloc_ints(len(x.data))
+  let out: Arr[F64] = alloc(element_count(x.shape))
+  let arg: Arr[I64] = alloc_ints(element_count(x.shape))
   scan_run(e.op, x, sp, out, arg, acc_dtype(x.dtype))
   let p: I64 = 0
-  while p < len(x.data) {
+  while p < element_count(x.shape) {
     js.d[n][p] = js.d[a][arg[p]]
     js.dd[n][p] = js.dd[a][arg[p]]
     p = p + 1
@@ -4763,10 +4881,10 @@ fn jet_select_by_value(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str
 fn jet_where(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let cond: Tensor = value_of(tp, e.inputs[0])
   let i: I64 = 0
-  while i < len(e.out.data) {
+  while i < element_count(e.out.shape) {
     let idx: Arr[I64] = unravel(e.out.shape, i)
     let src: I64 = e.inputs[1]
-    if cond.data[broadcast_offset(cond.shape, idx)] == 0.0 { src = e.inputs[2] }
+    if buf.get(cond.data, cond.dtype, broadcast_offset(cond.shape, idx)) == 0.0 { src = e.inputs[2] }
     let off: I64 = broadcast_offset(value_of(tp, src).shape, idx)
     js.d[n][i] = js.d[src][off]
     js.dd[n][i] = js.dd[src][off]
@@ -4798,9 +4916,9 @@ fn jet_unary(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   if len(e.fattr) > 0 { p0 = e.fattr[0] }
   if len(e.fattr) > 1 { p1 = e.fattr[1] }
   let i: I64 = 0
-  while i < len(e.out.data) {
-    let xv: F64 = x.data[i]
-    let ov: F64 = e.out.data[i]
+  while i < element_count(e.out.shape) {
+    let xv: F64 = buf.get(x.data, x.dtype, i)
+    let ov: F64 = buf.get(e.out.data, e.out.dtype, i)
     let f1: F64 = d_unary(e.op, xv, ov, p0, p1)
     let f2: F64 = d2_unary(e.op, xv, ov, p0, p1)
     let dx: F64 = js.d[a][i]
@@ -4821,13 +4939,13 @@ fn jet_binary(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, ai)
   let b: Tensor = value_of(tp, bi)
   let i: I64 = 0
-  while i < len(e.out.data) {
+  while i < element_count(e.out.shape) {
     let idx: Arr[I64] = unravel(e.out.shape, i)
     let oa: I64 = broadcast_offset(a.shape, idx)
     let ob: I64 = broadcast_offset(b.shape, idx)
-    let x: F64 = a.data[oa]
-    let y: F64 = b.data[ob]
-    let ov: F64 = e.out.data[i]
+    let x: F64 = buf.get(a.data, a.dtype, oa)
+    let y: F64 = buf.get(b.data, b.dtype, ob)
+    let ov: F64 = buf.get(e.out.data, e.out.dtype, i)
     let dx: F64 = js.d[ai][oa]
     let dy: F64 = js.d[bi][ob]
     let fa: F64 = d_binary_a(e.op, x, y, ov)
@@ -4896,9 +5014,9 @@ fn jet_matmul(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let s2: Tensor = matmul(da, db)?
   let s3: Tensor = matmul(a, ddb)?
   let i: I64 = 0
-  while i < len(e.out.data) {
-    js.d[n][i] = t1.data[i] + t2.data[i]
-    js.dd[n][i] = s1.data[i] + 2.0 * s2.data[i] + s3.data[i]
+  while i < element_count(e.out.shape) {
+    js.d[n][i] = buf.get(t1.data, t1.dtype, i) + buf.get(t2.data, t2.dtype, i)
+    js.dd[n][i] = buf.get(s1.data, s1.dtype, i) + 2.0 * buf.get(s2.data, s2.dtype, i) + buf.get(s3.data, s3.dtype, i)
     i = i + 1
   }
   Ok(0)
@@ -4950,14 +5068,14 @@ fn jet_cumprod(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
       let k: I64 = 0
       while k < sp.length {
         let p: I64 = base + k * sp.after
-        let xv: F64 = x.data[p]
+        let xv: F64 = buf.get(x.data, x.dtype, p)
         let dx: F64 = js.d[a][p]
         let ddx: F64 = js.dd[a][p]
         let d: F64 = d_prev * xv + prev * dx
         let dd: F64 = dd_prev * xv + 2.0 * d_prev * dx + prev * ddx
         js.d[n][p] = d
         js.dd[n][p] = dd
-        prev = e.out.data[p]
+        prev = buf.get(e.out.data, e.out.dtype, p)
         d_prev = d
         dd_prev = dd
         k = k + 1
@@ -4985,7 +5103,7 @@ fn jet_cumprod(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
 # OPTIMISATION, not taken: this is n(n+1)/2 forward passes. Reverse-over-forward
 # would need n, and is a different engine.
 fn hessian(tp: Tape, root: I64, leaf: I64) -> Res[Tensor, Str] {
-  let n: I64 = len(value_of(tp, leaf).data)
+  let n: I64 = element_count(value_of(tp, leaf).shape)
   let shape: Arr[I64] = arr_new()
   push(shape, n)
   push(shape, n)
