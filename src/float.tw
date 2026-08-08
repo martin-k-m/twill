@@ -56,6 +56,16 @@ mode systems
 #
 # `format_number`, `f64_shortest` and `f64_hex` below are those three, in that
 # order.
+#
+# NEEDS-114 adds a fourth axis rather than a fourth rendering: the shortest
+# rendering and the parse, taken at a narrow format, so a bf16 value prints
+# the shortest decimal that round-trips through bf16 and a bf16 literal is
+# rounded once, at bf16. Go's strconv has the same generalisation already:
+# FormatFloat and ParseFloat take a bit size, and internally roundShortest,
+# floatBits and atofHex all read a *floatInfo. The machinery below takes a
+# FloatFmt the same way, and the F64 entry points are unchanged: they are the
+# same functions handed FMT_F64, which substitutes the same constants back.
+# `f_shortest` and `f_of_str` at the end of the file are the new entries.
 
 import "bytes.tw" as bytes
 
@@ -467,11 +477,54 @@ let MANT_MASK: I64 = shl(1, MANT_BITS) - 1
 let EXP_MASK: I64 = shl(1, EXP_BITS) - 1
 let IMPLICIT_BIT: I64 = shl(1, MANT_BITS)
 
+# ---- a format as a value ---------------------------------------------------
+#
+# NEEDS-114. In the reference every format-specific constant above is a field
+# of one struct: roundShortest, floatBits and atofHex all take `flt *floatInfo`
+# and read mantbits, expbits and bias from it, and float64info is just one
+# entry. The first version of this port pinned those functions to the F64
+# constants instead, which made a bf16 value print and parse as the F64 it was
+# widened to. FloatFmt un-pins them: the decimal machinery below takes a
+# format, and F64 is FMT_F64 rather than a special case.
+#
+# One deviation of spelling, stated once: Go stores the bias negative
+# (float64info is {52, 11, -1023}) and FloatFmt stores it positive, because
+# the narrow conversions at the end of this file were written and verified
+# against the positive convention. Where the reference reads `flt.bias`, this
+# file reads `0 - f.bias`; the smallest normal exponent, Go's `flt.bias + 1`,
+# is `1 - f.bias`.
+
+struct FloatFmt {
+  mant_bits: I64,
+  exp_bits: I64,
+  # 2^(exp_bits - 1) - 1. Stored rather than recomputed so that a format is one
+  # literal to read and check.
+  bias: I64,
+}
+
+# FMT_F64 exists for the decimal machinery, which is total over all four
+# formats. It must not be handed to `f_narrow` or `f_widen` at the end of the
+# file: both assume a format strictly narrower than F64, and at F64 the
+# narrowing halfway mask becomes a shift by minus one. `f_shortest` and
+# `f_of_str` dispatch F64 to the F64 entry points before narrowing for exactly
+# that reason.
+let FMT_F64: FloatFmt = FloatFmt { mant_bits: 52, exp_bits: 11, bias: 1023 }
+let FMT_F32: FloatFmt = FloatFmt { mant_bits: 23, exp_bits: 8, bias: 127 }
+let FMT_BF16: FloatFmt = FloatFmt { mant_bits: 7, exp_bits: 8, bias: 127 }
+let FMT_F16: FloatFmt = FloatFmt { mant_bits: 10, exp_bits: 5, bias: 15 }
+
+fn fmt_width(f: FloatFmt) -> I64 = f.exp_bits + f.mant_bits + 1
+
+# The all-ones exponent field, and the encoding of an infinity with it.
+fn fmt_exp_all(f: FloatFmt) -> I64 = shl(1, f.exp_bits) - 1
+fn fmt_inf(f: FloatFmt) -> I64 = shl(fmt_exp_all(f), f.mant_bits)
+
 let KIND_FINITE: I64 = 0
 let KIND_INF: I64 = 1
 let KIND_NAN: I64 = 2
 
-# A float pulled apart: the value is `mant * 2^(exp - 52)` when kind is finite.
+# A float pulled apart: the value is `mant * 2^(exp - mant_bits)` in the
+# format it was unpacked from, when kind is finite.
 struct Unpacked {
   neg: Bool,
   kind: I64,
@@ -479,11 +532,14 @@ struct Unpacked {
   exp: I64,
 }
 
-fn unpack(bits: I64) -> Unpacked {
-  let neg: Bool = ushr(bits, 63) != 0
-  let be: I64 = and(ushr(bits, MANT_BITS), EXP_MASK)
-  let mant: I64 = and(bits, MANT_MASK)
-  if be == EXP_MASK {
+# At FMT_F64 this is the code it always was: every shift, mask and bias below
+# evaluates to the F64 constant it replaced.
+fn unpack(bits: I64, f: FloatFmt) -> Unpacked {
+  let expall: I64 = fmt_exp_all(f)
+  let neg: Bool = and(ushr(bits, f.exp_bits + f.mant_bits), 1) != 0
+  let be: I64 = and(ushr(bits, f.mant_bits), expall)
+  let mant: I64 = and(bits, shl(1, f.mant_bits) - 1)
+  if be == expall {
     let k: I64 = KIND_INF
     if mant != 0 { k = KIND_NAN }
     return Unpacked { neg: neg, kind: k, mant: 0, exp: 0 }
@@ -494,50 +550,52 @@ fn unpack(bits: I64) -> Unpacked {
     # normal uses rather than zero.
     exp = 1
   } else {
-    mant = or(mant, IMPLICIT_BIT)
+    mant = or(mant, shl(1, f.mant_bits))
   }
-  Unpacked { neg: neg, kind: KIND_FINITE, mant: mant, exp: exp + BIAS }
+  Unpacked { neg: neg, kind: KIND_FINITE, mant: mant, exp: exp - f.bias }
 }
 
-fn assemble(neg: Bool, mant: I64, exp: I64) -> I64 {
-  let bits: I64 = and(mant, MANT_MASK)
-  bits = or(bits, shl(and(exp - BIAS, EXP_MASK), MANT_BITS))
+fn assemble(neg: Bool, mant: I64, exp: I64, f: FloatFmt) -> I64 {
+  let bits: I64 = and(mant, shl(1, f.mant_bits) - 1)
+  bits = or(bits, shl(and(exp + f.bias, fmt_exp_all(f)), f.mant_bits))
   if neg {
-    bits = or(bits, SIGN_BIT)
+    bits = or(bits, shl(1, f.exp_bits + f.mant_bits))
   }
   bits
 }
 
 # ---- shortest round-trip digits --------------------------------------------
 
-# roundShortest from ftoa.go. `d` holds the exact decimal expansion of
-# `mant * 2^(exp-52)`; this cuts it at the first digit position where no other
-# F64 could round to what is left.
-fn round_shortest(d: Dec, mant: I64, exp: I64) {
+# roundShortest from ftoa.go, taking the format the way the reference takes
+# its *floatInfo. `d` holds the exact decimal expansion of
+# `mant * 2^(exp - f.mant_bits)`; this cuts it at the first digit position
+# where no other float of the format could round to what is left. At FMT_F64
+# every constant below is the F64 constant it replaced.
+fn round_shortest(d: Dec, mant: I64, exp: I64, f: FloatFmt) {
   if mant == 0 {
     d.nd = 0
     return
   }
 
-  let minexp: I64 = BIAS + 1
+  let minexp: I64 = 1 - f.bias
 
   # A cheap test that the answer is already shortest, using log2(10) > 3.32. It
   # is an optimisation in Go and it is kept because it is also the guard that
   # keeps the interval arithmetic below off the values where it is fiddliest.
-  if exp > minexp and 332 * (d.dp - d.nd) >= 100 * (exp - MANT_BITS) {
+  if exp > minexp and 332 * (d.dp - d.nd) >= 100 * (exp - f.mant_bits) {
     return
   }
 
   # The upper bound is halfway to the next float up.
   let upper: Dec = dec_new()
   dec_assign(upper, mant * 2 + 1)
-  dec_shift(upper, exp - MANT_BITS - 1)
+  dec_shift(upper, exp - f.mant_bits - 1)
 
   # And the lower bound halfway to the next float down, which is not symmetric:
   # at a power of two the gap below is half the gap above.
   let mantlo: I64 = 0
   let explo: I64 = 0
-  if mant > IMPLICIT_BIT or exp == minexp {
+  if mant > shl(1, f.mant_bits) or exp == minexp {
     mantlo = mant - 1
     explo = exp
   } else {
@@ -546,7 +604,7 @@ fn round_shortest(d: Dec, mant: I64, exp: I64) {
   }
   let lower: Dec = dec_new()
   dec_assign(lower, mantlo * 2 + 1)
-  dec_shift(lower, explo - MANT_BITS - 1)
+  dec_shift(lower, explo - f.mant_bits - 1)
 
   # The bounds themselves are only reachable when the mantissa is even, because
   # that is when IEEE round-to-nearest-even lands back on this float.
@@ -726,14 +784,14 @@ fn format_digits(shortest: Bool, neg: Bool, d: Dec, prec: I64, verb: I64) -> Str
   fmt_f(neg, d, fprec)
 }
 
-fn big_ftoa(prec: I64, verb: I64, neg: Bool, mant: I64, exp: I64) -> Str {
+fn big_ftoa(prec: I64, verb: I64, neg: Bool, mant: I64, exp: I64, f: FloatFmt) -> Str {
   let d: Dec = dec_new()
   dec_assign(d, mant)
-  dec_shift(d, exp - MANT_BITS)
+  dec_shift(d, exp - f.mant_bits)
 
   let shortest: Bool = prec < 0
   if shortest {
-    round_shortest(d, mant, exp)
+    round_shortest(d, mant, exp, f)
     if verb == VERB_E {
       prec = d.nd - 1
     } else {
@@ -846,7 +904,7 @@ fn fmt_x(prec: I64, neg: Bool, mant: I64, exp: I64) -> Str {
 let VERB_X: I64 = -1
 
 fn ftoa_bits(bits: I64, verb: I64, prec: I64) -> Str {
-  let u: Unpacked = unpack(bits)
+  let u: Unpacked = unpack(bits, FMT_F64)
 
   # Go's spellings, and the plus on infinity is not a typo: FormatFloat returns
   # "+Inf", so `print(1.0/0.0)` prints "+Inf" and anything that trims the sign
@@ -868,7 +926,7 @@ fn ftoa_bits(bits: I64, verb: I64, prec: I64) -> Str {
     return format_digits(prec < 0, u.neg, dec_new(), prec, verb)
   }
 
-  big_ftoa(prec, verb, u.neg, u.mant, u.exp)
+  big_ftoa(prec, verb, u.neg, u.mant, u.exp, FMT_F64)
 }
 
 # ---- the three public renderings -------------------------------------------
@@ -983,7 +1041,7 @@ fn format_i64(v: I64) -> Str {
 
 fn format_number(x: F64) -> Str {
   let bits: I64 = f64_bits(x)
-  let u: Unpacked = unpack(bits)
+  let u: Unpacked = unpack(bits, FMT_F64)
   if is_int64_exact(u) {
     return format_i64(int64_value(u))
   }
@@ -1195,15 +1253,25 @@ struct Bits {
   overflow: Bool,
 }
 
-fn float_bits(d: Dec) -> Bits {
+# floatBits from atof.go, taking the format as the reference does. The one
+# rounding below happens directly at `1 + f.mant_bits` significand bits, which
+# is what parsing a narrow literal through F64 cannot do: a decimal a hair
+# above a bf16 halfway point can round to exactly the halfway point at F64,
+# and a second rounding then breaks the tie to even, the wrong way. Rounding
+# once from the exact decimal has no second rounding to lose.
+fn float_bits(d: Dec, f: FloatFmt) -> Bits {
   if d.nd == 0 {
-    return Bits { bits: assemble(d.neg, 0, BIAS), overflow: false }
+    return Bits { bits: assemble(d.neg, 0, 0 - f.bias, f), overflow: false }
   }
+  # The obvious-overflow bounds are F64's, as they are in the reference, which
+  # uses one pair for every bit size: a narrower format overflows or
+  # underflows well inside them, and the scaled checks below are the ones that
+  # decide.
   if d.dp > 310 {
-    return Bits { bits: assemble(d.neg, 0, EXP_MASK + BIAS), overflow: true }
+    return Bits { bits: assemble(d.neg, 0, fmt_exp_all(f) - f.bias, f), overflow: true }
   }
   if d.dp < -330 {
-    return Bits { bits: assemble(d.neg, 0, BIAS), overflow: false }
+    return Bits { bits: assemble(d.neg, 0, 0 - f.bias, f), overflow: false }
   }
 
   # Scale by powers of two until the value is in [0.5, 1).
@@ -1227,33 +1295,34 @@ fn float_bits(d: Dec) -> Bits {
   # Below the smallest exponent the result is subnormal: keep the exponent and
   # let the mantissa lose bits, which is what makes the rounding below correct
   # for subnormals with no separate case.
-  if exp < BIAS + 1 {
-    let n: I64 = BIAS + 1 - exp
+  if exp < 1 - f.bias {
+    let n: I64 = 1 - f.bias - exp
     dec_shift(d, 0 - n)
     exp = exp + n
   }
 
-  if exp - BIAS >= EXP_MASK {
-    return Bits { bits: assemble(d.neg, 0, EXP_MASK + BIAS), overflow: true }
+  if exp + f.bias >= fmt_exp_all(f) {
+    return Bits { bits: assemble(d.neg, 0, fmt_exp_all(f) - f.bias, f), overflow: true }
   }
 
-  # One rounding, on the full 53 bits, which is the whole reason this path is
-  # correct where an accumulate-and-multiply parse is not.
-  dec_shift(d, 1 + MANT_BITS)
+  # One rounding, on the full 1 + mant_bits bits (53 at F64), which is the
+  # whole reason this path is correct where an accumulate-and-multiply parse
+  # is not, and, taken at a narrow format, where a parse through F64 is not.
+  dec_shift(d, 1 + f.mant_bits)
   let mant: I64 = dec_rounded_integer(d)
 
-  if mant == shl(2, MANT_BITS) {
+  if mant == shl(2, f.mant_bits) {
     mant = ushr(mant, 1)
     exp = exp + 1
-    if exp - BIAS >= EXP_MASK {
-      return Bits { bits: assemble(d.neg, 0, EXP_MASK + BIAS), overflow: true }
+    if exp + f.bias >= fmt_exp_all(f) {
+      return Bits { bits: assemble(d.neg, 0, fmt_exp_all(f) - f.bias, f), overflow: true }
     }
   }
 
-  if and(mant, IMPLICIT_BIT) == 0 {
-    exp = BIAS
+  if and(mant, shl(1, f.mant_bits)) == 0 {
+    exp = 0 - f.bias
   }
-  Bits { bits: assemble(d.neg, mant, exp), overflow: false }
+  Bits { bits: assemble(d.neg, mant, exp, f), overflow: false }
 }
 
 # "inf", "infinity", "nan", any case, with an optional sign on the infinities
@@ -1436,20 +1505,20 @@ fn read_hex_float(s: Str) -> HexRead {
 # atofHex. Rounding is done on two guard bits, the lower of which is sticky: it
 # carries "something nonzero was dropped", which is what makes an exactly-half
 # case distinguishable from a just-above-half one.
-fn atof_hex(h: HexRead) -> Bits {
-  let max_exp: I64 = shl(1, EXP_BITS) + BIAS - 2
-  let min_exp: I64 = BIAS + 1
+fn atof_hex(h: HexRead, f: FloatFmt) -> Bits {
+  let max_exp: I64 = shl(1, f.exp_bits) - f.bias - 2
+  let min_exp: I64 = 1 - f.bias
   let mant: I64 = h.mant
-  let exp: I64 = h.exp + MANT_BITS
+  let exp: I64 = h.exp + f.mant_bits
 
-  while mant != 0 and ushr(mant, MANT_BITS + 2) == 0 {
+  while mant != 0 and ushr(mant, f.mant_bits + 2) == 0 {
     mant = shl(mant, 1)
     exp = exp - 1
   }
   if h.trunc {
     mant = or(mant, 1)
   }
-  while ushr(mant, 1 + MANT_BITS + 2) != 0 {
+  while ushr(mant, 1 + f.mant_bits + 2) != 0 {
     mant = or(ushr(mant, 1), and(mant, 1))
     exp = exp + 1
   }
@@ -1467,19 +1536,19 @@ fn atof_hex(h: HexRead) -> Bits {
   exp = exp + 2
   if round == 3 {
     mant = mant + 1
-    if mant == shl(1, 1 + MANT_BITS) {
+    if mant == shl(1, 1 + f.mant_bits) {
       mant = ushr(mant, 1)
       exp = exp + 1
     }
   }
 
-  if ushr(mant, MANT_BITS) == 0 {
-    exp = BIAS
+  if ushr(mant, f.mant_bits) == 0 {
+    exp = 0 - f.bias
   }
   if exp > max_exp {
-    return Bits { bits: assemble(h.neg, 0, max_exp + 1), overflow: true }
+    return Bits { bits: assemble(h.neg, 0, max_exp + 1, f), overflow: true }
   }
-  Bits { bits: assemble(h.neg, mant, exp), overflow: false }
+  Bits { bits: assemble(h.neg, mant, exp, f), overflow: false }
 }
 
 fn f64_parse(s: Str) -> ParsedF64 {
@@ -1493,7 +1562,7 @@ fn f64_parse(s: Str) -> ParsedF64 {
 
   let h: HexRead = read_hex_float(s)
   if h.ok {
-    let hr: Bits = atof_hex(h)
+    let hr: Bits = atof_hex(h, FMT_F64)
     return ParsedF64 { bits: hr.bits, ok: true, out_of_range: hr.overflow }
   }
 
@@ -1501,7 +1570,7 @@ fn f64_parse(s: Str) -> ParsedF64 {
   if not dec_set(d, s) {
     return ParsedF64 { bits: 0, ok: false, out_of_range: false }
   }
-  let r: Bits = float_bits(d)
+  let r: Bits = float_bits(d, FMT_F64)
   ParsedF64 { bits: r.bits, ok: true, out_of_range: r.overflow }
 }
 
@@ -1518,11 +1587,14 @@ fn f64_of_str(s: Str) -> Opt[F64] {
 # ---- narrow binary floats --------------------------------------------------
 #
 # f32, bf16 and f16, as bit patterns held in an I64, with correctly rounded
-# conversion to and from F64. `docs/dtypes.md` is the design these implement and
-# `src/tensor.tw` is the only caller.
+# conversion to and from F64. `docs/dtypes.md` is the design these implement,
+# `src/tensor.tw` calls the rounding on every store, and the NEEDS-114 entry
+# points below call the conversions on every narrow print and parse.
 #
-# This section sits at the end of the file rather than next to the F64 bit
-# layout above because it reads `INF_BITS`, which the parsing section defines.
+# The FloatFmt struct and the FMT_ constants live with the F64 bit layout
+# above, where the decimal machinery that shares them can see them. The
+# conversions sit at the end of the file because `f_widen` reads `INF_BITS`,
+# which the parsing section defines.
 #
 # WHY ONE PARAMETERISED ROUTINE AND NOT THREE
 #
@@ -1541,24 +1613,6 @@ fn f64_of_str(s: Str) -> Opt[F64] {
 # tensor the errors do not cancel, they sum, and a weight matrix quantised that
 # way is systematically smaller than the one it came from. Round-to-nearest-even
 # is the IEEE default precisely because its error has no such bias.
-
-struct FloatFmt {
-  mant_bits: I64,
-  exp_bits: I64,
-  # 2^(exp_bits - 1) - 1. Stored rather than recomputed so that a format is one
-  # literal to read and check.
-  bias: I64,
-}
-
-let FMT_F32: FloatFmt = FloatFmt { mant_bits: 23, exp_bits: 8, bias: 127 }
-let FMT_BF16: FloatFmt = FloatFmt { mant_bits: 7, exp_bits: 8, bias: 127 }
-let FMT_F16: FloatFmt = FloatFmt { mant_bits: 10, exp_bits: 5, bias: 15 }
-
-fn fmt_width(f: FloatFmt) -> I64 = f.exp_bits + f.mant_bits + 1
-
-# The all-ones exponent field, and the encoding of an infinity with it.
-fn fmt_exp_all(f: FloatFmt) -> I64 = shl(1, f.exp_bits) - 1
-fn fmt_inf(f: FloatFmt) -> I64 = shl(fmt_exp_all(f), f.mant_bits)
 
 # F64 bits to `f`'s bits, round to nearest, ties to even.
 fn f_narrow(bits: I64, f: FloatFmt) -> I64 {
@@ -1687,3 +1741,108 @@ fn round_f16(x: F64) -> F64 = f_round(x, FMT_F16)
 # that land exactly halfway after the first one. `src/tensor.tw` casts through
 # `f_round` on the source dtype's F64 value for that reason.
 fn f32_bits_to_bf16_bits(b: I64) -> I64 = f_narrow(f_widen(b, FMT_F32), FMT_BF16)
+
+# ---- printing and parsing at a format --------------------------------------
+#
+# NEEDS-114. A narrow tensor's buffer holds the exact F64 widening of each
+# element, so rendering it with `f64_shortest` prints seventeen digits of a
+# number that distinguishes about three. The digits are not wrong; they claim
+# a precision the value does not have. The fix is not fewer digits of the F64,
+# it is the same shortest cut run against the format the value lives in, which
+# is what threading FloatFmt through `round_shortest` bought.
+#
+# The parse is the inverse, and it is where correctness rather than
+# readability is at stake: `f64_of_str` followed by `f_round` rounds twice,
+# and a literal that lands exactly on a narrow halfway point after the first
+# rounding is decided by the tie rule instead of by the digits the first
+# rounding cut away. `float_bits` at the format rounds the exact decimal once,
+# so there is nothing to cut away.
+
+# Shortest 'g' from the format's own bit pattern: Go's spellings for NaN and
+# the infinities, then the digit cut at the format's precision. The F64
+# instance of this function is `ftoa_bits` with VERB_G and precision -1.
+fn f_shortest_bits(nb: I64, f: FloatFmt) -> Str {
+  let u: Unpacked = unpack(nb, f)
+  if u.kind == KIND_NAN { return "NaN" }
+  if u.kind == KIND_INF {
+    if u.neg { return "-Inf" }
+    return "+Inf"
+  }
+  if u.mant == 0 {
+    return format_digits(true, u.neg, dec_new(), -1, VERB_G)
+  }
+  big_ftoa(-1, VERB_G, u.neg, u.mant, u.exp, f)
+}
+
+# The shortest decimal that round-trips through the format: for the F64 a
+# narrow tensor stores, the string a print of that tensor should show. Equal
+# to Go's strconv.FormatFloat(x, 'g', -1, bits) for the sizes Go has.
+# Dispatching FMT_F64 to `f64_shortest` keeps `f_narrow` off the one format it
+# does not accept, and is not a shortcut: at FMT_F64 the two routes are the
+# same functions handed the same constants.
+#
+# `x` is expected to be in-format already, which is the buffer invariant
+# `src/tensor.tw` enforces; an `x` that is not gets one correct rounding
+# first, exactly as Go's FormatFloat rounds its float64 argument to 32 bits.
+fn f_shortest(x: F64, f: FloatFmt) -> Str {
+  if f.mant_bits == MANT_BITS { return f64_shortest(x) }
+  f_shortest_bits(f_narrow(f64_bits(x), f), f)
+}
+
+fn f32_shortest(x: F64) -> Str = f_shortest(x, FMT_F32)
+fn bf16_shortest(x: F64) -> Str = f_shortest(x, FMT_BF16)
+fn f16_shortest(x: F64) -> Str = f_shortest(x, FMT_F16)
+
+# The format's bits, plus the flags `ParsedF64` carries and for the same
+# reason: out of range is not a syntax error, and "1e40" at bf16 is the bf16
+# infinity exactly as "1e400" is the F64 infinity at F64.
+struct ParsedFmt {
+  bits: I64,
+  ok: Bool,
+  out_of_range: Bool,
+}
+
+# `f64_parse` at a narrow format: the same specials, the same underscore rule,
+# the same grammar, and one rounding, at the format. A string is a syntax
+# error at bf16 exactly when it is one at F64, so changing a tensor's dtype
+# never changes which programs parse. `f_narrow` on the special bit patterns
+# is exact: an infinity narrows to the infinity and the quiet NaN to the quiet
+# NaN.
+fn f_parse(s: Str, f: FloatFmt) -> ParsedFmt {
+  match parse_special(s) {
+    Some(b) => return ParsedFmt { bits: f_narrow(b, f), ok: true, out_of_range: false },
+    None => {},
+  }
+  if not underscore_ok(s) {
+    return ParsedFmt { bits: 0, ok: false, out_of_range: false }
+  }
+
+  let h: HexRead = read_hex_float(s)
+  if h.ok {
+    let hr: Bits = atof_hex(h, f)
+    return ParsedFmt { bits: hr.bits, ok: true, out_of_range: hr.overflow }
+  }
+
+  let d: Dec = dec_new()
+  if not dec_set(d, s) {
+    return ParsedFmt { bits: 0, ok: false, out_of_range: false }
+  }
+  let r: Bits = float_bits(d, f)
+  ParsedFmt { bits: r.bits, ok: true, out_of_range: r.overflow }
+}
+
+# `f64_of_str` at a format: None on a syntax error, the format's infinity when
+# out of range, and the value returned as its exact F64 widening, which is the
+# representation `src/tensor.tw` stores. This is what a literal in a narrow
+# context should evaluate through, in place of `f64_of_str` followed by
+# `f_round`, which rounds twice.
+fn f_of_str(s: Str, f: FloatFmt) -> Opt[F64] {
+  if f.mant_bits == MANT_BITS { return f64_of_str(s) }
+  let p: ParsedFmt = f_parse(s, f)
+  if not p.ok { return None }
+  Some(f64_from_bits(f_widen(p.bits, f)))
+}
+
+fn f32_of_str(s: Str) -> Opt[F64] = f_of_str(s, FMT_F32)
+fn bf16_of_str(s: Str) -> Opt[F64] = f_of_str(s, FMT_BF16)
+fn f16_of_str(s: Str) -> Opt[F64] = f_of_str(s, FMT_F16)
