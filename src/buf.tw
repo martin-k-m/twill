@@ -1,0 +1,208 @@
+mode systems
+
+# buf.tw: the packed, byte-addressable buffer NEEDS-111 asks for, and the
+# dtype-aware element access that makes it a tensor's storage.
+#
+# `Buf` is an opaque runtime type in the way `Bytes` is: a fixed number of
+# bytes, allocated zeroed, addressed by byte index, growable never. Four native
+# primitives are its whole runtime surface, and this file is the single place
+# they are touched, for the same reason src/bytes.tw is the single place the
+# `Bytes` primitives are:
+#
+#   buf_new(n)         allocate n bytes, zeroed
+#   buf_len(b)         the length in bytes
+#   buf_get8(b, i)     read byte i, 0..255
+#   buf_set8(b, i, v)  write the low eight bits of v at byte i
+#
+# Everything above a byte is twill. An element of dtype `dt` occupies
+# elem_bytes(dt) bytes at byte offset i * elem_bytes(dt), little-endian, and
+# the bit patterns are produced and read back by the conversions src/float.tw
+# already carries, so this file adds layout and no new numerics. That division
+# is why NEEDS-111 could name `buf_get` and `buf_set` as primitives and the
+# runtime still only owes the four byte operations above: the rounding half of
+# the contract was already written and verified once, in src/float.tw, and a
+# native reimplementation of it would be a second thing to diverge.
+#
+# This does not live in src/bytes.tw, although "the byte-level surface of the
+# systems subset" sounds like its charter. Two reasons. `Bytes` is a growable
+# builder for compiler *output* and `Buf` is fixed storage for tensor
+# *elements*; a module is a charter, not a bag. And src/float.tw imports
+# src/bytes.tw for its own rendering, so the conversions this file needs could
+# never be imported there without a cycle.
+#
+# No slicing, no views, no alias: a Buf belongs to exactly one tensor.
+# NEEDS-111 says the primitive should not offer a view until something needs
+# one, and nothing does; every kernel in src/tensor.tw allocates its own
+# output.
+
+import "float.tw" as flt
+
+# ---- the dtype layout -------------------------------------------------------
+#
+# The dtype codes, value for value the ones src/tensor.tw declares. They are
+# declared twice because the import points the other way: src/tensor.tw
+# imports this file for its storage, so this file cannot import src/tensor.tw
+# for its codes. src/gpu/buffer.tw makes the same trade with `element_count`.
+# A code added or renumbered there is added here in the same change, and the
+# comment on src/tensor.tw `dtype_bits` points back at this table.
+
+let DT_BOOL: I64 = 0
+let DT_I8: I64 = 1
+let DT_I32: I64 = 2
+let DT_F16: I64 = 3
+let DT_BF16: I64 = 4
+let DT_F32: I64 = 5
+let DT_F64: I64 = 6
+
+# Bytes per element, the packing docs/dtypes.md promises: f64 is 8, f32 and
+# i32 are 4, bf16 and f16 are 2, i8 and bool are 1. This is src/tensor.tw's
+# `dtype_bits` divided by eight.
+fn elem_bytes(dt: I64) -> I64 {
+  if dt == DT_BOOL { return 1 }
+  if dt == DT_I8 { return 1 }
+  if dt == DT_I32 { return 4 }
+  if dt == DT_F16 { return 2 }
+  if dt == DT_BF16 { return 2 }
+  if dt == DT_F32 { return 4 }
+  8
+}
+
+# ---- allocation -------------------------------------------------------------
+
+fn new(n: I64) -> Buf = buf_new(n)
+
+fn byte_len(b: Buf) -> I64 = buf_len(b)
+
+# A zeroed buffer for n elements of dtype dt. All-zero bytes are the zero
+# value in every dtype in the set, +0.0 included, which is what lets this be
+# one allocation with no initialising pass.
+fn alloc_elems(n: I64, dt: I64) -> Buf = buf_new(n * elem_bytes(dt))
+
+# ---- little-endian bytes ----------------------------------------------------
+
+# The bits at `off`, assembled little-endian from w bytes. The top byte of an
+# 8-byte read lands in bits 56..63 through a wrapping shl, so a stored sign
+# bit comes back as a negative I64, which is exactly the form f64_from_bits
+# takes.
+fn rd_le(b: Buf, off: I64, w: I64) -> I64 {
+  let bits: I64 = 0
+  let k: I64 = 0
+  while k < w {
+    bits = or(bits, shl(buf_get8(b, off + k), 8 * k))
+    k = k + 1
+  }
+  bits
+}
+
+# The mask after the shift is what makes the arithmetic `shr` safe here: a
+# negative bit pattern sign-extends on the way down and the `and` throws the
+# extension away, so every byte written is the true byte of the two's
+# complement pattern.
+fn wr_le(b: Buf, off: I64, w: I64, bits: I64) {
+  let k: I64 = 0
+  while k < w {
+    buf_set8(b, off + k, and(shr(bits, 8 * k), 255))
+    k = k + 1
+  }
+}
+
+# ---- element access ---------------------------------------------------------
+#
+# `get` and `set` are the whole observable content of the layout, and the
+# property that makes NEEDS-111 a layout change rather than a semantics change
+# is one equation, per dtype and per element:
+#
+#   get(b, dt, i) after set(b, dt, i, x)  ==  dt_round(dt, x)
+#
+# with dt_round as src/tensor.tw defines it. For the float dtypes both sides
+# are the same code: dt_round is f_widen after f_narrow, `set` stores the
+# f_narrow bits and `get` widens them with f_widen, so the agreement is by
+# construction and not by matched implementations. For bool and the integers
+# the rule is restated below, branch for branch against dt_round's text, and
+# that restatement is the one place this file could drift from src/tensor.tw.
+
+# Element i, read as the exact F64 widening of the stored value. Exact is the
+# point: widening a narrow float never rounds, and every i32 is exactly
+# representable in F64, so `get` introduces no error and the storage invariant
+# in src/tensor.tw survives the round trip.
+fn get(b: Buf, dt: I64, i: I64) -> F64 {
+  let off: I64 = i * elem_bytes(dt)
+  if dt == DT_F64 { return f64_from_bits(rd_le(b, off, 8)) }
+  if dt == DT_F32 { return flt.f64_of_f32_bits(rd_le(b, off, 4)) }
+  if dt == DT_BF16 { return flt.f64_of_bf16_bits(rd_le(b, off, 2)) }
+  if dt == DT_F16 { return flt.f64_of_f16_bits(rd_le(b, off, 2)) }
+  if dt == DT_BOOL {
+    if buf_get8(b, off) == 0 { return 0.0 }
+    return 1.0
+  }
+  if dt == DT_I8 {
+    let v: I64 = buf_get8(b, off)
+    if v >= 128 { v = v - 256 }
+    return f64_of_i64(v)
+  }
+  let v32: I64 = rd_le(b, off, 4)
+  if v32 >= 2147483648 { v32 = v32 - 4294967296 }
+  f64_of_i64(v32)
+}
+
+# Toward zero, matching src/tensor.tw `trunc_toward_zero`, because the store
+# of an integer dtype is dt_round and dt_round truncates toward zero.
+fn trunc_toward_zero(x: F64) -> F64 {
+  if x < 0.0 { return 0.0 - f64_floor(0.0 - x) }
+  f64_floor(x)
+}
+
+# Element i, stored rounded: the narrow floats through f_narrow, which is
+# round-to-nearest ties-to-even by src/float.tw's verification, and bool and
+# the integers by dt_round's own three rules. NaN is not zero so it stores as
+# true in bool; NaN has no integer image and stores as zero; integer overflow
+# clamps rather than wraps, because a weight that saturates at 127 is visibly
+# wrong in a plot and one that wraps to -128 looks like a plausible negative
+# weight.
+fn set(b: Buf, dt: I64, i: I64, x: F64) {
+  let off: I64 = i * elem_bytes(dt)
+  if dt == DT_F64 {
+    wr_le(b, off, 8, f64_bits(x))
+    return
+  }
+  if dt == DT_F32 {
+    wr_le(b, off, 4, flt.f64_to_f32_bits(x))
+    return
+  }
+  if dt == DT_BF16 {
+    wr_le(b, off, 2, flt.f64_to_bf16_bits(x))
+    return
+  }
+  if dt == DT_F16 {
+    wr_le(b, off, 2, flt.f64_to_f16_bits(x))
+    return
+  }
+  if dt == DT_BOOL {
+    if x == 0.0 {
+      buf_set8(b, off, 0)
+    } else {
+      buf_set8(b, off, 1)
+    }
+    return
+  }
+  let v: F64 = 0.0
+  if x == x {
+    v = trunc_toward_zero(x)
+    let lo: F64 = 0.0 - 128.0
+    let hi: F64 = 127.0
+    if dt == DT_I32 {
+      lo = 0.0 - 2147483648.0
+      hi = 2147483647.0
+    }
+    if v < lo { v = lo }
+    if v > hi { v = hi }
+  }
+  let n: I64 = i64_of_f64(v)
+  if dt == DT_I8 {
+    if n < 0 { n = n + 256 }
+    buf_set8(b, off, n)
+    return
+  }
+  if n < 0 { n = n + 4294967296 }
+  wr_le(b, off, 4, n)
+}
