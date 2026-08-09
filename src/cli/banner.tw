@@ -19,6 +19,7 @@ import "src/term/ansi" as ansi
 import "src/term/color" as col
 import "src/term/width" as w
 import "src/cli/theme" as th
+import "src/cli/box" as box
 
 # Dots, not cells. Braille packs 2 across and 4 down into one cell, so this is a
 # 12-by-2 cell mark: small enough to sit on two lines beside the version, which
@@ -133,6 +134,32 @@ fn render(c: cp.Caps, version: Str) -> Str {
     l0 + "\n" + l1 + "\n"
   }
 }
+
+# The welcome panel: the mark and the name beside it, then the three commands a
+# newcomer reaches for, framed in a rounded box. This is the fuller version of
+# `render`, for the bare `twill` where a person is looking for a way in rather
+# than reading a banner between two commands. It degrades the same way and to the
+# same one line: a box drawn from characters the terminal cannot render is worse
+# than the text it was dressing up.
+fn welcome(c: cp.Caps, version: Str) -> Str {
+  if !can_draw(c) {
+    return plain(version)
+  }
+  let art = mark_lines(c)
+  let body: Arr[Str] = arr()
+  push(body, art[0] + "  " + ansi.paint(c, th.emphasis(), "twill"))
+  push(body, art[1] + "  " + ansi.paint(c, th.muted(), "a language for shapes"))
+  push(body, "")
+  push(body, hint(c, "twill run <file>", "run a program"))
+  push(body, hint(c, "twill repl", "start an interactive session"))
+  push(body, hint(c, "twill help", "see every command"))
+  box.panel(c, body, ansi.paint(c, th.muted(), version), th.teal(), box.rounded()) + "\n"
+}
+
+# A command and what it does, the command in the code colour and padded so the
+# descriptions line up, the description quiet behind it.
+fn hint(c: cp.Caps, cmd: Str, desc: Str) -> Str =
+  w.pad_right(ansi.paint(c, th.code(), cmd), 18) + ansi.paint(c, th.muted(), desc)
 
 # The mark needs braille and it needs colour to be a gradient rather than a
 # smudge. Without either, the honest answer is a line of text, not a degraded

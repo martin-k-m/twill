@@ -1,0 +1,119 @@
+mode systems
+
+# box.tw - a bordered panel, the frame around a block of content.
+#
+# The one thing the CLI could not draw before: a rectangle with a border and a
+# title, the shape a welcome message or a summary sits inside. It is separate
+# from src/term/frame.tw, which repaints a live region in place for the spinner
+# and the bar; this draws a static box once and is done.
+#
+# Two rules keep it honest. Alignment is by display width, not byte length, so a
+# line carrying colour or a multibyte glyph still lines up with the right edge,
+# which src/term/width.tw is imported for. And the border degrades: rounded
+# corners where the terminal draws box characters, plain ASCII where they would
+# come out as tofu, decided once from the capabilities rather than hoped for.
+
+import "src/term/caps" as cp
+import "src/term/ansi" as ansi
+import "src/term/color" as col
+import "src/term/width" as w
+
+# The six characters a border is drawn from: four corners, a horizontal run and
+# a vertical one.
+struct BoxChars {
+  tl: Str,
+  tr: Str,
+  bl: Str,
+  br: Str,
+  h: Str,
+  v: Str,
+}
+
+# Rounded is the default and the one that reads as considered rather than boxy.
+fn rounded() -> BoxChars = BoxChars { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" }
+fn heavy() -> BoxChars = BoxChars { tl: "┏", tr: "┓", bl: "┗", br: "┛", h: "━", v: "┃" }
+fn light() -> BoxChars = BoxChars { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" }
+fn ascii() -> BoxChars = BoxChars { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" }
+
+# The chars this terminal can actually render: the pretty ones where box drawing
+# is understood, ASCII where it is not, so a box never becomes a row of question
+# marks on a terminal that cannot draw it.
+fn for_caps(c: cp.Caps, pretty: BoxChars) -> BoxChars {
+  if c.unicode {
+    return pretty
+  }
+  ascii()
+}
+
+fn max_i64(a: I64, b: I64) -> I64 {
+  if a > b {
+    return a
+  }
+  b
+}
+
+# The widest content line, by display width.
+fn widest(body: Arr[Str]) -> I64 {
+  let m: I64 = 0
+  let i: I64 = 0
+  while i < len(body) {
+    m = max_i64(m, w.display_width(body[i]))
+    i = i + 1
+  }
+  m
+}
+
+# A panel around `body`, framed in `border`, with an optional `title` set into
+# the top edge. `title` may already carry colour of its own; its width is
+# measured with the escapes skipped so it still fits. One space of padding sits
+# inside each vertical edge, which is the difference between a box and a cage.
+#
+# The interior is as wide as the widest content line plus that padding, widened
+# if the title needs it, and capped to the terminal so the box never wraps, with
+# any line past the cap truncated rather than allowed to break the frame.
+fn panel(c: cp.Caps, body: Arr[Str], title: Str, border: col.Rgb, chars: BoxChars) -> Str {
+  let ch: BoxChars = for_caps(c, chars)
+  let title_w: I64 = w.display_width(title)
+
+  # The content region between the padding, then the interior including it.
+  let content: I64 = widest(body)
+  if len(title) > 0 {
+    content = max_i64(content, title_w + 2)
+  }
+  let interior: I64 = content + 2
+  # Never wider than the terminal: the box plus its two borders must fit.
+  let cap: I64 = c.width - 2
+  if interior > cap && cap > 4 {
+    interior = cap
+  }
+  let inner_content: I64 = interior - 2
+
+  let out: Str = top(c, ch, border, title, title_w, interior) + "\n"
+  let i: I64 = 0
+  while i < len(body) {
+    let line: Str = w.pad_right(w.truncate(body[i], inner_content), inner_content)
+    out = out + edge(c, ch, border) + " " + line + " " + edge(c, ch, border) + "\n"
+    i = i + 1
+  }
+  out + bottom(c, ch, border, interior)
+}
+
+# The top edge, with the title set in after one horizontal, and the rest of the
+# run filling to the right corner.
+fn top(c: cp.Caps, ch: BoxChars, border: col.Rgb, title: Str, title_w: I64, interior: I64) -> Str {
+  if len(title) == 0 {
+    return ansi.paint_fg(c, border, ch.tl + w.repeat(ch.h, interior) + ch.tr)
+  }
+  let fill: I64 = interior - title_w - 3
+  if fill < 1 {
+    fill = 1
+  }
+  let left: Str = ansi.paint_fg(c, border, ch.tl + ch.h + " ")
+  let right: Str = ansi.paint_fg(c, border, " " + w.repeat(ch.h, fill) + ch.tr)
+  left + title + right
+}
+
+fn bottom(c: cp.Caps, ch: BoxChars, border: col.Rgb, interior: I64) -> Str =
+  ansi.paint_fg(c, border, ch.bl + w.repeat(ch.h, interior) + ch.br)
+
+fn edge(c: cp.Caps, ch: BoxChars, border: col.Rgb) -> Str = ansi.paint_fg(c, border, ch.v)
