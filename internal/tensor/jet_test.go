@@ -160,6 +160,30 @@ func TestHessianFDProd(t *testing.T) {
 	zc("three-zero", []float64{0, 0, 0}, []float64{1, 1, 1}, 0, 0)
 }
 
+// Conv2D is bilinear in (input, weight). The first two cases move one operand
+// with the other held constant, so they check the input and weight paths of the
+// jet separately. The third feeds one leaf into both, making the convolution
+// x0^2 + x1^2 with hessian 2I, which is where the cross term 2*xd*wd shows up: a
+// jet missing the factor of two would report I here.
+func TestHessianFDConv(t *testing.T) {
+	checkHessianFD(t, "conv-input", []float64{1, 2, 3, 0.5, -1, 2}, []int{1, 2, 3}, func(x *Tensor) *Tensor {
+		w := New([]float64{0.5, -0.3, 0.2, 1.1}, []int{1, 1, 2, 2})
+		c, _ := Conv2D(x, w)
+		return Sum(Square(c))
+	})
+	checkHessianFD(t, "conv-weight", []float64{0.5, -0.3, 0.2, 1.1}, []int{1, 1, 2, 2}, func(wt *Tensor) *Tensor {
+		x := New([]float64{1, 2, 3, 0.5, -1, 2}, []int{1, 2, 3})
+		c, _ := Conv2D(x, wt)
+		return Sum(Square(c))
+	})
+	checkHessianFD(t, "conv-cross", []float64{1.3, -0.7}, []int{2}, func(x *Tensor) *Tensor {
+		in, _ := Reshape(x, []int{1, 1, 2})
+		wt, _ := Reshape(x, []int{1, 1, 1, 2})
+		c, _ := Conv2D(in, wt)
+		return Sum(c)
+	})
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)
