@@ -1676,10 +1676,17 @@ selection the backward pass already agreed on, so the two implementations stay
 byte-identical, and `internal/tensor/jet_test.go` checks the sort and topk
 Hessians against finite differences.
 
-Left: `softmax`, `logsumexp`, `prod`, `median`, `conv2d` and `maxpool2d`. Each
-has no jvp on either side and a real second derivative, not a permutation, so
-each needs its jvp written and verified on both sides at once, as with NEEDS-77.
-The original framing follows.
+`softmax` is done too, both sides. Its jacobian is `y_i(delta_ij - y_j)`, so the
+first output tangent is `y_i(xd_i - s)` with `s` the y-weighted mean of the input
+tangents, and the second is that differentiated once more along the direction;
+`internal/tensor` `Softmax` and `src/tensor.tw` `jet_softmax` carry it term for
+term, reading `y` from the stored output with no max subtraction, and
+`jet_test.go` checks the softmax hessian against finite differences on both a
+sum-of-squares and a weighted log-loss.
+
+Left: `logsumexp`, `prod`, `median`, `conv2d` and `maxpool2d`. Each has a real
+second derivative and no jvp on either side, so each needs its jvp written and
+verified on both sides at once, as with NEEDS-77. The original framing follows.
 
 *(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
 `is_rearrangement`.)*

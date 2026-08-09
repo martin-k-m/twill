@@ -370,6 +370,37 @@ func Softmax(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	// Forward-mode 2-jet. The jacobian is y_i(d_ij - y_j), so the first tangent
+	// is yd_i = y_i(xd_i - s) with s the y-weighted mean of the input tangents.
+	// Differentiating that once more along the direction gives the second, where
+	// sdot is d/dt of s. The max subtraction does not appear: it cancels out of
+	// y, which is all the jet reads.
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for i := 0; i < before; i++ {
+				for j := 0; j < after; j++ {
+					base := i*L*after + j
+					s := 0.0
+					for k := 0; k < L; k++ {
+						o := base + k*after
+						s += out[o] * t.jet.d[o]
+					}
+					sdot := 0.0
+					for k := 0; k < L; k++ {
+						o := base + k*after
+						yd := out[o] * (t.jet.d[o] - s)
+						res.jet.d[o] = yd
+						sdot += yd*t.jet.d[o] + out[o]*t.jet.dd[o]
+					}
+					for k := 0; k < L; k++ {
+						o := base + k*after
+						res.jet.dd[o] = res.jet.d[o]*(t.jet.d[o]-s) + out[o]*(t.jet.dd[o]-sdot)
+					}
+				}
+			}
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
