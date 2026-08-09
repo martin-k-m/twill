@@ -323,6 +323,28 @@ fn stmt_line(s: Stmt) -> I64 {
   }
 }
 
+# The last source line a statement occupies, for the formatter's blank-line
+# preservation (NEEDS-78). A statement with a block body ends at the block's
+# closing brace; a single-line statement ends where it starts. A function whose
+# body is an expression is one line, and one whose body is a block ends at the
+# block's end.
+fn stmt_end_line(s: Stmt) -> I64 {
+  match s {
+    SWhile(x) => x.body.end_line,
+    SFor(x) => x.body.end_line,
+    SBlock(x) => x.end_line,
+    SFn(x) => fn_end_line(x),
+    _ => stmt_line(s),
+  }
+}
+
+fn fn_end_line(x: FnDecl) -> I64 {
+  match x.body {
+    EBlock(b) => b.end_line,
+    _ => x.line,
+  }
+}
+
 fn stmt_id(s: Stmt) -> I64 {
   match s {
     SLet(x) => x.id,

@@ -1544,8 +1544,24 @@ other single-line statement uses.
 
 ## NEEDS-78: the formatter does not preserve blank lines
 
-**Status:** open, cosmetic, and the most likely reason someone stops running
-`twill fmt`. `src/fmt.tw`, and `internal/format/format.go` equally.
+**Status:** done in `src/fmt.tw`, as a deliberate divergence from the bootstrap.
+`maybe_blank` re-emits one blank line wherever the source had a gap of two or
+more lines between consecutive statements, measured from the previous
+statement's `stmt_end_line` to the leading edge of the next (its first own-line
+comment, or the statement itself), so a comment sitting directly under a
+statement is not mistaken for a break and a multi-line statement's own span is
+not either. The three statement lists, the program body, an inline `{ }` block,
+and a braced block body, all go through it.
+
+The owner chose to let twill's formatter be the better one here rather than
+reproduce `internal/format/format.go`, which drops the blanks, so the two
+disagree on this point until the bootstrap is retired and the fmt goldens are
+regenerated from twill when it can run. One case is left: a blank line between
+two consecutive own-line comments is not preserved, because `emit_leading`
+emits comments back to back; the entry's target, breaks between statements, is.
+
+*(Original: open, cosmetic. `src/fmt.tw`, and `internal/format/format.go`
+equally.)*
 
 The printer emits one line per statement and nothing else, so the blank lines a
 author put between paragraphs of a function are gone after one format. Comments
