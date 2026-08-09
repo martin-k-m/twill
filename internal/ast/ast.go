@@ -72,6 +72,12 @@ type Param struct {
 }
 
 type Program struct {
+	// Mode is the file-level mode named by a leading `mode <name>` declaration,
+	// or "" when there is none. `mode systems` selects the systems dialect the
+	// self-hosted compiler is written in; the bootstrap records it and runs the
+	// features it already has, so a systems-mode file built from those parses
+	// and runs rather than failing on the mode line.
+	Mode string
 	Body []Stmt
 }
 

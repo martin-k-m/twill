@@ -97,6 +97,15 @@ func (p *parser) skipSeparators() {
 func (p *parser) parseProgram() (*ast.Program, error) {
 	prog := &ast.Program{}
 	p.skipSeparators()
+	// A leading `mode <name>` is a file-level declaration, not a statement: it
+	// names the dialect the rest of the file is written in. `mode` is not a
+	// keyword (so it stays usable as an ordinary name elsewhere), so it is
+	// recognised only here, only first, and only when an identifier follows it.
+	if t := p.peek(0); t.Kind == lexer.IDENT && t.Value == "mode" && p.peek(1).Kind == lexer.IDENT {
+		p.next()                   // 'mode'
+		prog.Mode = p.next().Value // the dialect name, e.g. 'systems'
+		p.skipSeparators()
+	}
 	for !p.atEnd() {
 		s, err := p.parseStmt()
 		if err != nil {

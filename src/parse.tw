@@ -178,11 +178,21 @@ fn skip_separators(p: Parser) {
 fn parse_program(p: Parser) -> Res[ast.Program, lex.SyntaxError] {
   let body: Arr[ast.Stmt] = arr_new()
   skip_separators(p)
+  # A leading `mode <name>` is a file-level declaration, not a statement. `mode`
+  # is not a keyword, so it is recognised only here, only first, and only when
+  # an identifier follows it, which leaves it usable as an ordinary name after.
+  let mode: Str = ""
+  let t: lex.Token = peek(p, 0)
+  if t.kind == lex.KIND_IDENT and bytes.equal(t.value, "mode") and peek(p, 1).kind == lex.KIND_IDENT {
+    next_tok(p)
+    mode = next_tok(p).value
+    skip_separators(p)
+  }
   while not at_end(p) {
     push(body, parse_stmt(p)?)
     skip_separators(p)
   }
-  Ok(ast.Program { body: body })
+  Ok(ast.Program { mode: mode, body: body })
 }
 
 # ---- statements ------------------------------------------------------------

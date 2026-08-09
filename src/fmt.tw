@@ -104,6 +104,15 @@ fn format(prog: ast.Program, comments: Arr[lex.Comment]) -> Str {
   # in source order and no two own-line comments share a line, so the sort is an
   # identity and is not repeated. Emitting them in order is what emitLeading
   # below depends on.
+  # The mode declaration leads the file, set off from the body by a blank line
+  # the way every systems-mode source in the tree writes it. It mirrors the Go
+  # formatter, which emits the same two lines before the body.
+  if len(prog.mode) > 0 {
+    bytes.push_text(p.buf, bytes.concat("mode ", bytes.concat(prog.mode, "\n")))
+    if len(prog.body) > 0 {
+      bytes.push_text(p.buf, "\n")
+    }
+  }
   let j: I64 = 0
   let prev_end: I64 = -1
   while j < len(prog.body) {

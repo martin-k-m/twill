@@ -255,6 +255,10 @@ enum Stmt {
 }
 
 struct Program {
+  # The dialect named by a leading `mode <name>` declaration, or "" when there
+  # is none. `mode systems` selects the systems dialect this compiler is itself
+  # written in; it is recorded here and is not one of the body statements.
+  mode: Str,
   body: Arr[Stmt],
 }
 

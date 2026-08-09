@@ -42,6 +42,14 @@ func format(prog *ast.Program, comments []lexer.Comment) string {
 		}
 	}
 	sort.SliceStable(p.own, func(i, j int) bool { return p.own[i].Line < p.own[j].Line })
+	// The mode declaration leads the file, set off from the body by a blank line
+	// the way every systems-mode source in the tree writes it.
+	if prog.Mode != "" {
+		p.b.WriteString("mode " + prog.Mode + "\n")
+		if len(prog.Body) > 0 {
+			p.b.WriteString("\n")
+		}
+	}
 	for _, s := range prog.Body {
 		p.stmt(s, 0)
 	}
