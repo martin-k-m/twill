@@ -27,16 +27,29 @@ month later as it did when it was written.
 
 ## NEEDS-1: `mode systems` as a file-level declaration
 
-**Status:** blocking. Every file in `src/` opens with it.
+**Status:** the declaration is recognised and preserved on both sides
+(2026-08-09). The dialect *semantics* it should select are the remaining work.
 
 The gate from `docs/self-hosting.md` section 1.1. The first non-comment line of
 a file is `mode systems`; the default with no declaration is numeric mode and is
-unchanged. The lexer must produce it as an ordinary keyword-plus-identifier
-pair, the parser must accept it only as the first statement, and everything
-below is refused outside it.
+unchanged.
 
-*Go bootstrap:* no concept of a mode. `internal/parser/parser.go` `parseStmt`
-has no case for it and `internal/checker/checker.go` has a single policy.
+**Done.** `mode` is a bare identifier (not a keyword), recognised only as a
+leading `mode <name>` and only when an identifier follows, so it stays usable as
+an ordinary name everywhere else. It is recorded on the program rather than
+parsed as a statement, and the formatter re-emits it, set off from the body by a
+blank line. A systems-mode file built from features the bootstrap already has
+now parses and runs instead of failing on its first line, and `twill fmt`
+round-trips the mode line. This landed in the Go bootstrap
+(`internal/parser/parser.go` `parseProgram`, `ast.Program.Mode`,
+`internal/format/format.go`) and in the self-hosted tree in lockstep
+(`src/parse.tw` `parse_program`, `ast.Program.mode`, `src/fmt.tw`), with tests
+in `internal/interp/mode_test.go`.
+
+**Remaining.** The mode is recorded but does not yet *gate* anything: numeric
+mode does not refuse systems constructs and systems mode does not enable them,
+because the bootstrap still implements one dialect. That gating, and the systems
+constructs themselves (NEEDS-2 onward), are the substance behind this line.
 
 ## NEEDS-2: `I64` with bitwise operators
 

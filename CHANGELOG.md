@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`mode systems` is recognised as a file-level declaration** (NEEDS-1,
+  2026-08-09). A leading `mode <name>` is recorded on the program and re-emitted
+  by the formatter, set off from the body by a blank line. `mode` stays a
+  perfectly ordinary identifier everywhere else, since it is recognised only
+  first and only when an identifier follows. A systems-mode file built from
+  features the bootstrap already has now parses and runs rather than failing on
+  its first line, and `twill fmt` round-trips it. Landed in the Go bootstrap and
+  the self-hosted tree (`src/parse.tw`, `src/fmt.tw`) in lockstep. The mode does
+  not yet gate which constructs are legal; that is the remaining work behind the
+  entry.
+
 ### Renamed
 
 - **The language is now Twill, and its source extension is now `.tw`**
