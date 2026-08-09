@@ -35,7 +35,7 @@ mode systems
 # one, and nothing does; every kernel in src/tensor.tw allocates its own
 # output.
 
-import "float.tw" as flt
+import "std/float" as flt
 
 # ---- the dtype layout -------------------------------------------------------
 #

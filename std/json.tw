@@ -44,6 +44,7 @@ mode systems
 # three were happy with.
 
 import "std/text" as text
+import "std/float" as flt
 
 # ---- the model -------------------------------------------------------------
 
@@ -613,13 +614,14 @@ fn write_string(b: Bytes, s: Str) {
 # document that goes through this module twice is not the document it started
 # as. See docs/needs.md NEEDS-89.
 #
-# Until that primitive exists this calls `f64_shortest`, which is the algorithm
-# `src/float.tw` implements for the source formatter and the one that has the
-# round-trip property. Two things it must do that a general float renderer need
-# not: never emit `NaN` or `Inf`, which are not JSON and are refused by the
-# constructor below, and never emit an integer-valued double as "1e+06", which
-# is legal JSON but reads as a mistake in a document of counts.
-fn number_str(x: F64) -> Str = f64_shortest(x)
+# This calls `flt.f64_shortest`, the round-trip rendering that used to live in
+# `src/float.tw` and now lives in `std/float.tw`, where both the compiler and
+# this library reach the one copy: that move is what NEEDS-89 asked for, and it
+# is why the round-trip property is here rather than reimplemented. `str(x)`
+# would not do, being `'f'` with six digits, so `str(1.0 / 3.0)` is `"0.333333"`
+# and does not parse back. `f64_shortest` never emits `NaN` or `Inf`, which are
+# not JSON and are refused by the constructor below.
+fn number_str(x: F64) -> Str = flt.f64_shortest(x)
 
 # A number that is known to be finite, refusing the two values JSON cannot
 # represent.

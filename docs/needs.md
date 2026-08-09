@@ -1880,7 +1880,24 @@ there would mean the source formatter and the checker cannot reach it.
 
 ## NEEDS-89: a round-trip float rendering the standard library can call
 
-**Status:** open, blocking for `std/json.tw`. `number_str`.
+**Status:** done, by the second option. `src/float.tw` moved to `std/float.tw`,
+the one location both halves reach: an embedded std module can only import
+`std/...`, and the compiler's `src/` files already may. It imports nothing from
+the compiler tree now, the byte-buffer calls are the runtime primitives directly
+as `std/text` uses them and `str_eq` replaces the one `bytes.equal`, so the
+dependency does not invert. `std/json` `number_str`, `src/fmt.tw`, `src/tensor.tw`
+and `src/buf.tw` all import `std/float`; the first two were calling `f64_shortest`
+bare and dangling, and now resolve. The f64 rendering is unchanged, so nothing
+that compares against the bootstrap moves.
+
+Not part of this: the *parse* side. `f64_of_str` and a `ParsedF64`-shaped
+`f64_parse` are still called bare in `src/eval.tw` (CSV), `src/parse.tw` (numeric
+literals) and `std/json.tw` `JNumber`, and one of those wants an `F64` where the
+function returns `Opt[F64]`. That is the reachability of `f64_of_str`, NEEDS-18,
+and it is now wireable to the same `std/float` in a follow-up rather than
+blocked. The original text follows.
+
+*(Original: open, blocking for `std/json.tw`. `number_str`.)*
 
 `f64_shortest(F64) -> Str`, the shortest decimal that parses back to the same
 double, reachable from `std/`.
