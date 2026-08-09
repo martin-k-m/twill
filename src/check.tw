@@ -470,6 +470,10 @@ struct Checker {
   # Set when a file imports without an alias, which makes any unknown name
   # unprovable. See check().
   blind_import: Bool,
+  # Set for a `mode systems` file. The systems dialect names types the bootstrap
+  # has no definition for (I64, Str, Bool, and qualified names like cp.Caps), so
+  # an unresolved type annotation is advisory there rather than an error.
+  systems: Bool,
 }
 
 fn report(c: Checker, line: I64, msg: Str) {
@@ -488,6 +492,7 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     types: dict_new(),
     units: dict_new(),
     blind_import: false,
+    systems: bytes.equal(prog.mode, "systems"),
   }
 
   # Register declared record types and units first so forward references
@@ -1464,7 +1469,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
     i = i + 1
   }
   match fd.ret_unit {
-    Some(u) => resolve_unit(c, u, fd.line),
+    Some(u) => if not ret_is_advisory_type(c, u) { resolve_unit(c, u, fd.line) },
     None => unit,
   }
 
@@ -1492,7 +1497,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
     None => unit,
   }
   match fd.ret_unit {
-    Some(u) => check_return_unit(c, fd.line, fd.name, u, body_type),
+    Some(u) => if not ret_is_advisory_type(c, u) { check_return_unit(c, fd.line, fd.name, u, body_type) },
     None => unit,
   }
 }
@@ -1505,6 +1510,16 @@ fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv) -> Type {
     _ => infer_expr(c, body, scope),
   }
 }
+
+# ret_is_advisory_type reports whether a single-name return annotation is a type
+# name rather than a unit, and only in a systems-mode file. A `-> Bool` or
+# `-> Str`, whose name no `unit` declaration introduced, is a type return the
+# dialect writes, advisory because the bootstrap has no such type. A `-> USD`
+# where USD is a declared unit stays a unit and is checked; a compound
+# annotation is always a unit; and in numeric mode nothing is advisory.
+fn ret_is_advisory_type(c: Checker, u: ast.UnitAnno) -> Bool =
+  c.systems and len(u.factors) == 1 and u.factors[0].exp == 1
+    and not dict_has(c.units, u.factors[0].name)
 
 fn check_return_unit(c: Checker, line: I64, name: Str, ret_unit: ast.UnitAnno, body_type: Type) {
   let want: Dict[Str, I64] = unit_from_anno(ret_unit)
@@ -1564,8 +1579,14 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
             check_arg_unit(c, ex.line, i, p.name, want, arg_types[i])
             env_define(scope, p.name, tensor_with_unit(arr_new(), want))
           } else {
-            report(c, ex.line, bytes.concat("unknown type ", bytes.concat(quoted(p.type_name),
-              bytes.concat(" on parameter ", quoted(p.name)))))
+            # In systems mode the name is a type the bootstrap has no definition
+            # for (I64, Str, cp.Caps); the annotation is advisory, so the
+            # parameter takes the argument's type and nothing is reported. In
+            # numeric mode an unknown type name is still an error.
+            if not c.systems {
+              report(c, ex.line, bytes.concat("unknown type ", bytes.concat(quoted(p.type_name),
+                bytes.concat(" on parameter ", quoted(p.name)))))
+            }
             env_define(scope, p.name, arg_types[i])
           }
         },
@@ -1603,7 +1624,7 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
       None => unit,
     }
     match fn_.ret_unit {
-      Some(u) => return tensor_with_unit(arr_new(), unit_from_anno(u)),
+      Some(u) => if not ret_is_advisory_type(c, u) { return tensor_with_unit(arr_new(), unit_from_anno(u)) },
       None => unit,
     }
     return TUnknown
@@ -1634,7 +1655,7 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
     None => unit,
   }
   match fn_.ret_unit {
-    Some(u) => {
+    Some(u) => if not ret_is_advisory_type(c, u) {
       check_return_unit(c, ex.line, "", u, body_type)
       return tensor_with_unit(arr_new(), unit_from_anno(u))
     },

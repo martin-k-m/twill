@@ -46,10 +46,14 @@ round-trips the mode line. This landed in the Go bootstrap
 (`src/parse.tw` `parse_program`, `ast.Program.mode`, `src/fmt.tw`), with tests
 in `internal/interp/mode_test.go`.
 
-**Remaining.** The mode is recorded but does not yet *gate* anything: numeric
-mode does not refuse systems constructs and systems mode does not enable them,
-because the bootstrap still implements one dialect. That gating, and the systems
-constructs themselves (NEEDS-2 onward), are the substance behind this line.
+**The mode now gates one thing (2026-08-09):** type-name resolution. In a
+systems-mode file an unresolved type annotation (`n: I64`, `-> Bool`,
+`c: cp.Caps`) is advisory rather than an "unknown type" error, since the
+bootstrap has no such type; numeric mode is unchanged, and the unit algebra is
+untouched in both. This is the first behaviour that actually depends on the mode
+line, and it is what lets the self-hosted sources pass `twill check`. The rest
+of the gating (refusing systems constructs in numeric mode, enabling them in
+systems mode) and the constructs themselves (NEEDS-2 onward) remain.
 
 *Progress toward the type grammar (2026-08-09):* module-qualified type names in
 signatures (`fn f(c: cp.Caps) -> cp.Caps`) now parse on both sides, the single

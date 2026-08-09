@@ -22,7 +22,8 @@ type Diagnostic struct {
 
 // Check analyses a program and returns any diagnostics found.
 func Check(prog *ast.Program) []Diagnostic {
-	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}, units: map[string]bool{}}
+	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}, units: map[string]bool{},
+		systems: prog.Mode == "systems"}
 	// Register declared record types and units first so forward references resolve.
 	for _, s := range prog.Body {
 		switch d := s.(type) {
@@ -94,6 +95,11 @@ type checker struct {
 	// Set when a file imports without an alias, which makes any unknown name
 	// unprovable. See Check.
 	blindImport bool
+	// Set for a `mode systems` file. The systems dialect names types the
+	// bootstrap has no definition for (I64, Str, Bool, and module-qualified
+	// names like cp.Caps), so an unresolved type annotation is advisory there
+	// rather than the error it is in numeric mode.
+	systems bool
 }
 
 func (c *checker) registerType(td *ast.TypeDecl) {
@@ -790,7 +796,7 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 		}
 		scope.define(p.Name, c.paramType(p))
 	}
-	if fn.RetUnit != nil {
+	if fn.RetUnit != nil && !c.retIsAdvisoryType(fn.RetUnit) {
 		c.resolveUnit(fn.RetUnit, fn.Line)
 	}
 	c.stack[fn] = true
@@ -809,9 +815,20 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 				fn.Name, dimsString(got), dimsString(expected))
 		}
 	}
-	if fn.RetUnit != nil {
+	if fn.RetUnit != nil && !c.retIsAdvisoryType(fn.RetUnit) {
 		c.checkReturnUnit(fn.Line, fn.Name, fn.RetUnit, bodyType)
 	}
+}
+
+// retIsAdvisoryType reports whether a single-name return annotation is a type
+// name rather than a unit. Only in a systems-mode file: a `-> Bool` or `-> Str`,
+// whose name no `unit` declaration introduced, is a type return the dialect
+// writes, and is advisory, since the bootstrap has no such type. A `-> USD`
+// where USD is a declared unit stays a unit and is checked, and in numeric mode
+// nothing is advisory, so an undeclared unit is still reported. A compound
+// annotation (`USD/year`) is always a unit.
+func (c *checker) retIsAdvisoryType(u *ast.UnitAnno) bool {
+	return c.systems && len(u.Factors) == 1 && u.Factors[0].Exp == 1 && !c.units[u.Factors[0].Name]
 }
 
 func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
@@ -838,7 +855,13 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 				c.checkArgUnit(ex.Line, i, p.Name, want, argTypes[i])
 				scope.define(p.Name, tTensor{dims: []int{}, unit: want})
 			} else {
-				c.report(ex.Line, "unknown type %q on parameter %q", p.TypeName, p.Name)
+				// In systems mode the name is a type the bootstrap has no
+				// definition for (I64, Str, cp.Caps); the annotation is advisory,
+				// so the parameter takes the argument's type and nothing is
+				// reported. In numeric mode an unknown type name is still an error.
+				if !c.systems {
+					c.report(ex.Line, "unknown type %q on parameter %q", p.TypeName, p.Name)
+				}
 				scope.define(p.Name, argTypes[i])
 			}
 		case p.Shape != nil:
@@ -857,7 +880,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		if fn.ret != nil {
 			return tTensor{dims: substitute(fn.ret.Dims, subst)}
 		}
-		if fn.retUnit != nil {
+		if fn.retUnit != nil && !c.retIsAdvisoryType(fn.retUnit) {
 			return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
 		}
 		return tUnknown{}
@@ -882,7 +905,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		}
 		return expected
 	}
-	if fn.retUnit != nil {
+	if fn.retUnit != nil && !c.retIsAdvisoryType(fn.retUnit) {
 		c.checkReturnUnit(ex.Line, "", fn.retUnit, bodyType)
 		return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
 	}
