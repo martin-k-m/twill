@@ -30,18 +30,40 @@ import "tensor.tw" as tensor
 
 # ---- diagnostics -----------------------------------------------------------
 
+# Severity uses the same codes as src/cli/diagnostic.tw, so a renderer can pass
+# it through without translating. Nearly everything here is an error: a shape
+# or unit the program cannot have. The one warning, dtype widening in
+# promote_and_warn, is different in kind: the program means what it says and
+# will run, it will just run wider than the narrow operand was chosen for.
+# main.tw does not yet read the severity when it decides whether to run.
+let SEV_ERROR: I64 = 0
+let SEV_WARNING: I64 = 1
+
 struct Diagnostic {
   msg: Str,
   line: I64,
+  severity: I64,
 }
 
 # ---- types -----------------------------------------------------------------
 
+# A dtype the checker cannot name. -1 is outside every tensor.DT_* code, and
+# everything downstream treats it the way an unknown dimension is treated:
+# promotion with an unknown side is unknown, and no diagnostic ever fires on
+# one. Unknown is the common case on purpose, because most code never writes a
+# dtype, and a checker that claimed f64 everywhere would be claiming things
+# the dtype work in eval.tw is still deciding.
+let DT_UNKNOWN: I64 = -1
+
+fn dtype_known(dt: I64) -> Bool = dt >= 0
+
 # dims: -1 means an unknown size; an empty list is a scalar.
 # unit is the quantity's physical unit; an empty map is dimensionless.
+# dtype is a tensor.DT_* code, or DT_UNKNOWN when the checker cannot name it.
 struct TensorType {
   dims: Arr[I64],
   unit: Dict[Str, I64],
+  dtype: I64,
 }
 
 # elems absent means "a list whose contents are unknown", which is different
@@ -85,12 +107,22 @@ enum Type {
 
 fn no_unit() -> Dict[Str, I64] = dict_new()
 
-fn scalar() -> Type = TTensor(TensorType { dims: arr_new(), unit: no_unit() })
+# scalar is a rank-0 tensor of unknown dtype. Deliberately unknown and not
+# f64: what a bare number literal lands as when it meets a narrow tensor is
+# exactly NEEDS-113's open second example (`i32_tensor / 2`), and claiming
+# f64 here would turn every `w * 0.01` on narrow weights into a warning
+# today and into a wrong one the day literals learn to adapt. Unknown says
+# nothing, which is the policy.
+fn scalar() -> Type = TTensor(TensorType { dims: arr_new(), unit: no_unit(), dtype: DT_UNKNOWN })
 
-fn tensor_of(dims: Arr[I64]) -> Type = TTensor(TensorType { dims: dims, unit: no_unit() })
+fn tensor_of(dims: Arr[I64]) -> Type =
+  TTensor(TensorType { dims: dims, unit: no_unit(), dtype: DT_UNKNOWN })
 
 fn tensor_with_unit(dims: Arr[I64], u: Dict[Str, I64]) -> Type =
-  TTensor(TensorType { dims: dims, unit: u })
+  TTensor(TensorType { dims: dims, unit: u, dtype: DT_UNKNOWN })
+
+fn tensor_with_dtype(dims: Arr[I64], dt: I64) -> Type =
+  TTensor(TensorType { dims: dims, unit: no_unit(), dtype: dt })
 
 fn as_tensor(t: Type) -> Opt[TensorType] {
   match t {
@@ -137,6 +169,93 @@ fn is_definite_non_tensor(t: Type) -> Bool {
     TFn(_) => true,
     TBuiltin(_) => true,
     _ => false,
+  }
+}
+
+# ---- dtypes ----------------------------------------------------------------
+#
+# The checker mirrors tensor.promote by calling it, never by restating it: a
+# second copy of the lattice is how the static answer and the runtime answer
+# drift apart. Everything here degrades to DT_UNKNOWN rather than guessing,
+# for the same reason a dimension degrades to -1.
+
+# set_dtype attaches a dtype to a tensor result and leaves anything else
+# alone, the same shape as with_unit.
+fn set_dtype(res: Type, dt: I64) -> Type {
+  match as_tensor(res) {
+    Some(t) => TTensor(TensorType { dims: t.dims, unit: t.unit, dtype: dt }),
+    None => res,
+  }
+}
+
+# promote_dtype is tensor.promote lifted over unknowns: an unknown side makes
+# an unknown answer, and nothing is reported.
+fn promote_dtype(a: I64, b: I64) -> I64 {
+  if not dtype_known(a) or not dtype_known(b) { return DT_UNKNOWN }
+  tensor.promote(a, b)
+}
+
+# promote_and_warn is promote_dtype plus the one warning this file emits: a
+# narrow float silently widened by a wider one. `bf16_weights + f64_bias` is
+# f64, which is a perfectly correct answer that undoes the reason the weights
+# were narrow, and the checker is the only place it can be seen before it
+# runs (NEEDS-113). It is a warning and not an error: the program means what
+# it says.
+#
+# Only a float widened by a wider float qualifies. An integer meeting a float
+# keeps the float unchanged, which is the lattice doing its job, and f16
+# meeting bf16 promotes past both to f32, where neither operand was the wider
+# one. Both stay silent.
+fn promote_and_warn(c: Checker, line: I64, a: I64, b: I64) -> I64 {
+  let dt: I64 = promote_dtype(a, b)
+  if not dtype_known(dt) { return dt }
+  if a == b { return dt }
+  if not tensor.is_float_dtype(a) or not tensor.is_float_dtype(b) { return dt }
+  if dt != a and dt != b { return dt }
+  let narrow: I64 = a
+  if dt == a { narrow = b }
+  warn(c, line, bytes.concat("dtype widening: ", bytes.concat(tensor.dtype_name(a),
+    bytes.concat(" and ", bytes.concat(tensor.dtype_name(b),
+    bytes.concat(" promote to ", bytes.concat(tensor.dtype_name(dt),
+    bytes.concat(", which undoes the reason the ", bytes.concat(tensor.dtype_name(narrow),
+    " operand is narrow")))))))))
+  dt
+}
+
+# float_result_dtype is the dtype of an operation that cannot return an
+# integer: exp, sqrt, mean and their kin. The runtime promotes an integer
+# input to f32 (tensor.unary_result_dtype). The checker instead declines to
+# know it: claiming f32 would be true, and it would also let the widening
+# warning fire on a program that never wrote a dtype, through a chain like
+# exp(argmax(x)) meeting an ordinary f64. Zero new diagnostics on dtype-free
+# programs is the harder promise, so an integer input degrades to unknown.
+fn float_result_dtype(dt: I64) -> I64 {
+  if not dtype_known(dt) { return DT_UNKNOWN }
+  if tensor.is_int_dtype(dt) { return DT_UNKNOWN }
+  dt
+}
+
+# The dtype named by an argument, or DT_UNKNOWN when the argument is not a
+# dtype name. It is the checker's copy of eval.tw's contextual rule and reads
+# a name as a dtype under exactly the same three conditions: the argument is a
+# bare identifier, tensor.dtype_of_name knows it, and the environment does
+# not. The last condition is what keeps `f32` an ordinary identifier
+# everywhere it is bound to a value, so `let f32 = x; zeros(f32)` is a shape
+# and not a dtype, matching how the program will actually run.
+fn dtype_token(env: CheckEnv, e: ast.Expr) -> I64 {
+  match e {
+    EIdent(id) => {
+      match env_get(env, id.name) {
+        Some(_) => DT_UNKNOWN,
+        None => {
+          match tensor.dtype_of_name(id.name) {
+            Some(dt) => dt,
+            None => DT_UNKNOWN,
+          }
+        },
+      }
+    },
+    _ => DT_UNKNOWN,
   }
 }
 
@@ -353,7 +472,11 @@ struct Checker {
 }
 
 fn report(c: Checker, line: I64, msg: Str) {
-  push(c.diags, Diagnostic { msg: msg, line: line })
+  push(c.diags, Diagnostic { msg: msg, line: line, severity: SEV_ERROR })
+}
+
+fn warn(c: Checker, line: I64, msg: Str) {
+  push(c.diags, Diagnostic { msg: msg, line: line, severity: SEV_WARNING })
 }
 
 # check analyses a program and returns any diagnostics found.
@@ -495,7 +618,7 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
                   bytes.concat(" declares unit ", bytes.concat(unit_string(want),
                   bytes.concat(" but the value has unit ", unit_string(t.unit))))))
               }
-              env_define(env, st.name, tensor_with_unit(t.dims, want))
+              env_define(env, st.name, set_dtype(tensor_with_unit(t.dims, want), t.dtype))
             },
             None => env_define(env, st.name, tensor_with_unit(arr_new(), want)),
           }
@@ -571,8 +694,9 @@ fn infer_block(c: Checker, b: ast.Block, env: CheckEnv) -> Type {
 fn elem_type(t: Type) -> Type {
   match t {
     TTensor(v) => {
-      if len(v.dims) == 1 { return scalar() }
-      if len(v.dims) > 1 { return tensor_of(tail(v.dims)) }
+      # A row of a tensor keeps its dtype; iterating does not re-round.
+      if len(v.dims) == 1 { return tensor_with_dtype(arr_new(), v.dtype) }
+      if len(v.dims) > 1 { return tensor_with_dtype(tail(v.dims), v.dtype) }
       TUnknown
     },
     TList(_) => TUnknown,
@@ -700,7 +824,13 @@ fn join(a: Type, b: Type) -> Type {
     Some(at) => {
       match as_tensor(b) {
         Some(bt) => {
-          if shape_match(at, bt) { return TTensor(at) }
+          if shape_match(at, bt) {
+            # The branches agree on shape and may still disagree on dtype,
+            # and then the checker cannot name one.
+            let dt: I64 = DT_UNKNOWN
+            if at.dtype == bt.dtype { dt = at.dtype }
+            return TTensor(TensorType { dims: at.dims, unit: at.unit, dtype: dt })
+          }
           TUnknown
         },
         None => TUnknown,
@@ -743,7 +873,9 @@ fn infer_tensor_lit(c: Checker, ex: ast.TensorLit) -> Type {
     report(c, ex.line, "ragged tensor literal: rows have inconsistent lengths")
     return TUnknown
   }
-  tensor_of(dims)
+  # A tensor literal is f64, the documented default (docs/dtypes.md): narrow
+  # dtypes are always asked for and never inferred.
+  tensor_with_dtype(dims, tensor.DT_F64)
 }
 
 # dims and ok are carried as mutable handles rather than returned, because this
@@ -823,8 +955,8 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
   # Past this point both operands have to be tensors. One that is not is not
   # definitely wrong either, since it may be a TUnknown, so the result is
   # unknown and nothing is reported.
-  let a: TensorType = TensorType { dims: arr_new(), unit: dict_new() }
-  let b: TensorType = TensorType { dims: arr_new(), unit: dict_new() }
+  let a: TensorType = TensorType { dims: arr_new(), unit: dict_new(), dtype: DT_UNKNOWN }
+  let b: TensorType = TensorType { dims: arr_new(), unit: dict_new(), dtype: DT_UNKNOWN }
   match lt {
     Some(v) => a = v,
     None => return TUnknown,
@@ -834,16 +966,22 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
     None => return TUnknown,
   }
 
+  # The dtype the runtime would produce, and the widening warning when a
+  # narrow float meets a wider one. Every remaining operator goes through
+  # tensor.promote at run time, `^` included; comparisons produced bool above
+  # and never reach this.
+  let dt: I64 = promote_and_warn(c, ex.line, a.dtype, b.dtype)
+
   if bytes.equal(op, "@") {
     let res: ShapeResult = matmul_result(a, b)
     if len(res.msg) > 0 {
       report(c, ex.line, res.msg)
       return TUnknown
     }
-    return with_unit(res.type, unit_mul(a.unit, b.unit))
+    return set_dtype(with_unit(res.type, unit_mul(a.unit, b.unit)), dt)
   }
   if bytes.equal(op, "^") {
-    return pow_unit(c, a, ex)
+    return set_dtype(pow_unit(c, a, ex), dt)
   }
   # + - * / %
   let res: ShapeResult = elementwise_result(a, b)
@@ -851,7 +989,7 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
     report(c, ex.line, res.msg)
     return TUnknown
   }
-  with_unit(res.type, arith_unit(c, op, a, b, ex.line))
+  set_dtype(with_unit(res.type, arith_unit(c, op, a, b, ex.line)), dt)
 }
 
 fn is_comparison(op: Str) -> Bool =
@@ -886,7 +1024,7 @@ fn arith_unit(c: Checker, op: Str, a: TensorType, b: TensorType, line: I64) -> D
 fn pow_unit(c: Checker, lt: TensorType, ex: ast.Binary) -> Type {
   if len(lt.unit) == 0 { return TTensor(lt) }
   match const_int(ex.right) {
-    Some(k) => TTensor(TensorType { dims: lt.dims, unit: unit_pow(lt.unit, k) }),
+    Some(k) => TTensor(TensorType { dims: lt.dims, unit: unit_pow(lt.unit, k), dtype: lt.dtype }),
     None => {
       report(c, ex.line, bytes.concat("a quantity with unit ", bytes.concat(unit_string(lt.unit),
         " can only be raised to a constant integer power")))
@@ -904,12 +1042,13 @@ fn infer_index(c: Checker, ex: ast.Index, env: CheckEnv) -> Type {
         report(c, ex.line, "cannot index a scalar")
         return TUnknown
       }
-      # Indexing removes the leading axis. A vector indexes to a scalar, and
-      # the unit rides along because x[0] of a price list is a price.
+      # Indexing removes the leading axis. The unit and the dtype ride along,
+      # because x[0] of a price list is a price and x[0] of a bf16 tensor is
+      # a bf16 value.
       if len(v.dims) == 1 {
-        return tensor_with_unit(arr_new(), v.unit)
+        return set_dtype(tensor_with_unit(arr_new(), v.unit), v.dtype)
       }
-      tensor_with_unit(tail(v.dims), v.unit)
+      set_dtype(tensor_with_unit(tail(v.dims), v.unit), v.dtype)
     },
     # A list is heterogeneous, so an element's type is not knowable from the
     # list's.
@@ -973,7 +1112,7 @@ fn infer_slice(c: Checker, ex: ast.Slice, env: CheckEnv) -> Type {
         push(dims, v.dims[i])
         i = i + 1
       }
-      tensor_with_unit(dims, v.unit)
+      set_dtype(tensor_with_unit(dims, v.unit), v.dtype)
     },
     TList(_) => TList(ListType { elems: None }),
     _ => TUnknown,
@@ -1217,16 +1356,61 @@ fn list_dims(t: Type) -> Dims {
 
 # ---- calls -----------------------------------------------------------------
 
+# `x.to(f32)` casts x, lowering to tensor.cast (docs/dtypes.md). NEEDS-110
+# adds the surface syntax; here it is only a call whose callee is field access
+# named `to` with exactly one dtype-name argument, which is what it parses to
+# today. The dims and the unit ride through unchanged, because a cast changes
+# the values' format and nothing about what they mean. A target the checker
+# cannot see as a tensor makes the whole thing unknown and says nothing: `to`
+# may be a record field, and the runtime is the one that gets to reject a
+# cast of the uncastable.
+fn infer_cast(c: Checker, ex: ast.Call, env: CheckEnv) -> Opt[Type] {
+  match ex.callee {
+    EField(fld) => {
+      if not bytes.equal(fld.name, "to") { return None }
+      if len(ex.args) != 1 { return None }
+      let dt: I64 = dtype_token(env, ex.args[0])
+      if not dtype_known(dt) { return None }
+      let target: Type = infer_expr(c, fld.target, env)
+      match as_tensor(target) {
+        Some(t) => Some(TTensor(TensorType { dims: t.dims, unit: t.unit, dtype: dt })),
+        None => Some(TUnknown),
+      }
+    },
+    _ => None,
+  }
+}
+
 fn infer_call(c: Checker, ex: ast.Call, env: CheckEnv) -> Type {
+  match infer_cast(c, ex, env) {
+    Some(t) => return t,
+    None => unit,
+  }
   let callee: Type = infer_expr(c, ex.callee, env)
+  # A trailing dtype name on a constructor, `bf16` in `zeros([784, 128],
+  # bf16)`, is an argument in the source and not a value in the program. It is
+  # not meant to resolve, so inferring it would report a typo that is not one.
+  let ctor_dt: I64 = DT_UNKNOWN
+  match callee {
+    TBuiltin(b) => {
+      if in_set(b.name, "zeros ones fill randn rand eye scalar tensor") and len(ex.args) > 0 {
+        ctor_dt = dtype_token(env, ex.args[len(ex.args) - 1])
+      }
+    },
+    _ => unit,
+  }
   let arg_types: Arr[Type] = arr_new()
   let i: I64 = 0
   while i < len(ex.args) {
-    push(arg_types, infer_expr(c, ex.args[i], env))
+    if dtype_known(ctor_dt) and i == len(ex.args) - 1 {
+      push(arg_types, TUnknown)
+    } else {
+      push(arg_types, infer_expr(c, ex.args[i], env))
+    }
     i = i + 1
   }
   match callee {
-    TBuiltin(fn_) => infer_builtin_call(c, fn_.name, ex, arg_types),
+    TBuiltin(fn_) => infer_builtin_call(c, fn_.name, ex, arg_types, ctor_dt),
     TFn(fn_) => infer_user_call(c, fn_, ex, arg_types),
     TUnknown => TUnknown,
     # A number is not callable either, but `f(x)` where f is a tensor is a
@@ -1289,7 +1473,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
 
   match fd.ret {
     Some(anno) => {
-      let expected: TensorType = TensorType { dims: ast.concrete_dims(anno), unit: dict_new() }
+      let expected: TensorType = TensorType { dims: ast.concrete_dims(anno), unit: dict_new(), dtype: DT_UNKNOWN }
       match as_tensor(body_type) {
         Some(got) => {
           # Both sides must be fully known before this is a certain mismatch. A
@@ -1431,17 +1615,17 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
   match fn_.ret {
     Some(anno) => {
       let expected_dims: Arr[I64] = substitute(anno.dims, subst)
-      let expected: TensorType = TensorType { dims: expected_dims, unit: dict_new() }
+      let expected: TensorType = TensorType { dims: expected_dims, unit: dict_new(), dtype: DT_UNKNOWN }
       match as_tensor(body_type) {
         Some(got) => {
           if fully_known(expected) and fully_known(got) and not shape_match(expected, got) {
             report(c, ex.line, bytes.concat("function returns ", bytes.concat(dims_string(got),
               bytes.concat(" but its signature declares ", dims_string(expected)))))
           }
-          # Carry the body's unit through a shape return: a signature that
-          # declares a shape says nothing about the unit, so erasing it here
-          # would lose information the caller can use.
-          return tensor_with_unit(expected_dims, got.unit)
+          # Carry the body's unit and dtype through a shape return: a
+          # signature that declares a shape says nothing about either, so
+          # erasing them here would lose information the caller can use.
+          return set_dtype(tensor_with_unit(expected_dims, got.unit), got.dtype)
         },
         None => return TTensor(expected),
       }
@@ -1638,11 +1822,25 @@ fn arg_tensor(arg_types: Arr[Type], i: I64) -> Opt[TensorType] {
   as_tensor(arg_types[i])
 }
 
-fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> Type {
-  # Shape and unit preserved.
-  if in_set(name, "relu abs softmax clip") {
+# dt is the dtype named by a trailing dtype argument on a constructor call,
+# `bf16` in `zeros([784, 128], bf16)`, or DT_UNKNOWN when there was none.
+# infer_call read it before inferring the arguments, so when it is known the
+# last entry of arg_types is a placeholder and the last entry of ex.args is
+# not part of the shape.
+fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type], dt: I64) -> Type {
+  # Shape and unit preserved. So is the dtype: relu and clip preserve
+  # integrality and keep it (tensor.unary_result_dtype).
+  if in_set(name, "relu clip") {
     match arg_tensor(arg_types, 0) {
       Some(t) => return TTensor(t),
+      None => return TUnknown,
+    }
+  }
+  # abs and softmax also preserve shape and unit, but not an integer dtype;
+  # see float_result_dtype for why that is unknown here rather than f32.
+  if in_set(name, "abs softmax") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => return set_dtype(TTensor(t), float_result_dtype(t.dtype)),
       None => return TUnknown,
     }
   }
@@ -1655,7 +1853,7 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
           report(c, ex.line, bytes.concat(name, bytes.concat(
             " expects a dimensionless argument but got unit ", unit_string(t.unit))))
         }
-        return tensor_of(t.dims)
+        return set_dtype(tensor_of(t.dims), float_result_dtype(t.dtype))
       },
       None => return TUnknown,
     }
@@ -1668,23 +1866,23 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
           report(c, ex.line, bytes.concat("sqrt of unit ", bytes.concat(unit_string(t.unit),
             " is not a whole unit")))
         }
-        return tensor_with_unit(t.dims, r.unit)
+        return set_dtype(tensor_with_unit(t.dims, r.unit), float_result_dtype(t.dtype))
       },
       None => return TUnknown,
     }
   }
   if bytes.equal(name, "square") {
     match arg_tensor(arg_types, 0) {
-      Some(t) => return tensor_with_unit(t.dims, unit_pow(t.unit, 2)),
+      Some(t) => return set_dtype(tensor_with_unit(t.dims, unit_pow(t.unit, 2)), t.dtype),
       None => return TUnknown,
     }
   }
   if bytes.equal(name, "int") { return tensor_of(arr_new()) }
   if in_set(name, "item len") { return scalar() }
-  if in_set(name, "sum mean max min prod median") { return reduce_result(c, ex, arg_types) }
-  if in_set(name, "argmax argmin logsumexp") { return axis_reduce_result(c, ex, arg_types) }
+  if in_set(name, "sum mean max min prod median") { return reduce_result(c, name, ex, arg_types) }
+  if in_set(name, "argmax argmin logsumexp") { return axis_reduce_result(c, name, ex, arg_types) }
   if in_set(name, "maximum minimum greater less greater_equal less_equal equal") {
-    return broadcast_two(c, ex, arg_types)
+    return broadcast_two(c, name, ex, arg_types)
   }
   if bytes.equal(name, "where") { return broadcast_where(c, ex, arg_types) }
   if in_set(name, "reshape broadcast_to") { return reshape_result(c, name, ex, arg_types) }
@@ -1697,7 +1895,12 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
     return TList(ListType { elems: None })
   }
   if in_set(name, "write_frame print save") { return TUnit }
-  if bytes.equal(name, "scalar") { return scalar() }
+  if bytes.equal(name, "scalar") {
+    # scalar(x) really is f64 (tensor.tw), unlike a bare literal, whose
+    # eventual dtype is still an open question; see the scalar() helper.
+    if dtype_known(dt) { return tensor_with_dtype(arr_new(), dt) }
+    return tensor_with_dtype(arr_new(), tensor.DT_F64)
+  }
   if bytes.equal(name, "pow") { return pow_result(c, ex, arg_types) }
   if in_set(name, "matmul dot") {
     if len(arg_types) == 2 {
@@ -1710,7 +1913,8 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
                 report(c, ex.line, res.msg)
                 return TUnknown
               }
-              return with_unit(res.type, unit_mul(a.unit, b.unit))
+              return set_dtype(with_unit(res.type, unit_mul(a.unit, b.unit)),
+                promote_and_warn(c, ex.line, a.dtype, b.dtype))
             },
             None => return TUnknown,
           }
@@ -1721,26 +1925,34 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
     return TUnknown
   }
   if bytes.equal(name, "transpose") { return transpose_result(ex, arg_types) }
+  # A constructor without a dtype argument builds f64, the documented default
+  # (docs/dtypes.md). With one, it builds what was named.
+  let ctor_dt: I64 = tensor.DT_F64
+  let ctor_args: Arr[ast.Expr] = ex.args
+  if dtype_known(dt) {
+    ctor_dt = dt
+    ctor_args = drop_last_arg(ex.args)
+  }
   if in_set(name, "zeros ones randn rand") {
-    let s: Dims = const_shape(ex.args, 0)
-    if s.ok { return tensor_of(s.dims) }
+    let s: Dims = const_shape(ctor_args, 0)
+    if s.ok { return tensor_with_dtype(s.dims, ctor_dt) }
     return TUnknown
   }
   if bytes.equal(name, "fill") {
-    if len(ex.args) >= 1 {
-      let s: Dims = const_shape(ex.args, 1)
-      if s.ok { return tensor_of(s.dims) }
+    if len(ctor_args) >= 1 {
+      let s: Dims = const_shape(ctor_args, 1)
+      if s.ok { return tensor_with_dtype(s.dims, ctor_dt) }
     }
     return TUnknown
   }
   if bytes.equal(name, "eye") {
-    if len(ex.args) == 1 {
-      match const_int(ex.args[0]) {
+    if len(ctor_args) == 1 {
+      match const_int(ctor_args[0]) {
         Some(n) => {
           let d: Arr[I64] = arr_new()
           push(d, n)
           push(d, n)
-          return tensor_of(d)
+          return tensor_with_dtype(d, ctor_dt)
         },
         None => return TUnknown,
       }
@@ -1750,26 +1962,28 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
   # The loaded value's type depends on the file, so leave it unknown.
   if bytes.equal(name, "load") { return TUnknown }
   if bytes.equal(name, "str") { return TStr }
-  if bytes.equal(name, "tensor") { return tensor_builtin_result(arg_types) }
+  if bytes.equal(name, "tensor") { return tensor_builtin_result(arg_types, dt) }
   # These return values whose shape depends on runtime data; treat the result as
   # unknown so downstream code is not falsely flagged.
   if in_set(name, "grad grads value_and_grad jacobian hessian gbm_fit") { return TUnknown }
   # A cumulative scan, a reversal, or elementwise rounding all preserve the
-  # input's shape but not necessarily its unit, so the unit is dropped.
+  # input's shape and dtype but not necessarily its unit, so the unit is
+  # dropped.
   if in_set(name, "cumsum cumprod cummax cummin floor ceil round flip roll") {
     match arg_tensor(arg_types, 0) {
-      Some(t) => return tensor_of(t.dims),
+      Some(t) => return set_dtype(tensor_of(t.dims), t.dtype),
       None => return TUnknown,
     }
   }
-  # Selecting rows keeps the trailing dims but the row count is dynamic.
+  # Selecting rows keeps the trailing dims and the dtype, but the row count is
+  # dynamic.
   if bytes.equal(name, "gather") {
     match arg_tensor(arg_types, 0) {
       Some(t) => {
         if len(t.dims) >= 1 {
           let dims: Arr[I64] = copy_dims(t.dims)
           dims[0] = -1
-          return tensor_of(dims)
+          return set_dtype(tensor_of(dims), t.dtype)
         }
         return TUnknown
       },
@@ -1778,20 +1992,23 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type])
   }
   if bytes.equal(name, "conv2d") { return conv_result(arg_types) }
   # [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
+  # A pool selects, so the dtype is the input's, unrounded.
   if bytes.equal(name, "maxpool2d") {
     let dims: Arr[I64] = arr_new()
     push(dims, -1)
     push(dims, -1)
     push(dims, -1)
+    let pdt: I64 = DT_UNKNOWN
     match arg_tensor(arg_types, 0) {
       Some(t) => {
+        pdt = t.dtype
         if len(t.dims) == 3 {
           dims[0] = t.dims[0]
         }
       },
       None => unit,
     }
-    return tensor_of(dims)
+    return set_dtype(tensor_of(dims), pdt)
   }
   # One score per row of the feature matrix, which is the second argument.
   if bytes.equal(name, "gbm_predict") {
@@ -1819,6 +2036,18 @@ fn in_set(name: Str, words: Str) -> Bool {
   false
 }
 
+# The argument list without its trailing dtype name, for reading a
+# constructor's shape once the dtype has been read off the end.
+fn drop_last_arg(args: Arr[ast.Expr]) -> Arr[ast.Expr] {
+  let out: Arr[ast.Expr] = arr_new()
+  let i: I64 = 0
+  while i < len(args) - 1 {
+    push(out, args[i])
+    i = i + 1
+  }
+  out
+}
+
 # A reshape has to preserve the element count, and when both sides are known
 # that is arithmetic the checker can do. This is the second most common shape
 # mistake after a bad matmul and it used to reach the runtime untouched.
@@ -1844,22 +2073,36 @@ fn reshape_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> 
       None => unit,
     }
   }
-  tensor_of(s.dims)
+  # A reshape or a broadcast rearranges elements without re-rounding them, so
+  # the dtype rides through.
+  let rdt: I64 = DT_UNKNOWN
+  match arg_tensor(arg_types, 0) {
+    Some(in_) => rdt = in_.dtype,
+    None => unit,
+  }
+  set_dtype(tensor_of(s.dims), rdt)
 }
 
 fn pow_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   match arg_tensor(arg_types, 0) {
     Some(t) => {
-      if len(t.unit) == 0 { return TTensor(t) }
+      # pow is a binary operation at run time, so it promotes like one.
+      let edt: I64 = DT_UNKNOWN
+      match arg_tensor(arg_types, 1) {
+        Some(e) => edt = e.dtype,
+        None => unit,
+      }
+      let dt: I64 = promote_and_warn(c, ex.line, t.dtype, edt)
+      if len(t.unit) == 0 { return set_dtype(TTensor(t), dt) }
       if len(ex.args) >= 2 {
         match const_int(ex.args[1]) {
-          Some(k) => return tensor_with_unit(t.dims, unit_pow(t.unit, k)),
+          Some(k) => return set_dtype(tensor_with_unit(t.dims, unit_pow(t.unit, k)), dt),
           None => unit,
         }
       }
       report(c, ex.line, bytes.concat("pow of a quantity with unit ",
         bytes.concat(unit_string(t.unit), " needs a constant integer exponent")))
-      tensor_of(t.dims)
+      set_dtype(tensor_of(t.dims), dt)
     },
     None => TUnknown,
   }
@@ -1870,16 +2113,27 @@ fn pow_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
 # make is `tensor([[1, 2], [3, 4]]) @ tensor([[1, 2, 3]])`, and it used to pass
 # because this returned unknown for every argument. Anything that is not a
 # literal still does.
-fn tensor_builtin_result(arg_types: Arr[Type]) -> Type {
-  if len(arg_types) != 1 { return TUnknown }
+fn tensor_builtin_result(arg_types: Arr[Type], dt: I64) -> Type {
+  # When a trailing dtype argument was read, its placeholder entry is not part
+  # of the value being built.
+  let n: I64 = len(arg_types)
+  if dtype_known(dt) { n = n - 1 }
+  if n != 1 { return TUnknown }
   # A tensor literal was already given a shape on the way in, and `tensor(...)`
   # around it was throwing that away.
   match as_tensor(arg_types[0]) {
-    Some(t) => return TTensor(t),
+    Some(t) => {
+      if dtype_known(dt) { return set_dtype(TTensor(t), dt) }
+      return TTensor(t)
+    },
     None => unit,
   }
   let d: Dims = list_dims(arg_types[0])
-  if d.ok { return tensor_of(d.dims) }
+  if d.ok {
+    let cdt: I64 = tensor.DT_F64
+    if dtype_known(dt) { cdt = dt }
+    return tensor_with_dtype(d.dims, cdt)
+  }
   TUnknown
 }
 
@@ -1893,7 +2147,7 @@ fn transpose_result(ex: ast.Call, arg_types: Arr[Type]) -> Type {
           push(rev, t.dims[len(t.dims) - 1 - i])
           i = i + 1
         }
-        return tensor_of(rev)
+        return set_dtype(tensor_of(rev), t.dtype)
       }
       let axes: Arr[I64] = arr_new()
       let i: I64 = 1
@@ -1916,7 +2170,7 @@ fn transpose_result(ex: ast.Call, arg_types: Arr[Type]) -> Type {
         push(perm, t.dims[ax])
         k = k + 1
       }
-      tensor_of(perm)
+      set_dtype(tensor_of(perm), t.dtype)
     },
     None => TUnknown,
   }
@@ -1943,14 +2197,22 @@ fn plural(n: I64, one: Str, many: Str) -> Str {
 # reduce_result handles sum/mean/max/min/prod/median: no axis reduces to a
 # scalar; a constant axis over a known shape removes that dimension. Reductions
 # preserve the input's unit, because the mean of a list of prices is a price.
-fn reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+fn reduce_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   let u: Dict[Str, I64] = dict_new()
+  let rdt: I64 = DT_UNKNOWN
   match arg_tensor(arg_types, 0) {
-    Some(t) => u = t.unit,
+    Some(t) => {
+      u = t.unit
+      rdt = t.dtype
+    },
     None => unit,
   }
+  # A sum, a max or a prod stores the input's dtype. A mean or a median need
+  # not be an integer (tensor.reduce_result_dtype), and float_result_dtype
+  # explains why an integer input becomes unknown here rather than f32.
+  if in_set(name, "mean median") { rdt = float_result_dtype(rdt) }
   if len(arg_types) == 1 {
-    return tensor_with_unit(arr_new(), u)
+    return set_dtype(tensor_with_unit(arr_new(), u), rdt)
   }
   if len(arg_types) == 2 {
     match arg_tensor(arg_types, 0) {
@@ -1963,7 +2225,7 @@ fn reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
               # and the one people write when they mean "the last axis".
               if ax < 0 { ax = ax + len(t.dims) }
               if ax >= 0 and ax < len(t.dims) {
-                return tensor_with_unit(remove_dim(t.dims, ax), u)
+                return set_dtype(tensor_with_unit(remove_dim(t.dims, ax), u), rdt)
               }
               report_axis(c, ex, t)
             },
@@ -1980,7 +2242,7 @@ fn reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
 # axis_reduce_result handles argmax/argmin/logsumexp, which always reduce one
 # axis and default to the last. The result is dimensionless: an index has no
 # unit, and logsumexp's argument had to be dimensionless anyway.
-fn axis_reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+fn axis_reduce_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   match arg_tensor(arg_types, 0) {
     Some(t) => {
       if len(t.dims) == 0 { return TUnknown }
@@ -1996,7 +2258,11 @@ fn axis_reduce_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
         report_axis(c, ex, t)
         return TUnknown
       }
-      tensor_of(remove_dim(t.dims, axis))
+      # An index is i32 whatever it was taken over (tensor.tw); logsumexp
+      # keeps a float dtype and declines an integer one.
+      let rdt: I64 = float_result_dtype(t.dtype)
+      if in_set(name, "argmax argmin") { rdt = tensor.DT_I32 }
+      set_dtype(tensor_of(remove_dim(t.dims, axis)), rdt)
     },
     None => TUnknown,
   }
@@ -2014,7 +2280,7 @@ fn remove_dim(dims: Arr[I64], axis: I64) -> Arr[I64] {
   out
 }
 
-fn broadcast_two(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+fn broadcast_two(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   if len(arg_types) != 2 { return TUnknown }
   match arg_tensor(arg_types, 0) {
     Some(a) => {
@@ -2025,7 +2291,12 @@ fn broadcast_two(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
             report(c, ex.line, res.msg)
             return TUnknown
           }
-          res.type
+          # A comparison produces bool whatever it was handed; maximum and
+          # minimum promote like any other binary operation.
+          if in_set(name, "greater less greater_equal less_equal equal") {
+            return set_dtype(res.type, tensor.DT_BOOL)
+          }
+          set_dtype(res.type, promote_and_warn(c, ex.line, a.dtype, b.dtype))
         },
         None => TUnknown,
       }
@@ -2047,7 +2318,10 @@ fn broadcast_where(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
             report(c, ex.line, res.msg)
             return TUnknown
           }
-          res.type
+          # The condition's dtype does not enter the promotion; it is read for
+          # its truthiness (tensor.where3). No warning here: `where` is a
+          # selector, not the arithmetic the widening warning is about.
+          set_dtype(res.type, promote_dtype(a.dtype, b.dtype))
         },
         None => TUnknown,
       }
