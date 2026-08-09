@@ -912,6 +912,25 @@ func medianOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 	}
 
 	res := &Tensor{Data: out, Shape: outShape}
+	// Forward-mode. Median is a selection, locally linear, so a tangent rides
+	// with the value it selects and there is no second-order term of its own: the
+	// output tangent is the input's at the middle element, or the average of the
+	// two for an even length, and the same for the second tangent. It is the
+	// forward twin of the backward scatter below.
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for idx := 0; idx < outN; idx++ {
+				if lo[idx] == hi[idx] {
+					res.jet.d[idx] = t.jet.d[lo[idx]]
+					res.jet.dd[idx] = t.jet.dd[lo[idx]]
+				} else {
+					res.jet.d[idx] = (t.jet.d[lo[idx]] + t.jet.d[hi[idx]]) / 2
+					res.jet.dd[idx] = (t.jet.dd[lo[idx]] + t.jet.dd[hi[idx]]) / 2
+				}
+			}
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
