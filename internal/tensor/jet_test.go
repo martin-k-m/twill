@@ -53,6 +53,26 @@ func TestHessianFDVariance(t *testing.T) {
 	})
 }
 
+// Sort is a permutation, so its jet must carry each tangent with its value.
+// sum(square(sort(x))) has the same Hessian as sum(square(x)), 2I, but only if
+// the sort jvp permutes the tangents rather than dropping or misplacing them.
+// Distinct inputs keep the finite-difference perturbation away from a tie.
+func TestHessianFDSort(t *testing.T) {
+	checkHessianFD(t, "sort", []float64{3, 1, 4, 1.5, 2}, []int{5}, func(x *Tensor) *Tensor {
+		s, _ := SortAxis(x, 0, false)
+		return Sum(Square(s))
+	})
+}
+
+// TopK keeps the k largest, so the kept elements carry curvature 2 and the
+// dropped ones zero. The jet must carry tangents only through what survives.
+func TestHessianFDTopK(t *testing.T) {
+	checkHessianFD(t, "topk", []float64{3, 1, 4, 1.5, 2}, []int{5}, func(x *Tensor) *Tensor {
+		s, _ := TopKAxis(x, 3, 0, true)
+		return Sum(Square(s))
+	})
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)

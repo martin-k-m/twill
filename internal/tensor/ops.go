@@ -1085,6 +1085,18 @@ func SortAxis(t *Tensor, axis int, descending bool) (*Tensor, error) {
 	}
 
 	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	// Forward-mode: sort is a permutation, so a tangent rides with its value.
+	// The output at dst took its value from origin[dst], so its tangent is the
+	// input's there. This is the forward twin of the backward scatter below.
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for dst, src := range origin {
+				res.jet.d[dst] = t.jet.d[src]
+				res.jet.dd[dst] = t.jet.dd[src]
+			}
+		}
+	}
 	return track1(res, t, func() {
 		gt := t.ensureGrad()
 		for dst, src := range origin {
@@ -1182,6 +1194,18 @@ func TopKAxis(t *Tensor, k, axis int, largest bool) (*Tensor, error) {
 	}
 
 	res := &Tensor{Data: out, Shape: shape}
+	// Forward-mode: the k that survive carry their tangents through; the ones
+	// dropped contribute nothing, exactly as in the backward pass. origin[dst]
+	// is the input each kept output came from, so its tangent is the input's.
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for dst, src := range origin {
+				res.jet.d[dst] = t.jet.d[src]
+				res.jet.dd[dst] = t.jet.dd[src]
+			}
+		}
+	}
 	return track1(res, t, func() {
 		gt := t.ensureGrad()
 		for dst, src := range origin {

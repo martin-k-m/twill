@@ -4867,6 +4867,13 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
   # idea for many inputs. internal/tensor/ops.go's Concat carries this jvp, so
   # adding it here matches the bootstrap rather than diverging from it (NEEDS-83).
   if is_same_op(e.op, OpConcat) { return jet_concat(tp, n, e, js) }
+  # Sort and topk are permutations chosen by value: the output at o took its
+  # value from input origin[o], so its tangent is the input's tangent there.
+  # That is the forward twin of vjp_selection's scatter, and the bootstrap grew
+  # the same jvp in the same change, so the two agree (NEEDS-83).
+  if is_same_op(e.op, OpSort) or is_same_op(e.op, OpTopK) {
+    return jet_selection(tp, n, e, js)
+  }
   # Reshape, broadcast, transpose, flip, gather, index, slice and split move
   # numbers without changing them, so their jet is the same rearrangement
   # applied to the tangents. That is one rule, and it is expressed by replaying
@@ -4943,6 +4950,33 @@ fn jet_concat(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
     js.d[n][i] = buf.get(out_d.data, out_d.dtype, i)
     js.dd[n][i] = buf.get(out_dd.data, out_dd.dtype, i)
     i = i + 1
+  }
+  Ok(0)
+}
+
+# The 2-jet of sort and topk. It reads the same selection vjp_selection reads,
+# sort_origins, which for output o gives the input index the value came from, and
+# gathers the tangents by it: the forward pass carries a tangent wherever it
+# carries a value. It is the mirror of vjp_selection: that one scatters the
+# output cotangent back to origin[o], this one gathers the input tangent forward
+# from origin[o]. topk's origin covers only the kept outputs, so a dropped input
+# contributes no tangent, which is correct and matches the backward pass.
+fn jet_selection(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let axis: I64 = e.iattr[0]
+  let keep: I64 = x.shape[axis]
+  let direction: Bool = int_to_bool(e.iattr[1])
+  if is_same_op(e.op, OpTopK) {
+    keep = e.iattr[1]
+    direction = int_to_bool(e.iattr[2])
+  }
+  let origin: Arr[I64] = sort_origins(x, axis, direction, keep)
+  let o: I64 = 0
+  while o < len(origin) {
+    js.d[n][o] = js.d[a][origin[o]]
+    js.dd[n][o] = js.dd[a][origin[o]]
+    o = o + 1
   }
   Ok(0)
 }
