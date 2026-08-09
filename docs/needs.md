@@ -2416,8 +2416,11 @@ failure, not a curiosity.
 
 ## NEEDS-110: dtype names in the surface language
 
-**Status:** blocking for anything that wants a narrow tensor. `src/tensor.tw`
-has the whole dtype machinery and no way to reach it from a program.
+**Status:** done in twill (commit `65ebdb0`). `src/eval.tw` reads the seven
+names contextually, constructors take a trailing dtype, and `.to` casts. No
+new bootstrap primitive: it is all reachable from what `src/tensor.tw` already
+exposes. The Go bootstrap does not implement it, and gains nothing until it too
+carries a dtype, so this is one of the divergences the triple build will show.
 
 `docs/dtypes.md` is the design. What is missing is the syntax. Three things,
 none of them large on its own:
@@ -2443,8 +2446,13 @@ shape.
 
 ## NEEDS-111: a packed, byte-addressable buffer
 
-**Status:** open, and the entry that decides whether the dtype work saves a
-single byte. `src/tensor.tw` `Tensor.data`.
+**Status:** twill side done (commit `edb4637`); one native dependency remains.
+`src/buf.tw` packs the layout and `Tensor.data` is now a `Buf`, so the dtype
+work saves the bytes docs/dtypes.md promised: 2x for f32 and i32, 4x for bf16
+and f16, 8x for i8 and bool. What the runtime still owes is the four byte
+primitives `buf.tw` names and nothing else implements yet: `buf_new`,
+`buf_len`, `buf_get8`, `buf_set8`. Everything above a byte is twill. Until
+those land, the packed buffer is written but cannot run.
 
 The dtype semantics landed without it: a bf16 tensor holds bf16 values, rounded
 correctly, and `martin-k-m/shuttle` can now measure the error that quantisation
@@ -2482,7 +2490,10 @@ packed host buffer is the same bytes the device wants.
 
 ## NEEDS-112: loss scaling for f16
 
-**Status:** open. `docs/dtypes.md`, "Loss scaling, and the f16 story".
+**Status:** done in twill (commit `edb4637`). `src/tensor.tw` `backward_scaled`
+and `grads_finite`, written over the existing `backward`, no new primitive. See
+`docs/dtypes.md`, "Loss scaling, and the f16 story". The skip-not-clip loop
+that consumes them is `src/precision.tw` in `martin-k-m/loom`.
 
 f16 has five exponent bits, so its smallest normal is 2^-14 and real gradients
 go under it. bf16 does not have the problem and needs nothing here. f16 is
@@ -2513,8 +2524,10 @@ underflow in a way float64 would notice.
 
 ## NEEDS-113: dtype in the static checker
 
-**Status:** open, and a diagnostic gap rather than a convenience.
-`src/check.tw` tracks shapes and not dtypes.
+**Status:** done in twill (commit `79bc6ac`). `src/check.tw` carries a dtype on
+its tensor type, applies `tensor.promote` at binary nodes, and emits the one
+widening warning. Unknown is the default, so a dtype-free program draws no new
+diagnostic. No new primitive.
 
 The checker already approximates `broadcast_shape` statically, so a shape
 mismatch is a compile error. It has no equivalent for `promote`, so nothing is
@@ -2539,8 +2552,17 @@ promote.
 
 ## NEEDS-114: dtype-aware printing and parsing
 
-**Status:** open, and it makes the dtype work invisible from a program until it
-lands. `src/float.tw` `format_number` and `f64_shortest`, `src/eval.tw` `print`.
+**Status:** the numerics are done (commits `29c8f86`, `edb4637`); the print
+path in `src/eval.tw` is not yet wired. `src/float.tw` now renders and parses at
+a `FloatFmt`, and `src/tensor.tw` `dt_shortest`/`dt_of_str` dispatch it on the
+dtype. What is left is not mechanical, because the thing it plugs into is itself a
+hole: `src/eval.tw` calls `format_value` in four places and no version of it is
+written yet (that is NEEDS-57). So the honest sequence is NEEDS-57 first, and
+when `format_value` renders a tensor it routes each element through
+`tensor.dt_shortest(t.dtype, x)` rather than `format_number`, and narrow
+literals parse through `tensor.dt_of_str(dt, s)` rather than `f64_of_str`. The
+dispatch both of those need is in place; the renderer that calls it is not. No
+new primitive.
 
 `print(x)` renders the F64 in the buffer. For a bf16 tensor that F64 is the
 exact widening of a bf16 value, so it prints seventeen digits of a number that

@@ -1132,3 +1132,22 @@ carries the priority.
 Nothing here is a promise about a release either. It is a queue, ordered by
 evidence, and the evidence is that six programs were written and six programs do
 not run.
+
+---
+
+## After the queue: distribution
+
+This is recorded here so it is not forgotten, and kept out of the ranked queue
+above because it depends on the queue being finished rather than competing with
+it. The directive is that twill should be installed the way a language is
+installed, not the way a script is: a Windows installer, a macOS package, a
+Linux package for the common managers, each dropping a single `twill` binary and
+putting it on the path, with an uninstaller that removes it cleanly.
+
+Nothing about this can start until self-hosting closes. There is no artifact to
+wrap until the triple build produces one native binary that compiles twill
+without the Go bootstrap; an installer around the bootstrap would be shipping the
+thing the bootstrap exists to retire. So the order is fixed: the language
+feature queue first, the self-compilation milestone second, and only then the
+packaging. It is a real goal and a late one, and writing it down now is the whole
+of the work it needs today.
