@@ -4886,6 +4886,10 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
   # element it selects, or averages the two for an even length, with no
   # second-order term of its own. It is the forward twin of vjp_median (NEEDS-83).
   if is_same_op(e.op, OpMedian) { return jet_median(tp, n, e, js) }
+  # maxpool2d is a selection, locally linear: its jet gathers the tangent of the
+  # value that won each window, with no second-order term. The forward twin of
+  # vjp_maxpool2d, reading the same winners from iattr (NEEDS-83).
+  if is_same_op(e.op, OpMaxPool2D) { return jet_maxpool2d(tp, n, e, js) }
   # Reshape, broadcast, transpose, flip, gather, index, slice and split move
   # numbers without changing them, so their jet is the same rearrangement
   # applied to the tangents. That is one rule, and it is expressed by replaying
@@ -5098,6 +5102,23 @@ fn jet_median(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
       js.dd[n][idx] = (js.dd[ai][aux.lo[idx]] + js.dd[ai][aux.hi[idx]]) / 2.0
     }
     idx = idx + 1
+  }
+  Ok(0)
+}
+
+# The 2-jet of maxpool2d. It selects the largest value in each window and is
+# linear in a neighbourhood of the point, so a tangent rides with the value that
+# won and there is no second-order term. This gathers where vjp_maxpool2d
+# scatters, reading the same winners from iattr, whose first entry is the window
+# so the winner of output o is iattr[o + 1].
+fn jet_maxpool2d(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let o: I64 = 0
+  while o < element_count(e.out.shape) {
+    let src: I64 = e.iattr[o + 1]
+    js.d[n][o] = js.d[a][src]
+    js.dd[n][o] = js.dd[a][src]
+    o = o + 1
   }
   Ok(0)
 }

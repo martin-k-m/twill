@@ -120,6 +120,16 @@ func TestHessianFDMedian(t *testing.T) {
 	})
 }
 
+// MaxPool2D is a selection, so its jet gathers the tangent of each window's max.
+// A [1,2,4] input with a 2x2 window has two windows, so sum(square(pool)) curves
+// only on the two winners. Distinct values keep each argmax off a tie.
+func TestHessianFDMaxPool(t *testing.T) {
+	checkHessianFD(t, "maxpool", []float64{3, 1, 4, 1.5, 2, 5, 0.5, 2.7}, []int{1, 2, 4}, func(x *Tensor) *Tensor {
+		m, _ := MaxPool2D(x, 2)
+		return Sum(Square(m))
+	})
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)
