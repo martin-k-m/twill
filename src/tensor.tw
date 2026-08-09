@@ -4861,6 +4861,12 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
     return jet_select_by_value(tp, n, e, js)
   }
   if is_same_op(e.op, OpWhere) { return jet_where(tp, n, e, js) }
+  # Concat is linear and n-ary: the tangent of a concat is the concat of the
+  # tangents. It is not in is_rearrangement because that path replays a unary
+  # kernel on one tangent buffer, and concat has several; jet_concat is the same
+  # idea for many inputs. internal/tensor/ops.go's Concat carries this jvp, so
+  # adding it here matches the bootstrap rather than diverging from it (NEEDS-83).
+  if is_same_op(e.op, OpConcat) { return jet_concat(tp, n, e, js) }
   # Reshape, broadcast, transpose, flip, gather, index, slice and split move
   # numbers without changing them, so their jet is the same rearrangement
   # applied to the tangents. That is one rule, and it is expressed by replaying
@@ -4902,6 +4908,36 @@ fn jet_rearrangement(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] 
   let src_dd: Tensor = mk_raw(copy_shape(value_of(tp, a).shape), js.dd[a], jdt)
   let out_d: Tensor = replay_rearrangement(tp, e, src_d)?
   let out_dd: Tensor = replay_rearrangement(tp, e, src_dd)?
+  let i: I64 = 0
+  while i < element_count(e.out.shape) {
+    js.d[n][i] = buf.get(out_d.data, out_d.dtype, i)
+    js.dd[n][i] = buf.get(out_dd.data, out_dd.dtype, i)
+    i = i + 1
+  }
+  Ok(0)
+}
+
+# The 2-jet of concat: concatenate the input tangents the same way the forward
+# pass concatenated the values. Each input's tangent buffers are wrapped as a
+# tensor of that input's shape at the gradient dtype (a tangent is a derivative,
+# so it carries grad_dtype, exactly as jet_rearrangement wraps its one input),
+# and the pieces are concatenated in input order along the recorded axis. That is
+# internal/tensor/ops.go's Concat jvp written forward instead of as a scatter.
+fn jet_concat(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let axis: I64 = e.iattr[0]
+  let ds: Arr[Tensor] = arr_new()
+  let dds: Arr[Tensor] = arr_new()
+  let p: I64 = 0
+  while p < len(e.inputs) {
+    let a: I64 = e.inputs[p]
+    let sh: Arr[I64] = value_of(tp, a).shape
+    let jdt: I64 = grad_dtype(value_of(tp, a).dtype)
+    push(ds, mk_raw(copy_shape(sh), js.d[a], jdt))
+    push(dds, mk_raw(copy_shape(sh), js.dd[a], jdt))
+    p = p + 1
+  }
+  let out_d: Tensor = concat(ds, axis)?
+  let out_dd: Tensor = concat(dds, axis)?
   let i: I64 = 0
   while i < element_count(e.out.shape) {
     js.d[n][i] = buf.get(out_d.data, out_d.dtype, i)

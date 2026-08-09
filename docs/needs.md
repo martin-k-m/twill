@@ -1659,8 +1659,24 @@ and `SetRecordJets` does not have to.
 
 ## NEEDS-83: the ops with no forward-mode rule
 
-**Status:** open, and it is a gap in `hessian` rather than in the language.
-`src/tensor.tw` `jet_node`, `is_rearrangement`.
+**Status:** narrowed. `concat` landed; the rest wait on the Go side.
+`src/tensor.tw` `jet_node`, `jet_concat`, `is_rearrangement`.
+
+`concat` is done: `internal/tensor/ops.go`'s `Concat` already carries a jvp, so
+`hessian` over a concat worked on the bootstrap and failed only in twill, and
+`jet_concat` closes that by concatenating the input tangents the way the value
+is concatenated. That is a pure catch-up to the bootstrap, not a divergence.
+
+`sort` and `topk` turn out to be in the same position as the second group below,
+not the first: `SortAxis` and `TopKAxis` in `internal/tensor/ops.go` set up no
+jet, so adding a rule for them here alone would make the two implementations
+disagree about which programs are second-order differentiable. They, and
+`softmax`, `logsumexp`, `prod`, `median`, `conv2d` and `maxpool2d`, all need the
+jvp added on both sides at once, as with NEEDS-77, and the Go side is off-limits
+here. The original framing follows.
+
+*(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
+`is_rearrangement`.)*
 
 Forward-mode 2-jets are written for the elementwise binary and unary ops,
 matmul, sum, mean, cumsum, cumprod, cummax, cummin, where, and the pure
