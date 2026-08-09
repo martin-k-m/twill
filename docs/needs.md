@@ -1800,7 +1800,17 @@ ten makes `0.1` a different float from Go's before the program runs.
 
 ## NEEDS-88: `format_number` for a `Value` still has no home
 
-**Status:** open, and narrowed. `src/eval.tw`.
+**Status:** done. `src/eval.tw` `format_value`, and it needed no new import at
+all. The walk over tensors, lists, records and closures lives in eval; the
+per-number rendering routes through `tensor.dt_shortest`, which eval already
+imports for the dtype work and which calls `float.format_number` for f64. So the
+circular-import problem NEEDS-57 feared never had to be paid: eval does not
+import float, it goes through tensor, which it imports anyway. An f64 tensor
+prints exactly as `internal/value.Format` does, so the goldens are untouched; a
+narrow tensor prints its dtype after the shape and its elements at their own
+precision (NEEDS-114). The original narrowing below is kept for the reasoning.
+
+*(Original status: open, and narrowed. `src/eval.tw`.)*
 
 NEEDS-57 asks for `format_value(Value) -> Str` and `format_number(F64) -> Str`
 together, and argues that neither can live outside `src/eval.tw` because `Value`
