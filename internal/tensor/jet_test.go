@@ -73,6 +73,22 @@ func TestHessianFDTopK(t *testing.T) {
 	})
 }
 
+// Softmax has a genuine second derivative, not a permutation, so this exercises
+// the jvp's dd term. Two functions: the sum of squared probabilities, and a
+// weighted log-loss over them, which are the two shapes a classifier hessian
+// takes. Distinct-enough logits keep the jacobian well away from degeneracy.
+func TestHessianFDSoftmax(t *testing.T) {
+	checkHessianFD(t, "softmax-sq", []float64{0.5, -1.0, 2.0, 0.3}, []int{4}, func(x *Tensor) *Tensor {
+		s, _ := Softmax(x, 0)
+		return Sum(Square(s))
+	})
+	w := New([]float64{0.1, 0.3, 0.2, 0.25, 0.15}, []int{5})
+	checkHessianFD(t, "softmax-logloss", []float64{0.2, 1.1, -0.7, 0.9, 0.0}, []int{5}, func(x *Tensor) *Tensor {
+		s, _ := Softmax(x, 0)
+		return Sum(mul(w, Log(s)))
+	})
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)
