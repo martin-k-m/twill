@@ -1,0 +1,18 @@
+# twill, read by spool. The subset spool parses is comments, one-level tables,
+# quoted strings and single-line inline tables, and this file stays inside it.
+#
+# This is the language itself, the package every other manifest in the ecosystem
+# names as a dependency. It carries a manifest so that dependency resolves to a
+# real package with a real version rather than a dangling git URL: spool's
+# catalog is keyed by git URL, and a URL with no manifest is a hole in the graph.
+name = "twill"
+version = "1.2.0"
+
+# Documentation only. twill has no package entry point, and the language least
+# of all: what an importer reaches for is a std module by name, not a file in
+# this tree. spool records this and does not enforce it.
+entry = "std"
+
+# The language depends on nothing. It is the root of the ecosystem, not a node
+# in it, which is why this table is empty and every other manifest's is not.
+[dependencies]
