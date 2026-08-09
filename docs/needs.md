@@ -1703,10 +1703,18 @@ second-order term; `internal/tensor` `MaxPool2D` and `src/tensor.tw`
 `jet_maxpool2d` read the same argmax `vjp_maxpool2d` scatters to, and
 `jet_test.go` checks it against finite differences.
 
-Left: `prod` and `conv2d`, the two with genuine second-order terms rather than a
-selection. `prod` is the log-derivative with a zero-handling wrinkle; `conv2d`'s
-jvp is another convolution. Each needs its jvp written and verified on both sides
-at once, as with NEEDS-77. The original framing follows.
+`prod` is done too, both sides. Its first tangent is p times the sum of d_k/x_k
+and its second follows by differentiating that, with the zero count splitting it
+into cases exactly as `vjp_prod`'s backward splits: one zero leaves that factor,
+two leave their cross term, three or more leave nothing. `internal/tensor`
+`prodOver` and `src/tensor.tw` `jet_prod` carry the same four cases, and
+`jet_test.go` checks the no-zero path against a finite-difference hessian and the
+zero paths against the exact derivatives of a product polynomial, which a finite
+perturbation cannot reach because it moves a factor off zero.
+
+Left: `conv2d`, the last one. Its jvp is another convolution of the input tangent
+with the kernel, and needs writing and verifying on both sides at once, as with
+NEEDS-77. The original framing follows.
 
 *(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
 `is_rearrangement`.)*

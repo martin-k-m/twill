@@ -130,6 +130,36 @@ func TestHessianFDMaxPool(t *testing.T) {
 	})
 }
 
+// Prod has a real second derivative. The no-zero path is checked against a
+// finite-difference hessian; the zero paths cannot be, because a finite
+// perturbation moves a factor off zero, so they are checked directly against the
+// exact derivatives of a product polynomial. prod([2,0,3]) along [1,1,1] is
+// t(2+t)(3+t) = 6t + 5t^2 + ..., so d=6 and dd=10; prod([0,0,4]) is 4t^2 + ...,
+// so d=0 and dd=8.
+func TestHessianFDProd(t *testing.T) {
+	checkHessianFD(t, "prod-sq", []float64{1.5, -2.0, 0.7, 1.2}, []int{4}, func(x *Tensor) *Tensor {
+		p, _ := ProdAxis(x, 0)
+		return Square(p)
+	})
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	zc := func(name string, xd, v []float64, wantD, wantDD float64) {
+		leaf := Leaf(xd, []int{len(xd)})
+		leaf.RequiresGrad = true
+		out, _ := ProdAxis(leaf, 0)
+		d, dd, err := directional(out, leaf, []*Tensor{leaf, out}, v)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if math.Abs(d[0]-wantD) > 1e-9 || math.Abs(dd[0]-wantDD) > 1e-9 {
+			t.Errorf("%s: d=%v dd=%v want d=%v dd=%v", name, d[0], dd[0], wantD, wantDD)
+		}
+	}
+	zc("one-zero", []float64{2, 0, 3}, []float64{1, 1, 1}, 6, 10)
+	zc("two-zero", []float64{0, 0, 4}, []float64{1, 1, 1}, 0, 8)
+	zc("three-zero", []float64{0, 0, 0}, []float64{1, 1, 1}, 0, 0)
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)
