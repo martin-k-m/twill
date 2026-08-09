@@ -2068,6 +2068,18 @@ generator value that carries its own state and is threaded like the optimizer
 state in `std/optim.tw`. The second is the better answer and the larger change;
 the first would remove the surprise today.
 
+The first-class generator already exists: `std/random`'s `Rng`, with `new_rng`
+and `permutation(r, n)`. What blocks `std/batch` from using it is not that it is
+unwritten but the mode boundary. `std/random` is `mode systems` and `Rng` holds
+`I64` state; `std/batch` is numeric mode, where the only number is `float64` and
+an `I64`-carrying value cannot be held. Verified 2026-08: `std/random` is
+imported only by systems-mode modules (`std/stats` and its test), and no
+numeric-mode file holds an `Rng`. So the real choice is narrower than it looks:
+add the seeded builtins (a bootstrap change, both sides at once), or move
+`std/batch` itself into systems mode so it can hold an `Rng`. There is no
+numeric-mode-only fix, because the only seeding a numeric program has is the
+global `seed`, which is the side effect in the first place.
+
 *Go bootstrap:* `internal/interp` holds a package-level `*rand.Rand`. A
 per-call seed is a second `rand.New(rand.NewSource(seed))` that is not stored.
 
