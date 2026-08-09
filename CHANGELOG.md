@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`mode systems` now gates type-name resolution** (2026-08-09), its first
+  semantic effect. In a systems-mode file an unresolved type annotation
+  (`n: I64`, `-> Bool`, `-> Str`, `c: cp.Caps`) is advisory: the bootstrap has
+  no such type, so the parameter takes its argument's type and nothing is
+  reported. In numeric mode the same name is still an "unknown type" error, and
+  the unit algebra is untouched in both modes, so a declared-unit return like
+  `-> USD` is still checked. This is what lets the self-hosted sources, whose
+  every signature is written in `I64`/`Str`/`Bool` and qualified names, pass
+  `twill check`. Landed in the Go bootstrap (`internal/checker`) and the
+  self-hosted checker (`src/check.tw`) in lockstep, with tests in
+  `internal/checker/systems_test.go`.
+
 - **Module-qualified type names parse in signatures** (2026-08-09). `fn f(c:
   cp.Caps) -> cp.Caps` was a hard syntax error, because the type grammar reuses
   the unit-expression parser, which stops at the `.`. A `.` after a single bare
