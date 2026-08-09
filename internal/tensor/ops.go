@@ -454,6 +454,36 @@ func LogSumExp(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
+	// Forward-mode. The gradient of logsumexp is softmax, so the first output
+	// tangent is s, the y-weighted mean of the input tangents, and the second is
+	// its derivative along the direction. y is recomputed as exp(x - out) rather
+	// than read from soft: soft is exp(x - m) / sum and exp(x - out) is the same
+	// value by a different operation, and recomputing is what src/tensor.tw does,
+	// so the two stay bit-identical.
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for i := 0; i < before; i++ {
+				for j := 0; j < after; j++ {
+					oi := i*after + j
+					base := i*L*after + j
+					s := 0.0
+					for k := 0; k < L; k++ {
+						p := base + k*after
+						s += math.Exp(t.Data[p]-out[oi]) * t.jet.d[p]
+					}
+					ldd := 0.0
+					for k := 0; k < L; k++ {
+						p := base + k*after
+						y := math.Exp(t.Data[p] - out[oi])
+						ldd += y * (t.jet.d[p]*(t.jet.d[p]-s) + t.jet.dd[p])
+					}
+					res.jet.d[oi] = s
+					res.jet.dd[oi] = ldd
+				}
+			}
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return

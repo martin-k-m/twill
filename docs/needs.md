@@ -1684,9 +1684,16 @@ term, reading `y` from the stored output with no max subtraction, and
 `jet_test.go` checks the softmax hessian against finite differences on both a
 sum-of-squares and a weighted log-loss.
 
-Left: `logsumexp`, `prod`, `median`, `conv2d` and `maxpool2d`. Each has a real
-second derivative and no jvp on either side, so each needs its jvp written and
-verified on both sides at once, as with NEEDS-77. The original framing follows.
+`logsumexp` is done too, both sides. Its gradient is softmax, so its first output
+tangent is the y-weighted mean of the input tangents and its second is that
+differentiated once more; `internal/tensor` `LogSumExp` and `src/tensor.tw`
+`jet_logsumexp` both recompute `y` as `exp(x - out)` rather than reading a stored
+softmax, so they stay bit-identical, and `jet_test.go` checks it on the square of
+the reduction and on a cross-entropy `lse(x) - x_target`.
+
+Left: `prod`, `median`, `conv2d` and `maxpool2d`. Each has a real second
+derivative and no jvp on either side, so each needs its jvp written and verified
+on both sides at once, as with NEEDS-77. The original framing follows.
 
 *(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
 `is_rearrangement`.)*

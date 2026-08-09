@@ -89,6 +89,22 @@ func TestHessianFDSoftmax(t *testing.T) {
 	})
 }
 
+// LogSumExp reduces to a scalar and its gradient is softmax, so its second
+// order is softmax's first order. Two functions: the square of the reduction,
+// and lse(x) - x_target, which is the cross-entropy of a one-hot label and the
+// most common place a hessian meets logsumexp.
+func TestHessianFDLogSumExp(t *testing.T) {
+	checkHessianFD(t, "lse-sq", []float64{0.5, -1.0, 2.0, 0.3}, []int{4}, func(x *Tensor) *Tensor {
+		l, _ := LogSumExp(x, 0)
+		return Square(l)
+	})
+	checkHessianFD(t, "lse-xent", []float64{0.2, 1.1, -0.7, 0.9, 0.0}, []int{5}, func(x *Tensor) *Tensor {
+		l, _ := LogSumExp(x, 0)
+		pick, _ := IndexAxis0(x, 2)
+		return sub(l, pick)
+	})
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)
