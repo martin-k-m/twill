@@ -1783,7 +1783,7 @@ fn substitute(dims: Arr[ast.Dim], subst: Dict[Str, I64]) -> Arr[I64] {
 
 fn builtin_names() -> Arr[Str] {
   let a: Arr[Str] = arr_new()
-  for name in split_words("print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian") {
+  for name in split_words("print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item dtype range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian") {
     push(a, name)
   }
   a
@@ -1962,6 +1962,9 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # The loaded value's type depends on the file, so leave it unknown.
   if bytes.equal(name, "load") { return TUnknown }
   if bytes.equal(name, "str") { return TStr }
+  # dtype(t) reads a tensor's dtype back as its name. A string, because a dtype
+  # is a contextual name and not a value; see the builtin in src/eval.tw.
+  if bytes.equal(name, "dtype") { return TStr }
   if bytes.equal(name, "tensor") { return tensor_builtin_result(arg_types, dt) }
   # These return values whose shape depends on runtime data; treat the result as
   # unknown so downstream code is not falsely flagged.

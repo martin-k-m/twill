@@ -1,6 +1,6 @@
 # Twill language guide
 
-This is the reference for Twill v0.28. The language is small, so this is short.
+This is the reference for Twill v1.2. The language is small, so this is short.
 
 ## Running programs
 
@@ -929,7 +929,10 @@ every tensor leaf; `zip_leaves(f, trees)` walks a list of same-shaped trees in
 parallel, calling `f` with the list of leaves at each position. Optimizers use
 these, so they work on any model structure.
 
-Inspection: `shape(t)`, `item(t)`, `str(x)`, `print(...)`.
+Inspection: `shape(t)`, `item(t)`, `dtype(t)`, `str(x)`, `print(...)`. `dtype(t)`
+returns the name of a tensor's dtype as a string, one of `"f64"`, `"f32"`,
+`"bf16"`, `"f16"`, `"i32"`, `"i8"`, `"bool"`; it is the read-back the `to` cast
+and the dtype constructors otherwise have no inverse for.
 
 ### `str` on a number
 
