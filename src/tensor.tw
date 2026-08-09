@@ -95,7 +95,7 @@ mode systems
 # two entry points, because twill has no mutable flag on a value type.
 
 import "bytes.tw" as bytes
-import "float.tw" as flt
+import "std/float" as flt
 import "buf.tw" as buf
 
 # ---- the value ------------------------------------------------------------

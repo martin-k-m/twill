@@ -39,6 +39,7 @@ import "ast.tw" as ast
 import "lex.tw" as lex
 import "parse.tw" as parse
 import "bytes.tw" as bytes
+import "std/float" as flt
 
 # ---- errors ----------------------------------------------------------------
 
@@ -713,5 +714,5 @@ fn format_number(n: F64) -> Str {
       return str(k)
     }
   }
-  f64_shortest(n)
+  flt.f64_shortest(n)
 }
