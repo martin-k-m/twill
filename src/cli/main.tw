@@ -47,9 +47,7 @@ fn dispatch(c: cp.Caps, cmd: Str, rest: Arr[Str]) -> I64 {
 # else. Both are moments where a person is looking for orientation. Every other
 # command is a person who knows what they want, and showing them the logo is
 # taking two lines of their terminal to tell them what tool they just ran.
-fn greeting(c: cp.Caps) -> Str =
-  banner.render(c, VERSION) + "\n" +
-    ansi.paint(c, th.muted(), "  twill --help to see what it does\n")
+fn greeting(c: cp.Caps) -> Str = banner.welcome(c, VERSION)
 
 # Two: animation is for things that take time. A command decides between the
 # spinner and the progress bar by whether it knows its total, and it decides
