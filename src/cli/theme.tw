@@ -12,9 +12,9 @@
 
 mode systems
 
-import "src/term/color" as col
-import "src/term/ansi" as ansi
-import "src/term/caps" as cp
+import "../term/color.tw" as col
+import "../term/ansi.tw" as ansi
+import "../term/caps.tw" as cp
 
 # ── The ribbon ──────────────────────────────────────────────────────────────
 

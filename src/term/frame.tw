@@ -11,9 +11,9 @@
 
 mode systems
 
-import "src/term/caps" as cp
-import "src/term/ansi" as ansi
-import "src/term/width" as w
+import "caps.tw" as cp
+import "ansi.tw" as ansi
+import "width.tw" as w
 
 struct Frame {
   caps: cp.Caps,

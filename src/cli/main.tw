@@ -7,12 +7,12 @@
 
 mode systems
 
-import "src/term/caps" as cp
-import "src/term/ansi" as ansi
-import "src/cli/theme" as th
-import "src/cli/help" as help
-import "src/cli/banner" as banner
-import "src/cli/repl" as repl
+import "../term/caps.tw" as cp
+import "../term/ansi.tw" as ansi
+import "theme.tw" as th
+import "help.tw" as help
+import "banner.tw" as banner
+import "repl.tw" as repl
 
 let VERSION: Str = "1.2.0"
 

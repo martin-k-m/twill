@@ -8,8 +8,8 @@
 
 mode systems
 
-import "src/term/caps" as cp
-import "src/term/color" as col
+import "caps.tw" as cp
+import "color.tw" as col
 
 # ESC. Twill string literals recognise \n, \t, \" and \\ and nothing else, so
 # the byte is built rather than written. Every sequence below starts here.

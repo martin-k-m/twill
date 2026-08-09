@@ -21,12 +21,12 @@
 
 mode systems
 
-import "src/term/caps" as cp
-import "src/term/ansi" as ansi
-import "src/term/color" as col
-import "src/term/frame" as fr
-import "src/term/width" as w
-import "src/cli/theme" as th
+import "../term/caps.tw" as cp
+import "../term/ansi.tw" as ansi
+import "../term/color.tw" as col
+import "../term/frame.tw" as fr
+import "../term/width.tw" as w
+import "theme.tw" as th
 
 let FRAME_MS: I64 = 120
 
