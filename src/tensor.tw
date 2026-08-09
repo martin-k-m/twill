@@ -616,6 +616,7 @@ enum Op {
   OpSquare,
   OpPow,
   OpClip,
+  OpCast,
 
   OpSum,
   OpMean,
@@ -665,7 +666,7 @@ fn op_name(op: Op) -> Str {
     OpNeg => "neg", OpRelu => "relu", OpExp => "exp", OpLog => "log",
     OpSin => "sin", OpCos => "cos", OpSqrt => "sqrt", OpTanh => "tanh",
     OpSigmoid => "sigmoid", OpSquare => "square", OpPow => "pow",
-    OpClip => "clip",
+    OpClip => "clip", OpCast => "cast",
     OpSum => "sum", OpMean => "mean", OpMax => "max", OpMin => "min",
     OpProd => "prod", OpMedian => "median", OpArgmax => "argmax",
     OpArgmin => "argmin", OpLogSumExp => "logsumexp", OpSoftmax => "softmax",
@@ -2921,6 +2922,16 @@ fn t_clip(tp: Tape, a: I64, lo: F64, hi: F64) -> I64 {
   record(tp, OpClip, one_input(a), out, no_ints(), two_floats(lo, hi), "")
 }
 
+# The taped cast. The target dtype rides in iattr[0], and the forward is `cast`,
+# so the recorded value is already rounded to dt and carries it. The gradient is
+# the straight-through estimator (see the vjp), so a cast inside a differentiated
+# function no longer detaches its input, which is what makes bf16 weights with an
+# f32 master trainable rather than merely storable.
+fn t_cast(tp: Tape, a: I64, dt: I64) -> I64 {
+  let out: Tensor = cast(value_of(tp, a), dt)
+  record(tp, OpCast, one_input(a), out, one_int(dt), no_floats(), "")
+}
+
 fn t_where(tp: Tape, cond: I64, a: I64, b: I64) -> Res[I64, Str] {
   let out: Tensor = where3(value_of(tp, cond), value_of(tp, a), value_of(tp, b))?
   Ok(record(tp, OpWhere, three_ints(cond, a, b), out, no_ints(), no_floats(), ""))
@@ -3246,6 +3257,18 @@ fn vjp(tp: Tape, i: I64, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] 
   if is_same_op(e.op, OpSoftmax) { return vjp_softmax(tp, e, g, cot, touched) }
   if is_same_op(e.op, OpReshape) {
     # The identity on the buffer, which is why it has no helper.
+    accumulate(cot, touched, e.inputs[0], data_arr(g))
+    return Ok(0)
+  }
+  if is_same_op(e.op, OpCast) {
+    # The straight-through estimator: the forward rounds to dt, and the
+    # gradient of a rounding is taken to be one. So the cotangent passes to the
+    # input unchanged, exactly as reshape does, and accumulate stores it at the
+    # input's own gradient dtype. This is the whole reason a cast is on the tape
+    # rather than a graph break: an f32 master weight narrowed to bf16 receives
+    # the bf16 activation's f32 cotangent, and learns. Rounding the gradient a
+    # second time here, to match the forward rounding, is the thing loss scaling
+    # exists to avoid and is deliberately not done.
     accumulate(cot, touched, e.inputs[0], data_arr(g))
     return Ok(0)
   }

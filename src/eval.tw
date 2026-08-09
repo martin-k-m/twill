@@ -856,16 +856,16 @@ fn eval_call(x: ast.Call, env: Env) -> Res[Value, RuntimeError] {
 }
 
 # `t.to(f32)`: the explicit cast, docs/dtypes.md "The cast is spelled .to(dt)".
-# It lowers to tensor.cast, which re-rounds once from the source value. The
+# It lowers through tr_cast, which re-rounds once from the source value. The
 # argument is the one position that exists for nothing but a dtype, so the
 # name is read as one without consulting the environment: `x.to(f32)` casts
 # even in a scope that binds f32. Constructors read the other way around, see
 # contextual_dtype below.
 #
-# Forward-only, like the elementwise rounding builtins: src/tensor.tw has no
-# taped twin for a cast, so a cast inside a differentiated function detaches
-# its input from the graph rather than carrying a gradient through the
-# rounding.
+# It carries a gradient: tr_cast records an OpCast on the tape, whose vjp is the
+# straight-through estimator, so a cast inside a differentiated function no
+# longer detaches its input. That is what a bf16 weight with an f32 master
+# depends on.
 fn eval_cast(t: tensor.Tensor, x: ast.Call) -> Res[Value, RuntimeError] {
   if len(x.args) != 1 {
     return Err(runtime_error(x.line, bytes.concat("to expects 1 argument(s), got ",
@@ -874,7 +874,7 @@ fn eval_cast(t: tensor.Tensor, x: ast.Call) -> Res[Value, RuntimeError] {
   match x.args[0] {
     EIdent(id) => {
       match tensor.dtype_of_name(id.name) {
-        Some(dt) => return Ok(VTensor(tensor.cast(t, dt))),
+        Some(dt) => return Ok(VTensor(tr_cast(t, dt))),
         None => unit,
       }
     },
@@ -1872,6 +1872,17 @@ fn tr_clip(a: tensor.Tensor, lo: F64, hi: F64) -> tensor.Tensor {
   }
   let tp: tensor.Tape = tape_current()
   tensor.value_of(tp, tensor.t_clip(tp, tr_node(tp, a), lo, hi))
+}
+
+# `x.to(dt)`. Records an OpCast when a tape is installed, so a cast inside a
+# differentiated function passes its gradient straight through rather than
+# detaching. Off the tape it is the plain cast.
+fn tr_cast(a: tensor.Tensor, dt: I64) -> tensor.Tensor {
+  if not tape_installed() {
+    return tensor.cast(a, dt)
+  }
+  let tp: tensor.Tape = tape_current()
+  tensor.value_of(tp, tensor.t_cast(tp, tr_node(tp, a), dt))
 }
 
 fn tr_binary(op: tensor.Op, a: tensor.Tensor, b: tensor.Tensor) -> Res[tensor.Tensor, Str] {
