@@ -1659,96 +1659,17 @@ and `SetRecordJets` does not have to.
 
 ## NEEDS-83: the ops with no forward-mode rule
 
-**Status:** narrowed. `concat` landed; the rest wait on the Go side.
-`src/tensor.tw` `jet_node`, `jet_concat`, `is_rearrangement`.
-
-`concat` is done: `internal/tensor/ops.go`'s `Concat` already carries a jvp, so
-`hessian` over a concat worked on the bootstrap and failed only in twill, and
-`jet_concat` closes that by concatenating the input tangents the way the value
-is concatenated. That is a pure catch-up to the bootstrap, not a divergence.
-
-`sort` and `topk` are done too, both sides at once, which the owner authorised
-for this one change. `SortAxis` and `TopKAxis` in `internal/tensor/ops.go` grew
-a jvp that gathers each output's tangent from `origin[dst]`, the input it took
-its value from, and `src/tensor.tw` `jet_selection` does the same by
-`sort_origins`, the mirror of `vjp_selection`'s scatter. Both read the same
-selection the backward pass already agreed on, so the two implementations stay
-byte-identical, and `internal/tensor/jet_test.go` checks the sort and topk
-Hessians against finite differences.
-
-`softmax` is done too, both sides. Its jacobian is `y_i(delta_ij - y_j)`, so the
-first output tangent is `y_i(xd_i - s)` with `s` the y-weighted mean of the input
-tangents, and the second is that differentiated once more along the direction;
-`internal/tensor` `Softmax` and `src/tensor.tw` `jet_softmax` carry it term for
-term, reading `y` from the stored output with no max subtraction, and
-`jet_test.go` checks the softmax hessian against finite differences on both a
-sum-of-squares and a weighted log-loss.
-
-`logsumexp` is done too, both sides. Its gradient is softmax, so its first output
-tangent is the y-weighted mean of the input tangents and its second is that
-differentiated once more; `internal/tensor` `LogSumExp` and `src/tensor.tw`
-`jet_logsumexp` both recompute `y` as `exp(x - out)` rather than reading a stored
-softmax, so they stay bit-identical, and `jet_test.go` checks it on the square of
-the reduction and on a cross-entropy `lse(x) - x_target`.
-
-`median` is done too, both sides. It is a selection, locally linear, so its jet
-gathers the tangent of the middle element, or averages the two for an even
-length, with no second-order term of its own; `internal/tensor` `medianOver` and
-`src/tensor.tw` `jet_median` read the same `lo`/`hi` `vjp_median` scatters to, and
-`jet_test.go` checks the odd and even cases against finite differences.
-
-`maxpool2d` is done too, both sides. It selects the largest value in each window
-and is locally linear, so its jet gathers the tangent of the winner with no
-second-order term; `internal/tensor` `MaxPool2D` and `src/tensor.tw`
-`jet_maxpool2d` read the same argmax `vjp_maxpool2d` scatters to, and
-`jet_test.go` checks it against finite differences.
-
-`prod` is done too, both sides. Its first tangent is p times the sum of d_k/x_k
-and its second follows by differentiating that, with the zero count splitting it
-into cases exactly as `vjp_prod`'s backward splits: one zero leaves that factor,
-two leave their cross term, three or more leave nothing. `internal/tensor`
-`prodOver` and `src/tensor.tw` `jet_prod` carry the same four cases, and
-`jet_test.go` checks the no-zero path against a finite-difference hessian and the
-zero paths against the exact derivatives of a product polynomial, which a finite
-perturbation cannot reach because it moves a factor off zero.
-
-Left: `conv2d`, the last one. Its jvp is another convolution of the input tangent
-with the kernel, and needs writing and verifying on both sides at once, as with
-NEEDS-77. The original framing follows.
-
-*(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
-`is_rearrangement`.)*
-
-Forward-mode 2-jets are written for the elementwise binary and unary ops,
-matmul, sum, mean, cumsum, cumprod, cummax, cummin, where, and the pure
-rearrangements: reshape, broadcast_to, transpose, flip, gather, index0, slice0
-and split. Everything else reports
-
-    second-order autodiff: the function uses an operation without forward-mode
-    support
-
-which is `internal/tensor/jet.go`'s message, byte for byte. The ops that hit it
-are sort, topk, concat, prod, median, softmax, logsumexp, conv2d and maxpool2d.
-
-Two different reasons are hiding in that list and they want different work.
-
-Concat, sort and topk are rearrangements whose jet is a permutation of the
-tangents, and the permutation is either recorded already or derivable. They are
-missing because the shared replay path applies the forward kernel to the tangent
-buffer, and doing that to a sort would sort the *tangents*, which is a plausible
-wrong answer rather than a loud one. Each needs its own selection-then-apply
-rule, in the shape of `jet_select_by_value`.
-
-Softmax, logsumexp, prod, median, conv2d and maxpool2d have no jvp in
-`internal/tensor` either, so a `hessian` over them fails on the Go side with the
-same message. Adding them here first would make the two implementations disagree
-about which programs are second-order differentiable, which the differential
-harness would report as a divergence rather than as the improvement it is. Both
-sides at once, as with NEEDS-77.
-
-*Go bootstrap:* `internal/tensor/jet.go`, and the `recordJets` guards in
-`ops.go`, `scan.go`, `gather.go` and `tensor.go` that show exactly which ops
-have a rule there.
+**Status:** done. Every op has a forward-mode rule now, so `hessian` works over
+all of them. The rearrangements and selections, `concat`, `sort`, `topk`,
+`median` and `maxpool2d`, gather their tangents by the same mapping their vjp
+scatters. `softmax`, `logsumexp` and `prod` carry a genuine second-order term:
+softmax and logsumexp through the jacobian `y_i(delta_ij - y_j)`, prod through
+`p*(u*u + v - w)` with the zeros split into cases. `conv2d` is bilinear, so its
+jet is the product rule `xdd*w + 2*xd*wd + x*wdd` over the receptive field.
+`sort` and `topk` onward were added to `internal/tensor` and `src/tensor.tw` at
+once, the owner having authorised the bootstrap edits, and `jet_test.go` checks
+each against finite differences, with the zero and cross-term cases that finite
+differences cannot reach checked against exact derivatives.
 
 ## NEEDS-84: `f64_bits` and `f64_from_bits`
 

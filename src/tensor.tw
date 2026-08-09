@@ -4895,6 +4895,11 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
   # same way vjp_prod's backward does: one zero leaves only that factor, two
   # leave only their cross term, three or more leave nothing (NEEDS-83).
   if is_same_op(e.op, OpProd) { return jet_prod(tp, n, e, js) }
+  # conv2d is bilinear in (input, weight): each output is a sum of products over
+  # the receptive field, so the first tangent is the sum of xd*w + x*wd and the
+  # second is the bilinear product rule xdd*w + 2*xd*wd + x*wdd. A constant
+  # operand has zero tangents, which drops its term (NEEDS-83).
+  if is_same_op(e.op, OpConv2D) { return jet_conv2d(tp, n, e, js) }
   # Reshape, broadcast, transpose, flip, gather, index, slice and split move
   # numbers without changing them, so their jet is the same rearrangement
   # applied to the tangents. That is one rule, and it is expressed by replaying
@@ -5206,6 +5211,70 @@ fn jet_prod(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
       j = j + 1
     }
     i = i + 1
+  }
+  Ok(0)
+}
+
+# The 2-jet of conv2d, over the same loop the forward pass runs. conv is bilinear
+# in the input and the weight, so each output's first tangent is the sum over its
+# receptive field of xd*w + x*wd, and its second is the bilinear product rule,
+# xdd*w + 2*xd*wd + x*wdd. It reads both operands' tangents; a constant operand's
+# are zero and its term drops, so the one form serves whichever carries a jet.
+fn jet_conv2d(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let ain: I64 = e.inputs[0]
+  let awt: I64 = e.inputs[1]
+  let input: Tensor = value_of(tp, ain)
+  let weight: Tensor = value_of(tp, awt)
+  let cin: I64 = input.shape[0]
+  let h: I64 = input.shape[1]
+  let w: I64 = input.shape[2]
+  let cout: I64 = weight.shape[0]
+  let kh: I64 = weight.shape[2]
+  let kw: I64 = weight.shape[3]
+  let oh: I64 = h - kh + 1
+  let ow: I64 = w - kw + 1
+  let hw: I64 = h * w
+  let khw: I64 = kh * kw
+  let cinkhw: I64 = cin * khw
+  let ohw: I64 = oh * ow
+  let co: I64 = 0
+  while co < cout {
+    let i: I64 = 0
+    while i < oh {
+      let j: I64 = 0
+      while j < ow {
+        let sd: F64 = 0.0
+        let sdd: F64 = 0.0
+        let ci: I64 = 0
+        while ci < cin {
+          let a: I64 = 0
+          while a < kh {
+            let b: I64 = 0
+            while b < kw {
+              let in_idx: I64 = ci * hw + (i + a) * w + (j + b)
+              let w_idx: I64 = co * cinkhw + ci * khw + a * kw + b
+              let x: F64 = buf.get(input.data, input.dtype, in_idx)
+              let wv: F64 = buf.get(weight.data, weight.dtype, w_idx)
+              let xd: F64 = js.d[ain][in_idx]
+              let xdd: F64 = js.dd[ain][in_idx]
+              let wd: F64 = js.d[awt][w_idx]
+              let wdd: F64 = js.dd[awt][w_idx]
+              sd = sd + ((xd * wv) + (x * wd))
+              sdd = sdd + (((xdd * wv) + (2.0 * xd * wd)) + (x * wdd))
+              b = b + 1
+            }
+            a = a + 1
+          }
+          ci = ci + 1
+        }
+        let oi: I64 = co * ohw + i * ow + j
+        js.d[n][oi] = sd
+        js.dd[n][oi] = sdd
+        j = j + 1
+      }
+      i = i + 1
+    }
+    co = co + 1
   }
   Ok(0)
 }

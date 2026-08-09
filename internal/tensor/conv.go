@@ -41,6 +41,42 @@ func Conv2D(input, weight *Tensor) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: []int{cout, oh, ow}}
+	// Forward-mode. conv is bilinear in (input, weight): each output is a sum of
+	// products input*weight over the receptive field, so the first tangent is the
+	// sum of xd*w + x*wd and the second is the bilinear product rule, xdd*w +
+	// 2*xd*wd + x*wdd. A constant operand has zero tangents, which drops its term,
+	// so this is one form whether the input, the weight, or both carry a jet.
+	if recordJets && (input.RequiresGrad || weight.RequiresGrad) {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for co := 0; co < cout; co++ {
+				for i := 0; i < oh; i++ {
+					for j := 0; j < ow; j++ {
+						var sd, sdd float64
+						for ci := 0; ci < cin; ci++ {
+							for a := 0; a < kh; a++ {
+								for b := 0; b < kw; b++ {
+									inIdx := ci*hw + (i+a)*w + (j + b)
+									wIdx := co*cinkhw + ci*khw + a*kw + b
+									x := input.Data[inIdx]
+									wv := weight.Data[wIdx]
+									xd := input.jet.d[inIdx]
+									xdd := input.jet.dd[inIdx]
+									wd := weight.jet.d[wIdx]
+									wdd := weight.jet.dd[wIdx]
+									sd += xd*wv + x*wd
+									sdd += xdd*wv + 2*xd*wd + x*wdd
+								}
+							}
+						}
+						oi := co*ohw + i*ow + j
+						res.jet.d[oi] = sd
+						res.jet.dd[oi] = sdd
+					}
+				}
+			}
+		}
+	}
 	return track2(res, input, weight, func() {
 		g := res.Grad // [Cout, OH, OW]
 		var gi, gw []float64
