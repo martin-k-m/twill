@@ -144,7 +144,7 @@ fn rank0_number(v: Value) -> Opt[F64] {
   match v {
     VNum(x) => Some(x),
     VTensor(t) => {
-      if len(t.shape) == 0 { return Some(t.data[0]) }
+      if len(t.shape) == 0 { return Some(tensor.at(t, 0)) }
       None
     },
     _ => None,
@@ -160,7 +160,7 @@ fn truthy(v: Value, line: I64) -> Res[Bool, RuntimeError] {
     VBool(b) => Ok(b),
     VNum(x) => Ok(x != 0.0),
     VTensor(t) => {
-      if len(t.shape) == 0 { return Ok(t.data[0] != 0.0) }
+      if len(t.shape) == 0 { return Ok(tensor.at(t, 0) != 0.0) }
       Err(runtime_error(line, "condition must be a bool or a scalar number"))
     },
     _ => Err(runtime_error(line, bytes.concat("condition must be a bool or a scalar number, got a ",
@@ -473,7 +473,7 @@ fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
     let data: Arr[F64] = arr_new()
     let j: I64 = 0
     while j < stride {
-      push(data, t.data[k * stride + j])
+      push(data, tensor.at(t, k * stride + j))
       j = j + 1
     }
     if len(row_shape) == 0 {
@@ -728,7 +728,7 @@ fn deep_equal(l: Value, r: Value) -> Bool {
         # A rank-0 tensor equals a number of the same value: the two are the
         # same thing with different representations and a program cannot tell
         # them apart anywhere else either.
-        VNum(b) => len(a.shape) == 0 and a.data[0] == b,
+        VNum(b) => len(a.shape) == 0 and tensor.at(a, 0) == b,
         _ => false,
       }
     },
@@ -754,8 +754,8 @@ fn deep_equal(l: Value, r: Value) -> Bool {
 fn tensor_equal(a: tensor.Tensor, b: tensor.Tensor) -> Bool {
   if not tensor.shape_equal(a.shape, b.shape) { return false }
   let i: I64 = 0
-  while i < len(a.data) {
-    if a.data[i] != b.data[i] { return false }
+  while i < tensor.numel(a) {
+    if tensor.at(a, i) != tensor.at(b, i) { return false }
     i = i + 1
   }
   true
@@ -1029,7 +1029,7 @@ fn eval_slice(x: ast.Slice, env: Env) -> Res[Value, RuntimeError] {
       let data: Arr[F64] = arr_new()
       let k: I64 = start * stride
       while k < end * stride {
-        push(data, t.data[k])
+        push(data, tensor.at(t, k))
         k = k + 1
       }
       Ok(VTensor(tensor.mk_raw(shape, data, t.dtype)))
@@ -1089,7 +1089,7 @@ fn in_words(list: Str, name: Str) -> Bool {
   bytes.index_of(hay, needle) >= 0
 }
 
-let ARITY1: Str = "relu exp log sin cos tanh sigmoid sqrt square abs grad grads value_and_grad jacobian hessian tensor scalar seed permutation eye shape len item str int floor ceil round read_csv read_frame load columns"
+let ARITY1: Str = "relu exp log sin cos tanh sigmoid sqrt square abs grad grads value_and_grad jacobian hessian tensor scalar seed permutation eye shape len item dtype str int floor ceil round read_csv read_frame load columns"
 
 let ARITY2: Str = "pow matmul dot conv2d maxpool2d gather maximum minimum greater less greater_equal less_equal equal concat map append gbm_predict write_frame save field map_leaves zip_leaves"
 
@@ -1127,7 +1127,7 @@ fn single_number(v: Value) -> Opt[F64] {
   match v {
     VNum(x) => Some(x),
     VTensor(t) => {
-      if len(t.data) == 1 { return Some(t.data[0]) }
+      if tensor.numel(t) == 1 { return Some(tensor.at(t, 0)) }
       None
     },
     _ => None,
@@ -1161,7 +1161,7 @@ fn int_of(v: Value, who: Str, line: I64) -> Res[I64, RuntimeError] =
 fn is_scalar_value(v: Value) -> Bool {
   match v {
     VNum(_) => true,
-    VTensor(t) => len(t.data) == 1,
+    VTensor(t) => tensor.numel(t) == 1,
     _ => false,
   }
 }
@@ -1205,8 +1205,8 @@ fn indices_of(v: Value, who: Str, line: I64) -> Res[Arr[I64], RuntimeError] {
       }
       let out: Arr[I64] = arr_new()
       let i: I64 = 0
-      while i < len(t.data) {
-        push(out, i64_of_f64(f64_trunc(t.data[i])))
+      while i < tensor.numel(t) {
+        push(out, i64_of_f64(f64_trunc(tensor.at(t, i))))
         i = i + 1
       }
       Ok(out)
@@ -1242,8 +1242,8 @@ fn shape_from_args(args: Arr[Value], who: Str, line: I64) -> Res[Arr[I64], Runti
         if len(t.shape) == 1 {
           let dims: Arr[I64] = arr_new()
           let i: I64 = 0
-          while i < len(t.data) {
-            push(dims, i64_of_f64(f64_trunc(t.data[i])))
+          while i < tensor.numel(t) {
+            push(dims, i64_of_f64(f64_trunc(tensor.at(t, i))))
             i = i + 1
           }
           return Ok(dims)
@@ -1272,8 +1272,8 @@ fn to_items(v: Value, who: Str, line: I64) -> Res[Arr[Value], RuntimeError] {
       if len(t.shape) == 1 {
         let out: Arr[Value] = arr_new()
         let i: I64 = 0
-        while i < len(t.data) {
-          push(out, VTensor(tensor.scalar(t.data[i])))
+        while i < tensor.numel(t) {
+          push(out, VTensor(tensor.scalar(tensor.at(t, i))))
           i = i + 1
         }
         return Ok(out)
@@ -1703,10 +1703,10 @@ fn bi_elem_round(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
   let out: Arr[F64] = arr_new()
   let i: I64 = 0
-  while i < len(t.data) {
-    if bytes.equal(name, "floor") { push(out, f64_floor(t.data[i])) }
-    if bytes.equal(name, "ceil") { push(out, f64_ceil(t.data[i])) }
-    if bytes.equal(name, "round") { push(out, f64_round(t.data[i])) }
+  while i < tensor.numel(t) {
+    if bytes.equal(name, "floor") { push(out, f64_floor(tensor.at(t, i))) }
+    if bytes.equal(name, "ceil") { push(out, f64_ceil(tensor.at(t, i))) }
+    if bytes.equal(name, "round") { push(out, f64_round(tensor.at(t, i))) }
     i = i + 1
   }
   Ok(VTensor(tensor.mk(tensor.copy_shape(t.shape), out, t.dtype)))
@@ -2390,7 +2390,7 @@ fn gradients(f: Value, call_args: Arr[Value], line: I64) -> Res[Grads, RuntimeEr
     i = i + 1
   }
   Ok(Grads {
-    value: tensor.scalar(ot.data[0]),
+    value: tensor.scalar(tensor.at(ot, 0)),
     first: grad_from_node(nodes[0], all_grads, tape_leaf_values(tp)),
     all: all,
   })
@@ -2440,11 +2440,11 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
     Some(t) => xt = t,
     None => return Err(runtime_error(line, "jacobian: the input must be a tensor")),
   }
-  let n: I64 = len(xt.data)
+  let n: I64 = tensor.numel(xt)
   # A gradient-free pass to learn the output size. It costs one extra evaluation
   # and buys not having to guess m from the input.
   let y0: tensor.Tensor = apply_to_tensor(f, tensor.clone(xt), line)?
-  let m: I64 = len(y0.data)
+  let m: I64 = tensor.numel(y0)
   let jac: Arr[F64] = arr_new()
   let z: I64 = 0
   while z < m * n {
@@ -2466,7 +2466,7 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
       None => return Err(runtime_error(line, bytes.concat("jacobian: f must return a tensor, got ",
         format_value(ran.value)))),
     }
-    if len(y.data) != m {
+    if tensor.numel(y) != m {
       return Err(runtime_error(line, "jacobian: f returned a different output size on re-evaluation"))
     }
     # Isolate the j-th output by seeding the backward pass with a one-hot rather
@@ -2484,7 +2484,7 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
         if leaf < len(g) {
           k = 0
           while k < n {
-            jac[j * n + k] = g[leaf].data[k]
+            jac[j * n + k] = tensor.at(g[leaf], k)
             k = k + 1
           }
         }
@@ -2912,10 +2912,20 @@ fn bi_inspect(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError
   }
   if bytes.equal(name, "item") {
     let t: tensor.Tensor = arg_tensor(args[0], "item", line)?
-    if len(t.data) != 1 {
+    if tensor.numel(t) != 1 {
       return Err(runtime_error(line, "item expects a single-element tensor"))
     }
-    return Ok(VTensor(tensor.scalar(t.data[0])))
+    return Ok(VTensor(tensor.scalar(tensor.at(t, 0))))
+  }
+  # dtype(t): the name of a tensor's dtype, as a string. The read-back the
+  # constructors and `.to` have no inverse for otherwise: a program can ask for
+  # bf16 but not ask what it got. It returns the name rather than a dtype value
+  # because a dtype is a contextual name and not a first-class value (NEEDS-110),
+  # and a string is what a caller branches on ("f64") or prints. loom, shuttle
+  # and warp all wanted this; it is the surface for tensor.dtype_name.
+  if bytes.equal(name, "dtype") {
+    let t: tensor.Tensor = arg_tensor(args[0], "dtype", line)?
+    return Ok(VStr(tensor.dtype_name(t.dtype)))
   }
   if bytes.equal(name, "range") { return bi_range(args, line) }
   if bytes.equal(name, "list") {
@@ -3211,7 +3221,7 @@ fn write_frame(frame: RecordVal, path_in: Str, line: I64) -> Res[Unit, RuntimeEr
           return Err(runtime_error(line, bytes.concat("write_frame: column ",
             bytes.concat(quoted(k), " must be a 1-D tensor"))))
         }
-        col = t.data
+        col = tensor.data_arr(t)
       },
       None => return Err(runtime_error(line, bytes.concat("write_frame: column ",
         bytes.concat(quoted(k), " must be a 1-D tensor")))),
@@ -3326,7 +3336,7 @@ fn bi_gbm(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
         _ => return Err(runtime_error(line, "gbm_fit: opts must be a record")),
       }
     }
-    match gbm_fit(x.data, y.data, n, d, p) {
+    match gbm_fit(tensor.data_arr(x), tensor.data_arr(y), n, d, p) {
       Ok(h) => return Ok(VForeign(ForeignVal { kind: "gbm model", handle: h })),
       Err(m) => return Err(runtime_error(line, m)),
     }
@@ -3349,7 +3359,7 @@ fn bi_gbm(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
     return Err(runtime_error(line, bytes.concat("gbm_predict: X must be a 2-D [n, d] tensor, got shape ",
       shape_go(x.shape))))
   }
-  match gbm_predict(handle, x.data, x.shape[0], x.shape[1]) {
+  match gbm_predict(handle, tensor.data_arr(x), x.shape[0], x.shape[1]) {
     Ok(out) => {
       let shape: Arr[I64] = arr_new()
       push(shape, x.shape[0])

@@ -525,6 +525,17 @@ fn data_arr(t: Tensor) -> Arr[F64] {
   d
 }
 
+# Element i of the buffer, widened to F64. The single-element read for callers
+# outside this file that used to index `t.data[i]` when it was an Arr[F64]; now
+# that it is a packed Buf, this is the accessor they go through, so the widening
+# rule lives in one place. src/eval.tw is the caller this exists for.
+fn at(t: Tensor, i: I64) -> F64 = buf.get(t.data, t.dtype, i)
+
+# The element count, for a caller that used to read `len(t.data)`. It is the
+# product of the shape, not the byte length of the buffer, which is the number
+# those callers meant.
+fn numel(t: Tensor) -> I64 = element_count(t.shape)
+
 # The explicit cast. `docs/dtypes.md` spells it `x.to(f32)` in surface syntax;
 # this is what that lowers to.
 #
