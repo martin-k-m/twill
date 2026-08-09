@@ -1358,6 +1358,140 @@ fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, Runtim
 # ending is the sink's, not print's: the Go interpreter is constructed with an
 # `out func(string)` so a test or the REPL can capture output without going
 # near a file descriptor. NEEDS-56.
+# ---- value formatting ------------------------------------------------------
+#
+# format_value is the port of internal/value.Format, and print, str, and the
+# grad and jacobian error paths all go through it. It has to match the Go text
+# byte for byte, because the differential harness compares stdout, so every
+# branch here is the Go branch: "true"/"false" for a Bool, the raw bytes for a
+# Str, "()" for Unit, "<builtin NAME>" and "<fn NAME(params)>" for the two
+# callables, and "tensor(NESTED, shape=[...])" for a tensor of rank above zero.
+#
+# The one thing Go has no equivalent for is the dtype tag on a narrow tensor. An
+# f64 tensor prints exactly as Go prints it, so the goldens do not move; a bf16
+# or i8 tensor, which the Go bootstrap cannot produce at all, prints its dtype
+# after the shape and renders each element through dt_shortest at that dtype, so
+# it shows the digits the value actually has rather than seventeen (NEEDS-114).
+fn format_value(v: Value) -> Str {
+  match v {
+    VNum(x) => tensor.dt_shortest(tensor.DT_F64, x),
+    VTensor(t) => format_tensor(t),
+    VBool(b) => { if b { "true" } else { "false" } },
+    VStr(s) => s,
+    VList(l) => format_list(l),
+    VRecord(r) => format_record(r),
+    VClosure(c) => format_closure(c),
+    VBuiltin(b) => bytes.concat("<builtin ", bytes.concat(b.name, ">")),
+    # A foreign value renders through the Go value's String() there; here the
+    # handle carries only its kind, so a fitted model prints "<gbm model>" rather
+    # than Go's "<gbm squared, N trees, M features>". Foreign values are opaque
+    # handles that no golden prints, so the two never meet in the harness.
+    VForeign(f) => bytes.concat("<", bytes.concat(f.kind, ">")),
+    VUnit => "()",
+  }
+}
+
+# A scalar tensor is its number, exactly as Go's Format prints Data[0]. A tensor
+# of rank one or more is "tensor(" plus the nested rows plus the shape, with the
+# dtype appended only when it is not the default f64.
+fn format_tensor(t: tensor.Tensor) -> Str {
+  if len(t.shape) == 0 {
+    return tensor.dt_shortest(t.dtype, tensor.at(t, 0))
+  }
+  bytes.concat("tensor(",
+    bytes.concat(format_dim(t, 0, 0),
+    bytes.concat(", shape=",
+    bytes.concat(shape_comma(t.shape),
+    bytes.concat(dtype_suffix(t), ")")))))
+}
+
+# The nested rows, the port of tensor.ToNested plus formatNested in one pass.
+# The innermost dimension lists its elements; an outer dimension lists its
+# sub-blocks, each `dim_stride` elements wide. Row major, so the block at index i
+# of `dim` starts at base + i * stride.
+fn format_dim(t: tensor.Tensor, base: I64, dim: I64) -> Str {
+  let n: I64 = t.shape[dim]
+  let parts: Arr[Str] = arr_new()
+  if dim == len(t.shape) - 1 {
+    let i: I64 = 0
+    while i < n {
+      push(parts, tensor.dt_shortest(t.dtype, tensor.at(t, base + i)))
+      i = i + 1
+    }
+  } else {
+    let stride: I64 = dim_stride(t.shape, dim)
+    let i: I64 = 0
+    while i < n {
+      push(parts, format_dim(t, base + i * stride, dim + 1))
+      i = i + 1
+    }
+  }
+  bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]"))
+}
+
+# Elements spanned by one step along `dim`: the product of the dimensions below.
+fn dim_stride(shape: Arr[I64], dim: I64) -> I64 {
+  let s: I64 = 1
+  let i: I64 = dim + 1
+  while i < len(shape) {
+    s = s * shape[i]
+    i = i + 1
+  }
+  s
+}
+
+# "[2, 3]", comma-separated, which is Go's joinInts. This is not shape_go, which
+# joins with a space for the error messages that mirror Go's %v on a slice.
+fn shape_comma(shape: Arr[I64]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(shape) {
+    push(parts, str(shape[i]))
+    i = i + 1
+  }
+  bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]"))
+}
+
+# Nothing for f64, so the goldens are untouched; ", dtype=NAME" for a narrow one.
+fn dtype_suffix(t: tensor.Tensor) -> Str {
+  if t.dtype == tensor.DT_F64 { return "" }
+  bytes.concat(", dtype=", tensor.dtype_name(t.dtype))
+}
+
+fn format_list(l: ListVal) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(l.items) {
+    push(parts, format_value(l.items[i]))
+    i = i + 1
+  }
+  bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]"))
+}
+
+# Keys in insertion order, the same order deep_equal walks them, which is the
+# order the fields were written in the source and the order Go's Record.Keys
+# holds.
+fn format_record(r: RecordVal) -> Str {
+  let parts: Arr[Str] = arr_new()
+  for k in dict_keys(r.fields) {
+    push(parts, bytes.concat(k, bytes.concat(": ", format_value(dict_must(r.fields, k)))))
+  }
+  bytes.concat("{", bytes.concat(bytes.join(parts, ", "), "}"))
+}
+
+fn format_closure(c: Closure) -> Str {
+  let name: Str = c.name
+  if len(name) == 0 { name = "anonymous" }
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(c.params) {
+    push(parts, c.params[i].name)
+    i = i + 1
+  }
+  bytes.concat("<fn ", bytes.concat(name,
+    bytes.concat("(", bytes.concat(bytes.join(parts, ", "), ")>"))))
+}
+
 fn bi_print(args: Arr[Value]) -> Res[Value, RuntimeError] {
   let parts: Arr[Str] = arr_new()
   let i: I64 = 0
