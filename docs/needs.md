@@ -2398,9 +2398,18 @@ answer taken without anyone having to decide it.
 
 ## NEEDS-109: `reduce_all` disagrees with the bootstrap above 8192 elements
 
-**Status:** open, and it is a correctness divergence rather than a missing
-feature. `src/tensor.tw` `reduce_all`; `internal/tensor/parallel.go`
-`parallelSum`; `src/gpu/reduce.tw` `whole_tensor_sum`.
+**Status:** done. `src/tensor.tw` `reduce_all` now sums through `block_sum`,
+which ports `parallelSum`: a plain running sum below 8192 elements and fixed
+4096-element blocks combined in block order at or above, so twill and the
+bootstrap agree to the last bit at every size, and `src/gpu/reduce.tw`
+`whole_tensor_sum`, which already followed the Go form, agrees with both. The
+mean scaling was corrected in the same change from `s / n` to the bootstrap's
+`s * (1.0 / n)`, which rounds differently. The original divergence is described
+below.
+
+*(Original: open, a correctness divergence. `src/tensor.tw` `reduce_all`;
+`internal/tensor/parallel.go` `parallelSum`; `src/gpu/reduce.tw`
+`whole_tensor_sum`.)*
 
 Found while designing the GPU reductions, and recorded rather than fixed because
 `src/tensor.tw` was owned by another change at the time.

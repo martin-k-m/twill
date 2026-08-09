@@ -1293,6 +1293,48 @@ fn reduce_result_dtype(dt: I64, mean: Bool) -> I64 {
   dt
 }
 
+# The bootstrap sums a whole tensor in two forms, and this reduction has to pick
+# the same one at every size or it disagrees on the last bits. Below MIN_PARALLEL
+# it is a plain running sum; at or above, it is summed in fixed SUM_CHUNK-element
+# blocks whose partials are then combined in block order. The block size is fixed
+# and not derived from a core count, exactly as internal/tensor/parallel.go fixes
+# it, because that is what makes the answer the same on any machine and, the point
+# here, the same as the bootstrap's to the last bit. A plain running sum at every
+# size, which this was, failed the differential test above 8192 elements on the
+# last digit of a canonical float (NEEDS-109).
+let MIN_PARALLEL: I64 = 8192
+let SUM_CHUNK: I64 = 4096
+
+# The whole-buffer sum in that order. acc_add rather than a bare `+` so a narrow
+# tensor accumulates at its accumulation dtype; for an f64 tensor acc_add is f64
+# addition, so the order below is bit-identical to `parallelSum` over `[]float64`.
+fn block_sum(a: Tensor, acc: I64, n: I64) -> F64 {
+  if n < MIN_PARALLEL {
+    let s: F64 = 0.0
+    let i: I64 = 0
+    while i < n {
+      s = acc_add(acc, s, buf.get(a.data, a.dtype, i))
+      i = i + 1
+    }
+    return s
+  }
+  let total: F64 = 0.0
+  let start: I64 = 0
+  while start < n {
+    let end: I64 = start + SUM_CHUNK
+    if end > n { end = n }
+    let s: F64 = 0.0
+    let i: I64 = start
+    while i < end {
+      s = acc_add(acc, s, buf.get(a.data, a.dtype, i))
+      i = i + 1
+    }
+    total = acc_add(acc, total, s)
+    start = start + SUM_CHUNK
+  }
+  total
+}
+
 fn reduce_all(a: Tensor, mean: Bool) -> Tensor {
   let dt: I64 = reduce_result_dtype(a.dtype, mean)
   # The running sum is held at the accumulation dtype for the length of the
@@ -1302,13 +1344,12 @@ fn reduce_all(a: Tensor, mean: Bool) -> Tensor {
   # exceeds 256 times a typical term.
   let acc: I64 = acc_dtype(dt)
   let n: I64 = element_count(a.shape)
-  let s: F64 = 0.0
-  let i: I64 = 0
-  while i < n {
-    s = acc_add(acc, s, buf.get(a.data, a.dtype, i))
-    i = i + 1
-  }
-  if mean { return scalar_of(s / f64_of_i64(n), dt) }
+  let s: F64 = block_sum(a, acc, n)
+  # The bootstrap forms the mean as `s * (1.0 / n)`, not `s / n`. The two round
+  # differently, because `1.0 / n` rounds once before the multiply rounds again,
+  # and matching the bootstrap to the last bit means matching that, not just the
+  # sum order above.
+  if mean { return scalar_of(s * (1.0 / f64_of_i64(n)), dt) }
   scalar_of(s, dt)
 }
 
