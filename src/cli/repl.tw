@@ -78,10 +78,7 @@ fn show_error(r: Repl, d: dg.Diagnostic) -> Str = dg.render(r.caps, d)
 
 fn greet(r: Repl, version: Str) -> Str {
   if !r.caps.tty { "" }
-  else {
-    bn.render(r.caps, version) + "\n" +
-      ansi.paint(r.caps, th.muted(), "  :help for commands, Ctrl-D to leave") + "\n\n"
-  }
+  else { bn.repl_welcome(r.caps, version) + "\n" }
 }
 
 # Ctrl-D. One line, past tense, no exclamation. A tool that says goodbye

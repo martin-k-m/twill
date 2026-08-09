@@ -142,6 +142,26 @@ fn render(c: cp.Caps, version: Str) -> Str {
 # same one line: a box drawn from characters the terminal cannot render is worse
 # than the text it was dressing up.
 fn welcome(c: cp.Caps, version: Str) -> Str {
+  let hints: Arr[Str] = arr()
+  push(hints, hint(c, "twill run <file>", "run a program"))
+  push(hints, hint(c, "twill repl", "start an interactive session"))
+  push(hints, hint(c, "twill help", "see every command"))
+  welcome_box(c, version, hints)
+}
+
+# The same panel for the REPL, where the commands worth pointing at are its own
+# rather than the shell's.
+fn repl_welcome(c: cp.Caps, version: Str) -> Str {
+  let hints: Arr[Str] = arr()
+  push(hints, hint(c, ":help", "the repl commands"))
+  push(hints, hint(c, ":type <expr>", "the shape of an expression"))
+  push(hints, hint(c, "Ctrl-D", "leave"))
+  welcome_box(c, version, hints)
+}
+
+# The mark and the name, then whatever hints the caller wants under them, in a
+# rounded box with the version set into the top edge.
+fn welcome_box(c: cp.Caps, version: Str, hints: Arr[Str]) -> Str {
   if !can_draw(c) {
     return plain(version)
   }
@@ -150,9 +170,11 @@ fn welcome(c: cp.Caps, version: Str) -> Str {
   push(body, art[0] + "  " + ansi.paint(c, th.emphasis(), "twill"))
   push(body, art[1] + "  " + ansi.paint(c, th.muted(), "a language for shapes"))
   push(body, "")
-  push(body, hint(c, "twill run <file>", "run a program"))
-  push(body, hint(c, "twill repl", "start an interactive session"))
-  push(body, hint(c, "twill help", "see every command"))
+  let i: I64 = 0
+  while i < len(hints) {
+    push(body, hints[i])
+    i = i + 1
+  }
   box.panel(c, body, ansi.paint(c, th.muted(), version), th.teal(), box.rounded()) + "\n"
 }
 
