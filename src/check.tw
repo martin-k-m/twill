@@ -27,6 +27,7 @@ mode systems
 import "ast.tw" as ast
 import "bytes.tw" as bytes
 import "tensor.tw" as tensor
+import "builtins.tw" as builtins
 
 # ---- diagnostics -----------------------------------------------------------
 
@@ -1781,9 +1782,13 @@ fn substitute(dims: Arr[ast.Dim], subst: Dict[Str, I64]) -> Arr[I64] {
 
 # ---- builtins --------------------------------------------------------------
 
+# The names come from src/builtins.tw, the one list the evaluator reads too, so
+# the checker's known-name set and the evaluator's dispatch set cannot drift
+# (NEEDS-52). The Dict below stays, because is_builtin is called per identifier
+# and the O(1) lookup is worth keeping; only the source of the names moved.
 fn builtin_names() -> Arr[Str] {
   let a: Arr[Str] = arr_new()
-  for name in split_words("print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item dtype range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian") {
+  for name in split_words(builtins.NAMES) {
     push(a, name)
   }
   a

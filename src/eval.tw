@@ -37,6 +37,7 @@ mode systems
 import "ast.tw" as ast
 import "bytes.tw" as bytes
 import "tensor.tw" as tensor
+import "builtins.tw" as builtins
 
 # ---- values ----------------------------------------------------------------
 
@@ -1053,12 +1054,13 @@ fn slice_bound(e: Opt[ast.Expr], env: Env, dflt: I64) -> Res[I64, RuntimeError] 
 
 fn quoted(s: Str) -> Str = str_quote(s)
 
-# is_builtin is the check.tw table again. Shared rather than duplicated is the
-# right end state; today they are separate because the checker's table is the
-# one the diagnostics are compared against and the evaluator's is the one the
-# dispatch uses, and merging them before the dispatch exists would be guessing.
-# NEEDS-52.
-fn is_builtin(name: Str) -> Bool = builtin_exists(name)
+# is_builtin is the check.tw table, now genuinely shared rather than a second
+# copy: src/builtins.tw owns the one list and the checker builds its set from
+# the same NAMES. That is the end state NEEDS-52 asked for, and it replaces a
+# call to a builtin_exists that was never defined, so a bare builtin name in
+# expression position resolves to a VBuiltin instead of reaching an undefined
+# function.
+fn is_builtin(name: Str) -> Bool = builtins.is_builtin_name(name)
 
 # ---- builtins --------------------------------------------------------------
 #

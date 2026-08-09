@@ -1,0 +1,31 @@
+mode systems
+
+# builtins.tw: the one list of builtin names, shared by the checker and the
+# evaluator.
+#
+# NEEDS-52 was the drift risk of keeping this list twice. src/check.tw held it
+# for the unknown-name diagnostic, and src/eval.tw wanted the same set to turn a
+# bare name into a VBuiltin, and the comment there said "is_builtin is the
+# check.tw table again" over a call to a function that did not exist. This file
+# is the shared table both of them meant: check.tw builds its set from NAMES and
+# eval.tw asks is_builtin_name, so a builtin added to the dispatch is a name
+# added here once and seen by both, and the two can no longer disagree.
+#
+# The list is the evaluator's dispatch set and the checker's known-name set,
+# which are the same set by intent. A name here that eval does not dispatch
+# would check clean and fail at run time; a name eval dispatches that is missing
+# here would be reported as unknown though it works. Keeping one list is what
+# makes both of those impossible rather than merely unlikely.
+
+import "bytes.tw" as bytes
+
+let NAMES: Str = "print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item dtype range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian"
+
+# Membership over the space-separated list. Padding both sides is what stops
+# "max" from matching inside "cummax": the same trick eval's in_words and
+# check's in_set use, so the needle can only land on a whole word.
+fn is_builtin_name(name: Str) -> Bool {
+  let hay: Str = bytes.concat(" ", bytes.concat(NAMES, " "))
+  let needle: Str = bytes.concat(" ", bytes.concat(name, " "))
+  bytes.index_of(hay, needle) >= 0
+}
