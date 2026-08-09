@@ -4890,6 +4890,11 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
   # value that won each window, with no second-order term. The forward twin of
   # vjp_maxpool2d, reading the same winners from iattr (NEEDS-83).
   if is_same_op(e.op, OpMaxPool2D) { return jet_maxpool2d(tp, n, e, js) }
+  # prod has a genuine second-order term. The first tangent is p * sum(d_k/x_k),
+  # the second follows by differentiating it, and zeros split it into cases the
+  # same way vjp_prod's backward does: one zero leaves only that factor, two
+  # leave only their cross term, three or more leave nothing (NEEDS-83).
+  if is_same_op(e.op, OpProd) { return jet_prod(tp, n, e, js) }
   # Reshape, broadcast, transpose, flip, gather, index, slice and split move
   # numbers without changing them, so their jet is the same rearrangement
   # applied to the tangents. That is one rule, and it is expressed by replaying
@@ -5119,6 +5124,88 @@ fn jet_maxpool2d(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
     js.d[n][o] = js.d[a][src]
     js.dd[n][o] = js.dd[a][src]
     o = o + 1
+  }
+  Ok(0)
+}
+
+# The 2-jet of prod, per reduced span, split by the zero count the same way
+# vjp_prod splits the backward. With no zeros the first tangent is p times the
+# sum of d_k/x_k and the second is p*(u*u + v - w); with one zero at q only that
+# factor's derivative survives; with two, only their cross term; with three or
+# more, nothing. It recomputes the products through prod_over, the way vjp_prod
+# does, so the zero count and nz product are the ones the forward pass had.
+fn jet_prod(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
+  let a: I64 = e.inputs[0]
+  let x: Tensor = value_of(tp, a)
+  let sp: Spans = spans_for(x, e.iattr[0])
+  let aux: ProdAux = prod_over(x, sp.length, sp.before, sp.after, acc_dtype(x.dtype))
+  let i: I64 = 0
+  while i < sp.before {
+    let j: I64 = 0
+    while j < sp.after {
+      let idx: I64 = i * sp.after + j
+      let base: I64 = i * sp.length * sp.after + j
+      let p: F64 = aux.out[idx]
+      let nz: F64 = aux.nz_prod[idx]
+      let z: I64 = aux.zeros[idx]
+      if z == 0 {
+        let u: F64 = 0.0
+        let v: F64 = 0.0
+        let w: F64 = 0.0
+        let k: I64 = 0
+        while k < sp.length {
+          let pk: I64 = base + k * sp.after
+          let rk: F64 = js.d[a][pk] / buf.get(x.data, x.dtype, pk)
+          u = u + rk
+          v = v + (js.dd[a][pk] / buf.get(x.data, x.dtype, pk))
+          w = w + (rk * rk)
+          k = k + 1
+        }
+        js.d[n][idx] = p * u
+        js.dd[n][idx] = p * (((u * u) + v) - w)
+      } else {
+        if z == 1 {
+          let q: I64 = 0 - 1
+          let r: F64 = 0.0
+          let k: I64 = 0
+          while k < sp.length {
+            let pk: I64 = base + k * sp.after
+            if buf.get(x.data, x.dtype, pk) == 0.0 {
+              q = pk
+            } else {
+              r = r + (js.d[a][pk] / buf.get(x.data, x.dtype, pk))
+            }
+            k = k + 1
+          }
+          js.d[n][idx] = nz * js.d[a][q]
+          js.dd[n][idx] = (2.0 * nz * js.d[a][q] * r) + (nz * js.dd[a][q])
+        } else {
+          if z == 2 {
+            let q1: I64 = 0 - 1
+            let q2: I64 = 0 - 1
+            let k: I64 = 0
+            while k < sp.length {
+              let pk: I64 = base + k * sp.after
+              if buf.get(x.data, x.dtype, pk) == 0.0 {
+                if q1 < 0 {
+                  q1 = pk
+                } else {
+                  q2 = pk
+                }
+              }
+              k = k + 1
+            }
+            js.d[n][idx] = 0.0
+            js.dd[n][idx] = 2.0 * nz * js.d[a][q1] * js.d[a][q2]
+          } else {
+            js.d[n][idx] = 0.0
+            js.dd[n][idx] = 0.0
+          }
+        }
+      }
+      j = j + 1
+    }
+    i = i + 1
   }
   Ok(0)
 }

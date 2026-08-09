@@ -824,6 +824,66 @@ func prodOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 	}
 
 	res := &Tensor{Data: out, Shape: outShape}
+	// Forward-mode. The first tangent is p*u with u the sum of d_k/x_k, and the
+	// second follows from differentiating that. Zeros break the division, so the
+	// zero count splits it into cases, the forward twin of the backward's split:
+	// with one zero only that factor's derivative survives; with two, only their
+	// cross term; with three or more, nothing.
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for i := 0; i < before; i++ {
+				for j := 0; j < after; j++ {
+					idx := i*after + j
+					base := i*L*after + j
+					p := out[idx]
+					nz := nzProd[idx]
+					switch zeros[idx] {
+					case 0:
+						u, v, w := 0.0, 0.0, 0.0
+						for k := 0; k < L; k++ {
+							pk := base + k*after
+							rk := t.jet.d[pk] / t.Data[pk]
+							u += rk
+							v += t.jet.dd[pk] / t.Data[pk]
+							w += rk * rk
+						}
+						res.jet.d[idx] = p * u
+						res.jet.dd[idx] = p * (u*u + v - w)
+					case 1:
+						q, r := -1, 0.0
+						for k := 0; k < L; k++ {
+							pk := base + k*after
+							if t.Data[pk] == 0 {
+								q = pk
+							} else {
+								r += t.jet.d[pk] / t.Data[pk]
+							}
+						}
+						res.jet.d[idx] = nz * t.jet.d[q]
+						res.jet.dd[idx] = 2*nz*t.jet.d[q]*r + nz*t.jet.dd[q]
+					case 2:
+						q1, q2 := -1, -1
+						for k := 0; k < L; k++ {
+							pk := base + k*after
+							if t.Data[pk] == 0 {
+								if q1 < 0 {
+									q1 = pk
+								} else {
+									q2 = pk
+								}
+							}
+						}
+						res.jet.d[idx] = 0
+						res.jet.dd[idx] = 2 * nz * t.jet.d[q1] * t.jet.d[q2]
+					default:
+						res.jet.d[idx] = 0
+						res.jet.dd[idx] = 0
+					}
+				}
+			}
+		}
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
