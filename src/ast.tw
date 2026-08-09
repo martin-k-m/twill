@@ -131,6 +131,7 @@ struct Lambda {
   params: Arr[Param],
   ret: Opt[ShapeAnno],
   ret_unit: Opt[UnitAnno],
+  ret_type: Str,
   body: Expr,
   line: I64,
 }
@@ -215,6 +216,9 @@ struct FnDecl {
   params: Arr[Param],
   ret: Opt[ShapeAnno],
   ret_unit: Opt[UnitAnno],
+  # A named or module-qualified return type (`-> Repl`, `-> cp.Caps`), or "".
+  # Advisory, the way a parameter's type_name is; a `.` marks it unambiguously.
+  ret_type: Str,
   body: Expr,
   line: I64,
 }
@@ -391,9 +395,9 @@ fn list_lit(ids: NodeIds, elements: Arr[Expr], line: I64) -> Expr =
   EList(ListLit { id: fresh(ids), elements: elements, line: line })
 
 fn lambda(ids: NodeIds, params: Arr[Param], ret: Opt[ShapeAnno], ret_unit: Opt[UnitAnno],
-          body: Expr, line: I64) -> Expr =
+          ret_type: Str, body: Expr, line: I64) -> Expr =
   ELambda(Lambda { id: fresh(ids), params: params, ret: ret, ret_unit: ret_unit,
-                   body: body, line: line })
+                   ret_type: ret_type, body: body, line: line })
 
 fn unary(ids: NodeIds, op: Str, operand: Expr, line: I64) -> Expr =
   EUnary(Unary { id: fresh(ids), op: op, operand: operand, line: line })
@@ -427,9 +431,9 @@ fn let_stmt(ids: NodeIds, name: Str, unit: Opt[UnitAnno], value: Expr, line: I64
   SLet(Let { id: fresh(ids), name: name, unit: unit, value: value, line: line })
 
 fn fn_decl(ids: NodeIds, name: Str, params: Arr[Param], ret: Opt[ShapeAnno],
-           ret_unit: Opt[UnitAnno], body: Expr, line: I64) -> FnDecl =
+           ret_unit: Opt[UnitAnno], ret_type: Str, body: Expr, line: I64) -> FnDecl =
   FnDecl { id: fresh(ids), name: name, params: params, ret: ret, ret_unit: ret_unit,
-           body: body, line: line }
+           ret_type: ret_type, body: body, line: line }
 
 fn assign_stmt(ids: NodeIds, name: Str, value: Expr, line: I64) -> Stmt =
   SAssign(Assign { id: fresh(ids), name: name, value: value, line: line })

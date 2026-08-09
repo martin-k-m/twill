@@ -163,7 +163,7 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 }
 
 func (p *printer) fnDecl(fn *ast.FnDecl, indent int) {
-	sig := "fn " + fn.Name + "(" + p.params(fn.Params) + ")" + p.retPart(fn.Ret, fn.RetUnit)
+	sig := "fn " + fn.Name + "(" + p.params(fn.Params) + ")" + p.retPart(fn.Ret, fn.RetUnit, fn.RetType)
 	if blk, ok := fn.Body.(*ast.Block); ok {
 		p.blockStmt(indent, sig, blk, fn.Line)
 		return
@@ -201,12 +201,15 @@ func (p *printer) params(params []ast.Param) string {
 
 // retPart prints the `-> ...` return annotation, which is either a shape or a
 // unit (never both).
-func (p *printer) retPart(r *ast.ShapeAnno, u *ast.UnitAnno) string {
+func (p *printer) retPart(r *ast.ShapeAnno, u *ast.UnitAnno, retType string) string {
 	if r != nil {
 		return " -> " + p.shape(r)
 	}
 	if u != nil {
 		return " -> " + p.unitAnno(u)
+	}
+	if retType != "" {
+		return " -> " + retType
 	}
 	return ""
 }
@@ -281,7 +284,7 @@ func (p *printer) expr(e ast.Expr) string {
 		}
 		return "{ " + strings.Join(parts, ", ") + " }"
 	case *ast.Lambda:
-		sig := "fn(" + p.params(ex.Params) + ")" + p.retPart(ex.Ret, ex.RetUnit)
+		sig := "fn(" + p.params(ex.Params) + ")" + p.retPart(ex.Ret, ex.RetUnit, ex.RetType)
 		if blk, ok := ex.Body.(*ast.Block); ok {
 			return sig + " " + p.inlineBlock(blk)
 		}

@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Module-qualified type names parse in signatures** (2026-08-09). `fn f(c:
+  cp.Caps) -> cp.Caps` was a hard syntax error, because the type grammar reuses
+  the unit-expression parser, which stops at the `.`. A `.` after a single bare
+  name is now read as a qualified type (units are never qualified, so it is
+  unambiguous): the suffix is consumed and the dotted name kept. A qualified
+  return goes into a new advisory `RetType` on the function rather than a unit
+  slot, so no spurious unit check runs; a qualified parameter extends its
+  `TypeName`. Both are advisory, matching the structural records the bootstrap
+  already has, so an unresolved qualified name is tolerated rather than an
+  error. `twill fmt` round-trips them. Landed in the Go bootstrap and the
+  self-hosted tree (`src/parse.tw`, `src/ast.tw`, `src/fmt.tw`) in lockstep,
+  with tests in `internal/interp/qualtype_test.go`.
+
 - **`mode systems` is recognised as a file-level declaration** (NEEDS-1,
   2026-08-09). A leading `mode <name>` is recorded on the program and re-emitted
   by the formatter, set off from the body by a blank line. `mode` stays a

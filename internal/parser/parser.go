@@ -192,7 +192,7 @@ func (p *parser) parseFnDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	params, ret, retUnit, err := p.parseSignature()
+	params, ret, retUnit, retType, err := p.parseSignature()
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (p *parser) parseFnDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FnDecl{Name: name, Params: params, Ret: ret, RetUnit: retUnit, Body: body, Line: line}, nil
+	return &ast.FnDecl{Name: name, Params: params, Ret: ret, RetUnit: retUnit, RetType: retType, Body: body, Line: line}, nil
 }
 
 func (p *parser) parseWhile() (ast.Stmt, error) {
@@ -473,7 +473,7 @@ func (p *parser) parseIf() (*ast.IfExpr, error) {
 
 func (p *parser) parseLambda() (ast.Expr, error) {
 	line := p.next().Line // 'fn'
-	params, ret, retUnit, err := p.parseSignature()
+	params, ret, retUnit, retType, err := p.parseSignature()
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +481,7 @@ func (p *parser) parseLambda() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Lambda{Params: params, Ret: ret, RetUnit: retUnit, Body: body, Line: line}, nil
+	return &ast.Lambda{Params: params, Ret: ret, RetUnit: retUnit, RetType: retType, Body: body, Line: line}, nil
 }
 
 func (p *parser) parseTensorOrList() (ast.Expr, error) {
@@ -590,24 +590,54 @@ func (p *parser) expectPunct(value string) lexer.Token {
 }
 
 // parseSignature parses the parameter list and an optional "-> shape" return.
-func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, *ast.UnitAnno, error) {
+func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, *ast.UnitAnno, string, error) {
 	params, err := p.parseParams()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, "", err
 	}
 	var ret *ast.ShapeAnno
 	var retUnit *ast.UnitAnno
+	var retType string
 	if p.match("->") {
 		if p.check("[") {
 			ret, err = p.parseShapeAnno()
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
 		} else {
 			retUnit, err = p.parseUnitExpr()
-		}
-		if err != nil {
-			return nil, nil, nil, err
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+			// A `.` after a single bare name makes it a qualified type, not a
+			// unit: units are never qualified. Lift it out of the unit slot into
+			// an advisory type name and consume the `.Ident` suffix.
+			if p.check(".") && len(retUnit.Factors) == 1 && retUnit.Factors[0].Exp == 1 {
+				retType, err = p.qualify(retUnit.Factors[0].Name)
+				if err != nil {
+					return nil, nil, nil, "", err
+				}
+				retUnit = nil
+			}
 		}
 	}
-	return params, ret, retUnit, nil
+	return params, ret, retUnit, retType, nil
+}
+
+// qualify consumes `.Ident` segments after a base name and returns the dotted
+// qualified name, e.g. base "cp" then ".Caps" gives "cp.Caps". It is how a
+// module-qualified type name is read wherever a type annotation may appear.
+func (p *parser) qualify(base string) (string, error) {
+	name := base
+	for p.check(".") {
+		p.next() // '.'
+		seg, err := p.expectIdent()
+		if err != nil {
+			return "", err
+		}
+		name += "." + seg
+	}
+	return name, nil
 }
 
 func (p *parser) parseParams() ([]ast.Param, error) {
@@ -669,6 +699,14 @@ func (p *parser) parseParam() (ast.Param, error) {
 			}
 			if len(u.Factors) == 1 && u.Factors[0].Exp == 1 {
 				param.TypeName = u.Factors[0].Name // bare name: type or unit
+				// A `.` makes it a qualified type name (`cp.Caps`): units are
+				// never qualified, so the suffix is unambiguously a type.
+				if p.check(".") {
+					param.TypeName, err = p.qualify(param.TypeName)
+					if err != nil {
+						return ast.Param{}, err
+					}
+				}
 			} else {
 				param.Unit = u
 			}

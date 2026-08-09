@@ -73,6 +73,7 @@ struct Signature {
   params: Arr[ast.Param],
   ret: Opt[ast.ShapeAnno],
   ret_unit: Opt[ast.UnitAnno],
+  ret_type: Str,
 }
 
 # parse tokenizes and parses src into a Program.
@@ -248,7 +249,7 @@ fn parse_fn_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let name: Str = expect_ident(p)?
   let sig: Signature = parse_signature(p)?
   let body: ast.Expr = parse_fn_body(p)?
-  Ok(SFn(ast.fn_decl(p.ids, name, sig.params, sig.ret, sig.ret_unit, body, line)))
+  Ok(SFn(ast.fn_decl(p.ids, name, sig.params, sig.ret, sig.ret_unit, sig.ret_type, body, line)))
 }
 
 fn parse_while(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
@@ -524,7 +525,7 @@ fn parse_lambda(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
   let line: I64 = next_tok(p).line
   let sig: Signature = parse_signature(p)?
   let body: ast.Expr = parse_fn_body(p)?
-  Ok(ast.lambda(p.ids, sig.params, sig.ret, sig.ret_unit, body, line))
+  Ok(ast.lambda(p.ids, sig.params, sig.ret, sig.ret_unit, sig.ret_type, body, line))
 }
 
 # A `[...]` is a tensor literal when every element is one a tensor can be built
@@ -640,16 +641,36 @@ fn parse_signature(p: Parser) -> Res[Signature, lex.SyntaxError] {
   let params: Arr[ast.Param] = parse_params(p)?
   let ret: Opt[ast.ShapeAnno] = None
   let ret_unit: Opt[ast.UnitAnno] = None
+  let ret_type: Str = ""
   if accept(p, "->") {
-    # A `[` after the arrow is a shape; anything else is a unit expression.
-    # There is no third case, and a return type in the systems sense is NEEDS-1.
+    # A `[` after the arrow is a shape; otherwise a unit expression, unless a
+    # `.` follows a single bare name, which makes it a qualified type: units are
+    # never qualified. The qualified name is lifted into the advisory ret_type.
     if check(p, "[") {
       ret = Some(parse_shape_anno(p)?)
     } else {
-      ret_unit = Some(parse_unit_expr(p)?)
+      let u: ast.UnitAnno = parse_unit_expr(p)?
+      if check(p, ".") and len(u.factors) == 1 and u.factors[0].exp == 1 {
+        ret_type = qualify(p, u.factors[0].name)?
+      } else {
+        ret_unit = Some(u)
+      }
     }
   }
-  Ok(Signature { params: params, ret: ret, ret_unit: ret_unit })
+  Ok(Signature { params: params, ret: ret, ret_unit: ret_unit, ret_type: ret_type })
+}
+
+# qualify consumes `.Ident` segments after a base name and returns the dotted
+# qualified name, e.g. base "cp" then ".Caps" gives "cp.Caps". It reads a
+# module-qualified type name wherever a type annotation may appear.
+fn qualify(p: Parser, base: Str) -> Res[Str, lex.SyntaxError] {
+  let name: Str = base
+  while check(p, ".") {
+    next_tok(p)
+    let seg: Str = expect_ident(p)?
+    name = bytes.concat(name, bytes.concat(".", seg))
+  }
+  Ok(name)
 }
 
 fn parse_params(p: Parser) -> Res[Arr[ast.Param], lex.SyntaxError] {
@@ -681,6 +702,11 @@ fn parse_param(p: Parser) -> Res[ast.Param, lex.SyntaxError] {
       let u: ast.UnitAnno = parse_unit_expr(p)?
       if len(u.factors) == 1 and u.factors[0].exp == 1 {
         param.type_name = u.factors[0].name
+        # A `.` makes it a qualified type name (`cp.Caps`): units are never
+        # qualified, so the suffix is unambiguously part of the type.
+        if check(p, ".") {
+          param.type_name = qualify(p, param.type_name)?
+        }
       } else {
         param.unit = Some(u)
       }
