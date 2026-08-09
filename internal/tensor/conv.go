@@ -115,6 +115,19 @@ func MaxPool2D(input *Tensor, k int) (*Tensor, error) {
 		}
 	}
 	res := &Tensor{Data: out, Shape: []int{c, oh, ow}}
+	// Forward-mode. maxpool is a selection, locally linear, so a tangent rides
+	// with the value that won its window and there is no second-order term: the
+	// output tangent is the input's at argmax[o], for the first tangent and the
+	// second alike. The forward twin of the backward scatter.
+	if recordJets && input.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			for o, src := range argmax {
+				res.jet.d[o] = input.jet.d[src]
+				res.jet.dd[o] = input.jet.dd[src]
+			}
+		}
+	}
 	return track1(res, input, func() {
 		gi := input.ensureGrad()
 		g := res.Grad

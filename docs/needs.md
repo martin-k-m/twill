@@ -1697,10 +1697,16 @@ length, with no second-order term of its own; `internal/tensor` `medianOver` and
 `src/tensor.tw` `jet_median` read the same `lo`/`hi` `vjp_median` scatters to, and
 `jet_test.go` checks the odd and even cases against finite differences.
 
-Left: `prod`, `conv2d` and `maxpool2d`. `maxpool2d` is a selection like median;
-`prod` and `conv2d` have genuine second-order terms. Each needs its jvp written
-and verified on both sides at once, as with NEEDS-77. The original framing
-follows.
+`maxpool2d` is done too, both sides. It selects the largest value in each window
+and is locally linear, so its jet gathers the tangent of the winner with no
+second-order term; `internal/tensor` `MaxPool2D` and `src/tensor.tw`
+`jet_maxpool2d` read the same argmax `vjp_maxpool2d` scatters to, and
+`jet_test.go` checks it against finite differences.
+
+Left: `prod` and `conv2d`, the two with genuine second-order terms rather than a
+selection. `prod` is the log-derivative with a zero-handling wrinkle; `conv2d`'s
+jvp is another convolution. Each needs its jvp written and verified on both sides
+at once, as with NEEDS-77. The original framing follows.
 
 *(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
 `is_rearrangement`.)*
