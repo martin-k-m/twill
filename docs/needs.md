@@ -1890,12 +1890,15 @@ and `src/buf.tw` all import `std/float`; the first two were calling `f64_shortes
 bare and dangling, and now resolve. The f64 rendering is unchanged, so nothing
 that compares against the bootstrap moves.
 
-Not part of this: the *parse* side. `f64_of_str` and a `ParsedF64`-shaped
-`f64_parse` are still called bare in `src/eval.tw` (CSV), `src/parse.tw` (numeric
-literals) and `std/json.tw` `JNumber`, and one of those wants an `F64` where the
-function returns `Opt[F64]`. That is the reachability of `f64_of_str`, NEEDS-18,
-and it is now wireable to the same `std/float` in a follow-up rather than
-blocked. The original text follows.
+The parse side landed too, in a follow-up. `f64_of_str` was being called bare in
+`src/eval.tw` (CSV and frame reads), `src/parse.tw` (numeric literals) and
+`std/json.tw`'s number reader, all dangling; each now goes through `flt.f64_of_str`
+against the moved module. Two corrections fell out: `src/eval.tw` was spelling it
+`f64_parse` and matching `Some`/`None`, but `f64_parse` returns a `ParsedF64`
+struct and `f64_of_str` is the `Opt[F64]` it wanted; and `std/json` was handing
+an `Opt[F64]` to `JNumber`, which takes an `F64`, so it now matches the option
+and fails the parse on `None` rather than assuming. That closes the `f64_of_str`
+reachability half of NEEDS-18 for these callers. The original text follows.
 
 *(Original: open, blocking for `std/json.tw`. `number_str`.)*
 

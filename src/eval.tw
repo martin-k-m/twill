@@ -38,6 +38,7 @@ import "ast.tw" as ast
 import "bytes.tw" as bytes
 import "tensor.tw" as tensor
 import "builtins.tw" as builtins
+import "std/float" as flt
 
 # ---- values ----------------------------------------------------------------
 
@@ -3242,7 +3243,7 @@ fn read_csv(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
     }
     let row: Arr[F64] = arr_new()
     for f in split_fields(text) {
-      match f64_parse(f) {
+      match flt.f64_of_str(f) {
         Some(v) => push(row, v),
         None => return Err(runtime_error(line,
           bytes.concat("read_csv: ", bytes.concat(quoted(f), " is not a number")))),
@@ -3308,7 +3309,7 @@ fn read_frame(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
     let row: Arr[F64] = arr_new()
     let i: I64 = 0
     while i < len(fields) {
-      match f64_parse(fields[i]) {
+      match flt.f64_of_str(fields[i]) {
         Some(v) => push(row, v),
         None => return Err(runtime_error(line, bytes.concat("read_frame: column ",
           bytes.concat(quoted(header[i]), bytes.concat(" value ",
@@ -3382,7 +3383,7 @@ fn write_frame(frame: RecordVal, path_in: Str, line: I64) -> Res[Unit, RuntimeEr
     i = 0
     while i < len(cols) {
       if i > 0 { bytes.push(b, 44) }
-      bytes.push_text(b, format_number(cols[i][r]))
+      bytes.push_text(b, flt.format_number(cols[i][r]))
       i = i + 1
     }
     bytes.push(b, 10)

@@ -463,7 +463,13 @@ fn parse_number(p: Parser) -> Res[Json, ParseError] {
     }
     while p.pos < p.n and text.is_digit(p.src[p.pos]) { p.pos = p.pos + 1 }
   }
-  Ok(JNumber(f64_of_str(text.slice(p.src, start, p.pos))))
+  # The span was already validated as a JSON number above, so f64_of_str returns
+  # Some; the None arm is there because f64_of_str returns an Opt and a parser
+  # that unwrapped it with an assumption would be one input away from a crash.
+  match flt.f64_of_str(text.slice(p.src, start, p.pos)) {
+    Some(v) => Ok(JNumber(v)),
+    None => Err(fail(p, "invalid number")),
+  }
 }
 
 # ---- rendering -------------------------------------------------------------
