@@ -19,9 +19,12 @@ mode systems
 #   - There is no line-width limit and no wrapping. An expression prints on one
 #     line however long it is. A wrapping formatter would have to decide where
 #     to break, and that decision is not in the Go file to copy.
-#   - Blank lines in the input are not preserved. The printer emits one line per
-#     statement and nothing else, so paragraph breaks between statements are
-#     lost. This is a real cost and it is the Go behaviour; NEEDS-56 records it.
+#   - A blank line between two statements is preserved, as one blank line
+#     however many the author left, so paragraph breaks inside a function
+#     survive a format. This is the one place this printer deliberately diverges
+#     from internal/format/format.go, which drops them: the owner chose the
+#     better behaviour over byte-agreement with a bootstrap that is being
+#     retired. maybe_blank does it and NEEDS-78 records the decision.
 #
 # Comments are the part a formatter usually gets wrong, so this file does not
 # try to be clever about them. A comment on its own line is re-emitted, at the
@@ -101,8 +104,11 @@ fn format(prog: ast.Program, comments: Arr[lex.Comment]) -> Str {
   # identity and is not repeated. Emitting them in order is what emitLeading
   # below depends on.
   let j: I64 = 0
+  let prev_end: I64 = -1
   while j < len(prog.body) {
+    maybe_blank(p, prev_end, prog.body[j])
     stmt(p, prog.body[j], 0)
+    prev_end = ast.stmt_end_line(prog.body[j])
     j = j + 1
   }
   # Flush own-line comments that trail the last statement. The bound is a line
@@ -198,6 +204,32 @@ fn emit_leading(p: Printer, indent: I64, before_line: I64) {
   }
 }
 
+# NEEDS-78: re-emit one blank line where the source had a paragraph break between
+# two statements. The gap is measured from the previous statement's last line to
+# the leading edge of this one, which is its first own-line comment if it has one
+# and the statement itself otherwise, so a comment sitting directly under the
+# previous statement is not mistaken for a break. A gap of two or more source
+# lines becomes one blank line, however many the author left. prev_end below zero
+# means this is the first statement of a block, which never takes a leading blank.
+#
+# This is a deliberate divergence from internal/format/format.go, which emits one
+# line per statement and drops the blanks. The owner chose to let twill's
+# formatter be the better one here rather than reproduce the bootstrap's gap; the
+# two therefore disagree on this point until the bootstrap is retired, and the
+# fmt goldens are regenerated from twill when it can run. See the entry.
+fn maybe_blank(p: Printer, prev_end: I64, s: ast.Stmt) {
+  if prev_end < 0 {
+    return
+  }
+  let edge: I64 = ast.stmt_line(s)
+  if p.own_idx < len(p.own) and p.own[p.own_idx].line < edge {
+    edge = p.own[p.own_idx].line
+  }
+  if edge - prev_end >= 2 {
+    bytes.push_text(p.buf, "\n")
+  }
+}
+
 # The scan strips the `#` and the surrounding space, so re-emitting normalises
 # `#foo` and `#    foo` to `# foo`. An empty comment stays a bare `#` rather
 # than becoming `# ` with a trailing space, which would not survive a
@@ -279,8 +311,11 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
     # would invent a scope the parser did not record.
     SBlock(st) => {
       let i: I64 = 0
+      let prev_end: I64 = -1
       while i < len(st.body) {
+        maybe_blank(p, prev_end, st.body[i])
         stmt(p, st.body[i], indent)
+        prev_end = ast.stmt_end_line(st.body[i])
         i = i + 1
       }
     },
@@ -309,8 +344,11 @@ fn fn_decl(p: Printer, f: ast.FnDecl, indent: I64) {
 fn block_stmt(p: Printer, indent: I64, header: Str, blk: ast.Block, header_line: I64) {
   line_c(p, indent, bytes.concat(header, " {"), header_line)
   let i: I64 = 0
+  let prev_end: I64 = -1
   while i < len(blk.body) {
+    maybe_blank(p, prev_end, blk.body[i])
     stmt(p, blk.body[i], indent + 1)
+    prev_end = ast.stmt_end_line(blk.body[i])
     i = i + 1
   }
   # Comments before the closing brace. Without this a comment on the last line
