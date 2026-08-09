@@ -504,7 +504,18 @@ The three entries below came out of running `src/lex.tw` against
 
 ## NEEDS-32: Go-compatible `%q` for a non-printable or non-ASCII character
 
-**Status:** open divergence. `src/lex.tw:478` (`quote_char`).
+**Status:** closed for the control range; narrowed for the rest. `src/lex.tw`
+`quote_char` now escapes the ASCII control bytes exactly as Go's strconv does,
+a NUL as `"\x00"`, a vertical tab as `"\v"`, the seven named escapes and
+lowercase `\xHH` for the others including `0x7f`, so the case the entry leads
+with agrees byte for byte. A printable byte and every byte of a valid multibyte
+rune are emitted raw as before and already agreed. What remains is a
+non-printable rune above `0x7f` and an invalid UTF-8 byte, which need Go's full
+`%q` with its Unicode printability table (NEEDS-1) to render as the replacement
+rune; those are left raw, and the lexer's "unexpected character" realistically
+meets a control byte, which is now right. The original text follows.
+
+*(Original status: open divergence. `src/lex.tw:478` (`quote_char`).)*
 
 The message `unexpected character %q` is the lexer's only use of `%q` on source
 text. Go renders a non-printable rune as an escape: a NUL byte prints as

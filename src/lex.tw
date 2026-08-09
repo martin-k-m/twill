@@ -471,25 +471,78 @@ fn is_space(c: I64) -> Bool =
 # does, for the one error message that needs it. A printable ASCII byte is
 # wrapped in quotes with `"` and `\` escaped; a multi-byte character is passed
 # through whole, which is what %q does for a printable rune.
+# Go renders `%q` on a control character as an escape: a NUL is "\x00", a
+# vertical tab "\v". This emitted the raw byte instead, so the two disagreed on
+# any non-printable input character, which only fires on already-malformed source
+# and so survived a weak harness (NEEDS-32). A printable byte, and every byte of a
+# valid multibyte rune, is emitted raw as before and already agreed; the ASCII
+# control range is now escaped exactly as Go's strconv does. A non-printable rune
+# above 0x7f and an invalid UTF-8 byte still need Go's full `%q` with its Unicode
+# printability table (NEEDS-1 and NEEDS-20) to escape as the replacement rune,
+# and are left raw here, because the lexer's "unexpected character" realistically
+# meets a control byte, which this now gets right.
 fn quote_char(src: Str, i: I64) -> Str {
   let width: I64 = utf8_width(src[i])
   if i + width > len(src) {
     width = 1
   }
-  let raw: Str = src[i:i + width]
   let buf: Bytes = bytes.new()
   bytes.push(buf, C_QUOTE)
-  let k: I64 = 0
-  while k < width {
-    let c: I64 = raw[k]
-    if c == C_QUOTE or c == C_BACKSLASH {
-      bytes.push(buf, C_BACKSLASH)
+  if width == 1 {
+    escape_byte(buf, src[i])
+  } else {
+    let k: I64 = 0
+    while k < width {
+      bytes.push(buf, src[i + k])
+      k = k + 1
     }
-    bytes.push(buf, c)
-    k = k + 1
   }
   bytes.push(buf, C_QUOTE)
   bytes.to_str(buf)
+}
+
+# One byte escaped the way Go's strconv.appendEscapedRune does for a rune below
+# 0x80: quote and backslash first, then the printable range as itself, then the
+# seven named control escapes, then lowercase \xHH for the rest, 0x7f included. A
+# byte at or above 0x80 reaches here only as invalid UTF-8 and is left raw, the
+# residual the header note describes.
+fn escape_byte(buf: Bytes, c: I64) {
+  if c == C_QUOTE or c == C_BACKSLASH {
+    bytes.push(buf, C_BACKSLASH)
+    bytes.push(buf, c)
+    return
+  }
+  if c >= 32 and c != 127 {
+    bytes.push(buf, c)
+    return
+  }
+  let named: Str = named_escape(c)
+  if len(named) > 0 {
+    bytes.push_text(buf, named)
+    return
+  }
+  bytes.push_text(buf, "\\x")
+  bytes.push(buf, hex_digit(c / 16))
+  bytes.push(buf, hex_digit(c % 16))
+}
+
+# The seven control bytes Go's strconv spells with a letter; "" for the rest,
+# which take \xHH. The doubled backslash is one literal backslash, so "\\a" is
+# the two bytes a backslash and an a, which is what Go emits.
+fn named_escape(c: I64) -> Str {
+  if c == 7 { return "\\a" }
+  if c == 8 { return "\\b" }
+  if c == 9 { return "\\t" }
+  if c == 10 { return "\\n" }
+  if c == 11 { return "\\v" }
+  if c == 12 { return "\\f" }
+  if c == 13 { return "\\r" }
+  ""
+}
+
+fn hex_digit(n: I64) -> I64 {
+  if n < 10 { return 48 + n }
+  87 + n
 }
 
 # The length in bytes of the character whose first byte is c, by the UTF-8 lead
