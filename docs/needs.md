@@ -1691,9 +1691,16 @@ differentiated once more; `internal/tensor` `LogSumExp` and `src/tensor.tw`
 softmax, so they stay bit-identical, and `jet_test.go` checks it on the square of
 the reduction and on a cross-entropy `lse(x) - x_target`.
 
-Left: `prod`, `median`, `conv2d` and `maxpool2d`. Each has a real second
-derivative and no jvp on either side, so each needs its jvp written and verified
-on both sides at once, as with NEEDS-77. The original framing follows.
+`median` is done too, both sides. It is a selection, locally linear, so its jet
+gathers the tangent of the middle element, or averages the two for an even
+length, with no second-order term of its own; `internal/tensor` `medianOver` and
+`src/tensor.tw` `jet_median` read the same `lo`/`hi` `vjp_median` scatters to, and
+`jet_test.go` checks the odd and even cases against finite differences.
+
+Left: `prod`, `conv2d` and `maxpool2d`. `maxpool2d` is a selection like median;
+`prod` and `conv2d` have genuine second-order terms. Each needs its jvp written
+and verified on both sides at once, as with NEEDS-77. The original framing
+follows.
 
 *(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
 `is_rearrangement`.)*

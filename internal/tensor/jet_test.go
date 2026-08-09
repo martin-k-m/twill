@@ -105,6 +105,21 @@ func TestHessianFDLogSumExp(t *testing.T) {
 	})
 }
 
+// Median is a selection, so its jet gathers the tangent it selects. Odd length
+// picks a single middle element; even length averages the two, which splits the
+// curvature of square(median) across both. Distinct values keep the selection
+// off a tie, where an unstable sort makes the picked index arbitrary.
+func TestHessianFDMedian(t *testing.T) {
+	checkHessianFD(t, "median-odd", []float64{3, 1, 4, 1.5, 2.7}, []int{5}, func(x *Tensor) *Tensor {
+		m, _ := MedianAxis(x, 0)
+		return Square(m)
+	})
+	checkHessianFD(t, "median-even", []float64{3, 1, 4, 1.5}, []int{4}, func(x *Tensor) *Tensor {
+		m, _ := MedianAxis(x, 0)
+		return Square(m)
+	})
+}
+
 // Reciprocal and a rational: exercises Div's second derivatives.
 func TestHessianFDDivision(t *testing.T) {
 	ones := Filled([]int{3}, 1)
