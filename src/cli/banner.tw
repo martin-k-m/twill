@@ -14,12 +14,12 @@
 
 mode systems
 
-import "src/term/caps" as cp
-import "src/term/ansi" as ansi
-import "src/term/color" as col
-import "src/term/width" as w
-import "src/cli/theme" as th
-import "src/cli/box" as box
+import "../term/caps.tw" as cp
+import "../term/ansi.tw" as ansi
+import "../term/color.tw" as col
+import "../term/width.tw" as w
+import "theme.tw" as th
+import "box.tw" as box
 
 # Dots, not cells. Braille packs 2 across and 4 down into one cell, so this is a
 # 12-by-2 cell mark: small enough to sit on two lines beside the version, which

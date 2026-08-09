@@ -13,11 +13,11 @@
 
 mode systems
 
-import "src/term/caps" as cp
-import "src/term/ansi" as ansi
-import "src/term/width" as w
-import "src/cli/theme" as th
-import "src/cli/banner" as banner
+import "../term/caps.tw" as cp
+import "../term/ansi.tw" as ansi
+import "../term/width.tw" as w
+import "theme.tw" as th
+import "banner.tw" as banner
 
 struct Item {
   name: Str,
