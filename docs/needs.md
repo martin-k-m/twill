@@ -917,11 +917,18 @@ standard library from twill, which the bootstrap does with `go:embed`.
 
 ## NEEDS-52: one builtin table, not two
 
-**Status:** open, tidiness. `src/check.tw` and `src/eval.tw`.
+**Status:** done. `src/builtins.tw` owns the one list. `src/check.tw` builds its
+name set from `builtins.NAMES` and `src/eval.tw` `is_builtin` asks
+`builtins.is_builtin_name`, so the checker's known-name set and the evaluator's
+dispatch set read from the same string and cannot drift. This also closed a
+latent gap: eval's `is_builtin` had been calling a `builtin_exists` that was
+never defined, so a bare builtin name in expression position had no working
+resolution until now.
 
-The checker's table is what the diagnostics are compared against; the
-evaluator's would be what the dispatch uses. They are separate today because
-merging them before the dispatch exists would be guessing at its shape.
+*(Original: the checker's table is what the diagnostics are compared against;
+the evaluator's would be what the dispatch uses. They were separate because
+merging them before the dispatch existed would have been guessing at its
+shape.)*
 
 ## NEEDS-53: the formatter
 
