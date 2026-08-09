@@ -1667,13 +1667,19 @@ and `SetRecordJets` does not have to.
 `jet_concat` closes that by concatenating the input tangents the way the value
 is concatenated. That is a pure catch-up to the bootstrap, not a divergence.
 
-`sort` and `topk` turn out to be in the same position as the second group below,
-not the first: `SortAxis` and `TopKAxis` in `internal/tensor/ops.go` set up no
-jet, so adding a rule for them here alone would make the two implementations
-disagree about which programs are second-order differentiable. They, and
-`softmax`, `logsumexp`, `prod`, `median`, `conv2d` and `maxpool2d`, all need the
-jvp added on both sides at once, as with NEEDS-77, and the Go side is off-limits
-here. The original framing follows.
+`sort` and `topk` are done too, both sides at once, which the owner authorised
+for this one change. `SortAxis` and `TopKAxis` in `internal/tensor/ops.go` grew
+a jvp that gathers each output's tangent from `origin[dst]`, the input it took
+its value from, and `src/tensor.tw` `jet_selection` does the same by
+`sort_origins`, the mirror of `vjp_selection`'s scatter. Both read the same
+selection the backward pass already agreed on, so the two implementations stay
+byte-identical, and `internal/tensor/jet_test.go` checks the sort and topk
+Hessians against finite differences.
+
+Left: `softmax`, `logsumexp`, `prod`, `median`, `conv2d` and `maxpool2d`. Each
+has no jvp on either side and a real second derivative, not a permutation, so
+each needs its jvp written and verified on both sides at once, as with NEEDS-77.
+The original framing follows.
 
 *(Original: open, a gap in `hessian`. `src/tensor.tw` `jet_node`,
 `is_rearrangement`.)*
