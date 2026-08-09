@@ -95,6 +95,7 @@ type FnDecl struct {
 	Params  []Param
 	Ret     *ShapeAnno // shape return
 	RetUnit *UnitAnno  // unit return (`-> USD`)
+	RetType string     // named/qualified type return (`-> Repl`, `-> cp.Caps`); advisory
 	Body    Expr       // Block or single expression
 	Line    int
 }
@@ -211,6 +212,7 @@ type Lambda struct {
 	Params  []Param
 	Ret     *ShapeAnno
 	RetUnit *UnitAnno
+	RetType string // named/qualified type return; advisory, like FnDecl.RetType
 	Body    Expr
 	Line    int
 }

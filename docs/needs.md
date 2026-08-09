@@ -51,6 +51,15 @@ mode does not refuse systems constructs and systems mode does not enable them,
 because the bootstrap still implements one dialect. That gating, and the systems
 constructs themselves (NEEDS-2 onward), are the substance behind this line.
 
+*Progress toward the type grammar (2026-08-09):* module-qualified type names in
+signatures (`fn f(c: cp.Caps) -> cp.Caps`) now parse on both sides, the single
+most pervasive systems-mode construct. A `.` after a bare type name is consumed
+as a qualified suffix; a qualified return is held in an advisory `RetType`. The
+names are not yet resolved across modules (an unknown one is tolerated as
+`tUnknown`, not checked), but the signatures no longer fail to parse. Still
+unparsed: `enum`/`match`, `Res`/`Opt` with postfix `?`, generics (`Arr[T]`),
+typed record literals, and leading-`and`/`or` line continuation.
+
 ## NEEDS-2: `I64` with bitwise operators
 
 **Status:** blocking. `src/lex.tw` uses it for every offset, line and column.

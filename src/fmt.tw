@@ -342,7 +342,7 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
 fn fn_decl(p: Printer, f: ast.FnDecl, indent: I64) {
   let sig: Str = bytes.concat("fn ", bytes.concat(f.name,
     bytes.concat("(", bytes.concat(params(p, f.params),
-      bytes.concat(")", ret_part(f.ret, f.ret_unit))))))
+      bytes.concat(")", ret_part(f.ret, f.ret_unit, f.ret_type))))))
   match f.body {
     EBlock(blk) => block_stmt(p, indent, sig, blk, f.line),
     _ => line_c(p, indent, bytes.concat(sig, bytes.concat(" = ", expr(p, f.body))), f.line),
@@ -399,7 +399,7 @@ fn params(p: Printer, ps: Arr[ast.Param]) -> Str {
 
 # ret_part prints the `-> ...` return annotation, which is either a shape or a
 # unit (never both).
-fn ret_part(r: Opt[ast.ShapeAnno], u: Opt[ast.UnitAnno]) -> Str {
+fn ret_part(r: Opt[ast.ShapeAnno], u: Opt[ast.UnitAnno], ret_type: Str) -> Str {
   match r {
     Some(sh) => return bytes.concat(" -> ", shape(sh)),
     None => unit,
@@ -407,6 +407,9 @@ fn ret_part(r: Opt[ast.ShapeAnno], u: Opt[ast.UnitAnno]) -> Str {
   match u {
     Some(ua) => return bytes.concat(" -> ", unit_anno(ua)),
     None => unit,
+  }
+  if len(ret_type) > 0 {
+    return bytes.concat(" -> ", ret_type)
   }
   ""
 }
@@ -497,7 +500,7 @@ fn expr(p: Printer, e: ast.Expr) -> Str {
     },
     ELambda(x) => {
       let sig: Str = bytes.concat("fn(", bytes.concat(params(p, x.params),
-        bytes.concat(")", ret_part(x.ret, x.ret_unit))))
+        bytes.concat(")", ret_part(x.ret, x.ret_unit, x.ret_type))))
       match x.body {
         EBlock(blk) => bytes.concat(sig, bytes.concat(" ", inline_block(blk))),
         _ => bytes.concat(sig, bytes.concat(" = ", expr(p, x.body))),
