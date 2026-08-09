@@ -21,3 +21,4 @@ Thumbs.db
 # Local Go temp / cache (avoids a Windows Application Control block on system temp)
 /.gotmp/
 /.gocache/
+rust/
