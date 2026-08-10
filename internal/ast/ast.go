@@ -277,8 +277,12 @@ type Slice struct {
 
 // RecordLit is a record/struct literal: { name: expr, ... }.
 type RecordLit struct {
-	Fields []RecordField
-	Line   int
+	// TypeName is the name in front of a typed literal, `Point { x: 1.0 }`, or
+	// "". Records are structural, so it is advisory: the value is the same record
+	// `{ ... }` builds, and the name is kept only so the printer can reproduce it.
+	TypeName string
+	Fields   []RecordField
+	Line     int
 }
 
 type RecordField struct {

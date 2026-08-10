@@ -293,7 +293,11 @@ func (p *printer) expr(e ast.Expr) string {
 		for i, f := range ex.Fields {
 			parts[i] = f.Name + ": " + p.expr(f.Value)
 		}
-		return "{ " + strings.Join(parts, ", ") + " }"
+		prefix := ""
+		if ex.TypeName != "" {
+			prefix = ex.TypeName + " "
+		}
+		return prefix + "{ " + strings.Join(parts, ", ") + " }"
 	case *ast.Lambda:
 		sig := "fn(" + p.params(ex.Params) + ")" + p.retPart(ex.Ret, ex.RetUnit, ex.RetType)
 		if blk, ok := ex.Body.(*ast.Block); ok {

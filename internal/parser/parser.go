@@ -406,7 +406,36 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 			break
 		}
 	}
+	// A type name immediately followed by `{ field: ... }` is a typed record
+	// literal, `Point { x: 1.0, y: 2.0 }`. Records are structural, so the literal
+	// is the same value `{ ... }` builds; the name is carried only for printing.
+	// looksLikeRecord requires `{ ident :`, which a block never begins with, so
+	// this does not swallow the block of an `if`/`while` whose condition is a name.
+	if name, ok := exprToName(x); ok && p.looksLikeRecord() {
+		rec, err := p.parseRecordLit()
+		if err != nil {
+			return nil, err
+		}
+		rec.(*ast.RecordLit).TypeName = name
+		x = rec
+	}
 	return x, nil
+}
+
+// exprToName renders a name or a dotted name (`Point`, `geom.Point`) as text, for
+// the type in front of a typed record literal. It fails for anything else.
+func exprToName(x ast.Expr) (string, bool) {
+	switch e := x.(type) {
+	case *ast.Ident:
+		return e.Name, true
+	case *ast.Field:
+		base, ok := exprToName(e.Target)
+		if !ok {
+			return "", false
+		}
+		return base + "." + e.Name, true
+	}
+	return "", false
 }
 
 // parseIndexOrSlice parses the body of a `[...]` after the '[' is consumed. It
