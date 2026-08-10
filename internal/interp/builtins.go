@@ -548,6 +548,86 @@ func (ip *Interp) installBuiltins() {
 		return &value.Variant{Name: "Some", Payload: tensor.Scalar(float64(n)), HasPayload: true}, nil
 	})
 
+	// emit_line writes a string and a newline, the diagnostic printer's unit.
+	def("emit_line", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("emit_line expects a string")
+		}
+		ip.out(s)
+		return value.TheUnit, nil
+	})
+
+	// A seeded generator, scalar draws over the interpreter's own rng so a `seed`
+	// is reproducible across both the tensor ops and these.
+	def("rng_seed", 1, false, func(a []value.Value) (value.Value, error) {
+		n, err := scalarOf(a[0], "rng_seed")
+		if err != nil {
+			return nil, err
+		}
+		ip.rng.Seed(int64(n))
+		return value.TheUnit, nil
+	})
+	def("rng_uniform", 0, false, func(a []value.Value) (value.Value, error) {
+		return tensor.Scalar(ip.rng.Float64()), nil
+	})
+	def("rng_normal", 0, false, func(a []value.Value) (value.Value, error) {
+		return tensor.Scalar(ip.rng.NormFloat64()), nil
+	})
+	def("rng_perm", 1, false, func(a []value.Value) (value.Value, error) {
+		n, err := scalarOf(a[0], "rng_perm")
+		if err != nil {
+			return nil, err
+		}
+		perm := ip.rng.Perm(int(n))
+		out := &value.List{Items: make([]value.Value, len(perm))}
+		for i, p := range perm {
+			out.Items[i] = tensor.Scalar(float64(p))
+		}
+		return out, nil
+	})
+
+	// is_same is reference identity: true when two values are the same object, so
+	// a mutation through one is seen through the other. Every reference value is a
+	// pointer and every scalar is comparable, so interface equality is identity.
+	def("is_same", 2, false, func(a []value.Value) (value.Value, error) {
+		return value.Bool(a[0] == a[1]), nil
+	})
+
+	// args is the argument list the program was invoked with, as strings.
+	def("args", 0, false, func(a []value.Value) (value.Value, error) {
+		out := &value.List{Items: make([]value.Value, len(ip.Args))}
+		for i, s := range ip.Args {
+			out.Items[i] = value.Str(s)
+		}
+		return out, nil
+	})
+
+	// save_value / load_value persist a value to a file as its printed form. This
+	// is the minimal serializer the compiler's cache needs; a value that does not
+	// round-trip through its text is not one these are used on.
+	def("save_value", 2, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[1])
+		if !ok {
+			return nil, fmt.Errorf("save_value expects a path")
+		}
+		if err := os.WriteFile(path, []byte(value.Format(a[0])), 0o644); err != nil {
+			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
+		}
+		return &value.Variant{Name: "Ok", Payload: value.TheUnit, HasPayload: true}, nil
+	})
+	def("load_value", 1, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("load_value expects a path")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
+		}
+		return &value.Variant{Name: "Ok", Payload: value.Str(string(data)), HasPayload: true}, nil
+	})
+
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
 			x, err := asTensor(a[0], name)

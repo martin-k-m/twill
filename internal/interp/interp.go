@@ -82,6 +82,7 @@ type Interp struct {
 	loaded   map[string]bool // plain imports already loaded
 	loading  map[string]bool // namespaced imports currently loading (cycle guard)
 	rng      *rand.Rand      // deterministic RNG for randn/rand/seed
+	Args     []string        // program arguments, exposed by the args builtin
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.

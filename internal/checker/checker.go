@@ -53,8 +53,12 @@ func Check(prog *ast.Program) []Diagnostic {
 	// simply cannot see. `import "std/nn" as nn` keeps the check, since then
 	// every borrowed name arrives with the alias on it.
 	for _, st := range prog.Body {
-		if imp, ok := st.(*ast.Import); ok && imp.Alias == "" {
-			c.blindImport = true
+		if imp, ok := st.(*ast.Import); ok {
+			if imp.Alias == "" {
+				c.blindImport = true
+			} else {
+				c.aliasedImport = true
+			}
 		}
 	}
 	// Every top-level function name, before any body is checked. A file may call
@@ -81,6 +85,18 @@ func Check(prog *ast.Program) []Diagnostic {
 				if _, seen := env.get(v.Name); !seen {
 					env.define(v.Name, tUnknown{})
 				}
+			}
+		}
+	}
+	// Top-level `let` names too: a module-level constant may be referenced by a
+	// function declared above its definition line (the compiler's own DTYPE_MAKERS
+	// table is used this way). As with functions this only asserts the name
+	// exists; inferStmt still types the binding when the walk reaches it, and
+	// evaluation order is the evaluator's concern, not the checker's.
+	for _, s := range prog.Body {
+		if lt, ok := s.(*ast.Let); ok {
+			if _, seen := env.get(lt.Name); !seen {
+				env.define(lt.Name, tUnknown{})
 			}
 		}
 	}
@@ -116,6 +132,12 @@ type checker struct {
 	// Set when a file imports without an alias, which makes any unknown name
 	// unprovable. See Check.
 	blindImport bool
+	// Set when a file imports under an alias. An enum's variant constructors are
+	// registered program-wide at run time, so a constructor declared in an
+	// aliased module (`SFn`, `EBlock`) is in scope unqualified even though this
+	// single-file checker never read that module. Used only to soften the
+	// unknown-name report for a capitalized constructor name. See inferExpr.
+	aliasedImport bool
 	// Set for a `mode systems` file. The systems dialect names types the
 	// bootstrap has no definition for (I64, Str, Bool, and module-qualified
 	// names like cp.Caps), so an unresolved type annotation is advisory there
@@ -445,6 +467,20 @@ func elemType(t Type) Type {
 
 // --- expressions -----------------------------------------------------------
 
+// crossModuleVariant reports whether an unresolved name is plausibly an enum
+// variant constructor borrowed from an aliased import. Variant constructors are
+// registered program-wide at run time and are capitalized by convention, so a
+// capitalized unknown in a systems file that imports another module cannot be
+// proven undefined from this file alone. A lowercase unknown (a value or a
+// function) is still a typo and still reported.
+func (c *checker) crossModuleVariant(name string) bool {
+	if !c.systems || !c.aliasedImport || name == "" {
+		return false
+	}
+	r := rune(name[0])
+	return r >= 'A' && r <= 'Z'
+}
+
 func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 	switch ex := e.(type) {
 	case *ast.NumberLit:
@@ -461,7 +497,7 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		// the checker could see plainly and said nothing about. Builtins are not
 		// in the environment because they are not values, so they are checked
 		// against the table instead.
-		if !builtinNames[ex.Name] && !c.blindImport {
+		if !builtinNames[ex.Name] && !c.blindImport && !c.crossModuleVariant(ex.Name) {
 			c.report(ex.Line, "unknown name %q", ex.Name)
 		}
 		return tUnknown{}
@@ -1748,4 +1784,7 @@ var builtinNames = map[string]bool{
 	// Systems I/O and string parsing.
 	"write_out": true, "write_err": true, "read_file": true, "write_file": true,
 	"list_dir": true, "resolve_path": true, "str_quote": true, "i64_of_str": true,
+	// Diagnostics, seeded rng, identity, argv and value persistence.
+	"emit_line": true, "rng_seed": true, "rng_uniform": true, "rng_normal": true,
+	"rng_perm": true, "is_same": true, "args": true, "save_value": true, "load_value": true,
 }
