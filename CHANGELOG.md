@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-10
+
+The systems-mode front end. `mode systems` is the dialect the compiler is being
+rewritten in, and the bootstrap now parses, type-checks and formats all of it:
+every file in `src/`, `std/`, `examples/` and `testdata/` goes through the front
+end. Enums and `match`, `struct` declarations, generics in annotations,
+`Res`/`Opt` with postfix `?`, field and index assignment, bitwise operators, and
+typed record literals all land, each mirrored into the self-hosted compiler in
+lockstep. Running the self-hosted compiler on the bootstrap is the next step and
+is not yet done; the array/ML language the bootstrap has always been is
+unchanged and fully backward compatible.
+
 ### Fixed
 
 - **A line-leading `+`/`-` continues an expression inside a grouping**
