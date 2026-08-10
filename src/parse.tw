@@ -216,6 +216,8 @@ fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     if bytes.equal(t.value, "while") { return parse_while(p) }
     if bytes.equal(t.value, "for") { return parse_for(p) }
     if bytes.equal(t.value, "return") { return parse_return(p) }
+    if bytes.equal(t.value, "break") { return Ok(ast.break_stmt(p.ids, next_tok(p).line)) }
+    if bytes.equal(t.value, "continue") { return Ok(ast.continue_stmt(p.ids, next_tok(p).line)) }
     if bytes.equal(t.value, "import") { return parse_import(p) }
     if bytes.equal(t.value, "enum") { return parse_enum_decl(p) }
     if bytes.equal(t.value, "struct") { return parse_struct_decl(p) }

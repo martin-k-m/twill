@@ -270,6 +270,10 @@ struct For { id: I64, name: Str, iter: Expr, body: Block, line: I64 }
 # A bare `return` has no value.
 struct Return { id: I64, value: Opt[Expr], line: I64 }
 
+# Break and Continue are the loop-control statements, valid inside a while/for.
+struct Break { id: I64, line: I64 }
+struct Continue { id: I64, line: I64 }
+
 # Import binds a module. alias is non-empty for `import "..." as name`, which
 # brings the module in as a namespace record. An import with no alias brings its
 # names in unqualified, and that has a consequence for the checker: see the
@@ -318,6 +322,8 @@ enum Stmt {
   SStruct(StructDecl),
   SExpr(ExprStmt),
   SBlock(Block),
+  SBreak(Break),
+  SContinue(Continue),
 }
 
 struct Program {
@@ -396,6 +402,8 @@ fn stmt_line(s: Stmt) -> I64 {
     SStruct(x) => x.line,
     SExpr(x) => x.line,
     SBlock(x) => x.line,
+    SBreak(x) => x.line,
+    SContinue(x) => x.line,
   }
 }
 
@@ -436,6 +444,8 @@ fn stmt_id(s: Stmt) -> I64 {
     SStruct(x) => x.id,
     SExpr(x) => x.id,
     SBlock(x) => x.id,
+    SBreak(x) => x.id,
+    SContinue(x) => x.id,
   }
 }
 
@@ -516,6 +526,12 @@ fn for_stmt(ids: NodeIds, name: Str, iter: Expr, body: Block, line: I64) -> Stmt
 
 fn return_stmt(ids: NodeIds, value: Opt[Expr], line: I64) -> Stmt =
   SReturn(Return { id: fresh(ids), value: value, line: line })
+
+fn break_stmt(ids: NodeIds, line: I64) -> Stmt =
+  SBreak(Break { id: fresh(ids), line: line })
+
+fn continue_stmt(ids: NodeIds, line: I64) -> Stmt =
+  SContinue(Continue { id: fresh(ids), line: line })
 
 fn import_stmt(ids: NodeIds, path: Str, alias: Str, line: I64) -> Stmt =
   SImport(Import { id: fresh(ids), path: path, alias: alias, line: line })
