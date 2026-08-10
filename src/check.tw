@@ -173,6 +173,20 @@ fn is_definite_non_tensor(t: Type) -> Bool {
   }
 }
 
+fn is_str_type(t: Type) -> Bool {
+  match t {
+    TStr => true,
+    _ => false,
+  }
+}
+
+fn is_unknown_type(t: Type) -> Bool {
+  match t {
+    TUnknown => true,
+    _ => false,
+  }
+}
+
 # ---- dtypes ----------------------------------------------------------------
 #
 # The checker mirrors tensor.promote by calling it, never by restating it: a
@@ -1077,6 +1091,21 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
       None => unit,
     }
     return TBool
+  }
+
+  # `+` concatenates strings. When either side is a string the result is a
+  # string, provided the other side is a string too (or unknown, left advisory).
+  # A string added to a definite number or tensor is still the error below.
+  if bytes.equal(op, "+") {
+    if is_str_type(l) or is_str_type(r) {
+      let l_ok: Bool = is_str_type(l) or is_unknown_type(l)
+      let r_ok: Bool = is_str_type(r) or is_unknown_type(r)
+      if l_ok and r_ok {
+        return TStr
+      }
+      report(c, ex.line, bytes.concat("operator ", bytes.concat(quoted(op), " joins two strings or two numbers, not a mix")))
+      return TUnknown
+    }
   }
 
   if is_definite_non_tensor(l) or is_definite_non_tensor(r) {
