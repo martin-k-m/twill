@@ -347,6 +347,14 @@ fn parse_binary(p: Parser, min_prec: I64) -> Res[ast.Expr, lex.SyntaxError] {
     if (bytes.equal(op, "+") or bytes.equal(op, "-")) and p.pos > 0 and t.line > p.toks[p.pos - 1].line {
       break
     }
+    # A line that begins `and(` or `or(` is a bitwise call starting a new
+    # statement, not this expression continued by the boolean operator. The
+    # following `(` distinguishes the call from a genuine trailing-operator
+    # continuation, so only that form breaks.
+    if (bytes.equal(op, "and") or bytes.equal(op, "or")) and p.pos > 0
+        and t.line > p.toks[p.pos - 1].line and bytes.equal(peek(p, 1).value, "(") {
+      break
+    }
     let prec: I64 = 0
     match precedence_of(op) {
       Some(v) => prec = v,
@@ -476,6 +484,16 @@ fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
     }
     if bytes.equal(t.value, "fn") {
       return parse_lambda(p)
+    }
+    # `and` and `or` are the boolean infix operators, but spelled as a call,
+    # `and(x, y)`, they are the bitwise builtins. Only a following `(` selects
+    # the call; as infix they always have a left operand and so never reach
+    # parse_primary as a leading token. Emitting an ident lets parse_postfix
+    # turn it into the call.
+    if (bytes.equal(t.value, "and") or bytes.equal(t.value, "or"))
+        and bytes.equal(peek(p, 1).value, "(") {
+      next_tok(p)
+      return Ok(ast.ident(p.ids, t.value, t.line))
     }
     # Any other keyword falls through to the unexpected-token error below,
     # which is what the Go parser's switch does by not matching.

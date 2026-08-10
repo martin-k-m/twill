@@ -71,6 +71,41 @@ func (ip *Interp) installBuiltins() {
 		return tensor.PowScalar(base, p), nil
 	})
 
+	// Bitwise ops on I64, operating on scalar integers. The values are float64,
+	// so each operand is taken as an int64 and the result handed back as one.
+	// `and` and `or` share the boolean keywords' spelling but are the bitwise
+	// builtins when called; `not` stays the boolean operator and bitwise
+	// complement is spelled `bnot`. `shr` is arithmetic (sign-extending), so it
+	// is defined on a negative operand.
+	bitOp := func(name string, f func(x, y int64) int64) {
+		def(name, 2, false, func(a []value.Value) (value.Value, error) {
+			x, err := scalarOf(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			y, err := scalarOf(a[1], name)
+			if err != nil {
+				return nil, err
+			}
+			return tensor.Scalar(float64(f(int64(x), int64(y)))), nil
+		})
+	}
+	bitOp("and", func(x, y int64) int64 { return x & y })
+	bitOp("or", func(x, y int64) int64 { return x | y })
+	bitOp("xor", func(x, y int64) int64 { return x ^ y })
+	// Shift counts are masked to 0..63, per docs/language-guide.md, so a shift is
+	// always defined rather than depending on the host's out-of-range behaviour.
+	bitOp("shl", func(x, y int64) int64 { return x << uint64(y&63) })
+	bitOp("shr", func(x, y int64) int64 { return x >> uint64(y&63) })
+
+	def("bnot", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "bnot")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(float64(^int64(x))), nil
+	})
+
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
 			x, err := asTensor(a[0], name)

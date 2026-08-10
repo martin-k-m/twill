@@ -106,7 +106,7 @@ let SIGN_BIT: I64 = shl(1, 63)
 fn ushr(x: I64, k: I64) -> I64 {
   if k == 0 { return x }
   if x >= 0 { return shr(x, k) }
-  or(shr(and(x, not(SIGN_BIT)), k), shl(1, 63 - k))
+  or(shr(and(x, bnot(SIGN_BIT)), k), shl(1, 63 - k))
 }
 
 # Unsigned divide by ten. Halving first drops the value below 2^63, where signed

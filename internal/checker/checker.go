@@ -330,7 +330,7 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 	switch st := s.(type) {
 	case *ast.Let:
 		rhs := c.inferExpr(st.Value, env)
-		if st.Unit != nil {
+		if st.Unit != nil && !c.isAdvisoryTypeAnno(st.Unit) {
 			want := c.resolveUnit(st.Unit, st.Line)
 			if t, ok := rhs.(tTensor); ok {
 				if len(t.unit) != 0 && !unitEqual(t.unit, want) {
@@ -796,7 +796,7 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 		}
 		scope.define(p.Name, c.paramType(p))
 	}
-	if fn.RetUnit != nil && !c.retIsAdvisoryType(fn.RetUnit) {
+	if fn.RetUnit != nil && !c.isAdvisoryTypeAnno(fn.RetUnit) {
 		c.resolveUnit(fn.RetUnit, fn.Line)
 	}
 	c.stack[fn] = true
@@ -815,19 +815,19 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 				fn.Name, dimsString(got), dimsString(expected))
 		}
 	}
-	if fn.RetUnit != nil && !c.retIsAdvisoryType(fn.RetUnit) {
+	if fn.RetUnit != nil && !c.isAdvisoryTypeAnno(fn.RetUnit) {
 		c.checkReturnUnit(fn.Line, fn.Name, fn.RetUnit, bodyType)
 	}
 }
 
-// retIsAdvisoryType reports whether a single-name return annotation is a type
-// name rather than a unit. Only in a systems-mode file: a `-> Bool` or `-> Str`,
-// whose name no `unit` declaration introduced, is a type return the dialect
-// writes, and is advisory, since the bootstrap has no such type. A `-> USD`
-// where USD is a declared unit stays a unit and is checked, and in numeric mode
-// nothing is advisory, so an undeclared unit is still reported. A compound
-// annotation (`USD/year`) is always a unit.
-func (c *checker) retIsAdvisoryType(u *ast.UnitAnno) bool {
+// isAdvisoryTypeAnno reports whether a single-name annotation (on a parameter,
+// a return, or a `let`) is a type name rather than a unit. Only in a systems-
+// mode file: a name like `I64`, `Bool` or `Str`, which no `unit` declaration
+// introduced, is a type the dialect writes, and is advisory, since the bootstrap
+// has no such type. A `USD` that a `unit` declaration introduced stays a unit
+// and is checked; in numeric mode nothing is advisory, so an undeclared unit is
+// still reported; and a compound annotation (`USD/year`) is always a unit.
+func (c *checker) isAdvisoryTypeAnno(u *ast.UnitAnno) bool {
 	return c.systems && len(u.Factors) == 1 && u.Factors[0].Exp == 1 && !c.units[u.Factors[0].Name]
 }
 
@@ -880,7 +880,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		if fn.ret != nil {
 			return tTensor{dims: substitute(fn.ret.Dims, subst)}
 		}
-		if fn.retUnit != nil && !c.retIsAdvisoryType(fn.retUnit) {
+		if fn.retUnit != nil && !c.isAdvisoryTypeAnno(fn.retUnit) {
 			return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
 		}
 		return tUnknown{}
@@ -905,7 +905,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		}
 		return expected
 	}
-	if fn.retUnit != nil && !c.retIsAdvisoryType(fn.retUnit) {
+	if fn.retUnit != nil && !c.isAdvisoryTypeAnno(fn.retUnit) {
 		c.checkReturnUnit(ex.Line, "", fn.retUnit, bodyType)
 		return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
 	}
@@ -1668,4 +1668,7 @@ var builtinNames = map[string]bool{
 	"conv2d": true, "maxpool2d": true, "save": true, "load": true,
 	"gather": true, "permutation": true, "int": true,
 	"floor": true, "ceil": true, "round": true, "jacobian": true, "hessian": true,
+	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
+	// that name is the bitwise builtin; `bnot` is bitwise complement.
+	"and": true, "or": true, "xor": true, "shl": true, "shr": true, "bnot": true,
 }

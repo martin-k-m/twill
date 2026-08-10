@@ -612,7 +612,12 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     SLet(st) => {
       let rhs: Type = infer_expr(c, st.value, env)
       match st.unit {
-        Some(anno) => {
+        # A systems-mode `let n: I64` names a type the bootstrap has no
+        # definition for; the annotation is advisory, so the binding just takes
+        # the value's type, exactly as an unannotated let does.
+        Some(anno) => if is_advisory_type_anno(c, anno) {
+          env_define(env, st.name, rhs)
+        } else {
           let want: Dict[Str, I64] = resolve_unit(c, anno, st.line)
           match as_tensor(rhs) {
             Some(t) => {
@@ -1469,7 +1474,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
     i = i + 1
   }
   match fd.ret_unit {
-    Some(u) => if not ret_is_advisory_type(c, u) { resolve_unit(c, u, fd.line) },
+    Some(u) => if not is_advisory_type_anno(c, u) { resolve_unit(c, u, fd.line) },
     None => unit,
   }
 
@@ -1497,7 +1502,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
     None => unit,
   }
   match fd.ret_unit {
-    Some(u) => if not ret_is_advisory_type(c, u) { check_return_unit(c, fd.line, fd.name, u, body_type) },
+    Some(u) => if not is_advisory_type_anno(c, u) { check_return_unit(c, fd.line, fd.name, u, body_type) },
     None => unit,
   }
 }
@@ -1511,13 +1516,13 @@ fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv) -> Type {
   }
 }
 
-# ret_is_advisory_type reports whether a single-name return annotation is a type
+# is_advisory_type_anno reports whether a single-name return annotation is a type
 # name rather than a unit, and only in a systems-mode file. A `-> Bool` or
 # `-> Str`, whose name no `unit` declaration introduced, is a type return the
 # dialect writes, advisory because the bootstrap has no such type. A `-> USD`
 # where USD is a declared unit stays a unit and is checked; a compound
 # annotation is always a unit; and in numeric mode nothing is advisory.
-fn ret_is_advisory_type(c: Checker, u: ast.UnitAnno) -> Bool =
+fn is_advisory_type_anno(c: Checker, u: ast.UnitAnno) -> Bool =
   c.systems and len(u.factors) == 1 and u.factors[0].exp == 1
     and not dict_has(c.units, u.factors[0].name)
 
@@ -1624,7 +1629,7 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
       None => unit,
     }
     match fn_.ret_unit {
-      Some(u) => if not ret_is_advisory_type(c, u) { return tensor_with_unit(arr_new(), unit_from_anno(u)) },
+      Some(u) => if not is_advisory_type_anno(c, u) { return tensor_with_unit(arr_new(), unit_from_anno(u)) },
       None => unit,
     }
     return TUnknown
@@ -1655,7 +1660,7 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
     None => unit,
   }
   match fn_.ret_unit {
-    Some(u) => if not ret_is_advisory_type(c, u) {
+    Some(u) => if not is_advisory_type_anno(c, u) {
       check_return_unit(c, ex.line, "", u, body_type)
       return tensor_with_unit(arr_new(), unit_from_anno(u))
     },
