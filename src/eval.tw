@@ -2878,7 +2878,6 @@ fn apply_to_tensor(f: Value, arg: tensor.Tensor, line: I64) -> Res[tensor.Tensor
       format_value(out)))),
   }
 }
-}
 
 # ---- higher-order list and tree helpers ------------------------------------
 
