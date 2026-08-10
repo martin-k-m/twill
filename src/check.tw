@@ -501,6 +501,7 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
   for s in prog.body {
     match s {
       STypeDecl(d) => register_type(c, d),
+      SStruct(d) => register_struct(c, d),
       SUnitDecl(d) => dict_set(c.units, d.name, true),
       _ => unit,
     }
@@ -608,6 +609,19 @@ fn register_type(c: Checker, td: ast.TypeDecl) {
   dict_set(c.types, td.name, RecordType { fields: fields })
 }
 
+# A struct registers as a record type whose fields exist but whose field types
+# are advisory (the systems types the bootstrap does not model), so `m.field` is
+# checked for existence and left unknown.
+fn register_struct(c: Checker, sd: ast.StructDecl) {
+  let fields: Dict[Str, Type] = dict_new()
+  let i: I64 = 0
+  while i < len(sd.fields) {
+    dict_set(fields, sd.fields[i].name, TUnknown)
+    i = i + 1
+  }
+  dict_set(c.types, sd.name, RecordType { fields: fields })
+}
+
 # resolve_unit builds a unit map from an annotation and reports any factor that
 # names a unit which was never declared with `unit NAME`. A typo in a unit name
 # is otherwise indistinguishable from a new unit, and silently accepting it is
@@ -708,6 +722,7 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
       }
     },
     STypeDecl(_) => unit,
+    SStruct(_) => unit,
     SUnitDecl(_) => unit,
     # Enum cases were registered in the pre-pass, so the declaration is a no-op
     # here, the same as a type or unit declaration.

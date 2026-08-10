@@ -165,6 +165,7 @@ fn keyword_table() -> Dict[Str, Bool] {
   dict_set(d, "not", true)
   dict_set(d, "enum", true)
   dict_set(d, "match", true)
+  dict_set(d, "struct", true)
   d
 }
 

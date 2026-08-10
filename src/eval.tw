@@ -392,6 +392,9 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
       Ok(Normal(VUnit))
     },
     STypeDecl(_) => Ok(Normal(VUnit)),
+    # A struct is a record type: checked statically, erased at runtime, since a
+    # record carries its own fields and needs no declaration to be built.
+    SStruct(_) => Ok(Normal(VUnit)),
     # A unit declaration is erased at run time: units are a static check and
     # carry no representation in a value.
     SUnitDecl(_) => Ok(Normal(VUnit)),

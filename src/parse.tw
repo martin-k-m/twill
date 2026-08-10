@@ -219,6 +219,7 @@ fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     if bytes.equal(t.value, "import") { return parse_import(p) }
     if bytes.equal(t.value, "type") { return parse_type_decl(p) }
     if bytes.equal(t.value, "enum") { return parse_enum_decl(p) }
+    if bytes.equal(t.value, "struct") { return parse_struct_decl(p) }
   }
 
   # `unit <name>` declares a unit. `unit` is not a keyword, so it stays an
@@ -384,6 +385,27 @@ fn parse_enum_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   }
   expect(p, "}")?
   Ok(ast.enum_decl(p.ids, name, variants, line))
+}
+
+# parse_struct_decl parses `struct Name { field: Type, ... }`. A field's type is
+# a full type reference (name, qualified, or generic), kept as advisory text;
+# fields are comma-separated and a trailing comma is allowed.
+fn parse_struct_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  expect(p, "{")?
+  let fields: Arr[ast.StructField] = arr_new()
+  while not check(p, "}") and not at_end(p) {
+    let fname: Str = expect_ident(p)?
+    expect(p, ":")?
+    let ftype: Str = parse_type_ref(p)?
+    push(fields, ast.StructField { name: fname, type_name: ftype })
+    if not accept(p, ",") {
+      break
+    }
+  }
+  expect(p, "}")?
+  Ok(ast.struct_decl(p.ids, name, fields, line))
 }
 
 # ---- expressions -----------------------------------------------------------

@@ -332,6 +332,17 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
       line_c(p, indent, bytes.concat("enum ", bytes.concat(st.name,
         bytes.concat(" { ", bytes.concat(bytes.join(cases, ", "), " }")))), st.line)
     },
+    SStruct(st) => {
+      let fields: Arr[Str] = arr_new()
+      let i: I64 = 0
+      while i < len(st.fields) {
+        let f: ast.StructField = st.fields[i]
+        push(fields, bytes.concat(f.name, bytes.concat(": ", f.type_name)))
+        i = i + 1
+      }
+      line_c(p, indent, bytes.concat("struct ", bytes.concat(st.name,
+        bytes.concat(" { ", bytes.concat(bytes.join(fields, ", "), " }")))), st.line)
+    },
     SExpr(st) => line_c(p, indent, expr(p, st.x), st.line),
     # A bare block statement prints its contents at the same indent, with no
     # braces: the braces carried no meaning the tree kept, so re-emitting them
