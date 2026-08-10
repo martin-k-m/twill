@@ -1736,4 +1736,9 @@ var builtinNames = map[string]bool{
 	"f64_cos": true, "f64_floor": true, "f64_trunc": true, "f64_pow": true,
 	"f64_of_i64": true, "i64_of_f64": true, "f64_bits": true,
 	"f64_from_bits": true, "f64_signbit": true,
+	// Systems collections: growable list, ordered dict, byte buffer.
+	"arr_new": true, "push": true, "pop": true,
+	"dict_new": true, "dict_set": true, "dict_get": true, "dict_has": true,
+	"dict_must": true, "dict_or": true, "dict_keys": true,
+	"bytes_new": true, "bytes_push": true, "bytes_to_str": true, "abort": true,
 }
