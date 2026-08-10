@@ -153,8 +153,6 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseReturn()
 		case "import":
 			return p.parseImport()
-		case "type":
-			return p.parseTypeDecl()
 		case "enum":
 			return p.parseEnumDecl()
 		case "struct":
@@ -168,6 +166,12 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 	// is the declaration.
 	if t.Kind == lexer.IDENT && t.Value == "unit" && p.peek(1).Kind == lexer.IDENT {
 		return p.parseUnitDecl()
+	}
+	// `type <name> = ...` declares a record type. Like `unit`, `type` is not a
+	// keyword, so it stays usable as a field name (`res.type`, `{ type: x }`);
+	// only a leading `type` with an identifier after it is the declaration.
+	if t.Kind == lexer.IDENT && t.Value == "type" && p.peek(1).Kind == lexer.IDENT {
+		return p.parseTypeDecl()
 	}
 
 	x, err := p.parseExpr()
@@ -277,7 +281,9 @@ func (p *parser) parseFor() (ast.Stmt, error) {
 
 func (p *parser) parseReturn() (ast.Stmt, error) {
 	line := p.next().Line
-	if p.check("}") || p.check(";") || p.atEnd() {
+	// A value-less `return` is followed by the end of its block or statement, or,
+	// when it is a match arm body, by the arm-separating `,` (`_ => return,`).
+	if p.check("}") || p.check(";") || p.check(",") || p.atEnd() {
 		return &ast.Return{Value: nil, Line: line}, nil
 	}
 	v, err := p.parseExpr()
