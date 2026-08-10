@@ -23,6 +23,19 @@
 
 ### Added
 
+- **`enum` declarations and `match` expressions** (NEEDS-3, 2026-08-09): the sum
+  type and its eliminator, the foundation the whole `Res`/`Opt` family rests on.
+  `enum Name { Case, Case(Payload), ... }` declares the type; each case is a
+  value in scope (a one-argument constructor when it carries a payload, the
+  variant itself when it does not), so `Some(x)` is a call and `None` a bare
+  name. `match subject { pattern => body, ... }` inspects the case, binds its
+  payload (`Some(v) => ...`), runs the arm; `_` is the wildcard and an arm body
+  is a statement, so an expression, a `return`, an assignment or a block all
+  work. Values render as `Some(5)` / `None`. Go bootstrap (lexer `=>` plus the
+  two keywords, parser, `value.Variant`, interp, checker, formatter) with tests
+  in `internal/interp/enum_test.go`; self-hosted mirror follows. Unblocked
+  `src/main.tw`; `std/float.tw` advances to typed record literals.
+
 - **Assignment to a field or an index** (2026-08-09): `obj.f = v`, `arr[i] = v`,
   and the composing forms (`a.d[i] = v`, `xs[0].n = v`). Assignment now targets
   any lvalue expression, a name, a field, or an index, rather than only a bare

@@ -233,6 +233,21 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	case *ast.UnitDecl:
 		// Units are checked statically and erased at runtime.
 		return value.TheUnit
+	case *ast.EnumDecl:
+		// Each case becomes a value in scope: a payload case is a one-argument
+		// constructor, a payload-less case is the variant value itself. That is
+		// what makes `Some(x)` a call and `None` a bare name.
+		for _, v := range st.Variants {
+			name := v.Name
+			if v.HasPayload {
+				env.Define(name, &value.Builtin{Name: name, Arity: 1, Fn: func(a []value.Value) (value.Value, error) {
+					return &value.Variant{Name: name, Payload: a[0], HasPayload: true}, nil
+				}})
+			} else {
+				env.Define(name, &value.Variant{Name: name})
+			}
+		}
+		return value.TheUnit
 	case *ast.ExprStmt:
 		return ip.evalExpr(st.X, env)
 	case *ast.Block:
@@ -551,6 +566,24 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		case *ast.IfExpr:
 			return ip.evalExpr(alt, env)
 		}
+		return value.TheUnit
+	case *ast.Match:
+		subj := ip.evalExpr(ex.Subject, env)
+		variant, isVariant := subj.(*value.Variant)
+		for _, arm := range ex.Arms {
+			if !arm.Pattern.Wildcard && !(isVariant && arm.Pattern.Variant == variant.Name) {
+				continue
+			}
+			armEnv := value.NewEnv(env)
+			// Bind the payload where the pattern names it: `Some(v)` puts the
+			// carried value in `v` for the arm's body. A `_` binding, or a
+			// payload-less case, binds nothing.
+			if arm.Pattern.Binding != "" && isVariant && variant.HasPayload {
+				armEnv.Define(arm.Pattern.Binding, variant.Payload)
+			}
+			return ip.execStmt(arm.Body, armEnv)
+		}
+		ip.panicf(ex.Line, "no match arm for %s", value.Format(subj))
 		return value.TheUnit
 	case *ast.Block:
 		return ip.execBlockIn(ex, value.NewEnv(env))

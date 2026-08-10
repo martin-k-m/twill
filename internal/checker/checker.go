@@ -63,6 +63,18 @@ func Check(prog *ast.Program) []Diagnostic {
 			}
 		}
 	}
+	// Enum cases are names too: `Some`/`None`/`Ok`/`Err` and every user variant
+	// must resolve wherever they are constructed, so they are defined before any
+	// body is checked. The type they belong to is left advisory.
+	for _, s := range prog.Body {
+		if ed, ok := s.(*ast.EnumDecl); ok {
+			for _, v := range ed.Variants {
+				if _, seen := env.get(v.Name); !seen {
+					env.define(v.Name, tUnknown{})
+				}
+			}
+		}
+	}
 	for _, s := range prog.Body {
 		c.inferStmt(s, env)
 	}
@@ -382,7 +394,7 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		if st.Alias != "" {
 			env.define(st.Alias, tUnknown{})
 		}
-	case *ast.TypeDecl, *ast.UnitDecl:
+	case *ast.TypeDecl, *ast.UnitDecl, *ast.EnumDecl:
 		// Already registered in the pre-pass.
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)
@@ -489,6 +501,20 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		default:
 			return tUnknown{}
 		}
+	case *ast.Match:
+		c.inferExpr(ex.Subject, env)
+		// Each arm is checked in its own scope with the pattern's binding present
+		// (its type is unknown, since the payload type is advisory). The match's
+		// type is left unknown rather than unified across arms, which keeps the
+		// dialect's records-and-enums permissive.
+		for _, arm := range ex.Arms {
+			armEnv := newEnv(env)
+			if arm.Pattern.Binding != "" {
+				armEnv.define(arm.Pattern.Binding, tUnknown{})
+			}
+			c.inferStmt(arm.Body, armEnv)
+		}
+		return tUnknown{}
 	case *ast.Block:
 		return c.inferBlock(ex, newEnv(env))
 	}

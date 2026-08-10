@@ -97,6 +97,14 @@ type Closure struct {
 	Name   string
 }
 
+// Variant is one case of an enum value: a tag naming the case, and an optional
+// single payload. A payload-less case (like None) has HasPayload false.
+type Variant struct {
+	Name       string
+	Payload    Value
+	HasPayload bool
+}
+
 // Builtin is a native function. Fn receives evaluated args and returns a
 // value or an error.
 type Builtin struct {
@@ -305,6 +313,11 @@ func Format(v Value) string {
 			parts[i] = k + ": " + Format(t.Fields[k])
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
+	case *Variant:
+		if t.HasPayload {
+			return t.Name + "(" + Format(t.Payload) + ")"
+		}
+		return t.Name
 	case *Closure:
 		name := t.Name
 		if name == "" {
