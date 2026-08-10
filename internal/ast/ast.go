@@ -170,14 +170,14 @@ func (s *UnitDecl) Pos() int { return s.Line }
 func (s *TypeDecl) Pos() int { return s.Line }
 func (s *ExprStmt) Pos() int { return s.Line }
 
-func (s *Let) stmt()      {}
-func (s *FnDecl) stmt()   {}
-func (s *Assign) stmt()   {}
-func (s *While) stmt()    {}
-func (s *For) stmt()      {}
-func (s *Return) stmt()   {}
-func (s *Import) stmt()   {}
-func (s *UnitDecl) stmt() {}
+func (s *Let) stmt()        {}
+func (s *FnDecl) stmt()     {}
+func (s *Assign) stmt()     {}
+func (s *While) stmt()      {}
+func (s *For) stmt()        {}
+func (s *Return) stmt()     {}
+func (s *Import) stmt()     {}
+func (s *UnitDecl) stmt()   {}
 func (s *TypeDecl) stmt()   {}
 func (s *EnumDecl) stmt()   {}
 func (s *StructDecl) stmt() {}

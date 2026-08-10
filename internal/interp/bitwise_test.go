@@ -8,12 +8,12 @@ import "testing"
 
 func TestBitwiseOps(t *testing.T) {
 	cases := map[string]float64{
-		"and(6, 3)":   2,
-		"or(4, 1)":    5,
-		"xor(5, 3)":   6,
-		"shl(1, 4)":   16,
-		"shr(0 - 8, 1)": -4, // arithmetic shift keeps the sign
-		"bnot(0)":     -1,
+		"and(6, 3)":         2,
+		"or(4, 1)":          5,
+		"xor(5, 3)":         6,
+		"shl(1, 4)":         16,
+		"shr(0 - 8, 1)":     -4, // arithmetic shift keeps the sign
+		"bnot(0)":           -1,
 		"and(12, or(1, 2))": 0, // 12 & 3 = 0
 	}
 	for src, want := range cases {
