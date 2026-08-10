@@ -1741,4 +1741,6 @@ var builtinNames = map[string]bool{
 	"dict_new": true, "dict_set": true, "dict_get": true, "dict_has": true,
 	"dict_must": true, "dict_or": true, "dict_keys": true,
 	"bytes_new": true, "bytes_push": true, "bytes_to_str": true, "abort": true,
+	"dict_del": true, "buf_new": true, "buf_get8": true, "buf_set8": true,
+	"argsort": true,
 }
