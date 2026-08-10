@@ -146,7 +146,9 @@ struct Index { id: I64, target: Expr, index: Expr, line: I64 }
 struct Slice { id: I64, target: Expr, start: Opt[Expr], end: Opt[Expr], line: I64 }
 
 struct RecordField { name: Str, value: Expr }
-struct RecordLit { id: I64, fields: Arr[RecordField], line: I64 }
+# type_name is the name in front of a typed literal, `Point { x: 1.0 }`, or "".
+# Records are structural, so it is advisory: kept only so the printer reproduces it.
+struct RecordLit { id: I64, type_name: Str, fields: Arr[RecordField], line: I64 }
 
 # Field is record field access: target.name.
 struct Field { id: I64, target: Expr, name: Str, line: I64 }
@@ -191,6 +193,11 @@ struct Match {
   line: I64,
 }
 
+# Try is the postfix `?`: it unwraps the success case of a Res/Opt value (the
+# payload of Ok/Some) or, on a failure case (Err/None), returns that value from
+# the enclosing function.
+struct Try { id: I64, expr: Expr, line: I64 }
+
 # MatchArm is one `pattern => body`. The body is a statement, not an expression,
 # so `Some(v) => v`, `_ => return x`, `Ok(b) => acc = b` and `None => { ... }`
 # are all arms. Its value, for an expression arm, is the match's value.
@@ -226,6 +233,7 @@ enum Expr {
   EField(Field),
   EIf(IfExpr),
   EMatch(Match),
+  ETry(Try),
   EBlock(Block),
 }
 
@@ -338,6 +346,7 @@ fn expr_line(e: Expr) -> I64 {
     EField(x) => x.line,
     EIf(x) => x.line,
     EMatch(x) => x.line,
+    ETry(x) => x.line,
     EBlock(x) => x.line,
   }
 }
@@ -360,6 +369,7 @@ fn expr_id(e: Expr) -> I64 {
     EField(x) => x.id,
     EIf(x) => x.id,
     EMatch(x) => x.id,
+    ETry(x) => x.id,
     EBlock(x) => x.id,
   }
 }
@@ -465,8 +475,8 @@ fn index(ids: NodeIds, target: Expr, idx: Expr, line: I64) -> Expr =
 fn slice(ids: NodeIds, target: Expr, start: Opt[Expr], end: Opt[Expr], line: I64) -> Expr =
   ESlice(Slice { id: fresh(ids), target: target, start: start, end: end, line: line })
 
-fn record_lit(ids: NodeIds, fields: Arr[RecordField], line: I64) -> Expr =
-  ERecord(RecordLit { id: fresh(ids), fields: fields, line: line })
+fn record_lit(ids: NodeIds, type_name: Str, fields: Arr[RecordField], line: I64) -> Expr =
+  ERecord(RecordLit { id: fresh(ids), type_name: type_name, fields: fields, line: line })
 
 fn field(ids: NodeIds, target: Expr, name: Str, line: I64) -> Expr =
   EField(Field { id: fresh(ids), target: target, name: name, line: line })
@@ -512,6 +522,9 @@ fn enum_decl(ids: NodeIds, name: Str, variants: Arr[EnumVariant], line: I64) -> 
 
 fn match_expr(ids: NodeIds, subject: Expr, arms: Arr[MatchArm], line: I64) -> Expr =
   EMatch(Match { id: fresh(ids), subject: subject, arms: arms, line: line })
+
+fn try_expr(ids: NodeIds, expr: Expr, line: I64) -> Expr =
+  ETry(Try { id: fresh(ids), expr: expr, line: line })
 
 fn expr_stmt(ids: NodeIds, x: Expr, line: I64) -> Stmt =
   SExpr(ExprStmt { id: fresh(ids), x: x, line: line })

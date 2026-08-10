@@ -116,7 +116,7 @@ let C_UNDERSCORE: I64 = ch("_")
 # The single-character operator and punctuation sets, in the Go lexer's order.
 # Kept as strings so a token's value can be a one-byte slice of this constant
 # rather than a freshly built string: the scanner allocates enough as it is.
-let OP_CHARS: Str = "+-*/%@^<>=!"
+let OP_CHARS: Str = "+-*/%@^<>=!?"
 let PUNCT_CHARS: Str = "()[]{},:;."
 
 fn is_digit(c: I64) -> Bool = c >= C_ZERO and c <= C_NINE

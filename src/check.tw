@@ -842,6 +842,12 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
     },
     EIf(ex) => infer_if(c, ex, env),
     EMatch(ex) => infer_match(c, ex, env),
+    # The success payload's type is not tracked (Res/Opt are advisory), so the
+    # unwrapped value is left unknown; the subject is still checked.
+    ETry(ex) => {
+      infer_expr(c, ex.expr, env)
+      TUnknown
+    },
     EBlock(b) => infer_block(c, b, new_env(Some(env))),
   }
 }

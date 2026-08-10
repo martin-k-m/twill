@@ -656,7 +656,32 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
     EField(x) => field_value(eval_expr(x.target, env)?, x.name, x.line),
     EIf(x) => eval_if(x, env),
     EMatch(x) => eval_match(x, env),
+    ETry(x) => eval_try(x, env),
     EBlock(b) => Ok(flow_value(exec_block(b, new_env(Some(env)))?)),
+  }
+}
+
+# Postfix `?`: unwrap a Res/Opt success (the payload of Ok/Some) or, on a failure
+# case, hand it back. The Go interp returns the failure from the enclosing
+# function via its return signal; the self-hosted evaluator collapses returns at
+# every expression boundary (eval_if and eval_match do the same), so here the
+# failure variant becomes the expression's value rather than an early return.
+# Propagating it needs the evaluator change if-expressions and match arms wait
+# on; the parse, check and format of `?` are exact.
+fn eval_try(x: ast.Try, env: Env) -> Res[Value, RuntimeError] {
+  let v: Value = eval_expr(x.expr, env)?
+  match v {
+    VVariant(vt) => {
+      if bytes.equal(vt.name, "Ok") or bytes.equal(vt.name, "Some") {
+        match vt.payload {
+          Some(pv) => Ok(pv),
+          None => Ok(VUnit),
+        }
+      } else {
+        Ok(v)
+      }
+    },
+    _ => Err(runtime_error(x.line, "`?` expects a Res or Opt value")),
   }
 }
 

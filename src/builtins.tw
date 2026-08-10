@@ -19,7 +19,7 @@ mode systems
 
 import "bytes.tw" as bytes
 
-let NAMES: Str = "print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item dtype range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian and or xor shl shr bnot"
+let NAMES: Str = "print relu exp log sin cos tanh sigmoid sqrt sum prod median mean abs pow matmul dot grad grads value_and_grad map zip tensor scalar zeros ones fill randn rand eye transpose shape len item dtype range list str square maximum minimum greater less greater_equal less_equal equal where clip max min argmax argmin flip roll diff softmax logsumexp sort topk reshape broadcast_to concat fold append enumerate read_csv einsum map_leaves zip_leaves seed read_frame write_frame columns field with_field gbm_fit gbm_predict cumsum cumprod cummax cummin conv2d maxpool2d save load gather permutation int floor ceil round jacobian hessian and or xor shl shr bnot Ok Err Some None"
 
 # Membership over the space-separated list. Padding both sides is what stops
 # "max" from matching inside "cummax": the same trick eval's in_words and
