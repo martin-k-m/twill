@@ -113,11 +113,29 @@ is precisely the property the twill version is meant to gain.
 
 ## NEEDS-4: generics: `Arr[T]`, `Dict[K,V]`, `Opt[T]`, `Res[T,E]`
 
-**Status:** blocking.
+**Status:** generic type *annotations* parse and check (2026-08-09); generic
+type *declarations* and real monomorphization remain.
 
 Type parameters on structs, enums and functions. No bounds, no traits,
 monomorphized. Used on nearly every line of `src/`; `src/lex.tw:198` (`Lexer`
 holds `Arr[Token]` and `Arr[Comment]`) is the first.
+
+**Done.** A generic type name in an annotation position (`xs: Arr[I64]`,
+`-> Res[I64, Str]`, `let d: Dict[Str, Arr[I64]]`) now parses: a `[` after a bare
+type name opens a generic argument list, each argument itself a full type
+reference, so nesting (`Arr[Arr[I64]]`) and qualified arguments
+(`Dict[Str, ast.Expr]`) work. The whole thing is kept as advisory text, since the
+bootstrap has no such type, and `twill fmt` round-trips it. `let` gained a
+`TypeName` for this, and a systems-mode generic parameter is left `tUnknown`
+rather than pinned to the argument, so indexing an `Arr` param is not a false
+error. This unblocked `std/text.tw` (now round-trips) and moved float/random/
+linalg/stats past their generic lines to the next feature (field assignment).
+Landed in the Go bootstrap and mirrored in the self-hosted parser, checker and
+formatter; tests in `internal/interp/generics_test.go`.
+
+**Remaining.** Declaring a generic (`struct Box[T] { … }`, `enum Opt[T] { … }`),
+and any actual type-parameter checking or monomorphization: the annotations are
+tolerated, not understood.
 
 *Go bootstrap:* Go generics for none of it. `internal/value` has `List` as
 `[]Value` (heterogeneous) and `Record` as ordered string keys, and the checker

@@ -125,6 +125,8 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 		name := st.Name
 		if st.Unit != nil {
 			name += ": " + p.unitAnno(st.Unit)
+		} else if st.TypeName != "" {
+			name += ": " + st.TypeName
 		}
 		p.lineC(indent, "let "+name+" = "+p.expr(st.Value), st.Line)
 	case *ast.Assign:

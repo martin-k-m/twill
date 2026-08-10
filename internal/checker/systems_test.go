@@ -21,6 +21,18 @@ func TestSystemsModeToleratesTypedLet(t *testing.T) {
 	wantNone(t, "mode systems\nlet n: I64 = 3\nlet s: Str = n")
 }
 
+func TestSystemsModeToleratesGenericTypes(t *testing.T) {
+	wantNone(t, "mode systems\nfn f(a: Arr[I64], b: Dict[Str, V]) -> Res[I64, Str] = a\nlet r = f(1.0, 2.0)")
+	wantNone(t, "mode systems\nlet d: Arr[Arr[I64]] = 3.0")
+}
+
+// A generic-typed parameter is left unknown, not pinned to the argument, so the
+// body may index it without a false "cannot index a scalar" when a caller passes
+// a scalar.
+func TestGenericParamIsAdvisoryNotPinned(t *testing.T) {
+	wantNone(t, "mode systems\nfn head(xs: Arr[I64]) -> I64 = xs[0]\nlet r = head(3.0)")
+}
+
 func TestNumericModeStillRejectsUnknownLetUnit(t *testing.T) {
 	wantOne(t, "let n: I64 = 3", "unknown unit")
 }

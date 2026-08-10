@@ -330,7 +330,11 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 	switch st := s.(type) {
 	case *ast.Let:
 		rhs := c.inferExpr(st.Value, env)
-		if st.Unit != nil && !c.isAdvisoryTypeAnno(st.Unit) {
+		if st.TypeName != "" {
+			// A qualified or generic type annotation is always a type, never a
+			// unit, so the binding just takes the value's type.
+			env.define(st.Name, rhs)
+		} else if st.Unit != nil && !c.isAdvisoryTypeAnno(st.Unit) {
 			want := c.resolveUnit(st.Unit, st.Line)
 			if t, ok := rhs.(tTensor); ok {
 				if len(t.unit) != 0 && !unitEqual(t.unit, want) {
@@ -856,13 +860,18 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 				scope.define(p.Name, tTensor{dims: []int{}, unit: want})
 			} else {
 				// In systems mode the name is a type the bootstrap has no
-				// definition for (I64, Str, cp.Caps); the annotation is advisory,
-				// so the parameter takes the argument's type and nothing is
-				// reported. In numeric mode an unknown type name is still an error.
-				if !c.systems {
+				// definition for (I64, Str, Arr[I64], cp.Caps). The annotation is
+				// advisory and the type genuinely unknown, so the parameter is
+				// left unknown rather than pinned to whatever the argument
+				// happened to be: pinning it would make indexing an `Arr[I64]`
+				// param report a false error when a scalar was passed in a test.
+				// In numeric mode an unknown type name is still reported.
+				if c.systems {
+					scope.define(p.Name, tUnknown{})
+				} else {
 					c.report(ex.Line, "unknown type %q on parameter %q", p.TypeName, p.Name)
+					scope.define(p.Name, argTypes[i])
 				}
-				scope.define(p.Name, argTypes[i])
 			}
 		case p.Shape != nil:
 			if got, ok := argTypes[i].(tTensor); ok {

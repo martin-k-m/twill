@@ -235,13 +235,22 @@ fn parse_let(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   # An annotation on a `let` introduces a unit: `let px: USD/share = ...`. It is
   # not a type annotation today, and in systems mode it has to become one, which
   # is NEEDS-1's sharpest edge.
+  # A unit introduces a quantity (`let px: USD/share`); a name followed by `.` or
+  # `[` is a type (`let d: Arr[I64]`), advisory and kept as text, the same
+  # disambiguation a parameter makes.
   let unit: Opt[ast.UnitAnno] = None
+  let type_name: Str = ""
   if accept(p, ":") {
-    unit = Some(parse_unit_expr(p)?)
+    let u: ast.UnitAnno = parse_unit_expr(p)?
+    if (check(p, ".") or check(p, "[")) and len(u.factors) == 1 and u.factors[0].exp == 1 {
+      type_name = type_suffix(p, u.factors[0].name)?
+    } else {
+      unit = Some(u)
+    }
   }
   expect(p, "=")?
   let v: ast.Expr = parse_expr(p)?
-  Ok(ast.let_stmt(p.ids, name, unit, v, line))
+  Ok(ast.let_stmt(p.ids, name, unit, type_name, v, line))
 }
 
 fn parse_fn_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
@@ -668,8 +677,8 @@ fn parse_signature(p: Parser) -> Res[Signature, lex.SyntaxError] {
       ret = Some(parse_shape_anno(p)?)
     } else {
       let u: ast.UnitAnno = parse_unit_expr(p)?
-      if check(p, ".") and len(u.factors) == 1 and u.factors[0].exp == 1 {
-        ret_type = qualify(p, u.factors[0].name)?
+      if (check(p, ".") or check(p, "[")) and len(u.factors) == 1 and u.factors[0].exp == 1 {
+        ret_type = type_suffix(p, u.factors[0].name)?
       } else {
         ret_unit = Some(u)
       }
@@ -689,6 +698,47 @@ fn qualify(p: Parser, base: Str) -> Res[Str, lex.SyntaxError] {
     name = bytes.concat(name, bytes.concat(".", seg))
   }
   Ok(name)
+}
+
+# type_suffix continues a bare type name already read as `base`, consuming any
+# `.name` qualification and `[...]` generic arguments, and returns the whole
+# dotted/bracketed name, e.g. base "Arr" then "[I64]" gives "Arr[I64]".
+fn type_suffix(p: Parser, base: Str) -> Res[Str, lex.SyntaxError] {
+  let name: Str = qualify(p, base)?
+  if check(p, "[") {
+    let args: Str = parse_type_args(p)?
+    name = bytes.concat(name, args)
+  }
+  Ok(name)
+}
+
+# parse_type_ref reads a full type reference: a name, an optional `.name`
+# qualification, and optional `[...]` generic arguments, which nest.
+fn parse_type_ref(p: Parser) -> Res[Str, lex.SyntaxError] {
+  let name: Str = expect_ident(p)?
+  type_suffix(p, name)
+}
+
+# parse_type_args reads `[T, U, ...]` after a type name, each T a full type
+# reference, and returns the bracketed text, e.g. "[Str, Arr[I64]]". It assumes
+# the current token is "[".
+fn parse_type_args(p: Parser) -> Res[Str, lex.SyntaxError] {
+  next_tok(p)
+  let out: Str = "["
+  let first: Bool = true
+  while true {
+    let a: Str = parse_type_ref(p)?
+    if not first {
+      out = bytes.concat(out, ", ")
+    }
+    out = bytes.concat(out, a)
+    first = false
+    if not accept(p, ",") {
+      break
+    }
+  }
+  expect(p, "]")?
+  Ok(bytes.concat(out, "]"))
 }
 
 fn parse_params(p: Parser) -> Res[Arr[ast.Param], lex.SyntaxError] {
@@ -720,10 +770,11 @@ fn parse_param(p: Parser) -> Res[ast.Param, lex.SyntaxError] {
       let u: ast.UnitAnno = parse_unit_expr(p)?
       if len(u.factors) == 1 and u.factors[0].exp == 1 {
         param.type_name = u.factors[0].name
-        # A `.` makes it a qualified type name (`cp.Caps`): units are never
-        # qualified, so the suffix is unambiguously part of the type.
-        if check(p, ".") {
-          param.type_name = qualify(p, param.type_name)?
+        # A `.` or `[` makes it a qualified or generic type name (`cp.Caps`,
+        # `Arr[I64]`): units are never qualified or bracketed, so the suffix is
+        # unambiguously part of the type.
+        if check(p, ".") or check(p, "[") {
+          param.type_name = type_suffix(p, param.type_name)?
         }
       } else {
         param.unit = Some(u)

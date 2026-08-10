@@ -206,6 +206,9 @@ struct Let {
   id: I64,
   name: Str,
   unit: Opt[UnitAnno],
+  # A named/qualified/generic type annotation (`let d: Arr[I64] = ...`), or "".
+  # Advisory, like a parameter's type_name; a `.` or `[` marks it as a type.
+  type_name: Str,
   value: Expr,
   line: I64,
 }
@@ -427,8 +430,8 @@ fn if_expr(ids: NodeIds, cond: Expr, then_block: Block, else_branch: Else, line:
   IfExpr { id: fresh(ids), cond: cond, then_block: then_block,
            else_branch: else_branch, line: line }
 
-fn let_stmt(ids: NodeIds, name: Str, unit: Opt[UnitAnno], value: Expr, line: I64) -> Stmt =
-  SLet(Let { id: fresh(ids), name: name, unit: unit, value: value, line: line })
+fn let_stmt(ids: NodeIds, name: Str, unit: Opt[UnitAnno], type_name: Str, value: Expr, line: I64) -> Stmt =
+  SLet(Let { id: fresh(ids), name: name, unit: unit, type_name: type_name, value: value, line: line })
 
 fn fn_decl(ids: NodeIds, name: Str, params: Arr[Param], ret: Opt[ShapeAnno],
            ret_unit: Opt[UnitAnno], ret_type: Str, body: Expr, line: I64) -> FnDecl =

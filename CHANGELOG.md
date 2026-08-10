@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Generic type annotations parse and check** (NEEDS-4, part, 2026-08-09):
+  `xs: Arr[I64]`, `-> Res[I64, Str]`, `let d: Dict[Str, Arr[I64]]`. A `[` after a
+  bare type name opens a generic argument list, each argument a full type
+  reference, so nesting (`Arr[Arr[I64]]`) and qualified arguments
+  (`Dict[Str, ast.Expr]`) work; the whole name is kept as advisory text and
+  `twill fmt` round-trips it. `let` gained a `TypeName`, and a systems-mode
+  generic parameter is left unknown rather than pinned to its argument, so
+  indexing an `Arr` param is not a false error. Unblocked `std/text.tw`
+  (round-trips now) and moved four more std files to their next blocker. Go
+  bootstrap + self-hosted parser/checker/formatter; tests in
+  `internal/interp/generics_test.go`. Generic *declarations* and real
+  monomorphization remain.
+
 - **Bitwise operators on I64** (NEEDS-2, part, 2026-08-09): `and`, `or`, `xor`,
   `shl`, `shr` (2-arg) and `bnot` (1-arg), on scalar integers, `shr` arithmetic,
   shift counts masked to 0..63. `and`/`or` keep the boolean keywords' spelling

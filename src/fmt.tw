@@ -277,7 +277,9 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
       let name: Str = st.name
       match st.unit {
         Some(u) => name = bytes.concat(name, bytes.concat(": ", unit_anno(u))),
-        None => unit,
+        None => if len(st.type_name) > 0 {
+          name = bytes.concat(name, bytes.concat(": ", st.type_name))
+        },
       }
       line_c(p, indent, bytes.concat("let ", bytes.concat(name,
         bytes.concat(" = ", expr(p, st.value)))), st.line)

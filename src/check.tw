@@ -611,6 +611,11 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
   match s {
     SLet(st) => {
       let rhs: Type = infer_expr(c, st.value, env)
+      if len(st.type_name) > 0 {
+        # A qualified or generic type annotation is always a type, never a unit,
+        # so the binding just takes the value's type.
+        env_define(env, st.name, rhs)
+      } else {
       match st.unit {
         # A systems-mode `let n: I64` names a type the bootstrap has no
         # definition for; the annotation is advisory, so the binding just takes
@@ -635,6 +640,7 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
           }
         },
         None => env_define(env, st.name, rhs),
+      }
       }
     },
     SFn(st) => {
@@ -1585,14 +1591,18 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
             env_define(scope, p.name, tensor_with_unit(arr_new(), want))
           } else {
             # In systems mode the name is a type the bootstrap has no definition
-            # for (I64, Str, cp.Caps); the annotation is advisory, so the
-            # parameter takes the argument's type and nothing is reported. In
-            # numeric mode an unknown type name is still an error.
-            if not c.systems {
+            # for (I64, Str, Arr[I64], cp.Caps). The annotation is advisory and
+            # the type genuinely unknown, so the parameter is left unknown rather
+            # than pinned to whatever the argument happened to be: pinning would
+            # make indexing an `Arr[I64]` param a false error when a scalar was
+            # passed. In numeric mode an unknown type name is still reported.
+            if c.systems {
+              env_define(scope, p.name, TUnknown)
+            } else {
               report(c, ex.line, bytes.concat("unknown type ", bytes.concat(quoted(p.type_name),
                 bytes.concat(" on parameter ", quoted(p.name)))))
+              env_define(scope, p.name, arg_types[i])
             }
-            env_define(scope, p.name, arg_types[i])
           }
         },
       }
