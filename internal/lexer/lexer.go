@@ -41,7 +41,7 @@ var keywords = map[string]bool{
 	"while": true, "for": true, "in": true, "return": true,
 	"import": true, "type": true, "true": true, "false": true,
 	"and": true, "or": true, "not": true,
-	"enum": true, "match": true,
+	"enum": true, "match": true, "struct": true,
 }
 
 // multiOps are matched greedily before single-character operators.

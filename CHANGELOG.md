@@ -23,6 +23,20 @@
 
 ### Added
 
+- **`struct` declarations** (NEEDS-5, 2026-08-09): `struct Mat { rows: I64,
+  cols: I64, data: Arr[F64] }`. The whole self-hosted compiler declares its
+  types this way, yet the bootstrap had no `struct`, so `struct Foo { ... }`
+  parsed as stray identifiers and a record literal and failed the check. It is
+  now a declaration: field types are full type references (name, qualified, or
+  generic), the checker registers the name as a record type whose fields exist
+  and whose field types are advisory (so `m.field` is checked for existence),
+  and it is erased at runtime since a record is structural and built with a
+  (typed) record literal. Go bootstrap (lexer keyword, parser, checker, interp,
+  formatter) with tests in `internal/interp/struct_test.go`; self-hosted mirror
+  follows. Clears the `struct` blocker in the compiler's own sources and in
+  `std/linalg.tw`, `std/random.tw`, `std/float.tw`; what remains on those is the
+  systems-mode runtime primitive library (`arr_new`, `dict_new`, ...).
+
 - **Postfix `?` and built-in `Res`/`Opt`** (2026-08-09): `read_file(path)?`. The
   operator unwraps the success case of a `Res`/`Opt` value (the payload of `Ok`
   or `Some`) or returns its failure case (`Err`/`None`) from the enclosing

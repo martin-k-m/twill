@@ -164,6 +164,12 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 			}
 		}
 		p.lineC(indent, "enum "+st.Name+" { "+strings.Join(cases, ", ")+" }", st.Line)
+	case *ast.StructDecl:
+		fields := make([]string, len(st.Fields))
+		for i, f := range st.Fields {
+			fields[i] = f.Name + ": " + f.Type
+		}
+		p.lineC(indent, "struct "+st.Name+" { "+strings.Join(fields, ", ")+" }", st.Line)
 	case *ast.ExprStmt:
 		p.lineC(indent, p.expr(st.X), st.Line)
 	case *ast.Block:
