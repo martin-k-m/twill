@@ -46,6 +46,12 @@ func ParseWithComments(src string) (*ast.Program, []lexer.Comment, error) {
 type parser struct {
 	toks []lexer.Token
 	pos  int
+	// groupDepth is how many enclosing `(...)` or `[...]` the cursor is inside.
+	// The newline rules that end a statement (a line starting with `+`/`-`, or
+	// with `and(`/`or(`) apply only at statement level, groupDepth 0: inside a
+	// grouping there is no statement to end, so `f(a\n  + b)` continues the
+	// expression rather than breaking mid-argument.
+	groupDepth int
 }
 
 func (p *parser) peek(o int) lexer.Token {
@@ -317,14 +323,15 @@ func (p *parser) parseBinary(minPrec int) (ast.Expr, error) {
 		// than continuing this expression (so a line like `-mean(x)` is not
 		// glued onto the previous line as a subtraction). To continue an
 		// expression across lines, end the line with the operator.
-		if (op == "+" || op == "-") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line {
+		if p.groupDepth == 0 && (op == "+" || op == "-") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line {
 			break
 		}
 		// A line that begins `and(` or `or(` is a bitwise call starting a new
 		// statement, not this expression continued by the boolean operator. The
 		// following `(` is what distinguishes the call from a genuine (trailing-
-		// operator) continuation, so only that form breaks.
-		if (op == "and" || op == "or") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line && p.peek(1).Value == "(" {
+		// operator) continuation, so only that form breaks. Like the `+`/`-`
+		// rule, only at statement level: inside a grouping it continues.
+		if p.groupDepth == 0 && (op == "and" || op == "or") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line && p.peek(1).Value == "(" {
 			break
 		}
 		prec, ok := precedence[op]
@@ -403,6 +410,8 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 // parseIndexOrSlice parses the body of a `[...]` after the '[' is consumed. It
 // produces an Index (`t[e]`) or a Slice (`t[a:b]`, with either side optional).
 func (p *parser) parseIndexOrSlice(target ast.Expr, line int) (ast.Expr, error) {
+	p.groupDepth++
+	defer func() { p.groupDepth-- }()
 	var start, end ast.Expr
 	var err error
 	if !p.check(":") {
@@ -472,7 +481,9 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 
 	if p.check("(") {
 		p.next()
+		p.groupDepth++
 		inner, err := p.parseExpr()
+		p.groupDepth--
 		if err != nil {
 			return nil, err
 		}
@@ -532,6 +543,8 @@ func (p *parser) parseLambda() (ast.Expr, error) {
 
 func (p *parser) parseTensorOrList() (ast.Expr, error) {
 	line := p.next().Line // '['
+	p.groupDepth++
+	defer func() { p.groupDepth-- }()
 	var elements []ast.Expr
 	if !p.check("]") {
 		first, err := p.parseExpr()
@@ -966,6 +979,8 @@ func (p *parser) parseArgs() ([]ast.Expr, error) {
 	if _, err := p.expect("("); err != nil {
 		return nil, err
 	}
+	p.groupDepth++
+	defer func() { p.groupDepth-- }()
 	var args []ast.Expr
 	if !p.check(")") {
 		a, err := p.parseExpr()

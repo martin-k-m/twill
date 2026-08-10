@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A line-leading `+`/`-` continues an expression inside a grouping**
+  (2026-08-09). The rule that a line starting with `+`/`-` (or `and(`/`or(`)
+  begins a new statement now applies only at statement level; inside a `(...)`,
+  a call's arguments, or a `[...]`, there is no statement to end, so
+  `f(a\n  + b)` continues the argument rather than breaking with "expected `)`".
+  A `group_depth` counter on the parser gates the newline rules. Unblocked
+  `std/stats.tw`. Both sides.
+
 ### Changed
 
 - **`unit` is now a contextual keyword** (2026-08-09): a declaration only when it
