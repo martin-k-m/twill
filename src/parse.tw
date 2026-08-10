@@ -64,6 +64,11 @@ struct Parser {
   toks: Arr[lex.Token],
   pos: I64,
   ids: ast.NodeIds,
+  # How many enclosing `(...)` or `[...]` the cursor is inside. The newline
+  # rules that end a statement (a line starting `+`/`-`, or `and(`/`or(`) apply
+  # only at group_depth 0: inside a grouping there is no statement to end, so
+  # `f(a\n  + b)` continues the expression rather than breaking mid-argument.
+  group_depth: I64,
 }
 
 # Signature is the three-part result of parsing a parameter list and an optional
@@ -79,7 +84,7 @@ struct Signature {
 # parse tokenizes and parses src into a Program.
 fn parse(src: Str) -> Res[ast.Program, lex.SyntaxError] {
   let toks: Arr[lex.Token] = lex.tokenize(src)?
-  let p: Parser = Parser { toks: toks, pos: 0, ids: ast.new_ids() }
+  let p: Parser = Parser { toks: toks, pos: 0, ids: ast.new_ids(), group_depth: 0 }
   parse_program(p)
 }
 
@@ -92,7 +97,7 @@ struct Parsed {
 
 fn parse_with_comments(src: Str) -> Res[Parsed, lex.SyntaxError] {
   let sc: lex.Scan = lex.tokenize_with_comments(src)?
-  let p: Parser = Parser { toks: sc.tokens, pos: 0, ids: ast.new_ids() }
+  let p: Parser = Parser { toks: sc.tokens, pos: 0, ids: ast.new_ids(), group_depth: 0 }
   let prog: ast.Program = parse_program(p)?
   Ok(Parsed { program: prog, comments: sc.comments, ids: p.ids })
 }
@@ -373,14 +378,15 @@ fn parse_binary(p: Parser, min_prec: I64) -> Res[ast.Expr, lex.SyntaxError] {
     # continuing this expression, so a line like `-mean(x)` is not glued onto
     # the previous line as a subtraction. To continue an expression across
     # lines, end the line with the operator.
-    if (bytes.equal(op, "+") or bytes.equal(op, "-")) and p.pos > 0 and t.line > p.toks[p.pos - 1].line {
+    if p.group_depth == 0 and (bytes.equal(op, "+") or bytes.equal(op, "-")) and p.pos > 0 and t.line > p.toks[p.pos - 1].line {
       break
     }
     # A line that begins `and(` or `or(` is a bitwise call starting a new
     # statement, not this expression continued by the boolean operator. The
     # following `(` distinguishes the call from a genuine trailing-operator
-    # continuation, so only that form breaks.
-    if (bytes.equal(op, "and") or bytes.equal(op, "or")) and p.pos > 0
+    # continuation, so only that form breaks. Like the `+`/`-` rule, only at
+    # statement level: inside a grouping it continues.
+    if p.group_depth == 0 and (bytes.equal(op, "and") or bytes.equal(op, "or")) and p.pos > 0
         and t.line > p.toks[p.pos - 1].line and bytes.equal(peek(p, 1).value, "(") {
       break
     }
@@ -443,13 +449,18 @@ fn parse_postfix(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
     }
     if check(p, "(") {
       let line: I64 = peek(p, 0).line
+      p.group_depth = p.group_depth + 1
       let args: Arr[ast.Expr] = parse_args(p)?
+      p.group_depth = p.group_depth - 1
       x = ast.call(p.ids, x, args, line)
       continue
     }
     if check(p, "[") {
       let line: I64 = next_tok(p).line
-      x = parse_index_or_slice(p, x, line)?
+      p.group_depth = p.group_depth + 1
+      let ix: ast.Expr = parse_index_or_slice(p, x, line)?
+      p.group_depth = p.group_depth - 1
+      x = ix
       continue
     }
     break
@@ -537,12 +548,17 @@ fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
   # thing and the formatter re-inserts parentheses from precedence.
   if check(p, "(") {
     next_tok(p)
+    p.group_depth = p.group_depth + 1
     let inner: ast.Expr = parse_expr(p)?
+    p.group_depth = p.group_depth - 1
     expect(p, ")")?
     return Ok(inner)
   }
   if check(p, "[") {
-    return parse_tensor_or_list(p)
+    p.group_depth = p.group_depth + 1
+    let lst: ast.Expr = parse_tensor_or_list(p)?
+    p.group_depth = p.group_depth - 1
+    return Ok(lst)
   }
   if check(p, "{") {
     if looks_like_record(p) {
