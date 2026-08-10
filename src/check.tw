@@ -729,6 +729,9 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     SEnum(_) => unit,
     SExpr(st) => infer_expr(c, st.x, env),
     SBlock(b) => infer_block(c, b, new_env(Some(env))),
+    # Loop control carries no type and defines no name.
+    SBreak(_) => unit,
+    SContinue(_) => unit,
   }
 }
 

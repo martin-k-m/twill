@@ -364,6 +364,8 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
     # alone would turn a dropped declaration into a reported divergence and
     # bury it. NEEDS-55 is the entry to fix both together.
     SUnitDecl(_) => unit,
+    SBreak(st) => line_c(p, indent, "break", st.line),
+    SContinue(st) => line_c(p, indent, "continue", st.line),
   }
 }
 

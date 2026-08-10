@@ -220,12 +220,16 @@ fn error_text(e: RuntimeError) -> Str =
 enum Flow {
   Normal(Value),
   Returned(Value),
+  BreakF,
+  ContinueF,
 }
 
 fn flow_value(f: Flow) -> Value {
   match f {
     Normal(v) => v,
     Returned(v) => v,
+    BreakF => VUnit,
+    ContinueF => VUnit,
   }
 }
 
@@ -400,6 +404,8 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
     SUnitDecl(_) => Ok(Normal(VUnit)),
     SExpr(st) => Ok(Normal(eval_expr(st.x, env)?)),
     SBlock(b) => exec_block(b, new_env(Some(env))),
+    SBreak(_) => Ok(BreakF),
+    SContinue(_) => Ok(ContinueF),
   }
 }
 
@@ -411,6 +417,8 @@ fn exec_block(b: ast.Block, scope: Env) -> Res[Flow, RuntimeError] {
     let f: Flow = exec_stmt(s, scope)?
     match f {
       Returned(v) => return Ok(Returned(v)),
+      BreakF => return Ok(BreakF),
+      ContinueF => return Ok(ContinueF),
       Normal(v) => {
         match s {
           SExpr(_) => last = v,
@@ -433,6 +441,8 @@ fn exec_while(st: ast.While, env: Env) -> Res[Flow, RuntimeError] {
     let f: Flow = exec_block(st.body, new_env(Some(env)))?
     match f {
       Returned(v) => return Ok(Returned(v)),
+      BreakF => return Ok(Normal(VUnit)),
+      ContinueF => unit,
       Normal(_) => unit,
     }
   }
@@ -453,6 +463,8 @@ fn exec_for(st: ast.For, env: Env) -> Res[Flow, RuntimeError] {
         let f: Flow = exec_block(st.body, scope)?
         match f {
           Returned(v) => return Ok(Returned(v)),
+          BreakF => return Ok(Normal(VUnit)),
+          ContinueF => unit,
           Normal(_) => unit,
         }
         i = i + r.step
@@ -471,6 +483,8 @@ fn exec_for(st: ast.For, env: Env) -> Res[Flow, RuntimeError] {
     let f: Flow = exec_block(st.body, scope)?
     match f {
       Returned(v) => return Ok(Returned(v)),
+      BreakF => return Ok(Normal(VUnit)),
+      ContinueF => unit,
       Normal(_) => unit,
     }
     k = k + 1
@@ -623,6 +637,13 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
       match env_get(env, x.name) {
         Some(v) => Ok(v),
         None => {
+          # `unit` is the bare spelling of the Unit value, so an arm like
+          # `None => unit` and any nothing-valued expression resolves here. It is
+          # a builtin name, not a keyword, so it stays usable as a field name;
+          # only the bare identifier resolves to the value.
+          if bytes.equal(x.name, "unit") {
+            return Ok(VUnit)
+          }
           if is_builtin(x.name) {
             return Ok(plain_builtin(x.name))
           }
