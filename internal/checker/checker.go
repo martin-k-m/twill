@@ -31,6 +31,15 @@ func Check(prog *ast.Program) []Diagnostic {
 			c.registerType(d)
 		case *ast.UnitDecl:
 			c.units[d.Name] = true
+		case *ast.StructDecl:
+			// A struct registers as a record type whose fields exist but whose
+			// field types are advisory (the systems types the bootstrap does not
+			// model), so `m.field` is checked for existence and left unknown.
+			fields := map[string]Type{}
+			for _, f := range d.Fields {
+				fields[f.Name] = tUnknown{}
+			}
+			c.types[d.Name] = tRecord{fields: fields}
 		}
 	}
 	env := newEnv(nil)
@@ -394,7 +403,7 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		if st.Alias != "" {
 			env.define(st.Alias, tUnknown{})
 		}
-	case *ast.TypeDecl, *ast.UnitDecl, *ast.EnumDecl:
+	case *ast.TypeDecl, *ast.UnitDecl, *ast.EnumDecl, *ast.StructDecl:
 		// Already registered in the pre-pass.
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)

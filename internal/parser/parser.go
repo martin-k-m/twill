@@ -157,6 +157,8 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseTypeDecl()
 		case "enum":
 			return p.parseEnumDecl()
+		case "struct":
+			return p.parseStructDecl()
 		}
 	}
 
@@ -993,6 +995,42 @@ func (p *parser) parseEnumDecl() (ast.Stmt, error) {
 			v.Payload = payload
 		}
 		decl.Variants = append(decl.Variants, v)
+		if !p.match(",") {
+			break
+		}
+	}
+	if _, err := p.expect("}"); err != nil {
+		return nil, err
+	}
+	return decl, nil
+}
+
+// parseStructDecl parses `struct Name { field: Type, ... }`. A field's type is a
+// full type reference (a name, qualified, or generic), kept as advisory text;
+// fields are comma-separated and a trailing comma is allowed.
+func (p *parser) parseStructDecl() (ast.Stmt, error) {
+	line := p.next().Line // 'struct'
+	name, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect("{"); err != nil {
+		return nil, err
+	}
+	decl := &ast.StructDecl{Name: name, Line: line}
+	for !p.check("}") && !p.atEnd() {
+		fname, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(":"); err != nil {
+			return nil, err
+		}
+		ftype, err := p.parseTypeRef()
+		if err != nil {
+			return nil, err
+		}
+		decl.Fields = append(decl.Fields, ast.StructField{Name: fname, Type: ftype})
 		if !p.match(",") {
 			break
 		}

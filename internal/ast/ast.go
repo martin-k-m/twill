@@ -178,9 +178,26 @@ func (s *For) stmt()      {}
 func (s *Return) stmt()   {}
 func (s *Import) stmt()   {}
 func (s *UnitDecl) stmt() {}
-func (s *TypeDecl) stmt() {}
-func (s *EnumDecl) stmt() {}
-func (s *ExprStmt) stmt() {}
+func (s *TypeDecl) stmt()   {}
+func (s *EnumDecl) stmt()   {}
+func (s *StructDecl) stmt() {}
+func (s *ExprStmt) stmt()   {}
+
+// StructDecl declares a record type: `struct Name { field: Type, ... }`. Field
+// types are advisory text; records are structural, so the declaration names a
+// type the checker can register without constraining how a record is built.
+type StructDecl struct {
+	Name   string
+	Fields []StructField
+	Line   int
+}
+
+type StructField struct {
+	Name string
+	Type string // the field's type name (advisory); may be qualified or generic
+}
+
+func (s *StructDecl) Pos() int { return s.Line }
 
 // EnumDecl declares a sum type: `enum Name { Case, Case(Payload), ... }`. Each
 // case is a variant with an optional single payload. The payload type is kept

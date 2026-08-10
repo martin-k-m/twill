@@ -230,6 +230,10 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	case *ast.TypeDecl:
 		// Types are checked statically and erased at runtime.
 		return value.TheUnit
+	case *ast.StructDecl:
+		// A struct is a record type: checked statically, erased at runtime, since
+		// a record carries its own fields and needs no declaration to be built.
+		return value.TheUnit
 	case *ast.UnitDecl:
 		// Units are checked statically and erased at runtime.
 		return value.TheUnit
