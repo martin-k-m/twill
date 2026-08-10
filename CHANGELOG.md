@@ -13,6 +13,32 @@
   expression has a spelling. `unit` stays a field name elsewhere; only the bare
   name resolves. Both sides.
 
+- **Systems runtime primitives** (2026-08-10): `emit_line`, seeded scalar RNG
+  (`rng_seed`/`rng_uniform`/`rng_normal`/`rng_perm`), reference identity
+  (`is_same`), argv (`args`), and value persistence (`save_value`/`load_value`),
+  registered in the shared builtin table so both the checker and the evaluator
+  know them. Both sides.
+
+### Changed
+
+- **Top-level `let` forward references** (2026-08-10): a module-level constant may
+  be used above its definition line, matching the hoisting already granted to
+  functions and enum variants. The checker asserts the name exists; evaluation
+  order stays the evaluator's concern. Both sides. This resolves the compiler's
+  own `DTYPE_MAKERS` self-reference.
+
+- **Cross-module enum constructors** (2026-08-10): a capitalized constructor name
+  borrowed from an aliased import (e.g. `SFn`, `EBlock` from `ast.tw`) no longer
+  reports as unknown. Variant constructors register program-wide at run time, so
+  a single-file checker cannot prove one absent; a lowercase unknown (a value or
+  function typo) is still reported. Both sides.
+
+### Fixed
+
+- **`jacobian` output dtype scoping** (2026-08-10): the self-hosted `jacobian`
+  read the output tensor's dtype after the loop that bound it, where the binding
+  was out of scope. The dtype is now captured in a loop-outer variable.
+
 ## [1.3.0] - 2026-08-10
 
 The systems-mode front end. `mode systems` is the dialect the compiler is being

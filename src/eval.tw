@@ -2813,6 +2813,9 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
     z = z + 1
   }
   let j: I64 = 0
+  # The output dtype is the same every pass; capture it so the result's dtype is
+  # available after the loop, where `y` (bound per iteration) is out of scope.
+  let out_dtype: I64 = xt.dtype
   while j < m {
     # A fresh tape and a fresh leaf each pass: gradients accumulate, so reusing
     # one would sum every row into every other.
@@ -2830,6 +2833,7 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
     if tensor.numel(y) != m {
       return Err(runtime_error(line, "jacobian: f returned a different output size on re-evaluation"))
     }
+    out_dtype = y.dtype
     # Isolate the j-th output by seeding the backward pass with a one-hot rather
     # than by indexing the output: indexing would need a gradient rule of its
     # own, and the seed is where the choice of output belongs anyway.
@@ -2858,7 +2862,7 @@ fn do_jacobian(f: Value, x: Value, line: I64) -> Res[Value, RuntimeError] {
   push(shape, m)
   push(shape, n)
   # A jacobian is a derivative and takes the gradient dtype.
-  Ok(VTensor(tensor.mk(shape, jac, tensor.grad_dtype(y.dtype))))
+  Ok(VTensor(tensor.mk(shape, jac, tensor.grad_dtype(out_dtype))))
 }
 
 # hessian(f)(x): the matrix of second partial derivatives of a scalar f at x, by

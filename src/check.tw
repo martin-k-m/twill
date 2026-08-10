@@ -470,6 +470,11 @@ struct Checker {
   # Set when a file imports without an alias, which makes any unknown name
   # unprovable. See check().
   blind_import: Bool,
+  # Set when a file imports under an alias. An enum's variant constructors are
+  # registered program-wide at run time, so a constructor declared in an aliased
+  # module (`SFn`, `EBlock`) is in scope unqualified even though this single-file
+  # checker never read that module. See cross_module_variant().
+  aliased_import: Bool,
   # Set for a `mode systems` file. The systems dialect names types the bootstrap
   # has no definition for (I64, Str, Bool, and qualified names like cp.Caps), so
   # an unresolved type annotation is advisory there rather than an error.
@@ -484,6 +489,20 @@ fn warn(c: Checker, line: I64, msg: Str) {
   push(c.diags, Diagnostic { msg: msg, line: line, severity: SEV_WARNING })
 }
 
+# cross_module_variant reports whether an unresolved name is plausibly an enum
+# variant constructor borrowed from an aliased import. Variant constructors are
+# registered program-wide at run time and are capitalized by convention, so a
+# capitalized unknown in a systems file that imports another module cannot be
+# proven undefined from this file alone. A lowercase unknown (a value or a
+# function) is still a typo and still reported.
+fn cross_module_variant(c: Checker, name: Str) -> Bool {
+  if not c.systems { return false }
+  if not c.aliased_import { return false }
+  if len(name) == 0 { return false }
+  let first: I64 = name[0]
+  first >= 65 and first <= 90
+}
+
 # check analyses a program and returns any diagnostics found.
 fn check(prog: ast.Program) -> Arr[Diagnostic] {
   let c: Checker = Checker {
@@ -492,6 +511,7 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     types: dict_new(),
     units: dict_new(),
     blind_import: false,
+    aliased_import: false,
     systems: bytes.equal(prog.mode, "systems"),
   }
 
@@ -523,6 +543,8 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
       SImport(imp) => {
         if len(imp.alias) == 0 {
           c.blind_import = true
+        } else {
+          c.aliased_import = true
         }
       },
       _ => unit,
@@ -563,6 +585,23 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
             None => env_define(env, v.name, TUnknown),
           }
           i = i + 1
+        }
+      },
+      _ => unit,
+    }
+  }
+
+  # Top-level `let` names too: a module-level constant may be referenced by a
+  # function declared above its definition line (DTYPE_MAKERS is used this way).
+  # As with functions this only asserts the name exists; infer_stmt still types
+  # the binding when the walk reaches it, and evaluation order is the evaluator's
+  # concern, not the checker's.
+  for s in prog.body {
+    match s {
+      SLet(st) => {
+        match env_get(env, st.name) {
+          Some(_) => unit,
+          None => env_define(env, st.name, TUnknown),
         }
       },
       _ => unit,
@@ -806,7 +845,7 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
           # mistake the checker could see plainly and said nothing about.
           # Builtins are not in the environment because they are not values, so
           # they are checked against the table instead.
-          if not is_builtin(ex.name) and not c.blind_import {
+          if not is_builtin(ex.name) and not c.blind_import and not cross_module_variant(c, ex.name) {
             report(c, ex.line, bytes.concat("unknown name ", quoted(ex.name)))
           }
           TUnknown
@@ -2183,9 +2222,9 @@ fn reshape_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> 
           let to: Count = element_count(s.dims)
           if to.ok and from.n != to.n {
             report(c, ex.line, bytes.concat("reshape changes the number of elements: ",
-              bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new() }),
+              bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
               bytes.concat(" has ", bytes.concat(str(from.n),
-              bytes.concat(", ", bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new() }),
+              bytes.concat(", ", bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
               bytes.concat(" needs ", str(to.n)))))))))
           }
         }
