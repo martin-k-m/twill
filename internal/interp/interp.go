@@ -709,6 +709,18 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 		return value.Bool(ip.compare(op, l, r, ex.Line))
 	}
 
+	// `+` concatenates two strings. The tensor engine has no notion of a string,
+	// so this is handled before the widen to AsTensor rather than after it. Only
+	// string+string concatenates; a string with anything else is still the error
+	// AsTensor reports, so `"n=" + 3` stays a mistake (str() is how you mean it).
+	if op == "+" {
+		if ls, lok := l.(value.Str); lok {
+			if rs, rok := r.(value.Str); rok {
+				return value.Str(string(ls) + string(rs))
+			}
+		}
+	}
+
 	// Two plain numbers are the whole of an interpreted scalar loop, and going
 	// through the tensor engine to add them allocates a rank-0 tensor for the
 	// answer that nothing will ever differentiate. Neither operand can be

@@ -112,15 +112,15 @@ fn text_width(c: Caps) -> I64 {
 
 fn env_or(name: Str, fallback: Str) -> Str {
   match env(name) {
-    Opt.Some(v) => v,
-    Opt.None => fallback,
+    Some(v) => v,
+    None => fallback,
   }
 }
 
 fn has_env(name: Str) -> Bool {
   match env(name) {
-    Opt.Some(_) => true,
-    Opt.None => false,
+    Some(_) => true,
+    None => false,
   }
 }
 

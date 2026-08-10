@@ -13,6 +13,20 @@
   expression has a spelling. `unit` stays a field name elsewhere; only the bare
   name resolves. Both sides.
 
+- **String `+` concatenation** (2026-08-10): `a + b` joins two strings, in the
+  interp and the checker. Two strings give a string; a string with a definite
+  number or tensor is still an error (`str(n)` is how a number joins a string).
+  This is what the terminal and CLI code use instead of nested `bytes.concat`.
+  Both sides.
+
+- **Terminal, list and GPU-binding builtins** (2026-08-10): `arr` (list literal
+  as a call), `arr_clear`, `chr` (one-byte string), `slice` (clamped byte
+  substring), `env` (variable as `Opt[Str]`), `is_tty_stdout`, `window_size`,
+  `clock_now_ms`, and the `gpu_*` device FFI boundary (no backend in this build;
+  each fails loudly). With these the entire `src/`, `std/` and `examples/` tree,
+  including the `cli/`, `term/` and `gpu/` subfolders, type-checks under the
+  bootstrap. Both sides.
+
 - **Systems runtime primitives** (2026-08-10): `emit_line`, seeded scalar RNG
   (`rng_seed`/`rng_uniform`/`rng_normal`/`rng_perm`), reference identity
   (`is_same`), argv (`args`), and value persistence (`save_value`/`load_value`),

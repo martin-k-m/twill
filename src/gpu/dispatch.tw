@@ -74,9 +74,9 @@ fn margin() -> F64 = 1.2
 fn should_offload(c: Costs, flops: F64, moved: I64) -> Bool {
   if !c.valid { return false }
   let mb: F64 = f64_of_i64(moved * 8) / 1048576.0
-  let gpu_us: F64 = c.launch_us
-    + mb * c.transfer_us_per_mb
-    + flops / c.device_flops_per_us
+  let gpu_us: F64 = c.launch_us +
+    mb * c.transfer_us_per_mb +
+    flops / c.device_flops_per_us
   let cpu_us: F64 = flops / c.host_flops_per_us
   gpu_us * margin() < cpu_us
 }
