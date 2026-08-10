@@ -14,7 +14,7 @@ import "help.tw" as help
 import "banner.tw" as banner
 import "repl.tw" as repl
 
-let VERSION: Str = "1.2.0"
+let VERSION: Str = "1.3.0"
 
 fn main() -> I64 {
   let argv = args()

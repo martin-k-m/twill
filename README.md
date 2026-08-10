@@ -57,7 +57,7 @@ European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths: 200000
 landed on the closed-form Greeks. No tape object, no `requires_grad`, no
 `.backward()`. The full program is [`examples/montecarlo_option.tw`](examples/montecarlo_option.tw).
 
-This is an early prototype at v1.2.0. The reference implementation is a single Go
+This is an early prototype at v1.3.0. The reference implementation is a single Go
 binary with no dependencies, so it is quick to build and short enough to read.
 
 ## Contents
