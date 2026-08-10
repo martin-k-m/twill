@@ -216,17 +216,30 @@ fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     if bytes.equal(t.value, "unit") { return parse_unit_decl(p) }
   }
 
-  # Assignment: ident '=' expr. The lexer produces `==` as one token, so this
-  # cannot mis-fire on a comparison; there is no need to look past the `=`.
-  if t.kind == lex.KIND_IDENT and peek(p, 1).kind == lex.KIND_OP and bytes.equal(peek(p, 1).value, "=") {
-    let name: Str = next_tok(p).value
+  let x: ast.Expr = parse_expr(p)?
+  # Assignment: `<lvalue> = expr`. `=` is not a binary operator, so parse_expr
+  # stopped in front of it (and `==` was consumed as a comparison, so it never
+  # reaches here). The target must be an lvalue: a name, a field, or an index.
+  if peek(p, 0).kind == lex.KIND_OP and bytes.equal(peek(p, 0).value, "=") {
     next_tok(p)
     let v: ast.Expr = parse_expr(p)?
-    return Ok(ast.assign_stmt(p.ids, name, v, t.line))
+    if not is_assignable(x) {
+      return Err(err_at(t, "cannot assign to this expression; the left of `=` must be a name, a field, or an index"))
+    }
+    return Ok(ast.assign_stmt(p.ids, x, v, t.line))
   }
-
-  let x: ast.Expr = parse_expr(p)?
   Ok(ast.expr_stmt(p.ids, x, t.line))
+}
+
+# is_assignable reports whether an expression may sit on the left of `=`: a bare
+# name, a field access, or an index, the forms that name a storage location.
+fn is_assignable(x: ast.Expr) -> Bool {
+  match x {
+    EIdent(_) => true,
+    EField(_) => true,
+    EIndex(_) => true,
+    _ => false,
+  }
 }
 
 fn parse_let(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {

@@ -653,7 +653,16 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
       # parameters are unknown, so this only reports definite errors.
       check_fn_def(c, st, env)
     },
-    SAssign(st) => env_assign(env, st.name, infer_expr(c, st.value, env)),
+    SAssign(st) => {
+      let v: Type = infer_expr(c, st.value, env)
+      match st.target {
+        # A bare name rebinds where it was defined, walking outward.
+        EIdent(id) => env_assign(env, id.name, v),
+        # A field or index target: infer it so a malformed one is still checked,
+        # but there is no name to rebind.
+        _ => infer_expr(c, st.target, env),
+      }
+    },
     SWhile(st) => {
       infer_expr(c, st.cond, env)
       infer_block(c, st.body, new_env(Some(env)))

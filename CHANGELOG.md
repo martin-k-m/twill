@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Assignment to a field or an index** (2026-08-09): `obj.f = v`, `arr[i] = v`,
+  and the composing forms (`a.d[i] = v`, `xs[0].n = v`). Assignment now targets
+  any lvalue expression, a name, a field, or an index, rather than only a bare
+  name; the parser parses the left side as an expression and requires it to be
+  one of those three forms. Records and lists are reference values, so a field
+  or element write mutates the object every binding shares. Unblocked
+  `std/random.tw` and `std/linalg.tw` (both round-trip now). Go bootstrap
+  (parser, interp, checker, formatter) with tests in
+  `internal/interp/assign_test.go`, mirrored in the self-hosted tree.
+
 - **Generic type annotations parse and check** (NEEDS-4, part, 2026-08-09):
   `xs: Arr[I64]`, `-> Res[I64, Str]`, `let d: Dict[Str, Arr[I64]]`. A `[` after a
   bare type name opens a generic argument list, each argument a full type

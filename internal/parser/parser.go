@@ -119,6 +119,16 @@ func (p *parser) parseProgram() (*ast.Program, error) {
 
 // --- statements ------------------------------------------------------------
 
+// isAssignable reports whether an expression may sit on the left of `=`: a bare
+// name, a field access, or an index, the forms that name a storage location.
+func isAssignable(x ast.Expr) bool {
+	switch x.(type) {
+	case *ast.Ident, *ast.Field, *ast.Index:
+		return true
+	}
+	return false
+}
+
 func (p *parser) parseStmt() (ast.Stmt, error) {
 	t := p.peek(0)
 	if t.Kind == lexer.KEYWORD {
@@ -144,20 +154,23 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		}
 	}
 
-	// Assignment: ident '=' expr (but not '==').
-	if t.Kind == lexer.IDENT && p.peek(1).Kind == lexer.OP && p.peek(1).Value == "=" {
-		name := p.next().Value
+	x, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	// Assignment: `<lvalue> = expr`. `=` is not a binary operator, so parseExpr
+	// stopped in front of it (and `==` was consumed as a comparison, so it never
+	// reaches here). The target must be an lvalue: a name, a field, or an index.
+	if p.peek(0).Kind == lexer.OP && p.peek(0).Value == "=" {
 		p.next() // '='
 		v, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
-		return &ast.Assign{Name: name, Value: v, Line: t.Line}, nil
-	}
-
-	x, err := p.parseExpr()
-	if err != nil {
-		return nil, err
+		if !isAssignable(x) {
+			return nil, p.errf(t, "cannot assign to this expression; the left of `=` must be a name, a field, or an index")
+		}
+		return &ast.Assign{Target: x, Value: v, Line: t.Line}, nil
 	}
 	return &ast.ExprStmt{X: x, Line: t.Line}, nil
 }

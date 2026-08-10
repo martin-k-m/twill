@@ -226,7 +226,7 @@ struct FnDecl {
   line: I64,
 }
 
-struct Assign { id: I64, name: Str, value: Expr, line: I64 }
+struct Assign { id: I64, target: Expr, value: Expr, line: I64 }
 struct While { id: I64, cond: Expr, body: Block, line: I64 }
 struct For { id: I64, name: Str, iter: Expr, body: Block, line: I64 }
 
@@ -438,8 +438,8 @@ fn fn_decl(ids: NodeIds, name: Str, params: Arr[Param], ret: Opt[ShapeAnno],
   FnDecl { id: fresh(ids), name: name, params: params, ret: ret, ret_unit: ret_unit,
            ret_type: ret_type, body: body, line: line }
 
-fn assign_stmt(ids: NodeIds, name: Str, value: Expr, line: I64) -> Stmt =
-  SAssign(Assign { id: fresh(ids), name: name, value: value, line: line })
+fn assign_stmt(ids: NodeIds, target: Expr, value: Expr, line: I64) -> Stmt =
+  SAssign(Assign { id: fresh(ids), target: target, value: value, line: line })
 
 fn while_stmt(ids: NodeIds, cond: Expr, body: Block, line: I64) -> Stmt =
   SWhile(While { id: fresh(ids), cond: cond, body: body, line: line })

@@ -313,7 +313,9 @@ true in the implementation, including for a payload that is the enum itself
 
 ## NEEDS-17: a growable `Arr` with `pop` and `set`
 
-**Status:** blocking. `src/parse.tw` builds every statement list this way.
+**Status:** `set` via indexed assignment landed (2026-08-09): `xs[i] = v` mutates
+a list element in place (and `obj.f = v` a record field), both sides. `pop` and
+non-quadratic `append` remain.
 
 `append(xs, x)` returns a new list today, so building an n-element list is
 quadratic. `docs/self-hosting.md` section 1.2 makes the same argument for the

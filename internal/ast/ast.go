@@ -104,10 +104,12 @@ type FnDecl struct {
 	Line    int
 }
 
+// Assign is `target = value`, where target is an lvalue: a bare name, a field
+// (`obj.f = v`), or an index (`arr[i] = v`), and these compose (`a.d[i] = v`).
 type Assign struct {
-	Name  string
-	Value Expr
-	Line  int
+	Target Expr
+	Value  Expr
+	Line   int
 }
 
 type While struct {
