@@ -1731,4 +1731,9 @@ var builtinNames = map[string]bool{
 	"and": true, "or": true, "xor": true, "shl": true, "shr": true, "bnot": true,
 	// Built-in Res and Opt cases, and `unit`, the Unit value's name.
 	"Ok": true, "Err": true, "Some": true, "None": true, "unit": true,
+	// Scalar f64 math, conversions and IEEE bit access for the systems dialect.
+	"f64_sqrt": true, "f64_exp": true, "f64_log": true, "f64_sin": true,
+	"f64_cos": true, "f64_floor": true, "f64_trunc": true, "f64_pow": true,
+	"f64_of_i64": true, "i64_of_f64": true, "f64_bits": true,
+	"f64_from_bits": true, "f64_signbit": true,
 }

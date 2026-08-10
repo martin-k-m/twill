@@ -124,6 +124,82 @@ func (ip *Interp) installBuiltins() {
 	// so it stays a field name elsewhere; only the bare name resolves here.
 	ip.Global.Define("unit", value.TheUnit)
 
+	// Scalar f64 math for the systems dialect. The tensor ops (sqrt, exp, ...)
+	// work on whole tensors; these are the one-scalar-in, one-scalar-out forms
+	// the self-hosted sources call, and a scalar is a rank-0 tensor.
+	f64op := func(name string, f func(float64) float64) {
+		def(name, 1, false, func(a []value.Value) (value.Value, error) {
+			x, err := scalarOf(a[0], name)
+			if err != nil {
+				return nil, err
+			}
+			return tensor.Scalar(f(x)), nil
+		})
+	}
+	f64op("f64_sqrt", math.Sqrt)
+	f64op("f64_exp", math.Exp)
+	f64op("f64_log", math.Log)
+	f64op("f64_sin", math.Sin)
+	f64op("f64_cos", math.Cos)
+	f64op("f64_floor", math.Floor)
+	f64op("f64_trunc", math.Trunc)
+	def("f64_pow", 2, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_pow")
+		if err != nil {
+			return nil, err
+		}
+		y, err := scalarOf(a[1], "f64_pow")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(math.Pow(x, y)), nil
+	})
+
+	// Conversions. Values are float64, so f64_of_i64 is the identity and
+	// i64_of_f64 truncates toward zero, matching integer conversion.
+	def("f64_of_i64", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_of_i64")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(x), nil
+	})
+	def("i64_of_f64", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "i64_of_f64")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(math.Trunc(x)), nil
+	})
+
+	// IEEE bit access, for the float printer and parser. Above 2^53 the integer
+	// side loses precision, the same limit the bitwise ops have, since a value is
+	// a float64; within that range the round-trip is exact.
+	def("f64_bits", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_bits")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(float64(int64(math.Float64bits(x)))), nil
+	})
+	def("f64_from_bits", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_from_bits")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(math.Float64frombits(uint64(int64(x)))), nil
+	})
+	def("f64_signbit", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_signbit")
+		if err != nil {
+			return nil, err
+		}
+		if math.Signbit(x) {
+			return value.Bool(true), nil
+		}
+		return value.Bool(false), nil
+	})
+
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
 			x, err := asTensor(a[0], name)
