@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`unit` is now a contextual keyword** (2026-08-09): a declaration only when it
+  leads `unit <name>`, and an ordinary identifier everywhere else, most
+  importantly as a record field or key name (`unit: Opt[UnitAnno]`, which the
+  compiler's own `Param` and checker structs use). `unit USD` declarations are
+  unchanged. Both sides. This is the same contextual treatment `mode` already
+  has.
+
 ### Added
 
 - **Assignment to a field or an index** (2026-08-09): `obj.f = v`, `arr[i] = v`,

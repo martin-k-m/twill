@@ -149,9 +149,15 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseImport()
 		case "type":
 			return p.parseTypeDecl()
-		case "unit":
-			return p.parseUnitDecl()
 		}
+	}
+
+	// `unit <name>` declares a unit. `unit` is not a keyword, so it stays an
+	// ordinary identifier everywhere else, most importantly as a field name
+	// (`unit: Opt[UnitAnno]`); only a leading `unit` with an identifier after it
+	// is the declaration.
+	if t.Kind == lexer.IDENT && t.Value == "unit" && p.peek(1).Kind == lexer.IDENT {
+		return p.parseUnitDecl()
 	}
 
 	x, err := p.parseExpr()

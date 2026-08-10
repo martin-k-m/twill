@@ -213,7 +213,14 @@ fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     if bytes.equal(t.value, "return") { return parse_return(p) }
     if bytes.equal(t.value, "import") { return parse_import(p) }
     if bytes.equal(t.value, "type") { return parse_type_decl(p) }
-    if bytes.equal(t.value, "unit") { return parse_unit_decl(p) }
+  }
+
+  # `unit <name>` declares a unit. `unit` is not a keyword, so it stays an
+  # ordinary identifier everywhere else, most importantly as a field name
+  # (`unit: Opt[UnitAnno]`); only a leading `unit` with an identifier after it
+  # is the declaration.
+  if t.kind == lex.KIND_IDENT and bytes.equal(t.value, "unit") and peek(p, 1).kind == lex.KIND_IDENT {
+    return parse_unit_decl(p)
   }
 
   let x: ast.Expr = parse_expr(p)?
