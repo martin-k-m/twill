@@ -157,7 +157,6 @@ fn keyword_table() -> Dict[Str, Bool] {
   dict_set(d, "in", true)
   dict_set(d, "return", true)
   dict_set(d, "import", true)
-  dict_set(d, "type", true)
   dict_set(d, "true", true)
   dict_set(d, "false", true)
   dict_set(d, "and", true)

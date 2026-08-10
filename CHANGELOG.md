@@ -12,7 +12,18 @@
   A `group_depth` counter on the parser gates the newline rules. Unblocked
   `std/stats.tw`. Both sides.
 
+### Fixed
+
+- **A value-less `return` may end at a `,`** (2026-08-09), so a match arm body
+  can be a bare return: `TUnknown => return,`. Previously `parseReturn` treated
+  only `}`, `;` and end-of-input as terminators and tried to read the `,` as the
+  return value.
+
 ### Changed
+
+- **`type` is now a contextual keyword** (2026-08-09), like `unit`: a declaration
+  only when it leads `type <name> = ...`, and an ordinary identifier everywhere
+  else, most importantly as a field name (`res.type`, `{ type: x }`). Both sides.
 
 - **`unit` is now a contextual keyword** (2026-08-09): a declaration only when it
   leads `unit <name>`, and an ordinary identifier everywhere else, most

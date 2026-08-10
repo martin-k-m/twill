@@ -217,9 +217,15 @@ fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     if bytes.equal(t.value, "for") { return parse_for(p) }
     if bytes.equal(t.value, "return") { return parse_return(p) }
     if bytes.equal(t.value, "import") { return parse_import(p) }
-    if bytes.equal(t.value, "type") { return parse_type_decl(p) }
     if bytes.equal(t.value, "enum") { return parse_enum_decl(p) }
     if bytes.equal(t.value, "struct") { return parse_struct_decl(p) }
+  }
+
+  # `type <name> = ...` declares a record type. Like `unit`, `type` is not a
+  # keyword, so it stays usable as a field name (`res.type`, `{ type: x }`);
+  # only a leading `type` with an identifier after it is the declaration.
+  if t.kind == lex.KIND_IDENT and bytes.equal(t.value, "type") and peek(p, 1).kind == lex.KIND_IDENT {
+    return parse_type_decl(p)
   }
 
   # `unit <name>` declares a unit. `unit` is not a keyword, so it stays an
@@ -310,7 +316,9 @@ fn parse_for(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
 # next line still returns that value.
 fn parse_return(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let line: I64 = next_tok(p).line
-  if check(p, "}") or check(p, ";") or at_end(p) {
+  # A value-less `return` is followed by the end of its block or statement, or,
+  # when it is a match arm body, by the arm-separating `,` (`_ => return,`).
+  if check(p, "}") or check(p, ";") or check(p, ",") or at_end(p) {
     return Ok(ast.return_stmt(p.ids, None, line))
   }
   let v: ast.Expr = parse_expr(p)?
