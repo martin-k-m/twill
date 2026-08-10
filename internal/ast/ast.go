@@ -179,7 +179,25 @@ func (s *Return) stmt()   {}
 func (s *Import) stmt()   {}
 func (s *UnitDecl) stmt() {}
 func (s *TypeDecl) stmt() {}
+func (s *EnumDecl) stmt() {}
 func (s *ExprStmt) stmt() {}
+
+// EnumDecl declares a sum type: `enum Name { Case, Case(Payload), ... }`. Each
+// case is a variant with an optional single payload. The payload type is kept
+// only as a flag and a name (advisory), since the bootstrap does not check it.
+type EnumDecl struct {
+	Name     string
+	Variants []EnumVariant
+	Line     int
+}
+
+type EnumVariant struct {
+	Name       string
+	HasPayload bool
+	Payload    string // the payload type name (advisory); "" when no payload
+}
+
+func (s *EnumDecl) Pos() int { return s.Line }
 
 // --- expressions -----------------------------------------------------------
 
@@ -320,7 +338,34 @@ func (e *Slice) expr()     {}
 func (e *RecordLit) expr() {}
 func (e *Field) expr()     {}
 func (e *IfExpr) expr()    {}
+func (e *Match) expr()     {}
 func (e *Block) expr()     {}
+
+// Match is `match subject { pattern => body, ... }`, an expression whose value
+// is the body of the arm whose pattern matched. Arms are tried in order.
+type Match struct {
+	Subject Expr
+	Arms    []MatchArm
+	Line    int
+}
+
+type MatchArm struct {
+	Pattern MatchPattern
+	// The arm's body is a statement: an expression, a `return`, an assignment,
+	// or a block. Its value (for an expression arm) is the match's value.
+	Body Stmt
+}
+
+// MatchPattern is `Variant`, `Variant(binding)`, or `_`. Binding is "" when the
+// variant carries no payload or the payload is ignored; Wildcard is the `_` arm.
+type MatchPattern struct {
+	Variant  string
+	Binding  string
+	Wildcard bool
+	Line     int
+}
+
+func (e *Match) Pos() int { return e.Line }
 
 // Block is also usable as a statement body; it satisfies Stmt too so blocks
 // can appear where statements are expected.

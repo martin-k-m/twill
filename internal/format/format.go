@@ -155,6 +155,15 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 			fields[i] = f.Name + ": " + p.shape(f.Shape)
 		}
 		p.lineC(indent, "type "+st.Name+" = { "+strings.Join(fields, ", ")+" }", st.Line)
+	case *ast.EnumDecl:
+		cases := make([]string, len(st.Variants))
+		for i, v := range st.Variants {
+			cases[i] = v.Name
+			if v.HasPayload {
+				cases[i] += "(" + v.Payload + ")"
+			}
+		}
+		p.lineC(indent, "enum "+st.Name+" { "+strings.Join(cases, ", ")+" }", st.Line)
 	case *ast.ExprStmt:
 		p.lineC(indent, p.expr(st.X), st.Line)
 	case *ast.Block:
@@ -316,6 +325,8 @@ func (p *printer) expr(e ast.Expr) string {
 		return p.expr(ex.Target) + "." + ex.Name
 	case *ast.IfExpr:
 		return p.ifExpr(ex)
+	case *ast.Match:
+		return p.matchExpr(ex)
 	case *ast.Block:
 		return p.inlineBlock(ex)
 	}
@@ -378,6 +389,50 @@ func (p *printer) ifExpr(ex *ast.IfExpr) string {
 		s += " else " + p.ifExpr(alt)
 	}
 	return s
+}
+
+// matchExpr renders a match inline, `match subject { pattern => body, ... }`, the
+// same one-line canonical form the printer gives every block-structured
+// expression. A block-valued arm is inlined with `{ ...; ... }`.
+func (p *printer) matchExpr(ex *ast.Match) string {
+	arms := make([]string, len(ex.Arms))
+	for i, arm := range ex.Arms {
+		pat := arm.Pattern.Variant
+		if arm.Pattern.Wildcard {
+			pat = "_"
+		}
+		if arm.Pattern.Binding != "" {
+			pat += "(" + arm.Pattern.Binding + ")"
+		}
+		arms[i] = pat + " => " + p.inlineStmt(arm.Body)
+	}
+	return "match " + p.expr(ex.Subject) + " { " + strings.Join(arms, ", ") + " }"
+}
+
+// inlineStmt renders a statement on one line, for a match arm body. The common
+// arm shapes (an expression, a return, an assignment, a block) have direct
+// single-line forms; anything else falls back to buffer output joined with `;`.
+func (p *printer) inlineStmt(s ast.Stmt) string {
+	switch st := s.(type) {
+	case *ast.ExprStmt:
+		return p.expr(st.X)
+	case *ast.Return:
+		if st.Value == nil {
+			return "return"
+		}
+		return "return " + p.expr(st.Value)
+	case *ast.Assign:
+		return p.expr(st.Target) + " = " + p.expr(st.Value)
+	case *ast.Block:
+		return p.inlineBlock(st)
+	}
+	sub := &printer{}
+	sub.stmt(s, 0)
+	lines := strings.Split(strings.TrimRight(sub.b.String(), "\n"), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
+	}
+	return strings.Join(lines, "; ")
 }
 
 // inlineBlock renders a block as `{ ... }`. Statements are separated by `;` so

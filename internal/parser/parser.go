@@ -155,6 +155,8 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseImport()
 		case "type":
 			return p.parseTypeDecl()
+		case "enum":
+			return p.parseEnumDecl()
 		}
 	}
 
@@ -461,6 +463,8 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 			return &ast.BoolLit{Value: false, Line: t.Line}, nil
 		case "if":
 			return p.parseIf()
+		case "match":
+			return p.parseMatch()
 		case "fn":
 			return p.parseLambda()
 		case "and", "or":
@@ -922,6 +926,116 @@ func (p *parser) parseTypeDecl() (ast.Stmt, error) {
 		return nil, err
 	}
 	return decl, nil
+}
+
+// parseEnumDecl parses `enum Name { Case, Case(Payload), ... }`. A case is a
+// name with an optional single payload type in parentheses; cases are separated
+// by commas and a trailing comma is allowed.
+func (p *parser) parseEnumDecl() (ast.Stmt, error) {
+	line := p.next().Line // 'enum'
+	name, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect("{"); err != nil {
+		return nil, err
+	}
+	decl := &ast.EnumDecl{Name: name, Line: line}
+	for !p.check("}") && !p.atEnd() {
+		vname, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		v := ast.EnumVariant{Name: vname}
+		if p.check("(") {
+			p.next()
+			payload, err := p.parseTypeRef()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(")"); err != nil {
+				return nil, err
+			}
+			v.HasPayload = true
+			v.Payload = payload
+		}
+		decl.Variants = append(decl.Variants, v)
+		if !p.match(",") {
+			break
+		}
+	}
+	if _, err := p.expect("}"); err != nil {
+		return nil, err
+	}
+	return decl, nil
+}
+
+// parseMatch parses `match subject { pattern => body, ... }`. Arms are separated
+// by commas (trailing comma allowed); a body is a single expression or a block.
+func (p *parser) parseMatch() (ast.Expr, error) {
+	line := p.next().Line // 'match'
+	subject, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect("{"); err != nil {
+		return nil, err
+	}
+	m := &ast.Match{Subject: subject, Line: line}
+	for !p.check("}") && !p.atEnd() {
+		pat, err := p.parsePattern()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect("=>"); err != nil {
+			return nil, err
+		}
+		// The arm body is a statement, so `Ok(v) => v`, `_ => return x`,
+		// `Ok(b) => acc = b` and `None => { ... }` are all arms.
+		body, err := p.parseStmt()
+		if err != nil {
+			return nil, err
+		}
+		m.Arms = append(m.Arms, ast.MatchArm{Pattern: pat, Body: body})
+		if !p.match(",") {
+			break
+		}
+	}
+	if _, err := p.expect("}"); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// parsePattern parses a match arm's pattern: `_` (wildcard), a variant name, or
+// a variant name with a single binding, `Some(x)`. A binding of `_` discards the
+// payload.
+func (p *parser) parsePattern() (ast.MatchPattern, error) {
+	t := p.peek(0)
+	if t.Kind == lexer.IDENT && t.Value == "_" {
+		p.next()
+		return ast.MatchPattern{Wildcard: true, Line: t.Line}, nil
+	}
+	name, err := p.expectIdent()
+	if err != nil {
+		return ast.MatchPattern{}, err
+	}
+	pat := ast.MatchPattern{Variant: name, Line: t.Line}
+	if p.check("(") {
+		p.next()
+		bt := p.peek(0)
+		if bt.Kind != lexer.IDENT {
+			return ast.MatchPattern{}, p.errf(bt, "expected a binding name in the pattern")
+		}
+		p.next()
+		if bt.Value != "_" {
+			pat.Binding = bt.Value
+		}
+		if _, err := p.expect(")"); err != nil {
+			return ast.MatchPattern{}, err
+		}
+	}
+	return pat, nil
 }
 
 // parseShapeAnno parses "[d0, d1, ...]" where each dim is an integer or "_"

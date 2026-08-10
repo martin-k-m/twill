@@ -41,10 +41,11 @@ var keywords = map[string]bool{
 	"while": true, "for": true, "in": true, "return": true,
 	"import": true, "type": true, "true": true, "false": true,
 	"and": true, "or": true, "not": true,
+	"enum": true, "match": true,
 }
 
 // multiOps are matched greedily before single-character operators.
-var multiOps = []string{"==", "!=", "<=", ">=", "->", "&&", "||"}
+var multiOps = []string{"==", "!=", "<=", ">=", "->", "=>", "&&", "||"}
 
 // Comment is a source comment, kept so tools like the formatter can preserve
 // it. Trailing is true when code precedes it on the same line.
