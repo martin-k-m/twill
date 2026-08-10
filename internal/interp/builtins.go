@@ -143,6 +143,24 @@ func (ip *Interp) installBuiltins() {
 	f64op("f64_cos", math.Cos)
 	f64op("f64_floor", math.Floor)
 	f64op("f64_trunc", math.Trunc)
+	f64op("f64_ceil", math.Ceil)
+	f64op("f64_round", math.Round)
+	f64op("f64_tanh", math.Tanh)
+	def("f64_mod", 2, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_mod")
+		if err != nil {
+			return nil, err
+		}
+		y, err := scalarOf(a[1], "f64_mod")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(math.Mod(x, y)), nil
+	})
+	// i64 and f64 are the conversion casts: i64 truncates toward zero, f64 is the
+	// identity, since a value is already a float64.
+	f64op("i64", math.Trunc)
+	f64op("f64", func(x float64) float64 { return x })
 	def("f64_pow", 2, false, func(a []value.Value) (value.Value, error) {
 		x, err := scalarOf(a[0], "f64_pow")
 		if err != nil {
@@ -412,10 +430,122 @@ func (ip *Interp) installBuiltins() {
 		return value.TheUnit, nil
 	})
 
+	def("buf_len", 1, false, func(a []value.Value) (value.Value, error) {
+		b, ok := a[0].(*value.Bytes)
+		if !ok {
+			return nil, fmt.Errorf("buf_len expects a buffer")
+		}
+		return tensor.Scalar(float64(len(b.Data))), nil
+	})
+
 	// abort ends the program with a message, for the compiler's unreachable
 	// branches and invariant checks.
 	def("abort", 1, false, func(a []value.Value) (value.Value, error) {
 		return nil, fmt.Errorf("abort: %s", value.Format(a[0]))
+	})
+
+	// --- systems I/O ---------------------------------------------------------
+	//
+	// The compiler's front end reads source and writes diagnostics. write_out and
+	// write_err print without a trailing newline (the source supplies its own).
+	// The fallible ones return a Res: Ok on success, Err with a message.
+	asStr := func(v value.Value) (string, bool) {
+		switch t := v.(type) {
+		case value.Str:
+			return string(t), true
+		case *value.Bytes:
+			return string(t.Data), true
+		}
+		return "", false
+	}
+	def("write_out", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("write_out expects a string")
+		}
+		fmt.Fprint(os.Stdout, s)
+		return value.TheUnit, nil
+	})
+	def("write_err", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("write_err expects a string")
+		}
+		fmt.Fprint(os.Stderr, s)
+		return value.TheUnit, nil
+	})
+	def("read_file", 1, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("read_file expects a path")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
+		}
+		return &value.Variant{Name: "Ok", Payload: &value.Bytes{Data: data}, HasPayload: true}, nil
+	})
+	def("write_file", 2, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("write_file expects a path")
+		}
+		content, ok := asStr(a[1])
+		if !ok {
+			return nil, fmt.Errorf("write_file expects string content")
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
+		}
+		return &value.Variant{Name: "Ok", Payload: value.TheUnit, HasPayload: true}, nil
+	})
+	def("list_dir", 1, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("list_dir expects a path")
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
+		}
+		names := &value.List{Items: make([]value.Value, len(entries))}
+		for i, e := range entries {
+			names.Items[i] = value.Str(e.Name())
+		}
+		return &value.Variant{Name: "Ok", Payload: names, HasPayload: true}, nil
+	})
+	def("resolve_path", 2, false, func(a []value.Value) (value.Value, error) {
+		base, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("resolve_path expects a base path")
+		}
+		rel, ok := asStr(a[1])
+		if !ok {
+			return nil, fmt.Errorf("resolve_path expects a relative path")
+		}
+		if filepath.IsAbs(rel) {
+			return value.Str(rel), nil
+		}
+		return value.Str(filepath.Join(filepath.Dir(base), rel)), nil
+	})
+	def("str_quote", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("str_quote expects a string")
+		}
+		return value.Str(strconv.Quote(s)), nil
+	})
+	// i64_of_str parses a decimal integer, returning an Opt.
+	def("i64_of_str", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("i64_of_str expects a string")
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return &value.Variant{Name: "None"}, nil
+		}
+		return &value.Variant{Name: "Some", Payload: tensor.Scalar(float64(n)), HasPayload: true}, nil
 	})
 
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {

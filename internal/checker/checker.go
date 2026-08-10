@@ -1742,5 +1742,10 @@ var builtinNames = map[string]bool{
 	"dict_must": true, "dict_or": true, "dict_keys": true,
 	"bytes_new": true, "bytes_push": true, "bytes_to_str": true, "abort": true,
 	"dict_del": true, "buf_new": true, "buf_get8": true, "buf_set8": true,
-	"argsort": true,
+	"buf_len": true, "argsort": true,
+	"f64_ceil": true, "f64_round": true, "f64_tanh": true, "f64_mod": true,
+	"i64": true, "f64": true,
+	// Systems I/O and string parsing.
+	"write_out": true, "write_err": true, "read_file": true, "write_file": true,
+	"list_dir": true, "resolve_path": true, "str_quote": true, "i64_of_str": true,
 }
