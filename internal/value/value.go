@@ -161,9 +161,15 @@ type Env struct {
 	values [envInline]Value
 	n      int
 
-	vars   map[string]Value // spillover, and every binding in an ordered scope
-	parent *Env
-	order  []string // definition order, kept only when ordered is set
+	vars map[string]Value // spillover, and every binding in an ordered scope
+	// prebound holds hoisted top-level functions: visible to Get so a definition
+	// or a top-level let may reference a function written further down, but not
+	// counted as a binding, so it does not affect an ordered scope's definition
+	// order (which the module-namespace record's field order comes from). The
+	// real Define at the function's own declaration is what records its order.
+	prebound map[string]Value
+	parent   *Env
+	order    []string // definition order, kept only when ordered is set
 	// ordered is off for ordinary scopes: a call frame or loop body defines
 	// names on every iteration, and paying for a slice append there would show
 	// up in a training loop.
@@ -196,8 +202,23 @@ func (e *Env) Get(name string) (Value, bool) {
 				return v, true
 			}
 		}
+		if env.prebound != nil {
+			if v, ok := env.prebound[name]; ok {
+				return v, true
+			}
+		}
 	}
 	return nil, false
+}
+
+// Prebind binds name for lookup only, without recording it as a definition, so
+// a hoisted function is visible before its declaration runs but does not alter
+// this scope's definition order. A real Define later takes precedence.
+func (e *Env) Prebind(name string, v Value) {
+	if e.prebound == nil {
+		e.prebound = make(map[string]Value, 8)
+	}
+	e.prebound[name] = v
 }
 
 // Define binds name in this scope.

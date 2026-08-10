@@ -93,11 +93,34 @@ func runFile(path string, check bool) int {
 	}
 
 	ip := interp.New(nil)
-	if err := ip.RunFile(path); err != nil {
+	result, ranMain, err := ip.RunFileMain(path, scriptArgs(path))
+	if err != nil {
 		reportError(path, string(src), err)
 		return 1
 	}
+	// A systems-mode program's main returns its exit code; a numeric-mode file
+	// has no main and its top-level value is not an exit code, so it exits 0.
+	if ranMain {
+		if n, ok := value.AsNumber(result); ok {
+			return int(n)
+		}
+	}
 	return 0
+}
+
+// scriptArgs is what a run program sees through the args builtin. It mirrors Go's
+// os.Args: element 0 is the program name and the rest are the words after the
+// script path, so `twill run cli.tw check foo` hands the program
+// ["twill", "check", "foo"] and a self-hosted main that drops the first element
+// (as os.Args[1:] does) is left with ["check", "foo"].
+func scriptArgs(path string) []string {
+	rest := os.Args[1:]
+	for i, a := range rest {
+		if a == path {
+			return append([]string{"twill"}, rest[i+1:]...)
+		}
+	}
+	return []string{"twill"}
 }
 
 func checkOnly(path string) int {

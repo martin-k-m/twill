@@ -16,7 +16,7 @@ func runFileCapture(t *testing.T, dir, name, src string) []string {
 	}
 	var out []string
 	ip := interp.New(func(s string) { out = append(out, s) })
-	if err := ip.RunFile(filepath.Join(dir, name)); err != nil {
+	if _, _, err := ip.RunFileMain(filepath.Join(dir, name), nil); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	return out

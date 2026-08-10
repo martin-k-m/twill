@@ -33,7 +33,7 @@ func TestExamplesRunClean(t *testing.T) {
 				t.Fatalf("unexpected shape diagnostics: %v", diags)
 			}
 			ip := interp.New(func(string) {}) // discard output
-			if err := ip.RunFile(f); err != nil {
+			if _, _, err := ip.RunFileMain(f, nil); err != nil {
 				t.Fatalf("run: %v", err)
 			}
 		})

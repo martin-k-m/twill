@@ -160,7 +160,7 @@ func TestImport(t *testing.T) {
 	}
 	var out []string
 	ip := interp.New(func(s string) { out = append(out, s) })
-	if err := ip.RunFile(main); err != nil {
+	if _, _, err := ip.RunFileMain(main, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 1 || out[0] != "12" {

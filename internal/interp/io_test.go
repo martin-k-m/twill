@@ -26,7 +26,7 @@ func TestReadCSV(t *testing.T) {
 	}
 	var out []string
 	ip := interp.New(func(s string) { out = append(out, s) })
-	if err := ip.RunFile(main); err != nil {
+	if _, _, err := ip.RunFileMain(main, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 3 || out[0] != "3 3" || out[1] != "6" || out[2] != "45" {
