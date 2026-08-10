@@ -14,6 +14,15 @@
 
 ### Fixed
 
+- **Three latent syntax bugs in the self-hosted sources** (2026-08-09), found now
+  that the bootstrap parses far enough to reach them and `src/*.tw` was never in
+  the format test corpus: a `report(bytes.concat(...))` in `src/check.tw` was
+  missing a close paren; `src/tensor.tw` had two assignment right-hand sides
+  continued with a leading `+` (against the trailing-operator rule the language
+  documents), rewritten to trailing `+`; and `src/eval.tw` had one stray extra
+  `}` after `apply_to_tensor`. With these, **every file in `src/`, `std/`,
+  `examples/` and `testdata/` parses**, the whole self-hosted compiler included.
+
 - **A value-less `return` may end at a `,`** (2026-08-09), so a match arm body
   can be a bare return: `TUnknown => return,`. Previously `parseReturn` treated
   only `}`, `;` and end-of-input as terminators and tried to read the `,` as the

@@ -4709,8 +4709,8 @@ fn vjp_roll(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bo
       let base: I64 = i * sp.length * sp.after + j
       let k: I64 = 0
       while k < sp.length {
-        ga[base + k * sp.after] = ga[base + k * sp.after]
-          + buf.get(g.data, g.dtype, base + ((k + s) % sp.length) * sp.after)
+        ga[base + k * sp.after] = ga[base + k * sp.after] +
+          buf.get(g.data, g.dtype, base + ((k + s) % sp.length) * sp.after)
         k = k + 1
       }
       j = j + 1
@@ -5402,10 +5402,10 @@ fn jet_binary(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
     let fa: F64 = d_binary_a(e.op, x, y, ov)
     let fb: F64 = d_binary_b(e.op, x, y, ov)
     js.d[n][i] = fa * dx + fb * dy
-    js.dd[n][i] = fa * js.dd[ai][oa] + fb * js.dd[bi][ob]
-      + d2_binary_aa(e.op, x, y, ov) * dx * dx
-      + 2.0 * d2_binary_ab(e.op, x, y, ov) * dx * dy
-      + d2_binary_bb(e.op, x, y, ov) * dy * dy
+    js.dd[n][i] = fa * js.dd[ai][oa] + fb * js.dd[bi][ob] +
+      d2_binary_aa(e.op, x, y, ov) * dx * dx +
+      2.0 * d2_binary_ab(e.op, x, y, ov) * dx * dy +
+      d2_binary_bb(e.op, x, y, ov) * dy * dy
     i = i + 1
   }
   Ok(0)

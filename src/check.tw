@@ -2577,7 +2577,7 @@ fn infer_concat(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
       report(c, ex.line, bytes.concat("concat needs pieces of the same rank: ",
         bytes.concat(dims_string(parts[0]), bytes.concat(" has ", bytes.concat(str(rank),
         bytes.concat(", ", bytes.concat(dims_string(parts[i]),
-        bytes.concat(" has ", str(len(parts[i].dims)))))))))
+        bytes.concat(" has ", str(len(parts[i].dims))))))))))
       return TUnknown
     }
     i = i + 1
