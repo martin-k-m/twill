@@ -170,6 +170,10 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 			fields[i] = f.Name + ": " + f.Type
 		}
 		p.lineC(indent, "struct "+st.Name+" { "+strings.Join(fields, ", ")+" }", st.Line)
+	case *ast.Break:
+		p.lineC(indent, "break", st.Line)
+	case *ast.Continue:
+		p.lineC(indent, "continue", st.Line)
 	case *ast.ExprStmt:
 		p.lineC(indent, p.expr(st.X), st.Line)
 	case *ast.Block:

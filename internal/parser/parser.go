@@ -151,6 +151,10 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 			return p.parseFor()
 		case "return":
 			return p.parseReturn()
+		case "break":
+			return &ast.Break{Line: p.next().Line}, nil
+		case "continue":
+			return &ast.Continue{Line: p.next().Line}, nil
 		case "import":
 			return p.parseImport()
 		case "enum":

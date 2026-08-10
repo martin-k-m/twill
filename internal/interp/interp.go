@@ -61,6 +61,11 @@ func (e *RuntimeError) Error() string { return fmt.Sprintf("line %d: %s", e.Line
 // returnSignal unwinds the stack for a Twill `return`.
 type returnSignal struct{ value value.Value }
 
+// breakSignal and continueSignal unwind a loop body to its enclosing loop, the
+// same way returnSignal unwinds a function. runLoopBody catches them.
+type breakSignal struct{}
+type continueSignal struct{}
+
 // srcFrame says where the file currently executing came from. dir is what its
 // relative paths resolve against; std marks a standard-library module, which
 // lives in the binary and so has no directory of its own.
@@ -189,7 +194,9 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		return value.TheUnit
 	case *ast.While:
 		for value.Truthy(ip.evalExpr(st.Cond, env)) {
-			ip.execBlockIn(st.Body, value.NewEnv(env))
+			if ip.runLoopBody(st.Body, value.NewEnv(env)) {
+				break
+			}
 		}
 		return value.TheUnit
 	case *ast.For:
@@ -207,7 +214,9 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 			for x := start; (step > 0 && x < end) || (step < 0 && x > end); x += step {
 				scope := value.NewEnv(env)
 				scope.Define(st.Name, value.Num(float64(x)))
-				ip.execBlockIn(st.Body, scope)
+				if ip.runLoopBody(st.Body, scope) {
+					break
+				}
 			}
 			return value.TheUnit
 		}
@@ -215,7 +224,9 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		for _, item := range items {
 			scope := value.NewEnv(env)
 			scope.Define(st.Name, item)
-			ip.execBlockIn(st.Body, scope)
+			if ip.runLoopBody(st.Body, scope) {
+				break
+			}
 		}
 		return value.TheUnit
 	case *ast.Return:
@@ -224,6 +235,10 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 			v = ip.evalExpr(st.Value, env)
 		}
 		panic(returnSignal{value: v})
+	case *ast.Break:
+		panic(breakSignal{})
+	case *ast.Continue:
+		panic(continueSignal{})
 	case *ast.Import:
 		ip.doImport(st, env)
 		return value.TheUnit
@@ -260,6 +275,27 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		ip.panicf(s.Pos(), "unsupported statement")
 		return value.TheUnit
 	}
+}
+
+// runLoopBody runs one iteration of a loop body in the given scope, translating
+// the loop-control signals: it returns true if a `break` fired (stop the loop),
+// false otherwise (a normal end or a `continue`, both of which just move on).
+// A returnSignal or a real panic propagates through untouched.
+func (ip *Interp) runLoopBody(body *ast.Block, scope *value.Env) (brk bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch r.(type) {
+			case breakSignal:
+				brk = true
+			case continueSignal:
+				brk = false
+			default:
+				panic(r)
+			}
+		}
+	}()
+	ip.execBlockIn(body, scope)
+	return false
 }
 
 func (ip *Interp) execBlockIn(b *ast.Block, scope *value.Env) value.Value {

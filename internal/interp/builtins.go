@@ -119,6 +119,11 @@ func (ip *Interp) installBuiltins() {
 	variantCtor("Some")
 	ip.Global.Define("None", &value.Variant{Name: "None"})
 
+	// `unit` names the Unit value, so a systems-mode arm like `None => unit` and
+	// any expression that yields nothing has a spelling. `unit` is not reserved,
+	// so it stays a field name elsewhere; only the bare name resolves here.
+	ip.Global.Define("unit", value.TheUnit)
+
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
 			x, err := asTensor(a[0], name)
