@@ -84,10 +84,14 @@ type Program struct {
 // --- statements ------------------------------------------------------------
 
 type Let struct {
-	Name  string
-	Unit  *UnitAnno // optional unit annotation: `let px: USD/share = ...`
-	Value Expr
-	Line  int
+	Name string
+	Unit *UnitAnno // optional unit annotation: `let px: USD/share = ...`
+	// A named/qualified/generic type annotation (`let d: Arr[I64] = ...`), or "".
+	// Advisory, like a parameter's TypeName; a `.` or `[` after the name marks it
+	// unambiguously as a type rather than a unit.
+	TypeName string
+	Value    Expr
+	Line     int
 }
 
 type FnDecl struct {

@@ -168,12 +168,22 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Optional unit annotation introduces a unit: `let px: USD/share = ...`.
+	// Optional annotation. A unit introduces a quantity (`let px: USD/share`); a
+	// name followed by `.` or `[` is a type (`let d: Arr[I64]`), advisory and
+	// kept as text, the same disambiguation a parameter makes.
 	var unit *ast.UnitAnno
+	var typeName string
 	if p.match(":") {
 		unit, err = p.parseUnitExpr()
 		if err != nil {
 			return nil, err
+		}
+		if (p.check(".") || p.check("[")) && len(unit.Factors) == 1 && unit.Factors[0].Exp == 1 {
+			typeName, err = p.typeSuffix(unit.Factors[0].Name)
+			if err != nil {
+				return nil, err
+			}
+			unit = nil
 		}
 	}
 	if _, err := p.expect("="); err != nil {
@@ -183,7 +193,7 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Let{Name: name, Unit: unit, Value: v, Line: line}, nil
+	return &ast.Let{Name: name, Unit: unit, TypeName: typeName, Value: v, Line: line}, nil
 }
 
 func (p *parser) parseFnDecl() (ast.Stmt, error) {
@@ -626,11 +636,11 @@ func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, *ast.UnitAnno, s
 			if err != nil {
 				return nil, nil, nil, "", err
 			}
-			// A `.` after a single bare name makes it a qualified type, not a
-			// unit: units are never qualified. Lift it out of the unit slot into
-			// an advisory type name and consume the `.Ident` suffix.
-			if p.check(".") && len(retUnit.Factors) == 1 && retUnit.Factors[0].Exp == 1 {
-				retType, err = p.qualify(retUnit.Factors[0].Name)
+			// A `.` or `[` after a single bare name makes it a qualified or
+			// generic type, not a unit: units are never qualified or bracketed.
+			// Lift it out of the unit slot into an advisory type name.
+			if (p.check(".") || p.check("[")) && len(retUnit.Factors) == 1 && retUnit.Factors[0].Exp == 1 {
+				retType, err = p.typeSuffix(retUnit.Factors[0].Name)
 				if err != nil {
 					return nil, nil, nil, "", err
 				}
@@ -655,6 +665,62 @@ func (p *parser) qualify(base string) (string, error) {
 		name += "." + seg
 	}
 	return name, nil
+}
+
+// typeSuffix continues a bare type name already read as `base`, consuming any
+// `.name` qualification and `[...]` generic arguments, and returns the whole
+// dotted/bracketed name, e.g. base "Arr" then "[I64]" gives "Arr[I64]". Type
+// annotations are advisory, so the name is kept as text rather than a structure.
+func (p *parser) typeSuffix(base string) (string, error) {
+	name, err := p.qualify(base)
+	if err != nil {
+		return "", err
+	}
+	if p.check("[") {
+		args, err := p.parseTypeArgs()
+		if err != nil {
+			return "", err
+		}
+		name += args
+	}
+	return name, nil
+}
+
+// parseTypeRef reads a full type reference: a name, an optional `.name`
+// qualification, and optional `[...]` generic arguments, which nest.
+func (p *parser) parseTypeRef() (string, error) {
+	name, err := p.expectIdent()
+	if err != nil {
+		return "", err
+	}
+	return p.typeSuffix(name)
+}
+
+// parseTypeArgs reads `[T, U, ...]` after a type name, each T a full type
+// reference, and returns the bracketed text, e.g. "[Str, Arr[I64]]". It assumes
+// the current token is "[".
+func (p *parser) parseTypeArgs() (string, error) {
+	p.next() // '['
+	out := "["
+	first := true
+	for {
+		a, err := p.parseTypeRef()
+		if err != nil {
+			return "", err
+		}
+		if !first {
+			out += ", "
+		}
+		out += a
+		first = false
+		if !p.match(",") {
+			break
+		}
+	}
+	if _, err := p.expect("]"); err != nil {
+		return "", err
+	}
+	return out + "]", nil
 }
 
 func (p *parser) parseParams() ([]ast.Param, error) {
@@ -716,10 +782,11 @@ func (p *parser) parseParam() (ast.Param, error) {
 			}
 			if len(u.Factors) == 1 && u.Factors[0].Exp == 1 {
 				param.TypeName = u.Factors[0].Name // bare name: type or unit
-				// A `.` makes it a qualified type name (`cp.Caps`): units are
-				// never qualified, so the suffix is unambiguously a type.
-				if p.check(".") {
-					param.TypeName, err = p.qualify(param.TypeName)
+				// A `.` or `[` makes it a qualified or generic type name
+				// (`cp.Caps`, `Arr[I64]`): units are never qualified or
+				// bracketed, so the suffix is unambiguously part of a type.
+				if p.check(".") || p.check("[") {
+					param.TypeName, err = p.typeSuffix(param.TypeName)
 					if err != nil {
 						return ast.Param{}, err
 					}
