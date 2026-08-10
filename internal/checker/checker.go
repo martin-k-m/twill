@@ -699,6 +699,23 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 		return tBool{}
 	}
 
+	// `+` concatenates strings. When either side is a string the result is a
+	// string, provided the other side is a string too (or unknown, left advisory).
+	// A string added to a definite number or tensor is still the error below.
+	if op == "+" {
+		_, lStr := l.(tStr)
+		_, rStr := r.(tStr)
+		if lStr || rStr {
+			_, lUnk := l.(tUnknown)
+			_, rUnk := r.(tUnknown)
+			if (lStr || lUnk) && (rStr || rUnk) {
+				return tStr{}
+			}
+			c.report(ex.Line, "operator %q joins two strings or two numbers, not a mix", op)
+			return tUnknown{}
+		}
+	}
+
 	// A definite non-tensor operand to arithmetic is a type error.
 	if isDefiniteNonTensor(l) || isDefiniteNonTensor(r) {
 		c.report(ex.Line, "operator %q needs numbers/tensors", op)
@@ -1787,4 +1804,14 @@ var builtinNames = map[string]bool{
 	// Diagnostics, seeded rng, identity, argv and value persistence.
 	"emit_line": true, "rng_seed": true, "rng_uniform": true, "rng_normal": true,
 	"rng_perm": true, "is_same": true, "args": true, "save_value": true, "load_value": true,
+	// List literal-as-call, in-place clear, byte/char strings, GPU probe.
+	"arr": true, "arr_clear": true, "chr": true, "slice": true, "gpu_available": true,
+	"gpu_device_count": true, "is_tty_stdout": true, "window_size": true,
+	// GPU device FFI boundary (no backend in this build; see builtins.go).
+	"gpu_device_open": true, "gpu_device_info": true, "gpu_device_close": true,
+	"gpu_alloc": true, "gpu_free": true, "gpu_write": true, "gpu_read": true,
+	"gpu_copy": true, "gpu_program_build": true, "gpu_kernel": true,
+	"gpu_set_arg_buffer": true, "gpu_set_arg_local": true, "gpu_launch": true,
+	"gpu_finish": true, "gpu_device_info_i64": true, "env": true,
+	"gpu_set_arg_i64": true, "gpu_set_arg_f64": true, "clock_now_ms": true,
 }

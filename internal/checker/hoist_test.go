@@ -34,3 +34,10 @@ func TestCrossModuleLowercaseStillReported(t *testing.T) {
 func TestCapitalizedUnknownWithoutImportReported(t *testing.T) {
 	wantOne(t, "mode systems\nfn f() = Nope(1.0)", "unknown name")
 }
+
+// `+` on two strings type-checks to a string; a string plus a number is a type
+// error, since str() is how a number is meant to join a string.
+func TestStringConcatChecks(t *testing.T) {
+	wantNone(t, "mode systems\nlet s: Str = \"a\" + \"b\"")
+	wantOne(t, "mode systems\nlet s = \"a\" + 3.0", "joins two strings or two numbers")
+}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/martin-k-m/twill/internal/gbm"
 	"github.com/martin-k-m/twill/internal/tensor"
@@ -243,6 +244,106 @@ func (ip *Interp) installBuiltins() {
 		l.Items = l.Items[:len(l.Items)-1]
 		return last, nil
 	})
+	// arr is a list literal as a call: arr(a, b, c) is [a, b, c]. A fresh list
+	// every call, so two callers never share backing storage.
+	def("arr", -1, true, func(a []value.Value) (value.Value, error) {
+		items := make([]value.Value, len(a))
+		copy(items, a)
+		return &value.List{Items: items}, nil
+	})
+	// arr_clear empties a list in place, so a buffer can be reused across passes
+	// without reallocating.
+	def("arr_clear", 1, false, func(a []value.Value) (value.Value, error) {
+		l, ok := a[0].(*value.List)
+		if !ok {
+			return nil, fmt.Errorf("arr_clear expects a list")
+		}
+		l.Items = l.Items[:0]
+		return value.TheUnit, nil
+	})
+	// chr is a one-byte string with the given byte value. UTF-8 text is built by
+	// concatenating the bytes of a rune, which is why this is a byte and not a
+	// rune: the terminal code spells "│" as chr(226)+chr(...)+chr(...).
+	def("chr", 1, false, func(a []value.Value) (value.Value, error) {
+		n, err := scalarOf(a[0], "chr")
+		if err != nil {
+			return nil, err
+		}
+		return value.Str(string([]byte{byte(int(n))})), nil
+	})
+	// slice is a byte substring s[i:j], clamped to the string so an out-of-range
+	// index yields the empty overlap rather than a panic. Indices are byte
+	// offsets, matching how the lexer and width code index a Str.
+	def("slice", 3, false, func(a []value.Value) (value.Value, error) {
+		s, ok := a[0].(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("slice expects a string")
+		}
+		i, err := scalarOf(a[1], "slice")
+		if err != nil {
+			return nil, err
+		}
+		j, err := scalarOf(a[2], "slice")
+		if err != nil {
+			return nil, err
+		}
+		lo, hi := int(i), int(j)
+		n := len(s)
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > n {
+			hi = n
+		}
+		if lo > hi {
+			lo = hi
+		}
+		return value.Str(string(s)[lo:hi]), nil
+	})
+	// gpu_available reports whether a GPU backend is present. The bootstrap has no
+	// device, so it is always false; the self-hosted GPU code branches on it to
+	// fall back to the CPU path.
+	def("gpu_available", 0, false, func(a []value.Value) (value.Value, error) {
+		return value.Bool(false), nil
+	})
+	// gpu_device_count is how many GPUs the backend sees. The bootstrap has none,
+	// so it is zero, and gpu_available() is just this being positive.
+	def("gpu_device_count", 0, false, func(a []value.Value) (value.Value, error) {
+		return tensor.Scalar(0), nil
+	})
+	// is_tty_stdout reports whether standard output is a terminal, so the CLI can
+	// choose colour and progress animation over plain text when piped to a file.
+	def("is_tty_stdout", 0, false, func(a []value.Value) (value.Value, error) {
+		info, err := os.Stdout.Stat()
+		if err != nil {
+			return value.Bool(false), nil
+		}
+		return value.Bool(info.Mode()&os.ModeCharDevice != 0), nil
+	})
+	// window_size is the terminal's size as a { cols, rows } record. The bootstrap
+	// has no size syscall, so it returns zeros and the caller falls back to 80x24.
+	def("window_size", 0, false, func(a []value.Value) (value.Value, error) {
+		r := value.NewRecord()
+		r.Set("cols", tensor.Scalar(0))
+		r.Set("rows", tensor.Scalar(0))
+		return r, nil
+	})
+	// The GPU device intrinsics are the FFI boundary to a compute backend. This
+	// build has none, so each fails loudly rather than pretending to run; the
+	// self-hosted GPU code reaches them only after gpu_available() returns true,
+	// which here it never does. Registered so the device binding type-checks.
+	for _, name := range []string{
+		"gpu_device_open", "gpu_device_info", "gpu_device_close",
+		"gpu_alloc", "gpu_free", "gpu_write", "gpu_read", "gpu_copy",
+		"gpu_program_build", "gpu_kernel", "gpu_set_arg_buffer", "gpu_set_arg_local",
+		"gpu_launch", "gpu_finish", "gpu_device_info_i64",
+		"gpu_set_arg_i64", "gpu_set_arg_f64",
+	} {
+		n := name
+		def(n, -1, true, func(a []value.Value) (value.Value, error) {
+			return nil, fmt.Errorf("%s: no GPU backend in this build", n)
+		})
+	}
 
 	dictKey := func(v value.Value, name string) (string, error) {
 		s, ok := v.(value.Str)
@@ -546,6 +647,27 @@ func (ip *Interp) installBuiltins() {
 			return &value.Variant{Name: "None"}, nil
 		}
 		return &value.Variant{Name: "Some", Payload: tensor.Scalar(float64(n)), HasPayload: true}, nil
+	})
+
+	// env reads an environment variable as an Opt: Some(value) when set (even
+	// empty), None when absent, so a caller can tell "" from unset.
+	def("env", 1, false, func(a []value.Value) (value.Value, error) {
+		name, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("env expects a string")
+		}
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			return &value.Variant{Name: "None"}, nil
+		}
+		return &value.Variant{Name: "Some", Payload: value.Str(v), HasPayload: true}, nil
+	})
+
+	// clock_now_ms is wall-clock time in milliseconds, for the progress and
+	// spinner code that measures elapsed time and rates. Nondeterministic by
+	// nature; nothing in the compiler proper reads it.
+	def("clock_now_ms", 0, false, func(a []value.Value) (value.Value, error) {
+		return tensor.Scalar(float64(time.Now().UnixMilli())), nil
 	})
 
 	// emit_line writes a string and a newline, the diagnostic printer's unit.
