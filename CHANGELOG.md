@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`break` and `continue`** (NEEDS-12, 2026-08-10): loop control in `while` and
+  `for`, unwound to the enclosing loop by the same signal mechanism `return`
+  uses. Both sides.
+
+- **`unit` as a value** (NEEDS-13, 2026-08-10): the name `unit` resolves to the
+  Unit value, so a systems-mode arm like `None => unit` and any nothing-valued
+  expression has a spelling. `unit` stays a field name elsewhere; only the bare
+  name resolves. Both sides.
+
 ## [1.3.0] - 2026-08-10
 
 The systems-mode front end. `mode systems` is the dialect the compiler is being

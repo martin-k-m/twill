@@ -130,6 +130,10 @@ type Return struct {
 	Line  int
 }
 
+// Break and Continue are the loop-control statements, valid inside a while/for.
+type Break struct{ Line int }
+type Continue struct{ Line int }
+
 type Import struct {
 	Path  string
 	Alias string // non-empty for `import "..." as name` (a namespaced module)
@@ -182,6 +186,11 @@ func (s *TypeDecl) stmt()   {}
 func (s *EnumDecl) stmt()   {}
 func (s *StructDecl) stmt() {}
 func (s *ExprStmt) stmt()   {}
+func (s *Break) stmt()      {}
+func (s *Continue) stmt()   {}
+
+func (s *Break) Pos() int    { return s.Line }
+func (s *Continue) Pos() int { return s.Line }
 
 // StructDecl declares a record type: `struct Name { field: Type, ... }`. Field
 // types are advisory text; records are structural, so the declaration names a

@@ -405,6 +405,8 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		}
 	case *ast.TypeDecl, *ast.UnitDecl, *ast.EnumDecl, *ast.StructDecl:
 		// Already registered in the pre-pass.
+	case *ast.Break, *ast.Continue:
+		// Loop control carries no type and defines no name.
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)
 	case *ast.Block:
@@ -1727,6 +1729,6 @@ var builtinNames = map[string]bool{
 	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
 	// that name is the bitwise builtin; `bnot` is bitwise complement.
 	"and": true, "or": true, "xor": true, "shl": true, "shr": true, "bnot": true,
-	// Built-in Res and Opt cases.
-	"Ok": true, "Err": true, "Some": true, "None": true,
+	// Built-in Res and Opt cases, and `unit`, the Unit value's name.
+	"Ok": true, "Err": true, "Some": true, "None": true, "unit": true,
 }
