@@ -181,6 +181,34 @@ enum Else {
   ElseIf(IfExpr),
 }
 
+# Match is `match subject { pattern => body, ... }`, an expression whose value
+# is the body of the arm whose pattern matched. Arms are tried in order, and the
+# first whose pattern matches the subject variant's tag (or a `_` wildcard) wins.
+struct Match {
+  id: I64,
+  subject: Expr,
+  arms: Arr[MatchArm],
+  line: I64,
+}
+
+# MatchArm is one `pattern => body`. The body is a statement, not an expression,
+# so `Some(v) => v`, `_ => return x`, `Ok(b) => acc = b` and `None => { ... }`
+# are all arms. Its value, for an expression arm, is the match's value.
+struct MatchArm {
+  pattern: MatchPattern,
+  body: Stmt,
+}
+
+# MatchPattern is `Variant`, `Variant(binding)`, or `_`. binding is "" when the
+# variant carries no payload or the payload is ignored (`_`); wildcard is the
+# `_` arm, which matches any subject.
+struct MatchPattern {
+  variant: Str,
+  binding: Str,
+  wildcard: Bool,
+  line: I64,
+}
+
 enum Expr {
   ENumber(NumberLit),
   EString(StringLit),
@@ -197,6 +225,7 @@ enum Expr {
   ERecord(RecordLit),
   EField(Field),
   EIf(IfExpr),
+  EMatch(Match),
   EBlock(Block),
 }
 
@@ -245,6 +274,20 @@ struct UnitDecl { id: I64, name: Str, line: I64 }
 # TypeDecl declares a record type: `type Name = { field: shape, ... }`.
 struct TypeDecl { id: I64, name: Str, fields: Arr[TypeField], line: I64 }
 
+# EnumVariant is one case of an enum declaration: a name with an optional single
+# payload. The payload type is kept only as a flag and a name (advisory), since
+# the bootstrap does not check it. "" is the payload name when there is none.
+struct EnumVariant {
+  name: Str,
+  has_payload: Bool,
+  payload: Str,
+}
+
+# EnumDecl declares a sum type: `enum Name { Case, Case(Payload), ... }`. Each
+# case is a variant with an optional single payload. It is the base the Res/Opt
+# family is built on.
+struct EnumDecl { id: I64, name: Str, variants: Arr[EnumVariant], line: I64 }
+
 struct ExprStmt { id: I64, x: Expr, line: I64 }
 
 enum Stmt {
@@ -257,6 +300,7 @@ enum Stmt {
   SImport(Import),
   SUnitDecl(UnitDecl),
   STypeDecl(TypeDecl),
+  SEnum(EnumDecl),
   SExpr(ExprStmt),
   SBlock(Block),
 }
@@ -293,6 +337,7 @@ fn expr_line(e: Expr) -> I64 {
     ERecord(x) => x.line,
     EField(x) => x.line,
     EIf(x) => x.line,
+    EMatch(x) => x.line,
     EBlock(x) => x.line,
   }
 }
@@ -314,6 +359,7 @@ fn expr_id(e: Expr) -> I64 {
     ERecord(x) => x.id,
     EField(x) => x.id,
     EIf(x) => x.id,
+    EMatch(x) => x.id,
     EBlock(x) => x.id,
   }
 }
@@ -329,6 +375,7 @@ fn stmt_line(s: Stmt) -> I64 {
     SImport(x) => x.line,
     SUnitDecl(x) => x.line,
     STypeDecl(x) => x.line,
+    SEnum(x) => x.line,
     SExpr(x) => x.line,
     SBlock(x) => x.line,
   }
@@ -367,6 +414,7 @@ fn stmt_id(s: Stmt) -> I64 {
     SImport(x) => x.id,
     SUnitDecl(x) => x.id,
     STypeDecl(x) => x.id,
+    SEnum(x) => x.id,
     SExpr(x) => x.id,
     SBlock(x) => x.id,
   }
@@ -458,6 +506,12 @@ fn unit_decl(ids: NodeIds, name: Str, line: I64) -> Stmt =
 
 fn type_decl(ids: NodeIds, name: Str, fields: Arr[TypeField], line: I64) -> Stmt =
   STypeDecl(TypeDecl { id: fresh(ids), name: name, fields: fields, line: line })
+
+fn enum_decl(ids: NodeIds, name: Str, variants: Arr[EnumVariant], line: I64) -> Stmt =
+  SEnum(EnumDecl { id: fresh(ids), name: name, variants: variants, line: line })
+
+fn match_expr(ids: NodeIds, subject: Expr, arms: Arr[MatchArm], line: I64) -> Expr =
+  EMatch(Match { id: fresh(ids), subject: subject, arms: arms, line: line })
 
 fn expr_stmt(ids: NodeIds, x: Expr, line: I64) -> Stmt =
   SExpr(ExprStmt { id: fresh(ids), x: x, line: line })
