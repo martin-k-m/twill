@@ -585,6 +585,18 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		}
 		ip.panicf(ex.Line, "no match arm for %s", value.Format(subj))
 		return value.TheUnit
+	case *ast.Try:
+		v := ip.evalExpr(ex.Expr, env)
+		variant, ok := v.(*value.Variant)
+		if !ok {
+			ip.panicf(ex.Line, "`?` expects a Res or Opt value, got %s", value.Format(v))
+		}
+		// A success case yields its payload; a failure case is returned whole
+		// from the enclosing function, which is what propagates the error.
+		if variant.Name == "Ok" || variant.Name == "Some" {
+			return variant.Payload
+		}
+		panic(returnSignal{value: variant})
 	case *ast.Block:
 		return ip.execBlockIn(ex, value.NewEnv(env))
 	default:

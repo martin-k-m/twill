@@ -515,6 +515,11 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 			c.inferStmt(arm.Body, armEnv)
 		}
 		return tUnknown{}
+	case *ast.Try:
+		// The success payload's type is not tracked (Res/Opt are advisory), so
+		// the unwrapped value is left unknown; the subject is still checked.
+		c.inferExpr(ex.Expr, env)
+		return tUnknown{}
 	case *ast.Block:
 		return c.inferBlock(ex, newEnv(env))
 	}
@@ -1713,4 +1718,6 @@ var builtinNames = map[string]bool{
 	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
 	// that name is the bitwise builtin; `bnot` is bitwise complement.
 	"and": true, "or": true, "xor": true, "shl": true, "shr": true, "bnot": true,
+	// Built-in Res and Opt cases.
+	"Ok": true, "Err": true, "Some": true, "None": true,
 }

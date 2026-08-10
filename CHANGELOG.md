@@ -23,6 +23,16 @@
 
 ### Added
 
+- **Postfix `?` and built-in `Res`/`Opt`** (2026-08-09): `read_file(path)?`. The
+  operator unwraps the success case of a `Res`/`Opt` value (the payload of `Ok`
+  or `Some`) or returns its failure case (`Err`/`None`) from the enclosing
+  function, which is how an error propagates. `Ok`, `Err`, `Some` are built-in
+  one-argument constructors and `None` a built-in value, so the family works
+  without a declaration. Go bootstrap (lexer `?`, parser postfix, `ast.Try`,
+  interp, checker, formatter) with tests in `internal/interp/try_test.go`;
+  self-hosted mirror follows. This was the last parse blocker in the std format
+  corpus, which now round-trips clean end to end (`internal/format` passes).
+
 - **Typed record literals** (2026-08-09): `Point { x: 1.0, y: 2.0 }`,
   `geom.Point { ... }`. A type name in front of a record literal is now parsed;
   records are structural, so the value is the same one `{ ... }` builds and the

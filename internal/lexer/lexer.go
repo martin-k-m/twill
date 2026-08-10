@@ -175,7 +175,7 @@ func TokenizeWithComments(src string) ([]Token, []Comment, error) {
 			continue
 		}
 
-		if strings.ContainsRune("+-*/%@^<>=!", ch) {
+		if strings.ContainsRune("+-*/%@^<>=!?", ch) {
 			advance()
 			toks = append(toks, Token{OP, string(ch), startLine, startCol})
 			continue
