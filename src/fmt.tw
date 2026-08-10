@@ -513,7 +513,12 @@ fn expr(p: Printer, e: ast.Expr) -> Str {
         push(parts, bytes.concat(f.name, bytes.concat(": ", expr(p, f.value))))
         i = i + 1
       }
-      bytes.concat("{ ", bytes.concat(bytes.join(parts, ", "), " }"))
+      let body: Str = bytes.concat("{ ", bytes.concat(bytes.join(parts, ", "), " }"))
+      if len(x.type_name) > 0 {
+        bytes.concat(x.type_name, bytes.concat(" ", body))
+      } else {
+        body
+      }
     },
     ELambda(x) => {
       let sig: Str = bytes.concat("fn(", bytes.concat(params(p, x.params),
@@ -555,6 +560,7 @@ fn expr(p: Printer, e: ast.Expr) -> Str {
     EField(x) => bytes.concat(expr(p, x.target), bytes.concat(".", x.name)),
     EIf(x) => if_expr(p, x),
     EMatch(x) => match_expr(p, x),
+    ETry(x) => bytes.concat(expr(p, x.expr), "?"),
     EBlock(x) => inline_block(x),
   }
 }

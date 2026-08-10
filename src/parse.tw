@@ -491,9 +491,39 @@ fn parse_postfix(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
       x = ix
       continue
     }
+    if check(p, "?") {
+      # Postfix `?`: unwrap a Res/Opt success or return its failure.
+      let line: I64 = next_tok(p).line
+      x = ast.try_expr(p.ids, x, line)
+      continue
+    }
     break
   }
+  # A type name immediately followed by `{ field: ... }` is a typed record
+  # literal, `Point { x: 1.0 }`. Records are structural, so the value is the same
+  # `{ ... }` builds; the name is carried only for printing. looks_like_record
+  # requires `{ ident :`, which a block never begins with, so this does not
+  # swallow the block of an `if`/`while` whose condition is a name.
+  match expr_to_name(x) {
+    Some(name) => if looks_like_record(p) {
+      x = parse_record_lit(p, name)?
+    },
+    None => unit,
+  }
   Ok(x)
+}
+
+# expr_to_name renders a name or a dotted name (`Point`, `geom.Point`) as text,
+# for the type in front of a typed record literal. None for anything else.
+fn expr_to_name(x: ast.Expr) -> Opt[Str] {
+  match x {
+    EIdent(e) => Some(e.name),
+    EField(e) => match expr_to_name(e.target) {
+      Some(base) => Some(bytes.concat(base, bytes.concat(".", e.name))),
+      None => None,
+    },
+    _ => None,
+  }
 }
 
 # parse_index_or_slice parses the body of a `[...]` after the '[' is consumed.
@@ -593,7 +623,7 @@ fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
   }
   if check(p, "{") {
     if looks_like_record(p) {
-      return parse_record_lit(p)
+      return parse_record_lit(p, "")
     }
     return Ok(EBlock(parse_block(p)?))
   }
@@ -762,7 +792,7 @@ fn looks_like_record(p: Parser) -> Bool {
     peek(p, 2).kind == lex.KIND_PUNCT and bytes.equal(peek(p, 2).value, ":")
 }
 
-fn parse_record_lit(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+fn parse_record_lit(p: Parser, type_name: Str) -> Res[ast.Expr, lex.SyntaxError] {
   let line: I64 = expect(p, "{")?.line
   let fields: Arr[ast.RecordField] = arr_new()
   while not check(p, "}") and not at_end(p) {
@@ -775,7 +805,7 @@ fn parse_record_lit(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
     }
   }
   expect(p, "}")?
-  Ok(ast.record_lit(p.ids, fields, line))
+  Ok(ast.record_lit(p.ids, type_name, fields, line))
 }
 
 # ---- signatures and annotations --------------------------------------------
