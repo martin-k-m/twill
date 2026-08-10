@@ -83,6 +83,24 @@ struct BuiltinVal {
 
 fn plain_builtin(name: Str) -> Value = VBuiltin(BuiltinVal { name: name, captured: None })
 
+# A variant is one case of an enum value: a tag naming the case and an optional
+# single payload. A payload-less case (like None) has has_payload false and no
+# payload. It is internal/value.Variant, and renders as `Some(5)` or `None`.
+struct VariantVal {
+  name: Str,
+  payload: Opt[Value],
+  has_payload: Bool,
+}
+
+# A payload case is a one-argument constructor: `Some` is a value in scope that,
+# applied to one argument, builds the variant carrying it. The Go bootstrap uses
+# a Builtin closure over the case name for this; the self-hosted dispatch is by
+# name and cannot hold an arbitrary case name in its builtin table, so a
+# constructor is its own small Value carrying the tag. apply builds the variant.
+struct VariantCtor {
+  name: Str,
+}
+
 # A value the native core owns and twill only passes around: a fitted gbm model
 # is the only one today. It has no operations of its own, which is the point;
 # gbm_predict is the only thing that can read it, and it checks the kind.
@@ -106,6 +124,8 @@ enum Value {
   VClosure(Closure),
   VBuiltin(BuiltinVal),
   VForeign(ForeignVal),
+  VVariant(VariantVal),
+  VVariantCtor(VariantCtor),
   VUnit,
 }
 
@@ -120,6 +140,11 @@ fn type_name(v: Value) -> Str {
     VClosure(_) => "function",
     VBuiltin(_) => "builtin",
     VForeign(f) => f.kind,
+    # A constructed variant names itself "variant"; a payload constructor is a
+    # callable, and the Go bootstrap makes it a Builtin, so it reads "builtin"
+    # here to keep the two sides' diagnostics identical.
+    VVariant(_) => "variant",
+    VVariantCtor(_) => "builtin",
     VUnit => "unit",
   }
 }
@@ -349,6 +374,23 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
       }
     },
     SImport(st) => exec_import(st, env),
+    SEnum(st) => {
+      # Each case becomes a value in scope: a payload case is a one-argument
+      # constructor (VVariantCtor, which apply turns into the variant carrying
+      # its argument), a payload-less case is the variant value itself. That is
+      # what makes `Some(x)` a call and `None` a bare name.
+      let i: I64 = 0
+      while i < len(st.variants) {
+        let vt: ast.EnumVariant = st.variants[i]
+        if vt.has_payload {
+          env_define(env, vt.name, VVariantCtor(VariantCtor { name: vt.name }))
+        } else {
+          env_define(env, vt.name, VVariant(VariantVal { name: vt.name, payload: None, has_payload: false }))
+        }
+        i = i + 1
+      }
+      Ok(Normal(VUnit))
+    },
     STypeDecl(_) => Ok(Normal(VUnit)),
     # A unit declaration is erased at run time: units are a static check and
     # carry no representation in a value.
@@ -613,8 +655,55 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
     },
     EField(x) => field_value(eval_expr(x.target, env)?, x.name, x.line),
     EIf(x) => eval_if(x, env),
+    EMatch(x) => eval_match(x, env),
     EBlock(b) => Ok(flow_value(exec_block(b, new_env(Some(env)))?)),
   }
+}
+
+# `match subject { pattern => body, ... }`. The subject is evaluated once, then
+# arms are tried in order: an arm matches when its pattern is a `_` wildcard, or
+# when the subject is a variant whose tag equals the pattern's variant name. The
+# payload is bound where the pattern names it (`Some(v)`), and the arm body runs
+# as a statement in a child scope.
+#
+# The body's Flow is collapsed with flow_value, the same way eval_if collapses a
+# block's, so a `return` in an arm yields its value here rather than unwinding
+# the enclosing call. That is the tree walker's existing treatment of return in
+# expression position (see the EBlock and eval_if arms), and match follows it.
+fn eval_match(x: ast.Match, env: Env) -> Res[Value, RuntimeError] {
+  let subj: Value = eval_expr(x.subject, env)?
+  let is_variant: Bool = false
+  let subj_name: Str = ""
+  let subj_has_payload: Bool = false
+  let subj_payload: Opt[Value] = None
+  match subj {
+    VVariant(v) => {
+      is_variant = true
+      subj_name = v.name
+      subj_has_payload = v.has_payload
+      subj_payload = v.payload
+    },
+    _ => unit,
+  }
+  let i: I64 = 0
+  while i < len(x.arms) {
+    let arm: ast.MatchArm = x.arms[i]
+    let pat: ast.MatchPattern = arm.pattern
+    if pat.wildcard or (is_variant and bytes.equal(pat.variant, subj_name)) {
+      let scope: Env = new_env(Some(env))
+      # Bind the payload where the pattern names it: `Some(v)` puts the carried
+      # value in `v`. A `_` binding, or a payload-less case, binds nothing.
+      if len(pat.binding) > 0 and is_variant and subj_has_payload {
+        match subj_payload {
+          Some(pv) => env_define(scope, pat.binding, pv),
+          None => unit,
+        }
+      }
+      return Ok(flow_value(exec_stmt(arm.body, scope)?))
+    }
+    i = i + 1
+  }
+  Err(runtime_error(x.line, bytes.concat("no match arm for ", format_value(subj))))
 }
 
 # Field access on an already-evaluated target, shared by eval_expr and
@@ -976,6 +1065,16 @@ fn apply(callee: Value, args: Arr[Value], line: I64) -> Res[Value, RuntimeError]
           bytes.concat(str(want), bytes.concat(" argument(s), got ", str(len(args))))))))
       }
       call_builtin(b, args, line)
+    },
+    # A payload case constructor: one argument, wrapped as the variant's payload.
+    # The Go bootstrap installs this as an arity-1 Builtin; the arity mismatch
+    # message names the case, matching how apply names a builtin above.
+    VVariantCtor(c) => {
+      if len(args) != 1 {
+        return Err(runtime_error(line, bytes.concat(c.name, bytes.concat(" expects 1 argument(s), got ",
+          str(len(args))))))
+      }
+      Ok(VVariant(VariantVal { name: c.name, payload: Some(args[0]), has_payload: true }))
     },
     _ => Err(runtime_error(line, bytes.concat("cannot call a ", type_name(callee)))),
   }
@@ -1449,8 +1548,25 @@ fn format_value(v: Value) -> Str {
     # than Go's "<gbm squared, N trees, M features>". Foreign values are opaque
     # handles that no golden prints, so the two never meet in the harness.
     VForeign(f) => bytes.concat("<", bytes.concat(f.kind, ">")),
+    # A variant renders as `Some(5)` or `None`, exactly as internal/value.Format
+    # does: the payload goes through this same formatter. A payload constructor
+    # is a Builtin on the Go side and prints as one, so it matches here.
+    VVariant(v) => format_variant(v),
+    VVariantCtor(c) => bytes.concat("<builtin ", bytes.concat(c.name, ">")),
     VUnit => "()",
   }
+}
+
+# `Some(5)` for a payload variant, `None` for a payload-less one. The payload is
+# rendered through format_value, the same recursion the Go formatter uses.
+fn format_variant(v: VariantVal) -> Str {
+  if v.has_payload {
+    match v.payload {
+      Some(p) => return bytes.concat(v.name, bytes.concat("(", bytes.concat(format_value(p), ")"))),
+      None => unit,
+    }
+  }
+  v.name
 }
 
 # A scalar tensor is its number, exactly as Go's Format prints Data[0]. A tensor

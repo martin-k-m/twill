@@ -548,6 +548,26 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     }
   }
 
+  # Enum cases are names too: `Some`/`None`/`Ok`/`Err` and every user variant
+  # must resolve wherever they are constructed, so they are defined before any
+  # body is checked. The type they belong to is left advisory.
+  for s in prog.body {
+    match s {
+      SEnum(ed) => {
+        let i: I64 = 0
+        while i < len(ed.variants) {
+          let v: ast.EnumVariant = ed.variants[i]
+          match env_get(env, v.name) {
+            Some(_) => unit,
+            None => env_define(env, v.name, TUnknown),
+          }
+          i = i + 1
+        }
+      },
+      _ => unit,
+    }
+  }
+
   for s in prog.body {
     infer_stmt(c, s, env)
   }
@@ -689,6 +709,9 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     },
     STypeDecl(_) => unit,
     SUnitDecl(_) => unit,
+    # Enum cases were registered in the pre-pass, so the declaration is a no-op
+    # here, the same as a type or unit declaration.
+    SEnum(_) => unit,
     SExpr(st) => infer_expr(c, st.x, env),
     SBlock(b) => infer_block(c, b, new_env(Some(env))),
   }
@@ -818,8 +841,28 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
       }
     },
     EIf(ex) => infer_if(c, ex, env),
+    EMatch(ex) => infer_match(c, ex, env),
     EBlock(b) => infer_block(c, b, new_env(Some(env))),
   }
+}
+
+# A match's subject is inferred, then each arm body is checked as a statement in
+# its own scope with the pattern's binding present (its type is unknown, since
+# the payload type is advisory). The match's type is left unknown rather than
+# unified across arms, which keeps the dialect's records-and-enums permissive.
+fn infer_match(c: Checker, ex: ast.Match, env: CheckEnv) -> Type {
+  infer_expr(c, ex.subject, env)
+  let i: I64 = 0
+  while i < len(ex.arms) {
+    let arm: ast.MatchArm = ex.arms[i]
+    let scope: CheckEnv = new_env(Some(env))
+    if len(arm.pattern.binding) > 0 {
+      env_define(scope, arm.pattern.binding, TUnknown)
+    }
+    infer_stmt(c, arm.body, scope)
+    i = i + 1
+  }
+  TUnknown
 }
 
 fn as_record(t: Type) -> Opt[RecordType] {

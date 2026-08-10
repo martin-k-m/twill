@@ -218,6 +218,7 @@ fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     if bytes.equal(t.value, "return") { return parse_return(p) }
     if bytes.equal(t.value, "import") { return parse_import(p) }
     if bytes.equal(t.value, "type") { return parse_type_decl(p) }
+    if bytes.equal(t.value, "enum") { return parse_enum_decl(p) }
   }
 
   # `unit <name>` declares a unit. `unit` is not a keyword, so it stays an
@@ -356,6 +357,33 @@ fn parse_type_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   }
   expect(p, "}")?
   Ok(ast.type_decl(p.ids, name, fields, line))
+}
+
+# parse_enum_decl parses `enum Name { Case, Case(Payload), ... }`. A case is a
+# name with an optional single payload type in parentheses; cases are separated
+# by commas and a trailing comma is allowed. The payload type is read with
+# parse_type_ref and kept only as advisory text, the way the Go parser keeps it.
+fn parse_enum_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let name: Str = expect_ident(p)?
+  expect(p, "{")?
+  let variants: Arr[ast.EnumVariant] = arr_new()
+  while not check(p, "}") and not at_end(p) {
+    let vname: Str = expect_ident(p)?
+    let has_payload: Bool = false
+    let payload: Str = ""
+    if accept(p, "(") {
+      payload = parse_type_ref(p)?
+      expect(p, ")")?
+      has_payload = true
+    }
+    push(variants, ast.EnumVariant { name: vname, has_payload: has_payload, payload: payload })
+    if not accept(p, ",") {
+      break
+    }
+  }
+  expect(p, "}")?
+  Ok(ast.enum_decl(p.ids, name, variants, line))
 }
 
 # ---- expressions -----------------------------------------------------------
@@ -522,6 +550,9 @@ fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
     if bytes.equal(t.value, "if") {
       return Ok(EIf(parse_if(p)?))
     }
+    if bytes.equal(t.value, "match") {
+      return parse_match(p)
+    }
     if bytes.equal(t.value, "fn") {
       return parse_lambda(p)
     }
@@ -582,6 +613,55 @@ fn parse_if(p: Parser) -> Res[ast.IfExpr, lex.SyntaxError] {
     }
   }
   Ok(ast.if_expr(p.ids, cond, then_block, else_branch, line))
+}
+
+# parse_match parses `match subject { pattern => body, ... }`. Arms are separated
+# by commas (a trailing comma is allowed); each body is a statement, so it is
+# parsed with parse_stmt and `Some(v) => v`, `_ => return x`, `Ok(b) => acc = b`
+# and `None => { ... }` are all arms. The subject is a plain expression, and the
+# `{` that follows it is the match's brace, never a record literal, because
+# parse_postfix stops before a `{`.
+fn parse_match(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let line: I64 = next_tok(p).line
+  let subject: ast.Expr = parse_expr(p)?
+  expect(p, "{")?
+  let arms: Arr[ast.MatchArm] = arr_new()
+  while not check(p, "}") and not at_end(p) {
+    let pat: ast.MatchPattern = parse_pattern(p)?
+    expect(p, "=>")?
+    let body: ast.Stmt = parse_stmt(p)?
+    push(arms, ast.MatchArm { pattern: pat, body: body })
+    if not accept(p, ",") {
+      break
+    }
+  }
+  expect(p, "}")?
+  Ok(ast.match_expr(p.ids, subject, arms, line))
+}
+
+# parse_pattern parses a match arm's pattern: `_` (wildcard), a variant name, or
+# a variant name with a single binding, `Some(x)`. A binding of `_` discards the
+# payload, which is recorded as an empty binding.
+fn parse_pattern(p: Parser) -> Res[ast.MatchPattern, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  if t.kind == lex.KIND_IDENT and bytes.equal(t.value, "_") {
+    next_tok(p)
+    return Ok(ast.MatchPattern { variant: "", binding: "", wildcard: true, line: t.line })
+  }
+  let name: Str = expect_ident(p)?
+  let binding: Str = ""
+  if accept(p, "(") {
+    let bt: lex.Token = peek(p, 0)
+    if bt.kind != lex.KIND_IDENT {
+      return Err(err_at(bt, "expected a binding name in the pattern"))
+    }
+    next_tok(p)
+    if not bytes.equal(bt.value, "_") {
+      binding = bt.value
+    }
+    expect(p, ")")?
+  }
+  Ok(ast.MatchPattern { variant: name, binding: binding, wildcard: false, line: t.line })
 }
 
 fn parse_lambda(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
