@@ -355,7 +355,14 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		// parameters are unknown, so this only reports definite errors.
 		c.checkFnDef(st, env)
 	case *ast.Assign:
-		env.assign(st.Name, c.inferExpr(st.Value, env))
+		v := c.inferExpr(st.Value, env)
+		if id, ok := st.Target.(*ast.Ident); ok {
+			env.assign(id.Name, v)
+		} else {
+			// A field or index target: infer it so a malformed one is still
+			// checked, but there is no name to rebind.
+			c.inferExpr(st.Target, env)
+		}
 	case *ast.While:
 		c.inferExpr(st.Cond, env)
 		c.inferBlock(st.Body, newEnv(env))

@@ -130,7 +130,7 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 		}
 		p.lineC(indent, "let "+name+" = "+p.expr(st.Value), st.Line)
 	case *ast.Assign:
-		p.lineC(indent, st.Name+" = "+p.expr(st.Value), st.Line)
+		p.lineC(indent, p.expr(st.Target)+" = "+p.expr(st.Value), st.Line)
 	case *ast.FnDecl:
 		p.fnDecl(st, indent)
 	case *ast.While:

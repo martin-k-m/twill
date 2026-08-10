@@ -531,6 +531,14 @@ fn data_arr(t: Tensor) -> Arr[F64] {
 # rule lives in one place. src/eval.tw is the caller this exists for.
 fn at(t: Tensor, i: I64) -> F64 = buf.get(t.data, t.dtype, i)
 
+# Store x into element i of the buffer, rounded to the tensor's dtype the way
+# `buf.set` requires. The write counterpart to `at`, for the same callers: it
+# keeps the dtype rule in one place rather than letting src/eval.tw reach into
+# the packed Buf itself. In-element assignment (`t[i] = x`) is the caller.
+fn set_at(t: Tensor, i: I64, x: F64) {
+  buf.set(t.data, t.dtype, i, x)
+}
+
 # The element count, for a caller that used to read `len(t.data)`. It is the
 # product of the shape, not the byte length of the buffer, which is the number
 # those callers meant.

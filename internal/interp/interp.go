@@ -185,9 +185,7 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		return value.TheUnit
 	case *ast.Assign:
 		v := ip.evalExpr(st.Value, env)
-		if !env.Assign(st.Name, v) {
-			ip.panicf(st.Line, "cannot assign to undefined variable %q (use 'let' first)", st.Name)
-		}
+		ip.assignTo(st.Target, v, env, st.Line)
 		return value.TheUnit
 	case *ast.While:
 		for value.Truthy(ip.evalExpr(st.Cond, env)) {
@@ -891,6 +889,54 @@ func (ip *Interp) callClosure(c *value.Closure, args []value.Value) (ret value.V
 		return ip.execBlockIn(blk, scope)
 	}
 	return ip.evalExpr(c.Body, scope)
+}
+
+// assignTo stores v into the location named by target: a variable, a record
+// field, or an element of a list or flat tensor. Records and lists are
+// reference values, so a field or element write is visible through every
+// binding that shares them, which is what makes `a.d[i] = v` mutate the object.
+func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line int) {
+	switch t := target.(type) {
+	case *ast.Ident:
+		if !env.Assign(t.Name, v) {
+			ip.panicf(line, "cannot assign to undefined variable %q (use 'let' first)", t.Name)
+		}
+	case *ast.Field:
+		obj := ip.evalExpr(t.Target, env)
+		rec, ok := obj.(*value.Record)
+		if !ok {
+			ip.panicf(t.Line, "cannot set field %q of a non-record", t.Name)
+		}
+		rec.Set(t.Name, v)
+	case *ast.Index:
+		obj := ip.evalExpr(t.Target, env)
+		idxVal := ip.evalExpr(t.Index, env)
+		n, ok := rank0Number(idxVal)
+		if !ok {
+			ip.panicf(t.Line, "index must be a scalar number")
+		}
+		idx := int(n)
+		switch c := obj.(type) {
+		case *value.List:
+			if idx < 0 || idx >= len(c.Items) {
+				ip.panicf(t.Line, "list index %d out of range", idx)
+			}
+			c.Items[idx] = v
+		case *tensor.Tensor:
+			s, ok := rank0Number(v)
+			if !ok {
+				ip.panicf(t.Line, "can only assign a scalar to a tensor element")
+			}
+			if idx < 0 || idx >= len(c.Data) {
+				ip.panicf(t.Line, "tensor index %d out of range", idx)
+			}
+			c.Data[idx] = s
+		default:
+			ip.panicf(t.Line, "value is not indexable")
+		}
+	default:
+		ip.panicf(line, "cannot assign to this expression")
+	}
 }
 
 func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {

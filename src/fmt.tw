@@ -285,7 +285,7 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
         bytes.concat(" = ", expr(p, st.value)))), st.line)
     },
     SAssign(st) => line_c(p, indent,
-      bytes.concat(st.name, bytes.concat(" = ", expr(p, st.value))), st.line),
+      bytes.concat(expr(p, st.target), bytes.concat(" = ", expr(p, st.value))), st.line),
     SFn(st) => fn_decl(p, st, indent),
     SWhile(st) => block_stmt(p, indent,
       bytes.concat("while ", expr(p, st.cond)), st.body, st.line),

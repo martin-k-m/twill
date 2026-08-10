@@ -253,6 +253,70 @@ fn env_assign(e: Env, name: Str, v: Value) -> Bool {
   false
 }
 
+# assign_to stores v into the location named by target: a variable, a record
+# field, or an element of a list or flat tensor. Records and lists are reference
+# values, so a field or element write is visible through every binding that
+# shares them, which is what makes `a.d[i] = v` mutate the object.
+fn assign_to(target: ast.Expr, v: Value, env: Env, line: I64) -> Res[Unit, RuntimeError] {
+  match target {
+    EIdent(t) => {
+      if not env_assign(env, t.name, v) {
+        # Assigning to a name that was never declared is a typo, not a
+        # declaration. `let` is how a binding is introduced and there is exactly
+        # one way to do it.
+        return Err(runtime_error(line, bytes.concat("cannot assign to undefined variable ",
+          bytes.concat(quoted(t.name), " (use 'let' first)"))))
+      }
+      Ok(unit)
+    },
+    EField(t) => {
+      let obj: Value = eval_expr(t.target, env)?
+      match obj {
+        VRecord(r) => {
+          dict_set(r.fields, t.name, v)
+          Ok(unit)
+        },
+        _ => Err(runtime_error(t.line, bytes.concat("cannot set field ",
+          bytes.concat(quoted(t.name), " of a non-record")))),
+      }
+    },
+    EIndex(t) => {
+      let obj: Value = eval_expr(t.target, env)?
+      let idx_val: Value = eval_expr(t.index, env)?
+      let idx: I64 = 0
+      match rank0_number(idx_val) {
+        Some(n) => idx = i64_of_f64(n),
+        None => return Err(runtime_error(t.line, "index must be a scalar number")),
+      }
+      match obj {
+        VList(l) => {
+          if idx < 0 or idx >= len(l.items) {
+            return Err(runtime_error(t.line, bytes.concat("list index ",
+              bytes.concat(str(idx), " out of range"))))
+          }
+          l.items[idx] = v
+          Ok(unit)
+        },
+        VTensor(tn) => {
+          let s: F64 = 0.0
+          match rank0_number(v) {
+            Some(n) => s = n,
+            None => return Err(runtime_error(t.line, "can only assign a scalar to a tensor element")),
+          }
+          if idx < 0 or idx >= tensor.numel(tn) {
+            return Err(runtime_error(t.line, bytes.concat("tensor index ",
+              bytes.concat(str(idx), " out of range"))))
+          }
+          tensor.set_at(tn, idx, s)
+          Ok(unit)
+        },
+        _ => Err(runtime_error(t.line, "value is not indexable")),
+      }
+    },
+    _ => Err(runtime_error(line, "cannot assign to this expression")),
+  }
+}
+
 # ---- statements ------------------------------------------------------------
 
 fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
@@ -273,12 +337,7 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
     },
     SAssign(st) => {
       let v: Value = eval_expr(st.value, env)?
-      if not env_assign(env, st.name, v) {
-        # Assigning to a name that was never declared is a typo, not a
-        # declaration. `let` is how a binding is introduced and there is exactly
-        # one way to do it.
-        return Err(runtime_error(st.line, bytes.concat("undefined variable ", quoted(st.name))))
-      }
+      assign_to(st.target, v, env, st.line)?
       Ok(Normal(VUnit))
     },
     SWhile(st) => exec_while(st, env),
