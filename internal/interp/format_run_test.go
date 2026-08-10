@@ -49,7 +49,7 @@ func runCapture(t *testing.T, path, _ string) []string {
 	t.Helper()
 	var out []string
 	ip := interp.New(func(s string) { out = append(out, s) })
-	if err := ip.RunFile(path); err != nil {
+	if _, _, err := ip.RunFileMain(path, nil); err != nil {
 		t.Fatalf("run %s: %v", path, err)
 	}
 	return out

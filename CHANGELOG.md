@@ -4,6 +4,22 @@
 
 ### Added
 
+- **Self-hosting: the front end runs on the bootstrap** (2026-08-10): the twill
+  compiler written in twill (`src/main.tw` and the modules it imports) now runs
+  on the Go bootstrap and checks and formats real files, byte-for-byte matching
+  the Go `check` and `fmt` commands and their exit codes. A systems-mode program
+  now has `main()` as its entry point (invoked after the top level, the way Go
+  and Rust spell it), with command-line words after the script exposed through
+  the `args` builtin, so `twill run src/main.tw check foo.tw` drives the
+  self-hosted CLI. `run` and `repl` remain stubbed in the self-hosted CLI (they
+  need the evaluator's native core, a later step). Enabling changes: top-level
+  functions are hoisted so a definition or a module-level `let` may call one
+  written below it (order-preserving, via a prebind that does not disturb a
+  namespace's field order); enum variant constructors are program-global at run
+  time, matching the checker; `len`, indexing and slicing work on strings (and
+  `len` on dicts and bytes); dict keys may be integers (`Dict[I64, V]`);
+  `read_file` yields a `Str`.
+
 - **`break` and `continue`** (NEEDS-12, 2026-08-10): loop control in `while` and
   `for`, unwound to the enclosing loop by the same signal mechanism `return`
   uses. Both sides.

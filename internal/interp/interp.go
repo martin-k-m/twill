@@ -151,23 +151,78 @@ func (ip *Interp) Run(src string) (result value.Value, err error) {
 		}
 	}()
 	result = value.TheUnit
+	ip.hoistFns(prog.Body, ip.Global)
 	for _, s := range prog.Body {
 		result = ip.execStmt(s, ip.Global)
 	}
 	return result, nil
 }
 
-// RunFile evaluates a file, resolving imports relative to its directory.
-func (ip *Interp) RunFile(path string) error {
+// RunFileMain runs a file and, if it is a systems-mode program defining a
+// nullary main, calls main() as the entry point and returns its value. This is
+// the two dialects' split: a numeric-mode file is its top-level statements,
+// while a systems-mode program's entry is main(), the way Go and Rust spell it.
+// Trailing command-line arguments are exposed through the args builtin, so
+// `twill run src/main.tw check foo.tw` runs the self-hosted CLI's main() with
+// ["check", "foo.tw"]. A file with no main runs its top level and nothing more.
+func (ip *Interp) RunFileMain(path string, args []string) (result value.Value, ranMain bool, err error) {
+	ip.Args = args
 	src, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("cannot read file %q", path)
+		return nil, false, fmt.Errorf("cannot read file %q", path)
+	}
+	prog, perr := parser.Parse(string(src))
+	if perr != nil {
+		return nil, false, perr
 	}
 	abs, _ := filepath.Abs(path)
 	ip.pushSrc(srcFrame{dir: filepath.Dir(abs)})
 	defer ip.popSrc()
-	_, runErr := ip.Run(string(src))
-	return runErr
+
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case *RuntimeError:
+				err = e
+			case returnSignal:
+				result = e.value
+			default:
+				panic(r)
+			}
+		}
+	}()
+	result = value.TheUnit
+	ip.hoistFns(prog.Body, ip.Global)
+	for _, s := range prog.Body {
+		result = ip.execStmt(s, ip.Global)
+	}
+	if prog.Mode == "systems" {
+		if m, ok := ip.Global.Get("main"); ok {
+			if c, ok := m.(*value.Closure); ok && len(c.Params) == 0 {
+				result = ip.callClosure(c, nil)
+				ranMain = true
+			}
+		}
+	}
+	return result, ranMain, nil
+}
+
+// hoistFns pre-defines every top-level function in a body before the body runs,
+// so a definition may call one that appears later in the file and a top-level
+// `let` may call any of them. This matches the checker, which already resolves
+// forward references, and how most languages treat file-level functions; without
+// it a module-level `let X = f()` would fail whenever f is written below it.
+func (ip *Interp) hoistFns(body []ast.Stmt, env *value.Env) {
+	for _, s := range body {
+		if fn, ok := s.(*ast.FnDecl); ok {
+			env.Prebind(fn.Name, &value.Closure{
+				Params: paramNames(fn.Params),
+				Body:   fn.Body,
+				Env:    env,
+				Name:   fn.Name,
+			})
+		}
+	}
 }
 
 func (ip *Interp) pushSrc(f srcFrame) { ip.srcStack = append(ip.srcStack, f) }
@@ -257,14 +312,25 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		// Each case becomes a value in scope: a payload case is a one-argument
 		// constructor, a payload-less case is the variant value itself. That is
 		// what makes `Some(x)` a call and `None` a bare name.
+		//
+		// A variant is also bound in the global scope, not only the scope the enum
+		// is declared in. Variant constructors are program-wide: a module that
+		// declares `enum Stmt { SFn(..) }` is imported under an alias, yet other
+		// modules construct `SFn(..)` unqualified. The checker already resolves
+		// these across modules (see crossModuleVariant); this is the runtime half.
 		for _, v := range st.Variants {
 			name := v.Name
+			var ctor value.Value
 			if v.HasPayload {
-				env.Define(name, &value.Builtin{Name: name, Arity: 1, Fn: func(a []value.Value) (value.Value, error) {
+				ctor = &value.Builtin{Name: name, Arity: 1, Fn: func(a []value.Value) (value.Value, error) {
 					return &value.Variant{Name: name, Payload: a[0], HasPayload: true}, nil
-				}})
+				}}
 			} else {
-				env.Define(name, &value.Variant{Name: name})
+				ctor = &value.Variant{Name: name}
+			}
+			env.Define(name, ctor)
+			if env != ip.Global {
+				ip.Global.Define(name, ctor)
 			}
 		}
 		return value.TheUnit
@@ -416,6 +482,7 @@ func (ip *Interp) doImport(st *ast.Import, env *value.Env) {
 		// A module scope tracks definition order, so the namespace record's
 		// fields come out in declaration order instead of Go map order.
 		modEnv := value.NewModuleEnv(ip.Global)
+		ip.hoistFns(prog.Body, modEnv)
 		for _, s := range prog.Body {
 			ip.execStmt(s, modEnv)
 		}
@@ -434,6 +501,7 @@ func (ip *Interp) doImport(st *ast.Import, env *value.Env) {
 		return
 	}
 	ip.loaded[mod.key] = true
+	ip.hoistFns(prog.Body, env)
 	for _, s := range prog.Body {
 		ip.execStmt(s, env)
 	}
@@ -1054,6 +1122,13 @@ func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {
 			ip.panicf(ex.Line, "list index %d out of range", idx)
 		}
 		return t.Items[idx]
+	case value.Str:
+		// A Str indexes to the byte at that offset, as a number: the systems
+		// lexer walks bytes with `src[i]` and compares them to byte constants.
+		if idx < 0 || idx >= len(t) {
+			ip.panicf(ex.Line, "string index %d out of range", idx)
+		}
+		return tensor.Scalar(float64(t[idx]))
 	}
 	ip.panicf(ex.Line, "value is not indexable")
 	return value.TheUnit
@@ -1073,6 +1148,8 @@ func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
 		dim0 = t.Shape[0]
 	case *value.List:
 		dim0 = len(t.Items)
+	case value.Str:
+		dim0 = len(t)
 	default:
 		ip.panicf(ex.Line, "value is not sliceable")
 	}
@@ -1106,6 +1183,17 @@ func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
 		items := make([]value.Value, end-start)
 		copy(items, t.Items[start:end])
 		return &value.List{Items: items}
+	case value.Str:
+		if start < 0 {
+			start += dim0
+		}
+		if end < 0 {
+			end += dim0
+		}
+		if start < 0 || end > dim0 || start > end {
+			ip.panicf(ex.Line, "slice [%d:%d] out of range for length %d", start, end, dim0)
+		}
+		return value.Str(string(t)[start:end])
 	}
 	return value.TheUnit
 }

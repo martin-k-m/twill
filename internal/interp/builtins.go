@@ -346,11 +346,17 @@ func (ip *Interp) installBuiltins() {
 	}
 
 	dictKey := func(v value.Value, name string) (string, error) {
-		s, ok := v.(value.Str)
-		if !ok {
-			return "", fmt.Errorf("%s expects a string key", name)
+		// Dict keys are strings internally, but the systems dialect also has
+		// Dict[I64, V] (the checker keys its recursion guard by function id). An
+		// integer key maps to its decimal string; a program keeps one key type per
+		// dict, so a numeric and a textual key never alias in practice.
+		if s, ok := v.(value.Str); ok {
+			return string(s), nil
 		}
-		return string(s), nil
+		if n, ok := value.AsNumber(v); ok {
+			return strconv.FormatInt(int64(n), 10), nil
+		}
+		return "", fmt.Errorf("%s expects a string or integer key", name)
 	}
 	asDict := func(v value.Value, name string) (*value.Dict, error) {
 		d, ok := v.(*value.Dict)
@@ -584,7 +590,9 @@ func (ip *Interp) installBuiltins() {
 		if err != nil {
 			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
 		}
-		return &value.Variant{Name: "Ok", Payload: &value.Bytes{Data: data}, HasPayload: true}, nil
+		// Source is text: the systems dialect reads a file into a Str and indexes
+		// its bytes, so read_file yields a Str, not a Bytes.
+		return &value.Variant{Name: "Ok", Payload: value.Str(string(data)), HasPayload: true}, nil
 	})
 	def("write_file", 2, false, func(a []value.Value) (value.Value, error) {
 		path, ok := asStr(a[0])
@@ -1407,8 +1415,16 @@ func (ip *Interp) installBuiltins() {
 			return tensor.Scalar(float64(t.Shape[0])), nil
 		case *value.List:
 			return tensor.Scalar(float64(len(t.Items))), nil
+		case value.Str:
+			// A Str is a byte string, so its length is its byte count, matching how
+			// the lexer and the systems string code index it.
+			return tensor.Scalar(float64(len(t))), nil
+		case *value.Dict:
+			return tensor.Scalar(float64(len(t.Keys))), nil
+		case *value.Bytes:
+			return tensor.Scalar(float64(len(t.Data))), nil
 		}
-		return nil, fmt.Errorf("len expects a tensor or list")
+		return nil, fmt.Errorf("len expects a tensor, list, string, dict or bytes")
 	})
 	def("item", 1, false, func(a []value.Value) (value.Value, error) {
 		t, err := asTensor(a[0], "item")

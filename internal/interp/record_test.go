@@ -56,7 +56,7 @@ func TestNamespacedImport(t *testing.T) {
 	}
 	var out []string
 	ip := interp.New(func(s string) { out = append(out, s) })
-	if err := ip.RunFile(main); err != nil {
+	if _, _, err := ip.RunFileMain(main, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 2 || out[0] != "12" || out[1] != "7" {

@@ -27,7 +27,7 @@ func runFile(t *testing.T, dir, src string) []string {
 	main := writeModule(t, dir, "main", src)
 	var out []string
 	ip := interp.New(func(s string) { out = append(out, s) })
-	if err := ip.RunFile(main); err != nil {
+	if _, _, err := ip.RunFileMain(main, nil); err != nil {
 		t.Fatalf("run error: %v\nsource:\n%s", err, src)
 	}
 	return out
@@ -288,7 +288,7 @@ func TestImportOfLegacyExtensionIsRefused(t *testing.T) {
 	}
 
 	ip := interp.New(func(string) {})
-	err := ip.RunFile(main)
+	_, _, err := ip.RunFileMain(main, nil)
 	if err == nil {
 		t.Fatal("a .ra import resolved; the extension is meant to be a hard break")
 	}
