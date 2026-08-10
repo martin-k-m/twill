@@ -23,6 +23,17 @@
 
 ### Added
 
+- **Typed record literals** (2026-08-09): `Point { x: 1.0, y: 2.0 }`,
+  `geom.Point { ... }`. A type name in front of a record literal is now parsed;
+  records are structural, so the value is the same one `{ ... }` builds and the
+  name is advisory, kept only so `twill fmt` reproduces it. The `{ ident :`
+  shape that marks a record is one a block never begins with, so a condition
+  ending in a name (`if p.x > 0 { ... }`) is not mistaken for a typed literal, no
+  parser mode flag needed. Go bootstrap (parser, `ast.RecordLit.TypeName`,
+  formatter) with tests in `internal/interp/typed_record_test.go`; self-hosted
+  mirror follows. Unblocked `std/float.tw`; the std format corpus is now down to
+  two parse failures (io, json), both on postfix `?`.
+
 - **`enum` declarations and `match` expressions** (NEEDS-3, 2026-08-09): the sum
   type and its eliminator, the foundation the whole `Res`/`Opt` family rests on.
   `enum Name { Case, Case(Payload), ... }` declares the type; each case is a
