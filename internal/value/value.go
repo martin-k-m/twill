@@ -90,6 +90,33 @@ func (r *Record) Get(name string) (Value, bool) {
 	return v, ok
 }
 
+// Dict is an insertion-ordered map with string keys, the systems dialect's
+// Dict[Str, V]. Keys preserves declaration order for stable iteration.
+type Dict struct {
+	Keys []string
+	Map  map[string]Value
+}
+
+func NewDict() *Dict { return &Dict{Map: map[string]Value{}} }
+
+func (d *Dict) Set(k string, v Value) {
+	if _, ok := d.Map[k]; !ok {
+		d.Keys = append(d.Keys, k)
+	}
+	d.Map[k] = v
+}
+
+func (d *Dict) Get(k string) (Value, bool) {
+	v, ok := d.Map[k]
+	return v, ok
+}
+
+// Bytes is a growable byte buffer, the systems dialect's Bytes, distinct from a
+// Str so building one is not quadratic.
+type Bytes struct {
+	Data []byte
+}
+
 type Closure struct {
 	Params []string
 	Body   ast.Expr
@@ -313,6 +340,14 @@ func Format(v Value) string {
 			parts[i] = k + ": " + Format(t.Fields[k])
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
+	case *Dict:
+		parts := make([]string, len(t.Keys))
+		for i, k := range t.Keys {
+			parts[i] = k + ": " + Format(t.Map[k])
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
+	case *Bytes:
+		return string(t.Data)
 	case *Variant:
 		if t.HasPayload {
 			return t.Name + "(" + Format(t.Payload) + ")"

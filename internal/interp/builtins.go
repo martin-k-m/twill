@@ -200,6 +200,160 @@ func (ip *Interp) installBuiltins() {
 		return value.Bool(false), nil
 	})
 
+	// --- systems collections: growable list, ordered dict, byte buffer -------
+
+	def("arr_new", 0, false, func(a []value.Value) (value.Value, error) {
+		return &value.List{}, nil
+	})
+	def("push", 2, false, func(a []value.Value) (value.Value, error) {
+		l, ok := a[0].(*value.List)
+		if !ok {
+			return nil, fmt.Errorf("push expects a list")
+		}
+		l.Items = append(l.Items, a[1])
+		return value.TheUnit, nil
+	})
+	def("pop", 1, false, func(a []value.Value) (value.Value, error) {
+		l, ok := a[0].(*value.List)
+		if !ok {
+			return nil, fmt.Errorf("pop expects a list")
+		}
+		if len(l.Items) == 0 {
+			return nil, fmt.Errorf("pop from an empty list")
+		}
+		last := l.Items[len(l.Items)-1]
+		l.Items = l.Items[:len(l.Items)-1]
+		return last, nil
+	})
+
+	dictKey := func(v value.Value, name string) (string, error) {
+		s, ok := v.(value.Str)
+		if !ok {
+			return "", fmt.Errorf("%s expects a string key", name)
+		}
+		return string(s), nil
+	}
+	asDict := func(v value.Value, name string) (*value.Dict, error) {
+		d, ok := v.(*value.Dict)
+		if !ok {
+			return nil, fmt.Errorf("%s expects a dict", name)
+		}
+		return d, nil
+	}
+	def("dict_new", 0, false, func(a []value.Value) (value.Value, error) {
+		return value.NewDict(), nil
+	})
+	def("dict_set", 3, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_set")
+		if err != nil {
+			return nil, err
+		}
+		k, err := dictKey(a[1], "dict_set")
+		if err != nil {
+			return nil, err
+		}
+		d.Set(k, a[2])
+		return value.TheUnit, nil
+	})
+	// dict_get returns an Opt: Some(value) when the key is present, None when not.
+	def("dict_get", 2, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_get")
+		if err != nil {
+			return nil, err
+		}
+		k, err := dictKey(a[1], "dict_get")
+		if err != nil {
+			return nil, err
+		}
+		if v, ok := d.Get(k); ok {
+			return &value.Variant{Name: "Some", Payload: v, HasPayload: true}, nil
+		}
+		return &value.Variant{Name: "None"}, nil
+	})
+	def("dict_has", 2, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_has")
+		if err != nil {
+			return nil, err
+		}
+		k, err := dictKey(a[1], "dict_has")
+		if err != nil {
+			return nil, err
+		}
+		_, ok := d.Get(k)
+		return value.Bool(ok), nil
+	})
+	// dict_must is dict_get without the Opt: it aborts on a missing key, for the
+	// call sites that have already checked the key is present.
+	def("dict_must", 2, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_must")
+		if err != nil {
+			return nil, err
+		}
+		k, err := dictKey(a[1], "dict_must")
+		if err != nil {
+			return nil, err
+		}
+		if v, ok := d.Get(k); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("dict_must: no key %q", k)
+	})
+	// dict_or returns the value at a key, or a default when it is absent.
+	def("dict_or", 3, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_or")
+		if err != nil {
+			return nil, err
+		}
+		k, err := dictKey(a[1], "dict_or")
+		if err != nil {
+			return nil, err
+		}
+		if v, ok := d.Get(k); ok {
+			return v, nil
+		}
+		return a[2], nil
+	})
+	def("dict_keys", 1, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_keys")
+		if err != nil {
+			return nil, err
+		}
+		out := &value.List{Items: make([]value.Value, len(d.Keys))}
+		for i, k := range d.Keys {
+			out.Items[i] = value.Str(k)
+		}
+		return out, nil
+	})
+
+	def("bytes_new", 0, false, func(a []value.Value) (value.Value, error) {
+		return &value.Bytes{}, nil
+	})
+	def("bytes_push", 2, false, func(a []value.Value) (value.Value, error) {
+		b, ok := a[0].(*value.Bytes)
+		if !ok {
+			return nil, fmt.Errorf("bytes_push expects a byte buffer")
+		}
+		n, err := scalarOf(a[1], "bytes_push")
+		if err != nil {
+			return nil, err
+		}
+		b.Data = append(b.Data, byte(int64(n)))
+		return value.TheUnit, nil
+	})
+	def("bytes_to_str", 1, false, func(a []value.Value) (value.Value, error) {
+		b, ok := a[0].(*value.Bytes)
+		if !ok {
+			return nil, fmt.Errorf("bytes_to_str expects a byte buffer")
+		}
+		return value.Str(string(b.Data)), nil
+	})
+
+	// abort ends the program with a message, for the compiler's unreachable
+	// branches and invariant checks.
+	def("abort", 1, false, func(a []value.Value) (value.Value, error) {
+		return nil, fmt.Errorf("abort: %s", value.Format(a[0]))
+	})
+
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
 			x, err := asTensor(a[0], name)
