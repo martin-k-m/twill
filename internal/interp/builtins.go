@@ -348,6 +348,70 @@ func (ip *Interp) installBuiltins() {
 		return value.Str(string(b.Data)), nil
 	})
 
+	def("dict_del", 2, false, func(a []value.Value) (value.Value, error) {
+		d, err := asDict(a[0], "dict_del")
+		if err != nil {
+			return nil, err
+		}
+		k, err := dictKey(a[1], "dict_del")
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := d.Map[k]; ok {
+			delete(d.Map, k)
+			for i, key := range d.Keys {
+				if key == k {
+					d.Keys = append(d.Keys[:i], d.Keys[i+1:]...)
+					break
+				}
+			}
+		}
+		return value.TheUnit, nil
+	})
+
+	// A buf is a fixed-size byte buffer, the packed storage a narrow dtype tensor
+	// keeps. It reuses the Bytes value, allocated to length up front.
+	def("buf_new", 1, false, func(a []value.Value) (value.Value, error) {
+		n, err := scalarOf(a[0], "buf_new")
+		if err != nil {
+			return nil, err
+		}
+		return &value.Bytes{Data: make([]byte, int(n))}, nil
+	})
+	def("buf_get8", 2, false, func(a []value.Value) (value.Value, error) {
+		b, ok := a[0].(*value.Bytes)
+		if !ok {
+			return nil, fmt.Errorf("buf_get8 expects a buffer")
+		}
+		i, err := scalarOf(a[1], "buf_get8")
+		if err != nil {
+			return nil, err
+		}
+		if int(i) < 0 || int(i) >= len(b.Data) {
+			return nil, fmt.Errorf("buf_get8 index %d out of range", int(i))
+		}
+		return tensor.Scalar(float64(b.Data[int(i)])), nil
+	})
+	def("buf_set8", 3, false, func(a []value.Value) (value.Value, error) {
+		b, ok := a[0].(*value.Bytes)
+		if !ok {
+			return nil, fmt.Errorf("buf_set8 expects a buffer")
+		}
+		i, err := scalarOf(a[1], "buf_set8")
+		if err != nil {
+			return nil, err
+		}
+		v, err := scalarOf(a[2], "buf_set8")
+		if err != nil {
+			return nil, err
+		}
+		if int(i) < 0 || int(i) >= len(b.Data) {
+			return nil, fmt.Errorf("buf_set8 index %d out of range", int(i))
+		}
+		b.Data[int(i)] = byte(int64(v))
+		return value.TheUnit, nil
+	})
+
 	// abort ends the program with a message, for the compiler's unreachable
 	// branches and invariant checks.
 	def("abort", 1, false, func(a []value.Value) (value.Value, error) {
