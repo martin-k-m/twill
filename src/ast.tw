@@ -296,6 +296,12 @@ struct EnumVariant {
 # family is built on.
 struct EnumDecl { id: I64, name: Str, variants: Arr[EnumVariant], line: I64 }
 
+# StructDecl declares a record type: `struct Name { field: Type, ... }`. Field
+# types are advisory text; records are structural, so the declaration names a
+# type without constraining how a record is built.
+struct StructField { name: Str, type_name: Str }
+struct StructDecl { id: I64, name: Str, fields: Arr[StructField], line: I64 }
+
 struct ExprStmt { id: I64, x: Expr, line: I64 }
 
 enum Stmt {
@@ -309,6 +315,7 @@ enum Stmt {
   SUnitDecl(UnitDecl),
   STypeDecl(TypeDecl),
   SEnum(EnumDecl),
+  SStruct(StructDecl),
   SExpr(ExprStmt),
   SBlock(Block),
 }
@@ -386,6 +393,7 @@ fn stmt_line(s: Stmt) -> I64 {
     SUnitDecl(x) => x.line,
     STypeDecl(x) => x.line,
     SEnum(x) => x.line,
+    SStruct(x) => x.line,
     SExpr(x) => x.line,
     SBlock(x) => x.line,
   }
@@ -425,6 +433,7 @@ fn stmt_id(s: Stmt) -> I64 {
     SUnitDecl(x) => x.id,
     STypeDecl(x) => x.id,
     SEnum(x) => x.id,
+    SStruct(x) => x.id,
     SExpr(x) => x.id,
     SBlock(x) => x.id,
   }
@@ -519,6 +528,9 @@ fn type_decl(ids: NodeIds, name: Str, fields: Arr[TypeField], line: I64) -> Stmt
 
 fn enum_decl(ids: NodeIds, name: Str, variants: Arr[EnumVariant], line: I64) -> Stmt =
   SEnum(EnumDecl { id: fresh(ids), name: name, variants: variants, line: line })
+
+fn struct_decl(ids: NodeIds, name: Str, fields: Arr[StructField], line: I64) -> Stmt =
+  SStruct(StructDecl { id: fresh(ids), name: name, fields: fields, line: line })
 
 fn match_expr(ids: NodeIds, subject: Expr, arms: Arr[MatchArm], line: I64) -> Expr =
   EMatch(Match { id: fresh(ids), subject: subject, arms: arms, line: line })
