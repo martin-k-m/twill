@@ -4,8 +4,19 @@
 
 ### Added
 
-- **`mode systems` now gates type-name resolution** (2026-08-09), its first
-  semantic effect. In a systems-mode file an unresolved type annotation
+- **Bitwise operators on I64** (NEEDS-2, part, 2026-08-09): `and`, `or`, `xor`,
+  `shl`, `shr` (2-arg) and `bnot` (1-arg), on scalar integers, `shr` arithmetic,
+  shift counts masked to 0..63. `and`/`or` keep the boolean keywords' spelling
+  but are the bitwise builtins when called; a line beginning `and(`/`or(` is a
+  new call-statement rather than a boolean continuation of the line above;
+  bitwise-not is `bnot`, since `not` stays the boolean prefix operator. Values
+  are still float64, so a full 64-bit pattern round-trips lossily above 2^53 (a
+  real I64 storage type is the remainder of NEEDS-2). Go bootstrap + self-hosted
+  parser/checker/registry; `std/float.tw` and `std/random.tw` updated to `bnot`.
+  Tests in `internal/interp/bitwise_test.go`.
+
+- **`mode systems` gates type-name resolution** (2026-08-09), its first
+  semantic effect, now also covering `let` annotations (`let n: I64 = …`). In a systems-mode file an unresolved type annotation
   (`n: I64`, `-> Bool`, `-> Str`, `c: cp.Caps`) is advisory: the bootstrap has
   no such type, so the parameter takes its argument's type and nothing is
   reported. In numeric mode the same name is still an "unknown type" error, and

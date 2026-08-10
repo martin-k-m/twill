@@ -291,6 +291,13 @@ func (p *parser) parseBinary(minPrec int) (ast.Expr, error) {
 		if (op == "+" || op == "-") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line {
 			break
 		}
+		// A line that begins `and(` or `or(` is a bitwise call starting a new
+		// statement, not this expression continued by the boolean operator. The
+		// following `(` is what distinguishes the call from a genuine (trailing-
+		// operator) continuation, so only that form breaks.
+		if (op == "and" || op == "or") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line && p.peek(1).Value == "(" {
+			break
+		}
 		prec, ok := precedence[op]
 		if !ok || prec < minPrec {
 			break
@@ -418,6 +425,16 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 			return p.parseIf()
 		case "fn":
 			return p.parseLambda()
+		case "and", "or":
+			// `and` and `or` are the boolean infix operators, but spelled as a
+			// call, `and(x, y)`, they are the bitwise builtins. Only a following
+			// `(` selects the call; as infix they always have a left operand and
+			// so never reach parsePrimary as a leading token. Emitting an Ident
+			// lets parsePostfix turn it into the call.
+			if p.peek(1).Value == "(" {
+				p.next()
+				return &ast.Ident{Name: t.Value, Line: t.Line}, nil
+			}
 		}
 	case lexer.IDENT:
 		p.next()

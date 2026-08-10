@@ -71,7 +71,7 @@ let SIGN_BIT: I64 = shl(1, 63)
 # putting it back at its shifted position is the standard fix.
 fn ushr(x: I64, k: I64) -> I64 {
   if k == 0 { return x }
-  let low: I64 = shr(and(x, not(SIGN_BIT)), k)
+  let low: I64 = shr(and(x, bnot(SIGN_BIT)), k)
   if and(x, SIGN_BIT) == 0 { return low }
   or(low, shl(1, 63 - k))
 }

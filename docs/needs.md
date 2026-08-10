@@ -66,7 +66,21 @@ typed record literals, and leading-`and`/`or` line continuation.
 
 ## NEEDS-2: `I64` with bitwise operators
 
-**Status:** blocking. `src/lex.tw` uses it for every offset, line and column.
+**Status:** the six operators are spelled and work (2026-08-09); a true 64-bit
+`I64` distinct from float64 remains. The bitwise builtins `and`, `or`, `xor`,
+`shl`, `shr`, `bnot` operate on scalar integers, with `shr` arithmetic and shift
+counts masked to 0..63. `and`/`or` share the boolean keywords' spelling but are
+the bitwise builtins when called (`and(x, y)`); a line that begins `and(`/`or(`
+is a new call-statement, not a boolean continuation; and bitwise-not is spelled
+`bnot`, since `not` stays the boolean prefix operator (owner's call, 2026-08-09).
+Landed in the Go bootstrap (parser + `internal/interp/builtins.go` + checker) and
+mirrored in the self-hosted parser, checker and builtin registry;
+`internal/interp/bitwise_test.go` covers the values, the preserved boolean infix,
+and the line-start disambiguation. **Still missing:** values are float64, so a
+full 64-bit pattern such as a sign bit (`shl(1, 63)`) is not exactly
+representable and round-trips lossily above 2^53. That needs a real I64 storage
+type, which is the rest of this entry and what the self-hosted eval runtime for
+these builtins is waiting on.
 
 A signed 64-bit integer distinct from float64, with `and or xor shl shr not`,
 defined wrapping, and explicit `i64()` / `f64()` conversions only. The exact

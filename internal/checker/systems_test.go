@@ -17,6 +17,14 @@ func TestSystemsModeToleratesQualifiedTypes(t *testing.T) {
 	wantNone(t, "mode systems\nfn idc(c: cp.Caps) -> cp.Caps = c\nlet r = idc(1.0)")
 }
 
+func TestSystemsModeToleratesTypedLet(t *testing.T) {
+	wantNone(t, "mode systems\nlet n: I64 = 3\nlet s: Str = n")
+}
+
+func TestNumericModeStillRejectsUnknownLetUnit(t *testing.T) {
+	wantOne(t, "let n: I64 = 3", "unknown unit")
+}
+
 func TestNumericModeStillRejectsUnknownParamType(t *testing.T) {
 	// Same signature, no mode line: the unknown type is an error, exactly as
 	// before, so a numeric-mode typo is still caught.
