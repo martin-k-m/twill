@@ -331,6 +331,8 @@ func (p *printer) expr(e ast.Expr) string {
 		return p.ifExpr(ex)
 	case *ast.Match:
 		return p.matchExpr(ex)
+	case *ast.Try:
+		return p.expr(ex.Expr) + "?"
 	case *ast.Block:
 		return p.inlineBlock(ex)
 	}

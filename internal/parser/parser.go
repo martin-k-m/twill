@@ -402,6 +402,10 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 				return nil, err
 			}
 			x = node
+		} else if p.check("?") {
+			// Postfix `?`: unwrap a Res/Opt success or return its failure.
+			line := p.next().Line
+			x = &ast.Try{Expr: x, Line: line}
 		} else {
 			break
 		}

@@ -343,7 +343,18 @@ func (e *RecordLit) expr() {}
 func (e *Field) expr()     {}
 func (e *IfExpr) expr()    {}
 func (e *Match) expr()     {}
+func (e *Try) expr()       {}
 func (e *Block) expr()     {}
+
+// Try is the postfix `?`: it unwraps the success case of a Res/Opt value (the
+// payload of `Ok`/`Some`) or, on a failure case (`Err`/`None`), returns that
+// value from the enclosing function.
+type Try struct {
+	Expr Expr
+	Line int
+}
+
+func (e *Try) Pos() int { return e.Line }
 
 // Match is `match subject { pattern => body, ... }`, an expression whose value
 // is the body of the arm whose pattern matched. Arms are tried in order.

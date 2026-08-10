@@ -106,6 +106,19 @@ func (ip *Interp) installBuiltins() {
 		return tensor.Scalar(float64(^int64(x))), nil
 	})
 
+	// Res and Opt are built in: their cases are constructors and values in every
+	// scope, so `Ok(x)`, `Err(e)`, `Some(x)` and `None` work without a
+	// declaration, and postfix `?` unwraps `Ok`/`Some` or returns `Err`/`None`.
+	variantCtor := func(name string) {
+		def(name, 1, false, func(a []value.Value) (value.Value, error) {
+			return &value.Variant{Name: name, Payload: a[0], HasPayload: true}, nil
+		})
+	}
+	variantCtor("Ok")
+	variantCtor("Err")
+	variantCtor("Some")
+	ip.Global.Define("None", &value.Variant{Name: "None"})
+
 	binTensor := func(name string, f func(a, b *tensor.Tensor) (*tensor.Tensor, error)) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
 			x, err := asTensor(a[0], name)
