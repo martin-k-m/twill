@@ -6,8 +6,15 @@
 
 - **Self-hosting: the front end runs on the bootstrap** (2026-08-10): the twill
   compiler written in twill (`src/main.tw` and the modules it imports) now runs
-  on the Go bootstrap and checks and formats real files, byte-for-byte matching
-  the Go `check` and `fmt` commands and their exit codes. A systems-mode program
+  on the Go bootstrap and checks and formats real files. A differential sweep of
+  the whole corpus (443 files) has `check` matching the Go command byte-for-byte
+  on 432; `fmt` reproduces the Go layout structurally. The one thing keeping both
+  from full parity is that the bootstrap has no exact 64-bit integer (its numbers
+  are float64), so the self-hosted number parser cannot assemble an IEEE bit
+  pattern above 2^53 and every reprinted or axis-valued numeric literal comes out
+  wrong; the checks and format that do not read a numeric value match exactly.
+  (`fmt` also preserves blank lines between statements by design, a deliberate
+  divergence from Go `fmt`.) A systems-mode program
   now has `main()` as its entry point (invoked after the top level, the way Go
   and Rust spell it), with command-line words after the script exposed through
   the `args` builtin, so `twill run src/main.tw check foo.tw` drives the
