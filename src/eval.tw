@@ -1880,11 +1880,14 @@ fn format_value(v: Value) -> Str {
     VRecord(r) => format_record(r),
     VClosure(c) => format_closure(c),
     VBuiltin(b) => bytes.concat("<builtin ", bytes.concat(b.name, ">")),
-    # A foreign value renders through the Go value's String() there; here the
-    # handle carries only its kind, so a fitted model prints "<gbm model>" rather
-    # than Go's "<gbm squared, N trees, M features>". Foreign values are opaque
-    # handles that no golden prints, so the two never meet in the harness.
-    VForeign(f) => bytes.concat("<", bytes.concat(f.kind, ">")),
+    # A foreign value renders through the Go value's String() there. A fitted gbm
+    # model is described by handle through the native gbm_describe, so it prints
+    # "<gbm logistic, N trees, M features>" exactly as the reference does; any
+    # other foreign kind falls back to "<kind>".
+    VForeign(f) => {
+      if bytes.equal(f.kind, "gbm model") { gbm_describe(f.handle) }
+      else { bytes.concat("<", bytes.concat(f.kind, ">")) }
+    },
     # A variant renders as `Some(5)` or `None`, exactly as internal/value.Format
     # does: the payload goes through this same formatter. A payload constructor
     # is a Builtin on the Go side and prints as one, so it matches here.
