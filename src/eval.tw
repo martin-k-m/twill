@@ -1071,6 +1071,23 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
   if bytes.equal(x.op, "==") { return Ok(VBool(deep_equal(l, r))) }
   if bytes.equal(x.op, "!=") { return Ok(VBool(not deep_equal(l, r))) }
 
+  # An ordering comparison is scalar: a Num or a rank-0 tensor on each side. It
+  # has zero gradient, so -- unlike arithmetic, whose fast path is Num-only to
+  # keep a traced rank-0 tensor on the tape -- it may read a rank-0 tensor out
+  # without breaking a derivative. A non-scalar operand falls through and errors,
+  # matching the bootstrap, where the elementwise form is greater/less, not >/<.
+  if bytes.equal(x.op, "<") or bytes.equal(x.op, "<=") or bytes.equal(x.op, ">") or bytes.equal(x.op, ">=") {
+    match rank0_number(l) {
+      Some(a) => {
+        match rank0_number(r) {
+          Some(b) => return num_arith(x.op, a, b, x.line),
+          None => unit,
+        }
+      },
+      None => unit,
+    }
+  }
+
   # `+` concatenates two strings, before the numeric paths, since a string is
   # neither a scalar nor a tensor and would otherwise fall through to the error.
   if bytes.equal(x.op, "+") {
