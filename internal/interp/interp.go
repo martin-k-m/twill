@@ -239,10 +239,39 @@ func (ip *Interp) popSrc() { ip.srcStack = ip.srcStack[:len(ip.srcStack)-1] }
 
 // --- statement execution ---------------------------------------------------
 
+// isI64Anno reports whether a let's annotation is a bare `I64`. The parser puts
+// a `.`-or-`[`-free annotation in the unit slot (as a one-factor unit) rather
+// than TypeName, so both spellings are checked. Arr[I64], F64, a compound unit
+// and no annotation are not I64.
+func isI64Anno(typeName string, u *ast.UnitAnno) bool {
+	if typeName == "I64" {
+		return true
+	}
+	return u != nil && len(u.Factors) == 1 && u.Factors[0].Name == "I64" && u.Factors[0].Exp == 1
+}
+
 func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	switch st := s.(type) {
 	case *ast.Let:
-		env.Define(st.Name, ip.evalExpr(st.Value, env))
+		v := ip.evalExpr(st.Value, env)
+		// A scalar bound at an `I64` annotation truncates toward zero. Numbers run
+		// as float64, so integer division comes back fractional; a systems-mode
+		// kernel like tensor.tw's transpose_origins binds `let coord: I64 = rem /
+		// stride` and uses it as a buffer index, which then reads out of range.
+		// Truncating at the bind makes the interpreted arithmetic match the I64
+		// semantics the annotation promises. A real I64 runtime divides as integers
+		// and this is a no-op.
+		if isI64Anno(st.TypeName, st.Unit) {
+			switch t := v.(type) {
+			case value.Num:
+				v = value.Num(math.Trunc(float64(t)))
+			case *tensor.Tensor:
+				if t.IsScalar() {
+					v = value.Num(math.Trunc(t.Data[0]))
+				}
+			}
+		}
+		env.Define(st.Name, v)
 		return value.TheUnit
 	case *ast.FnDecl:
 		env.Define(st.Name, &value.Closure{
