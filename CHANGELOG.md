@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-11
+
+The self-hosting release. The twill compiler written in twill (`src/*.tw`) now
+runs on the Go bootstrap and performs every stage -- lex, parse, check, format,
+**evaluate**, and the differential canonical dump -- matching the Go reference.
+`twill check` matches byte-for-byte on all 443 corpus files; `twill fmt` on all
+89 (bar a by-design blank-line divergence); and the self-hosted evaluator runs
+the entire example corpus -- autodiff, jacobians, hessians, neural-net training,
+CNNs, attention, gradient boosting, Monte Carlo pricing -- with output identical
+to `twill run`, save a couple of 1-ULP float-accumulation differences and the
+save/load of a foreign gbm model. The whole `src/`+`std/` tree type-checks clean.
+
+Getting there added a systems runtime the evaluator needs and closed the
+numeric, formatting, evaluation and dtype gaps between the two implementations;
+the entries below are that work.
+
 ### Added
 
 - **Native float text conversion unblocks self-hosted numbers** (2026-08-10):
