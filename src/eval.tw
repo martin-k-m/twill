@@ -623,6 +623,122 @@ fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
 #   - A module is evaluated once and cached, so two importers share its state.
 #   - With no alias the module's bindings land in the importer's environment
 #     unqualified. With one they land in a record under the alias.
+# canonical renders a value in the differential harness's dump form, matching
+# cmd/twill/dump.go byte for byte: floats as exact hex bit patterns (f64_hex),
+# a scalar tensor and a Num rendered the same, record keys sorted. It is what
+# `run --dump=canonical` prints so two binaries can be compared with no tolerance.
+fn canonical(v: Value, depth: I64) -> Str {
+  if depth > 32 { return "elided" }
+  match v {
+    VNum(x) => bytes.concat("num ", f64_hex(x)),
+    VTensor(t) => {
+      if len(t.shape) == 0 { return bytes.concat("num ", f64_hex(tensor.at(t, 0))) }
+      let out: Bytes = bytes.new()
+      bytes.push_text(out, "tensor shape=[")
+      bytes.push_text(out, canon_join_ints(t.shape))
+      bytes.push_text(out, "] data=[")
+      let n: I64 = tensor.numel(t)
+      let i: I64 = 0
+      while i < n {
+        if i > 0 { bytes.push(out, 32) }
+        bytes.push_text(out, f64_hex(tensor.at(t, i)))
+        i = i + 1
+      }
+      bytes.push_text(out, "]")
+      bytes.to_str(out)
+    },
+    VBool(b) => { if b { "bool true" } else { "bool false" } },
+    VStr(s) => bytes.concat("str ", str_quote(s)),
+    VUnit => "unit",
+    VList(l) => {
+      let out: Bytes = bytes.new()
+      bytes.push_text(out, "list [")
+      let i: I64 = 0
+      while i < len(l.items) {
+        if i > 0 { bytes.push_text(out, ", ") }
+        bytes.push_text(out, canonical(l.items[i], depth + 1))
+        i = i + 1
+      }
+      bytes.push_text(out, "]")
+      bytes.to_str(out)
+    },
+    VRecord(r) => {
+      let keys: Arr[Str] = canon_sort(dict_keys(r.fields))
+      let out: Bytes = bytes.new()
+      bytes.push_text(out, "record {")
+      let i: I64 = 0
+      while i < len(keys) {
+        if i > 0 { bytes.push_text(out, ", ") }
+        bytes.push_text(out, keys[i])
+        bytes.push_text(out, ": ")
+        bytes.push_text(out, canonical(dict_must(r.fields, keys[i]), depth + 1))
+        i = i + 1
+      }
+      bytes.push_text(out, "}")
+      bytes.to_str(out)
+    },
+    VClosure(c) => {
+      let nm: Str = c.name
+      if len(nm) == 0 { nm = "anonymous" }
+      bytes.concat("fn ", bytes.concat(nm, bytes.concat("/", str(len(c.params)))))
+    },
+    VBuiltin(b) => bytes.concat("builtin ", b.name),
+    # A variant or a foreign handle has no portable canonical form in the Go
+    # dumper either; it prints the Go type name. Nothing in the corpus binds one
+    # at the top level, so the exact spelling here is not compared.
+    VVariant(_) => "opaque *value.Variant",
+    VVariantCtor(_) => "opaque *value.Builtin",
+    VForeign(f) => bytes.concat("opaque ", f.kind),
+  }
+}
+
+# Shape dimensions joined with ", ", matching Go's joinInts in the dumper (which
+# differs from shape_go's space-joined error-message form).
+fn canon_join_ints(shape: Arr[I64]) -> Str {
+  let parts: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(shape) {
+    push(parts, str(shape[i]))
+    i = i + 1
+  }
+  bytes.join(parts, ", ")
+}
+
+# A byte-wise ascending sort of strings, Go's sort.Strings, for a record's keys.
+# Insertion sort: a record has a handful of fields, not thousands.
+fn canon_sort(xs: Arr[Str]) -> Arr[Str] {
+  let out: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(xs) {
+    push(out, xs[i])
+    i = i + 1
+  }
+  let j: I64 = 1
+  while j < len(out) {
+    let key: Str = out[j]
+    let k: I64 = j - 1
+    while k >= 0 and canon_str_less(key, out[k]) {
+      out[k + 1] = out[k]
+      k = k - 1
+    }
+    out[k + 1] = key
+    j = j + 1
+  }
+  out
+}
+
+fn canon_str_less(a: Str, b: Str) -> Bool {
+  let n: I64 = len(a)
+  if len(b) < n { n = len(b) }
+  let i: I64 = 0
+  while i < n {
+    if a[i] < b[i] { return true }
+    if a[i] > b[i] { return false }
+    i = i + 1
+  }
+  len(a) < len(b)
+}
+
 fn exec_import(st: ast.Import, env: Env) -> Res[Flow, RuntimeError] {
   # The source comes from the native `module_source`, which owns the resolution
   # policy (std embedded, else relative to the running program, `.ra` refused).
