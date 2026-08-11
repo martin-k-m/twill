@@ -1346,26 +1346,24 @@ fn eval_slice(x: ast.Slice, env: Env) -> Res[Value, RuntimeError] {
       Ok(VList(ListVal { items: items }))
     },
     VStr(s) => Ok(VStr(s[start:end])),
-    VTensor(t) => {
-      let rows: Arr[Value] = tensor_rows(t)
-      let shape: Arr[I64] = arr_new()
-      push(shape, end - start)
-      let i: I64 = 1
-      while i < len(t.shape) {
-        push(shape, t.shape[i])
-        i = i + 1
-      }
-      let stride: I64 = tensor.element_count(t.shape) / t.shape[0]
-      let data: Arr[F64] = arr_new()
-      let k: I64 = start * stride
-      while k < end * stride {
-        push(data, tensor.at(t, k))
-        k = k + 1
-      }
-      Ok(VTensor(tensor.mk_raw(shape, data, t.dtype)))
-    },
+    # A tensor slice is axis-0 and records on the tape when one is installed, so
+    # a gradient flows back through `x[i:j]`. Building the result from raw data
+    # here instead (as this once did) detached it from the tape, and jacobian(f)
+    # of a function that slices its input then recombined the pieces came back
+    # all zeros because the backward pass could not reach the leaf.
+    VTensor(t) => lift_v(tr_slice(t, start, end), x.line),
     _ => Err(runtime_error(x.line, "unreachable: slice target was validated above")),
   }
+}
+
+# The tape shim for an axis-0 slice, mirroring tr_matmul and tr_unary: the traced
+# node when a tape is installed, the plain kernel otherwise.
+fn tr_slice(a: tensor.Tensor, start: I64, end: I64) -> Res[tensor.Tensor, Str] {
+  if not tape_installed() {
+    return tensor.slice_axis0(a, start, end)
+  }
+  let tp: tensor.Tape = tape_current()
+  Ok(tensor.value_of(tp, tensor.t_slice_axis0(tp, tr_node(tp, a), start, end)?))
 }
 
 fn slice_bound(e: Opt[ast.Expr], env: Env, dflt: I64) -> Res[I64, RuntimeError] {
