@@ -623,19 +623,35 @@ func (ip *Interp) installBuiltins() {
 		}
 		return &value.Variant{Name: "Ok", Payload: names, HasPayload: true}, nil
 	})
-	def("resolve_path", 2, false, func(a []value.Value) (value.Value, error) {
-		base, ok := asStr(a[0])
-		if !ok {
-			return nil, fmt.Errorf("resolve_path expects a base path")
+	// resolve_path makes a path absolute. With two arguments it resolves the
+	// second relative to the first's directory. With one it resolves against the
+	// running program's directory -- the form the self-hosted evaluator's file
+	// builtins use, where the base is implicit, mirroring how the interpreter's
+	// own file I/O resolves a relative path.
+	def("resolve_path", -1, true, func(a []value.Value) (value.Value, error) {
+		switch len(a) {
+		case 1:
+			rel, ok := asStr(a[0])
+			if !ok {
+				return nil, fmt.Errorf("resolve_path expects a path")
+			}
+			return value.Str(ip.resolvePath(rel)), nil
+		case 2:
+			base, ok := asStr(a[0])
+			if !ok {
+				return nil, fmt.Errorf("resolve_path expects a base path")
+			}
+			rel, ok := asStr(a[1])
+			if !ok {
+				return nil, fmt.Errorf("resolve_path expects a relative path")
+			}
+			if filepath.IsAbs(rel) {
+				return value.Str(rel), nil
+			}
+			return value.Str(filepath.Join(filepath.Dir(base), rel)), nil
+		default:
+			return nil, fmt.Errorf("resolve_path expects 1 or 2 arguments, got %d", len(a))
 		}
-		rel, ok := asStr(a[1])
-		if !ok {
-			return nil, fmt.Errorf("resolve_path expects a relative path")
-		}
-		if filepath.IsAbs(rel) {
-			return value.Str(rel), nil
-		}
-		return value.Str(filepath.Join(filepath.Dir(base), rel)), nil
 	})
 	def("str_quote", 1, false, func(a []value.Value) (value.Value, error) {
 		s, ok := asStr(a[0])
