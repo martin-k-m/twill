@@ -35,6 +35,7 @@ mode systems
 # worth writing even though it will not be the thing that runs.
 
 import "ast.tw" as ast
+import "parse.tw" as parse
 import "bytes.tw" as bytes
 import "tensor.tw" as tensor
 import "builtins.tw" as builtins
@@ -623,7 +624,67 @@ fn tensor_rows(t: tensor.Tensor) -> Arr[Value] {
 #   - With no alias the module's bindings land in the importer's environment
 #     unqualified. With one they land in a record under the alias.
 fn exec_import(st: ast.Import, env: Env) -> Res[Flow, RuntimeError] {
-  Err(runtime_error(st.line, "import is not implemented in the self-hosted evaluator yet (NEEDS-51)"))
+  # The source comes from the native `module_source`, which owns the resolution
+  # policy (std embedded, else relative to the running program, `.ra` refused).
+  # Everything after is twill: parse the module, run its top level in a fresh
+  # scope, then either bind that scope under the alias as a record or, for a
+  # plain import, copy its names into the importer's scope.
+  let src: Str = ""
+  match module_source(st.path) {
+    Some(s) => src = s,
+    None => return Err(runtime_error(st.line, bytes.concat("cannot read import ", quoted(st.path)))),
+  }
+  match parse.parse(src) {
+    Err(e) => return Err(runtime_error(st.line,
+      bytes.concat("import ", bytes.concat(quoted(st.path), " failed to parse")))),
+    Ok(prog) => {
+      # A fresh module scope with no parent: it reaches builtins through the
+      # is_builtin fallback, not through a scope, and must not see the importer's
+      # locals. Functions are pre-bound so a top-level `let` may call one declared
+      # below it, matching the bootstrap's hoist.
+      let mod_env: Env = new_env(None)
+      hoist_module_fns(prog.body, mod_env)
+      let i: I64 = 0
+      while i < len(prog.body) {
+        exec_stmt(prog.body[i], mod_env)?
+        i = i + 1
+      }
+      if len(st.alias) == 0 {
+        let keys: Arr[Str] = dict_keys(mod_env.vars)
+        let j: I64 = 0
+        while j < len(keys) {
+          match dict_get(mod_env.vars, keys[j]) {
+            Some(v) => env_define(env, keys[j], v),
+            None => unit,
+          }
+          j = j + 1
+        }
+      } else {
+        env_define(env, st.alias, VRecord(RecordVal { fields: mod_env.vars }))
+      }
+      Ok(Normal(VUnit))
+    },
+  }
+}
+
+# Pre-bind every top-level function of a module before its body runs, so a
+# definition or a module-level `let` may reference a function written lower in
+# the file. This is what the bootstrap interpreter's hoist does; the evaluator's
+# ordinary exec is single-pass, so imports do it explicitly here.
+fn hoist_module_fns(body: Arr[ast.Stmt], env: Env) {
+  let i: I64 = 0
+  while i < len(body) {
+    match body[i] {
+      SFn(fd) => env_define(env, fd.name, VClosure(Closure {
+        params: fd.params,
+        body: fd.body,
+        env: env,
+        name: fd.name,
+      })),
+      _ => unit,
+    }
+    i = i + 1
+  }
 }
 
 # ---- expressions -----------------------------------------------------------
