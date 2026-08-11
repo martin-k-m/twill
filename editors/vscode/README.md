@@ -1,26 +1,51 @@
 # Twill for VS Code
 
-Syntax highlighting for Twill (`.tw`) files: comments, strings, numbers,
-keywords, operators, function definitions, and the built-in / autodiff
-functions.
+Language support for [Twill](https://github.com/martin-k-m/twill), a tensor-first
+differentiable language where automatic differentiation and physical units are
+built into the language rather than a library.
 
-## Install locally
+## Features
 
-VS Code loads extensions from `~/.vscode/extensions`. To try this one without
-packaging:
+- **Syntax highlighting** for `.tw` files: comments, strings (with `\x`/`\u`/`\U`
+  escapes), numbers (decimal, hex, scientific), operators (including `@`, `->`,
+  `=>`, postfix `?`), and the `mode` declaration.
+- **Keyword and type awareness**: control flow (`if`/`else`/`while`/`for`/`match`/
+  `break`/`continue`/`return`), declarations (`let`/`fn`/`enum`/`struct`/`type`/
+  `unit`), imports, logical and bitwise operators, and the built-in types
+  (`I64`, `F64`, `Bool`, `Str`, `Arr`, `Dict`, `Opt`, `Res`, `Tensor`, …) and
+  dtype names (`f32`, `bf16`, `f16`, …).
+- **Built-in and autodiff functions** highlighted distinctly: `grad`, `grads`,
+  `jacobian`, `hessian`, plus the tensor/array standard library
+  (`matmul`, `softmax`, `reshape`, `concat`, `gbm_fit`, …).
+- **Variant constructors** (`Ok`, `Err`, `Some`, `None`) and constants
+  (`true`, `false`, `unit`).
+- **Snippets** for functions, `let`, loops, `if`/`else`, `match`, `enum`,
+  `struct`, `import`, `mode systems`, and `grad`.
+- **Editor behavior**: line-comment toggling (`#`), bracket matching,
+  auto-closing pairs, indentation rules, and `# region` / `# endregion` folding.
+
+## Install
+
+Install **Twill** from the Visual Studio Marketplace, or from a `.vsix`:
 
 ```bash
-# from the repo root
-cp -r editors/vscode ~/.vscode/extensions/twill-lang-0.1.0
+code --install-extension twill-lang-1.0.0.vsix
 ```
 
-Then reload VS Code. Any `.tw` file will be highlighted.
+## Build from source
 
-To build a `.vsix` package instead, install [`vsce`](https://github.com/microsoft/vscode-vsce)
-and run `vsce package` inside `editors/vscode`.
+```bash
+cd editors/vscode
+npx @vscode/vsce package     # produces twill-lang-<version>.vsix
+```
 
 ## What's here
 
-- `syntaxes/twill.tmLanguage.json`: the TextMate grammar.
-- `language-configuration.json`: comments, brackets, auto-closing pairs.
-- `package.json`: the extension manifest.
+- `syntaxes/twill.tmLanguage.json` — the TextMate grammar.
+- `language-configuration.json` — comments, brackets, indentation, folding.
+- `snippets/twill.json` — code snippets.
+- `package.json` — the extension manifest.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

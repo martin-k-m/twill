@@ -4,9 +4,12 @@
   "scopeName": "source.twill",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#mode" },
     { "include": "#strings" },
+    { "include": "#declarations" },
     { "include": "#keywords" },
     { "include": "#constants" },
+    { "include": "#types" },
     { "include": "#autodiff" },
     { "include": "#builtins" },
     { "include": "#numbers" },
@@ -23,6 +26,13 @@
         }
       ]
     },
+    "mode": {
+      "match": "^\\s*(mode)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.mode.twill" },
+        "2": { "name": "entity.name.type.mode.twill" }
+      }
+    },
     "strings": {
       "name": "string.quoted.double.twill",
       "begin": "\"",
@@ -30,7 +40,19 @@
       "patterns": [
         {
           "name": "constant.character.escape.twill",
-          "match": "\\\\."
+          "match": "\\\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[nrt0\"'\\\\])"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "enum / struct / type / unit declarations name a new type",
+          "match": "\\b(enum|struct|type|unit)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.twill" },
+            "2": { "name": "entity.name.type.twill" }
+          }
         }
       ]
     },
@@ -38,33 +60,70 @@
       "patterns": [
         {
           "name": "keyword.control.twill",
-          "match": "\\b(if|else|while|for|in|return|import)\\b"
+          "match": "\\b(if|else|while|for|in|return|match|break|continue)\\b"
+        },
+        {
+          "name": "keyword.control.import.twill",
+          "match": "\\b(import|as)\\b"
         },
         {
           "name": "storage.type.twill",
-          "match": "\\b(let|fn)\\b"
+          "match": "\\b(let|fn|enum|struct|type|unit)\\b"
         },
         {
           "name": "keyword.operator.logical.twill",
           "match": "\\b(and|or|not)\\b"
+        },
+        {
+          "name": "keyword.operator.bitwise.twill",
+          "match": "\\b(shl|shr|xor|bnot)\\b"
         }
       ]
     },
     "constants": {
-      "name": "constant.language.twill",
-      "match": "\\b(true|false)\\b"
+      "patterns": [
+        {
+          "name": "constant.language.boolean.twill",
+          "match": "\\b(true|false|unit)\\b"
+        },
+        {
+          "name": "constant.language.variant.twill",
+          "match": "\\b(Ok|Err|Some|None)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "comment": "primitive and library types, and dtype names",
+          "name": "support.type.twill",
+          "match": "\\b(I8|I32|I64|F16|BF16|F32|F64|Bool|Str|Bytes|Buf|Unit|Arr|Dict|Opt|Res|Tensor|Tape)\\b"
+        },
+        {
+          "name": "support.type.dtype.twill",
+          "match": "\\b(bool|i8|i32|f16|bf16|f32|f64)\\b"
+        }
+      ]
     },
     "autodiff": {
       "name": "support.function.autodiff.twill",
-      "match": "\\b(grad|grads|value_and_grad)\\b"
+      "match": "\\b(grad|grads|value_and_grad|jacobian|hessian)\\b"
     },
     "builtins": {
       "name": "support.function.builtin.twill",
-      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|square|abs|pow|clip|sum|mean|max|min|argmax|softmax|logsumexp|maximum|minimum|where|greater|less|greater_equal|less_equal|equal|matmul|dot|einsum|transpose|reshape|concat|tensor|scalar|zeros|ones|fill|randn|rand|eye|shape|len|item|range|list|str|map|zip|fold|append|enumerate)\\b"
+      "match": "\\b(print|relu|sigmoid|tanh|exp|log|sin|cos|sqrt|square|abs|pow|clip|sum|prod|mean|median|max|min|argmax|argmin|argsort|softmax|logsumexp|sort|topk|maximum|minimum|where|greater|less|greater_equal|less_equal|equal|matmul|dot|einsum|transpose|reshape|broadcast_to|concat|conv2d|maxpool2d|gather|cumsum|cumprod|cummax|cummin|flip|roll|diff|tensor|scalar|zeros|ones|fill|randn|rand|eye|seed|permutation|shape|dtype|len|item|int|floor|ceil|round|range|list|str|map|zip|fold|append|enumerate|map_leaves|zip_leaves|save|load|read_csv|read_frame|write_frame|columns|field|with_field|gbm_fit|gbm_predict)\\b"
     },
     "numbers": {
-      "name": "constant.numeric.twill",
-      "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?\\b"
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.twill",
+          "match": "\\b0[xX][0-9A-Fa-f_]+\\b"
+        },
+        {
+          "name": "constant.numeric.twill",
+          "match": "\\b\\d[\\d_]*(\\.[\\d_]+)?([eE][+-]?\\d+)?\\b"
+        }
+      ]
     },
     "function-def": {
       "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
@@ -80,8 +139,16 @@
       }
     },
     "operators": {
-      "name": "keyword.operator.twill",
-      "match": "(@|\\+|-|\\*|/|%|\\^|==|!=|<=|>=|<|>|=|->)"
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.twill",
+          "match": "(->|=>)"
+        },
+        {
+          "name": "keyword.operator.twill",
+          "match": "(@|\\+|-|\\*|/|%|\\^|==|!=|<=|>=|<|>|=|\\?)"
+        }
+      ]
     }
   }
 }
