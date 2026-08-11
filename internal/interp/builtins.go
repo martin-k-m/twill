@@ -719,6 +719,20 @@ func (ip *Interp) installBuiltins() {
 		return value.Str(strconv.FormatFloat(x, 'g', -1, 64)), nil
 	})
 
+	// num_to_text is the runtime number rendering `print` and `str` use: an
+	// integer without a point, otherwise `%.6f` with trailing zeros trimmed --
+	// exactly value.FormatNumber, the Go bootstrap's own printer. std/float's
+	// format_number delegates here so a running self-hosted program prints numbers
+	// identically instead of through the pure-twill decimal machinery, which needs
+	// an exact 64-bit integer the float64 runtime lacks.
+	def("num_to_text", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "num_to_text")
+		if err != nil {
+			return nil, err
+		}
+		return value.Str(value.FormatNumber(x)), nil
+	})
+
 	// A seeded generator, scalar draws over the interpreter's own rng so a `seed`
 	// is reproducible across both the tensor ops and these.
 	def("rng_seed", 1, false, func(a []value.Value) (value.Value, error) {

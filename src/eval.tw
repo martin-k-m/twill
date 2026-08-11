@@ -828,8 +828,10 @@ fn eval_unary(x: ast.Unary, env: Env) -> Res[Value, RuntimeError] {
   if bytes.equal(x.op, "-") {
     match v {
       VNum(n) => return Ok(VNum(-n)),
-      # Negating a tensor is an elementwise kernel. NEEDS-25.
-      _ => return Err(runtime_error(x.line, "negation of a tensor needs the native core (NEEDS-25)")),
+      # Negating a tensor is the elementwise neg kernel, the same traced op the
+      # unary-math builtins use, so it records on the tape.
+      VTensor(t) => return Ok(VTensor(tr_unary(tensor.OpNeg, t))),
+      _ => return Err(runtime_error(x.line, bytes.concat("cannot negate a ", type_name(v)))),
     }
   }
   Ok(VBool(not truthy(v, x.line)?))
@@ -856,6 +858,20 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
   if bytes.equal(x.op, "==") { return Ok(VBool(deep_equal(l, r))) }
   if bytes.equal(x.op, "!=") { return Ok(VBool(not deep_equal(l, r))) }
 
+  # `+` concatenates two strings, before the numeric paths, since a string is
+  # neither a scalar nor a tensor and would otherwise fall through to the error.
+  if bytes.equal(x.op, "+") {
+    match l {
+      VStr(ls) => {
+        match r {
+          VStr(rs) => return Ok(VStr(bytes.concat(ls, rs))),
+          _ => unit,
+        }
+      },
+      _ => unit,
+    }
+  }
+
   # The scalar fast path, which is most of what a twill program actually does
   # and the reason Num exists as a distinct case. Anything wider is a kernel.
   match rank0_number(l) {
@@ -867,8 +883,48 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
     },
     None => unit,
   }
+
+  # A wider operand is a tensor kernel. `^` takes a scalar exponent; the rest
+  # broadcast. Both operands widen through as_tensor, so a tensor-scalar mix (a
+  # bias add, a scale) works without a special case.
+  if bytes.equal(x.op, "^") {
+    match as_tensor(l) {
+      Some(a) => {
+        match rank0_number(r) {
+          Some(p) => return Ok(VTensor(tr_pow_scalar(a, p))),
+          None => return Err(runtime_error(x.line, "exponent must be a scalar")),
+        }
+      },
+      None => unit,
+    }
+  }
+  match as_tensor(l) {
+    Some(a) => {
+      match as_tensor(r) {
+        Some(b) => return eval_tensor_binop(x.op, a, b, x.line),
+        None => unit,
+      }
+    },
+    None => unit,
+  }
   Err(runtime_error(x.line, bytes.concat("operator ", bytes.concat(quoted(x.op),
-    " on tensors needs the native core (NEEDS-25)"))))
+    " expects numbers/tensors"))))
+}
+
+# The elementwise and matmul kernels behind the arithmetic operators, delegating
+# to the same traced tensor ops the named builtins use, so `a + b` and the like
+# record on the tape exactly as `add(a, b)` would. A comparison operator does not
+# reach here: it is scalar-only (the fast path) or an error, matching the
+# bootstrap, where the elementwise mask is spelled `greater`/`less`, not `>`/`<`.
+fn eval_tensor_binop(op: Str, a: tensor.Tensor, b: tensor.Tensor, line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(op, "+") { return lift_v(tr_binary(tensor.OpAdd, a, b), line) }
+  if bytes.equal(op, "-") { return lift_v(tr_binary(tensor.OpSub, a, b), line) }
+  if bytes.equal(op, "*") { return lift_v(tr_binary(tensor.OpMul, a, b), line) }
+  if bytes.equal(op, "/") { return lift_v(tr_binary(tensor.OpDiv, a, b), line) }
+  if bytes.equal(op, "%") { return lift_v(tr_binary(tensor.OpMod, a, b), line) }
+  if bytes.equal(op, "@") { return lift_v(tr_matmul(a, b), line) }
+  Err(runtime_error(line, bytes.concat("operator ", bytes.concat(quoted(op),
+    " does not apply to tensors"))))
 }
 
 fn num_arith(op: Str, a: F64, b: F64, line: I64) -> Res[Value, RuntimeError] {
