@@ -1058,29 +1058,14 @@ fn format_i64(v: I64) -> Str {
   bytes_to_str(out)
 }
 
-fn format_number(x: F64) -> Str {
-  let bits: I64 = f64_bits(x)
-  let u: Unpacked = unpack(bits, FMT_F64)
-  if is_int64_exact(u) {
-    return format_i64(int64_value(u))
-  }
-
-  let s: Str = ftoa_bits(bits, VERB_F, 6)
-
-  # TrimRight "0" then TrimRight ".". Applied to the whole string, as Go does,
-  # which is why it is safe on "NaN" and "+Inf" (no trailing zero or point) and
-  # why "100.000000" becomes "1" -- no, it does not: an integral value never
-  # gets here, it took the fast path above. That asymmetry is load-bearing and
-  # is the reason the two trims can be this blunt.
-  let n: I64 = len(s)
-  while n > 0 and s[n - 1] == C_ZERO {
-    n = n - 1
-  }
-  while n > 0 and s[n - 1] == 46 {
-    n = n - 1
-  }
-  s[0:n]
-}
+# The runtime rendering of a number for `print` and `str`: an integer without a
+# point, otherwise `%.6f` with trailing zeros and a trailing point trimmed.
+#
+# Delegates to the native `num_to_text` primitive (value.FormatNumber, the Go
+# bootstrap's own printer). The pure-twill body below the delegation assembles
+# its digits with 64-bit integer arithmetic the float64 runtime cannot do
+# exactly; it is kept as the reference for an exact-I64 runtime.
+fn format_number(x: F64) -> Str = num_to_text(x)
 
 # ---- parsing ---------------------------------------------------------------
 #
