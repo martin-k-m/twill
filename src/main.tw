@@ -26,6 +26,7 @@ import "lex.tw" as lex
 import "parse.tw" as parse
 import "check.tw" as check
 import "fmt.tw" as fmt
+import "eval.tw" as eval
 import "bytes.tw" as bytes
 
 let VERSION: Str = "1.3.0"
@@ -128,8 +129,43 @@ fn run_file(path: Str, do_check: Bool) -> I64 {
       return rc
     }
   }
-  write_err("run needs the evaluator's native core (NEEDS-25)\n")
-  EXIT_ERROR
+  eval_program(path, src)
+}
+
+# Parse and evaluate a program's top level, one statement at a time, reporting a
+# runtime error the way the bootstrap does. The parse cannot fail here on the
+# checked path (precheck already parsed it), but the bare no-check path reaches
+# this too, so the Err arm stays.
+fn eval_program(path: Str, src: Str) -> I64 {
+  match parse.parse(src) {
+    Err(e) => {
+      report_syntax(path, src, e)
+      EXIT_ERROR
+    },
+    Ok(prog) => {
+      let env: eval.Env = eval.new_env(None)
+      let i: I64 = 0
+      while i < len(prog.body) {
+        match eval.exec_stmt(prog.body[i], env) {
+          Ok(_) => unit,
+          Err(er) => {
+            report_runtime(path, src, er)
+            return EXIT_ERROR
+          },
+        }
+        i = i + 1
+      }
+      EXIT_OK
+    },
+  }
+}
+
+# A runtime error, formatted as `path:line: runtime error: msg` with the source
+# excerpt, matching cmd/twill's reportError for a RuntimeError.
+fn report_runtime(path: Str, src: Str, e: eval.RuntimeError) {
+  write_err(bytes.concat(path, bytes.concat(":", bytes.concat(str(e.line),
+    bytes.concat(": runtime error: ", bytes.concat(e.msg, "\n"))))))
+  show_context(src, e.line, 0)
 }
 
 # run_file_canonical mirrors run_file and then dumps. It is a separate function
