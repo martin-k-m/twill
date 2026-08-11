@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/martin-k-m/twill/internal/gbm"
 	"github.com/martin-k-m/twill/internal/parser"
 	"github.com/martin-k-m/twill/internal/tensor"
 	"github.com/martin-k-m/twill/internal/value"
@@ -83,6 +84,12 @@ type Interp struct {
 	loading  map[string]bool // namespaced imports currently loading (cycle guard)
 	rng      *rand.Rand      // deterministic RNG for randn/rand/seed
 	Args     []string        // program arguments, exposed by the args builtin
+	// gbmModels holds fitted gradient-boosting models by integer handle. The Go
+	// interpreter passes a *gbm.Model as a value directly, but a twill value
+	// cannot hold a native pointer, so the self-hosted evaluator refers to a
+	// model by a handle into this table (a VForeign carrying the I64).
+	gbmModels map[int64]*gbm.Model
+	nextGbm   int64
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -91,11 +98,12 @@ func New(out func(string)) *Interp {
 		out = func(s string) { fmt.Println(s) }
 	}
 	ip := &Interp{
-		Global:  value.NewEnv(nil),
-		out:     out,
-		loaded:  map[string]bool{},
-		loading: map[string]bool{},
-		rng:     rand.New(rand.NewSource(defaultSeed)),
+		Global:    value.NewEnv(nil),
+		out:       out,
+		loaded:    map[string]bool{},
+		loading:   map[string]bool{},
+		rng:       rand.New(rand.NewSource(defaultSeed)),
+		gbmModels: map[int64]*gbm.Model{},
 	}
 	ip.installBuiltins()
 	return ip
