@@ -1,8 +1,8 @@
 {
   "name": "twill-lang",
   "displayName": "Twill",
-  "description": "Syntax highlighting for the Twill tensor language (.tw).",
-  "version": "0.1.0",
+  "description": "Syntax highlighting and snippets for the Twill tensor-first differentiable language (.tw).",
+  "version": "1.0.0",
   "publisher": "twill-lang",
   "license": "MIT",
   "icon": "icon.png",
@@ -10,14 +10,28 @@
     "color": "#12332C",
     "theme": "dark"
   },
+  "keywords": [
+    "twill",
+    "tensor",
+    "autodiff",
+    "differentiable",
+    "machine learning"
+  ],
+  "homepage": "https://github.com/martin-k-m/twill",
   "repository": {
     "type": "git",
     "url": "https://github.com/martin-k-m/twill.git"
   },
+  "bugs": {
+    "url": "https://github.com/martin-k-m/twill/issues"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
   "contributes": {
     "languages": [
       {
@@ -32,6 +46,12 @@
         "language": "twill",
         "scopeName": "source.twill",
         "path": "./syntaxes/twill.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "twill",
+        "path": "./snippets/twill.json"
       }
     ]
   }
