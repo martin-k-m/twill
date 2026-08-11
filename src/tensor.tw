@@ -950,8 +950,11 @@ fn d_binary_b(op: Op, x: F64, y: F64, o: F64) -> F64 {
 # result dtype's own arithmetic gives; `acc_add` above carries the argument.
 fn binary(op: Op, a: Tensor, b: Tensor) -> Res[Tensor, Str] {
   let shape: Arr[I64] = broadcast_shape(a.shape, b.shape)?
+  # A comparison yields the promoted dtype, not bool: internal/tensor's compareOp
+  # returns a plain float tensor of 0.0/1.0 (broadcastBinary), so `sum(greater(
+  # x, 0))` counts them. Packing the result into DT_BOOL here diverged from the
+  # reference and made a comparison-then-reduce (gbm.tw's default count) wrong.
   let dt: I64 = promote(a.dtype, b.dtype)
-  if is_comparison(op) { dt = DT_BOOL }
   let n: I64 = element_count(shape)
   let out: Arr[F64] = alloc(n)
 
