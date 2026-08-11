@@ -49,3 +49,15 @@ func TestSelfHostedCheckShapeError(t *testing.T) {
 		t.Fatalf("check of a mismatched file exited %d, want 1", code)
 	}
 }
+
+// A shape error that hinges on the value of a numeric literal -- an axis out of
+// range -- exercises the number parser end to end: the self-hosted lexer reads
+// the token "7", the parser turns it into the value 7, and the checker compares
+// it to the rank. Before str_to_f64 the literal parsed to garbage and this
+// error was silently missed, so this guards that numbers reach the checker
+// intact.
+func TestSelfHostedCheckCatchesBadAxis(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let x = zeros(2, 3)\nlet y = sum(x, 7)\n"); code != 1 {
+		t.Fatalf("check of an out-of-range axis exited %d, want 1", code)
+	}
+}

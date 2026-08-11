@@ -688,6 +688,37 @@ func (ip *Interp) installBuiltins() {
 		return value.TheUnit, nil
 	})
 
+	// str_to_f64 parses a float from its decimal (or hex-float) text, returning an
+	// Opt. std/float.f64_of_str delegates to this on the bootstrap: the pure-twill
+	// decimal parser it also contains needs exact 64-bit integers to assemble an
+	// IEEE pattern, which a float64-backed interpreter cannot provide, so the
+	// self-hosted compiler would otherwise read every numeric literal as garbage.
+	// Underscores are digit separators and dropped, matching the twill parser.
+	def("str_to_f64", 1, false, func(a []value.Value) (value.Value, error) {
+		s, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("str_to_f64 expects a string")
+		}
+		clean := strings.ReplaceAll(s, "_", "")
+		f, err := strconv.ParseFloat(clean, 64)
+		if err != nil {
+			return &value.Variant{Name: "None"}, nil
+		}
+		return &value.Variant{Name: "Some", Payload: tensor.Scalar(f), HasPayload: true}, nil
+	})
+
+	// f64_to_str is the shortest %g decimal of a float, the same call the Go
+	// formatter uses (strconv 'g', -1). std/float.f64_shortest delegates to it on
+	// the bootstrap: the pure-twill shortest-print, like the parser, assembles its
+	// digits with 64-bit integer arithmetic the float64 runtime cannot do exactly.
+	def("f64_to_str", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_to_str")
+		if err != nil {
+			return nil, err
+		}
+		return value.Str(strconv.FormatFloat(x, 'g', -1, 64)), nil
+	})
+
 	// A seeded generator, scalar draws over the interpreter's own rng so a `seed`
 	// is reproducible across both the tensor ops and these.
 	def("rng_seed", 1, false, func(a []value.Value) (value.Value, error) {
