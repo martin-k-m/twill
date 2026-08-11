@@ -873,15 +873,19 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
   }
 
   # The scalar fast path, which is most of what a twill program actually does
-  # and the reason Num exists as a distinct case. Anything wider is a kernel.
-  match rank0_number(l) {
-    Some(a) => {
-      match rank0_number(r) {
-        Some(b) => return num_arith(x.op, a, b, x.line),
-        None => unit,
+  # and the reason Num exists as a distinct case. It is VNum-only, NOT any rank-0
+  # value: a rank-0 *tensor* carries a tape node, and intercepting it here would
+  # compute through it untraced and break the derivative. Only a Num, which by
+  # construction can carry no gradient, takes this path; a tensor of any rank
+  # goes to the traced kernel below.
+  match l {
+    VNum(a) => {
+      match r {
+        VNum(b) => return num_arith(x.op, a, b, x.line),
+        _ => unit,
       }
     },
-    None => unit,
+    _ => unit,
   }
 
   # A wider operand is a tensor kernel. `^` takes a scalar exponent; the rest
