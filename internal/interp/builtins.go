@@ -765,6 +765,12 @@ func (ip *Interp) installBuiltins() {
 		return value.Str(strconv.FormatFloat(x, 'x', -1, 64)), nil
 	})
 
+	// gbm_describe renders a fitted model by handle, for the self-hosted eval's
+	// VForeign printing.
+	def("gbm_describe", 1, false, func(a []value.Value) (value.Value, error) {
+		return ip.gbmDescribe(a)
+	})
+
 	// num_to_text is the runtime number rendering `print` and `str` use: an
 	// integer without a point, otherwise `%.6f` with trailing zeros trimmed --
 	// exactly value.FormatNumber, the Go bootstrap's own printer. std/float's
@@ -2524,6 +2530,22 @@ func (ip *Interp) gbmFitRaw(a []value.Value) (value.Value, error) {
 	ip.nextGbm++
 	ip.gbmModels[h] = m
 	return gbmOk(tensor.Scalar(float64(h)))
+}
+
+// gbmDescribe returns a fitted model's human-readable form by handle, so the
+// self-hosted evaluator -- which holds only the handle in a VForeign -- can
+// print "<gbm logistic, N trees, M features>" as the reference does, rather than
+// the placeholder "<gbm model>".
+func (ip *Interp) gbmDescribe(a []value.Value) (value.Value, error) {
+	h, ok := value.AsNumber(a[0])
+	if !ok {
+		return value.Str("<gbm model>"), nil
+	}
+	m, ok := ip.gbmModels[int64(h)]
+	if !ok {
+		return value.Str("<gbm model>"), nil
+	}
+	return value.Str(m.String()), nil
 }
 
 func (ip *Interp) gbmPredictRaw(a []value.Value) (value.Value, error) {
