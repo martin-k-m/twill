@@ -57,8 +57,12 @@ European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths: 200000
 landed on the closed-form Greeks. No tape object, no `requires_grad`, no
 `.backward()`. The full program is [`examples/montecarlo_option.tw`](examples/montecarlo_option.tw).
 
-This is an early prototype at v1.3.0. The reference implementation is a single Go
-binary with no dependencies, so it is quick to build and short enough to read.
+This is an early prototype; the current release is v1.4.0, in which the twill
+compiler written in twill runs on the Go bootstrap and reproduces the reference
+across every stage (see [twill is being written in
+twill](#twill-is-being-written-in-twill)). The reference implementation is a
+single Go binary with no dependencies, so it is quick to build and short enough
+to read.
 
 ## Contents
 
@@ -349,18 +353,26 @@ fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
 
 ## twill is being written in twill
 
-> **This section describes work in progress. None of it runs yet.**
+> **As of v1.4.0 this runs. The twill compiler written in twill executes on the
+> Go bootstrap and matches the reference across every stage.**
 
-The reference implementation is Go. The next one is twill: the lexer, parser,
-checker, evaluator, tensor kernels, formatter and CLI are being written in the
-language itself, under `src/`, and are already in the repository. They do not
-execute, because the language cannot yet express its own compiler.
+The reference implementation is Go. The second one is twill: the lexer, parser,
+checker, evaluator, tensor kernels, formatter and CLI, written in the language
+itself under `src/`. As of v1.4.0 the whole `src/`+`std/` tree type-checks clean
+and runs on the Go bootstrap: `twill check` matches the Go command byte-for-byte
+on all 443 corpus files, `twill fmt` on all 89 (bar a by-design blank-line
+divergence), and the self-hosted evaluator runs the entire example corpus,
+autodiff, jacobians, hessians, neural-net training, CNNs, attention, gradient
+boosting and Monte Carlo pricing, with output identical to `twill run` save a
+couple of 1-ULP float-accumulation differences. It runs on the bootstrap rather
+than as its own Go-free binary; bootstrapping to a standalone twill-built
+compiler is the next step.
 
-That is the point of doing it. A `.tw` file declares its mode on the first line,
-and `mode systems` turns on the subset a compiler needs: a real 64-bit integer
-with defined wrapping, byte strings, arrays, dictionaries, structs, file reading.
-Designing that subset is the actual project; the compiler is downstream of it and
-is the easy half. Writing the compiler first is how you find out what the subset
+Designing the subset a compiler needs was the point of doing it. A `.tw` file
+declares its mode on the first line, and `mode systems` turns that subset on: a
+real 64-bit integer with defined wrapping, byte strings, arrays, dictionaries,
+structs, file reading. Designing it is the actual project; the compiler is
+downstream of it and is the easy half. Writing the compiler first is how you find out what the subset
 has to be, instead of guessing.
 
 The output so far is two things.
@@ -403,7 +415,8 @@ This is a prototype, and some of it is deliberately left for later.
   mismatches when shapes are statically knowable and stays quiet otherwise.
 - Imports are files and `std/` modules. There is no package manager yet, and no
   versioning of third-party libraries.
-- The self-hosted compiler under `src/` does not run.
+- The self-hosted compiler runs on the Go bootstrap, not yet as its own Go-free
+  binary. Bootstrapping to a standalone twill-built compiler is the next step.
 
 The [design notes](docs/design.md) go into the roadmap.
 
