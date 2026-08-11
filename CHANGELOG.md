@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Native float text conversion unblocks self-hosted numbers** (2026-08-10):
+  two primitives, `str_to_f64` (parse) and `f64_to_str` (shortest `%g`), that
+  `std/float`'s `f64_of_str` and `f64_shortest` delegate to. The pure-twill
+  decimal machinery they also contain assembles IEEE bit patterns with 64-bit
+  integer arithmetic the float64-backed bootstrap cannot do exactly, so every
+  numeric literal the self-hosted compiler read or printed came out wrong; the
+  primitives are the same `strconv` calls the Go bootstrap uses, so numbers now
+  round-trip. With this the self-hosted `check` matches the Go command
+  byte-for-byte on all 443 corpus files (was 432), and `fmt` reproduces every
+  numeric literal correctly. The twill decimal code is kept as the reference for
+  a future exact-I64 runtime.
+
 - **Self-hosting: the front end runs on the bootstrap** (2026-08-10): the twill
   compiler written in twill (`src/main.tw` and the modules it imports) now runs
   on the Go bootstrap and checks and formats real files. A differential sweep of

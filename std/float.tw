@@ -949,7 +949,12 @@ fn ftoa_bits(bits: I64, verb: I64, prec: I64) -> Str {
 # decimal that parses back to x, exponent form outside [-4, 6), exponent always
 # signed and at least two digits, "-0" for negative zero. This is what
 # `src/fmt.tw` writes a numeric literal with.
-fn f64_shortest(x: F64) -> Str = ftoa_bits(f64_bits(x), VERB_G, -1)
+#
+# Delegates to the native `f64_to_str` primitive, which is that strconv call. The
+# pure-twill `ftoa_bits` path assembles the digits with 64-bit integer
+# arithmetic the float64-backed bootstrap cannot do exactly, so it is kept as the
+# reference for an exact-I64 runtime while the primitive is what runs here.
+fn f64_shortest(x: F64) -> Str = f64_to_str(x)
 
 # NEEDS-29. Equal to strconv.FormatFloat(x, 'x', -1, 64), the exact bits, which
 # is what the canonical dump in `testdata/` compares.
@@ -1592,10 +1597,15 @@ fn f64_parse(s: Str) -> ParsedF64 {
 # an out-of-range literal yields the infinity Go yields, because that is what
 # `internal/parser` sees and a checker diagnostic that disagreed would be a
 # divergence of its own.
+#
+# The body delegates to the native `str_to_f64` primitive. The pure-twill
+# `f64_parse` below it assembles an IEEE bit pattern with 64-bit integer
+# arithmetic, which a float64-backed interpreter (the bootstrap running this
+# self-hosted source) cannot do without dropping the low bits, so on the
+# bootstrap it returns garbage. `f64_parse` is kept as the reference the day the
+# runtime has an exact I64; until then the primitive is the one that runs.
 fn f64_of_str(s: Str) -> Opt[F64] {
-  let p: ParsedF64 = f64_parse(s)
-  if not p.ok { return None }
-  Some(f64_from_bits(p.bits))
+  str_to_f64(s)
 }
 
 # ---- narrow binary floats --------------------------------------------------
