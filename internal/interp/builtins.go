@@ -719,6 +719,23 @@ func (ip *Interp) installBuiltins() {
 		return value.Str(strconv.FormatFloat(x, 'g', -1, 64)), nil
 	})
 
+	// module_source resolves an import path to its source text: a "std/..." path
+	// to the embedded standard library, anything else to a file relative to the
+	// running program. It is the one primitive the self-hosted evaluator's
+	// exec_import needs; the parsing, evaluation and namespace snapshot are twill.
+	// None when the module cannot be read (a bad path, a retired .ra extension).
+	def("module_source", 1, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("module_source expects a string")
+		}
+		mod, err := ip.loadModule(path)
+		if err != nil {
+			return &value.Variant{Name: "None"}, nil
+		}
+		return &value.Variant{Name: "Some", Payload: value.Str(mod.src), HasPayload: true}, nil
+	})
+
 	// num_to_text is the runtime number rendering `print` and `str` use: an
 	// integer without a point, otherwise `%.6f` with trailing zeros trimmed --
 	// exactly value.FormatNumber, the Go bootstrap's own printer. std/float's

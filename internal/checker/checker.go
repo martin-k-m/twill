@@ -1814,5 +1814,5 @@ var builtinNames = map[string]bool{
 	"gpu_set_arg_buffer": true, "gpu_set_arg_local": true, "gpu_launch": true,
 	"gpu_finish": true, "gpu_device_info_i64": true, "env": true,
 	"gpu_set_arg_i64": true, "gpu_set_arg_f64": true, "clock_now_ms": true,
-	"str_to_f64": true, "f64_to_str": true, "num_to_text": true,
+	"str_to_f64": true, "f64_to_str": true, "num_to_text": true, "module_source": true,
 }
