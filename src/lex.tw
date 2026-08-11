@@ -586,32 +586,10 @@ fn dump_tokens(toks: Arr[Token]) -> Str {
 
 # A token's value can contain a newline or a tab (a string literal carries the
 # unescaped byte), and the dump is line-oriented, so the value is re-escaped.
-fn quote_value(s: Str) -> Str {
-  let buf: Bytes = bytes.new()
-  bytes.push(buf, C_QUOTE)
-  let i: I64 = 0
-  while i < len(s) {
-    let c: I64 = s[i]
-    if c == C_QUOTE or c == C_BACKSLASH {
-      bytes.push(buf, C_BACKSLASH)
-      bytes.push(buf, c)
-    } else {
-      if c == C_LF {
-        bytes.push_text(buf, "\\n")
-      } else {
-        if c == C_TAB {
-          bytes.push_text(buf, "\\t")
-        } else {
-          if c == C_CR {
-            bytes.push_text(buf, "\\r")
-          } else {
-            bytes.push(buf, c)
-          }
-        }
-      }
-    }
-    i = i + 1
-  }
-  bytes.push(buf, C_QUOTE)
-  bytes.to_str(buf)
-}
+# Delegates to the native `str_quote`, which is Go's strconv.Quote, the same call
+# the bootstrap formatter uses for a string literal. The hand-rolled version this
+# replaced escaped only the quote, backslash and the three common controls and
+# left every other byte raw, so a control or non-ASCII byte (a lone UTF-8
+# continuation, say) printed unescaped and diverged from the reference. strconv's
+# rule covers the whole \x / \u / \U range at once and matches it byte for byte.
+fn quote_value(s: Str) -> Str = str_quote(s)
