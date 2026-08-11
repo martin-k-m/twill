@@ -1877,7 +1877,11 @@ fn bi_abs(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
 fn bi_pow(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let base: tensor.Tensor = arg_tensor(args[0], "pow", line)?
   let p: F64 = scalar_of(args[1], "pow", line)?
-  lift_v(tr_pow_scalar(base, p), line)
+  # tr_pow_scalar returns a bare tensor, not a Res, so it is wrapped directly
+  # rather than through lift_v, which unwraps an Ok/Err. Passing the tensor to
+  # lift_v (as this once did) handed lift a value that was neither, and every
+  # `pow` call -- adam's bias correction among them -- died on "no match arm".
+  Ok(VTensor(tr_pow_scalar(base, p)))
 }
 
 fn bi_binary(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
