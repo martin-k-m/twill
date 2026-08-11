@@ -1745,6 +1745,12 @@ func (ip *Interp) installBuiltins() {
 	// record of hyperparameters (rounds, learning_rate, max_depth, min_leaf,
 	// lambda, gamma, objective). Returns an opaque model.
 	def("gbm_fit", -1, true, func(a []value.Value) (value.Value, error) {
+		// Low-level form for the self-hosted evaluator: (X data, y data, n, d,
+		// params record) -> Ok(handle) / Err(msg). The evaluator has already
+		// unpacked the tensors and cannot hold a native model, so it fits by handle.
+		if len(a) == 5 {
+			return ip.gbmFitRaw(a)
+		}
 		if len(a) != 2 && len(a) != 3 {
 			return nil, fmt.Errorf("gbm_fit expects (X, y) or (X, y, opts)")
 		}
@@ -1782,7 +1788,15 @@ func (ip *Interp) installBuiltins() {
 	// gbm_predict(model, X): score a [n, d] feature matrix with a fitted model,
 	// returning an [n] tensor (raw scores for regression, probabilities for a
 	// logistic model).
-	def("gbm_predict", 2, false, func(a []value.Value) (value.Value, error) {
+	def("gbm_predict", -1, true, func(a []value.Value) (value.Value, error) {
+		// Low-level form for the self-hosted evaluator: (handle, X data, n, d) ->
+		// Ok(scores list) / Err(msg).
+		if len(a) == 4 {
+			return ip.gbmPredictRaw(a)
+		}
+		if len(a) != 2 {
+			return nil, fmt.Errorf("gbm_predict expects (model, X)")
+		}
 		m, ok := a[0].(*gbm.Model)
 		if !ok {
 			return nil, fmt.Errorf("gbm_predict: first argument must be a model from gbm_fit")
@@ -2419,4 +2433,121 @@ func randomTensor(shape []int, sample func() float64) *tensor.Tensor {
 		data[i] = sample()
 	}
 	return tensor.New(data, shape)
+}
+
+// --- gbm handle bridge for the self-hosted evaluator ------------------------
+
+func gbmOk(v value.Value) (value.Value, error) {
+	return &value.Variant{Name: "Ok", Payload: v, HasPayload: true}, nil
+}
+
+func gbmErr(msg string) (value.Value, error) {
+	return &value.Variant{Name: "Err", Payload: value.Str(msg), HasPayload: true}, nil
+}
+
+// floatSlice reads a list of numbers into a []float64, the form gbm.Fit and
+// Predict take. A non-list or a non-numeric element reports false.
+func floatSlice(v value.Value) ([]float64, bool) {
+	l, ok := v.(*value.List)
+	if !ok {
+		return nil, false
+	}
+	out := make([]float64, len(l.Items))
+	for i, it := range l.Items {
+		f, ok := value.AsNumber(it)
+		if !ok {
+			return nil, false
+		}
+		out[i] = f
+	}
+	return out, true
+}
+
+// gbmParamsFromRecord reads the systems dialect's GbmParams record into gbm's
+// own Params, defaulting any field the record omits.
+func gbmParamsFromRecord(rec *value.Record) gbm.Params {
+	p := gbm.DefaultParams()
+	geti := func(k string, dst *int) {
+		if v, ok := rec.Get(k); ok {
+			if n, ok := value.AsNumber(v); ok {
+				*dst = int(n)
+			}
+		}
+	}
+	getf := func(k string, dst *float64) {
+		if v, ok := rec.Get(k); ok {
+			if n, ok := value.AsNumber(v); ok {
+				*dst = n
+			}
+		}
+	}
+	geti("rounds", &p.Rounds)
+	geti("max_depth", &p.MaxDepth)
+	geti("min_leaf", &p.MinLeaf)
+	getf("learning_rate", &p.LearningRate)
+	getf("lambda", &p.Lambda)
+	getf("gamma", &p.Gamma)
+	if v, ok := rec.Get("objective"); ok {
+		if s, ok := v.(value.Str); ok && string(s) == "logistic" {
+			p.Objective = gbm.Logistic
+		}
+	}
+	return p
+}
+
+func (ip *Interp) gbmFitRaw(a []value.Value) (value.Value, error) {
+	xs, ok := floatSlice(a[0])
+	if !ok {
+		return gbmErr("gbm_fit: X data must be a list of numbers")
+	}
+	ys, ok := floatSlice(a[1])
+	if !ok {
+		return gbmErr("gbm_fit: y data must be a list of numbers")
+	}
+	n, ok := value.AsNumber(a[2])
+	if !ok {
+		return gbmErr("gbm_fit: n must be a number")
+	}
+	d, ok := value.AsNumber(a[3])
+	if !ok {
+		return gbmErr("gbm_fit: d must be a number")
+	}
+	rec, ok := a[4].(*value.Record)
+	if !ok {
+		return gbmErr("gbm_fit: params must be a record")
+	}
+	m, err := gbm.Fit(xs, ys, int(n), int(d), gbmParamsFromRecord(rec))
+	if err != nil {
+		return gbmErr(err.Error())
+	}
+	h := ip.nextGbm
+	ip.nextGbm++
+	ip.gbmModels[h] = m
+	return gbmOk(tensor.Scalar(float64(h)))
+}
+
+func (ip *Interp) gbmPredictRaw(a []value.Value) (value.Value, error) {
+	h, ok := value.AsNumber(a[0])
+	if !ok {
+		return gbmErr("gbm_predict: handle must be a number")
+	}
+	m, ok := ip.gbmModels[int64(h)]
+	if !ok {
+		return gbmErr("gbm_predict: unknown model handle")
+	}
+	xs, ok := floatSlice(a[1])
+	if !ok {
+		return gbmErr("gbm_predict: X data must be a list of numbers")
+	}
+	n, _ := value.AsNumber(a[2])
+	d, _ := value.AsNumber(a[3])
+	out, err := m.Predict(xs, int(n), int(d))
+	if err != nil {
+		return gbmErr(err.Error())
+	}
+	items := make([]value.Value, len(out))
+	for i, x := range out {
+		items[i] = tensor.Scalar(x)
+	}
+	return gbmOk(&value.List{Items: items})
 }
