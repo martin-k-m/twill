@@ -353,7 +353,7 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
   match s {
     SLet(st) => {
       let v: Value = eval_expr(st.value, env)?
-      env_define(env, st.name, v)
+      env_define(env, st.name, coerce_scalar_i64(st.type_name, st.unit, v))
       Ok(Normal(VUnit))
     },
     SFn(st) => {
@@ -737,6 +737,42 @@ fn canon_str_less(a: Str, b: Str) -> Bool {
     i = i + 1
   }
   len(a) < len(b)
+}
+
+# Truncate a scalar bound at an `I64` annotation toward zero. On a real I64
+# runtime `/` between integers is already integer division; the bootstrap runs
+# every number as a float64, so `rem / stride` comes back fractional and, used as
+# a buffer index in the ported tensor kernels (transpose_origins and friends),
+# reads out of bounds. Applying the annotation's integer truncation at the bind
+# is what makes the interpreted arithmetic match the compiled I64 semantics. Only
+# a bare `I64` annotation on a scalar Num is coerced; `Arr[I64]`, `F64`, an
+# unannotated let and non-numeric values pass through untouched.
+fn coerce_scalar_i64(type_name: Str, u: Opt[ast.UnitAnno], v: Value) -> Value {
+  if is_i64_anno(type_name, u) {
+    match v {
+      VNum(x) => return VNum(i64_of_f64(x)),
+      _ => unit,
+    }
+  }
+  v
+}
+
+# A bare `I64` annotation reaches here as a one-factor unit (name "I64", exp 1),
+# because the parser routes a `.`-or-`[`-free annotation to the unit slot rather
+# than type_name. Either spelling counts; `Arr[I64]`, `F64`, a compound unit and
+# no annotation do not.
+fn is_i64_anno(type_name: Str, u: Opt[ast.UnitAnno]) -> Bool {
+  if bytes.equal(type_name, "I64") { return true }
+  match u {
+    Some(anno) => {
+      if len(anno.factors) == 1 {
+        let f: ast.UnitFactor = anno.factors[0]
+        return bytes.equal(f.name, "I64") and f.exp == 1
+      }
+      false
+    },
+    None => false,
+  }
 }
 
 fn exec_import(st: ast.Import, env: Env) -> Res[Flow, RuntimeError] {
