@@ -200,8 +200,47 @@ fn run_file_canonical(path: Str, do_check: Bool) -> I64 {
       return rc
     }
   }
-  write_err("canonical dump needs the evaluator (NEEDS-25, NEEDS-29)\n")
-  EXIT_ERROR
+  dump_canonical(path, src)
+}
+
+# Evaluate a program and print the canonical dump: the final value under
+# `_result`, then every top-level binding in sorted order, each rendered by
+# eval.canonical. This is the differential harness's contract and mirrors
+# cmd/twill/dump.go. The evaluator's fresh scope holds exactly the program's own
+# bindings -- builtins resolve through is_builtin, not the scope -- so unlike the
+# Go dumper there is no set of predefined names to subtract.
+fn dump_canonical(path: Str, src: Str) -> I64 {
+  match parse.parse(src) {
+    Err(e) => {
+      report_syntax(path, src, e)
+      EXIT_ERROR
+    },
+    Ok(prog) => {
+      let env: eval.Env = eval.new_env(None)
+      let last: eval.Value = VUnit
+      let i: I64 = 0
+      while i < len(prog.body) {
+        match eval.exec_stmt(prog.body[i], env) {
+          Ok(fl) => last = eval.flow_value(fl),
+          Err(er) => {
+            report_runtime(path, src, er)
+            return EXIT_ERROR
+          },
+        }
+        i = i + 1
+      }
+      write_out("# canonical v1\n")
+      write_out(bytes.concat("_result = ", bytes.concat(eval.canonical(last, 0), "\n")))
+      let names: Arr[Str] = eval.canon_sort(dict_keys(env.vars))
+      let j: I64 = 0
+      while j < len(names) {
+        write_out(bytes.concat(names[j], bytes.concat(" = ",
+          bytes.concat(eval.canonical(dict_must(env.vars, names[j]), 0), "\n"))))
+        j = j + 1
+      }
+      EXIT_OK
+    },
+  }
 }
 
 # precheck is the parse-and-check block both run paths share, including the

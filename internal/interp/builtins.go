@@ -752,6 +752,19 @@ func (ip *Interp) installBuiltins() {
 		return &value.Variant{Name: "Some", Payload: value.Str(mod.src), HasPayload: true}, nil
 	})
 
+	// f64_hex is the exact hexadecimal-float form (strconv 'x', the same call
+	// cmd/twill/dump.go's hexFloat uses), for the canonical dump the differential
+	// harness compares bit for bit. The pure-twill hex printer needs exact 64-bit
+	// integer arithmetic to lay out the mantissa, so on the bootstrap the self-
+	// hosted canonical dump delegates here.
+	def("f64_hex", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_hex")
+		if err != nil {
+			return nil, err
+		}
+		return value.Str(strconv.FormatFloat(x, 'x', -1, 64)), nil
+	})
+
 	// num_to_text is the runtime number rendering `print` and `str` use: an
 	// integer without a point, otherwise `%.6f` with trailing zeros trimmed --
 	// exactly value.FormatNumber, the Go bootstrap's own printer. std/float's
