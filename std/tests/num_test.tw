@@ -1,0 +1,74 @@
+# num_test.tw: std/num, the matrix diagonals and products, and the construction
+# builtins they lean on.
+#
+# Run with:  twill std/tests/num_test.tw
+#
+# Every expected value is worked out by hand from the definition above it, so a
+# failure points at the arithmetic and not at a remembered number.
+
+import "std/num" as num
+import "std/shapes" as sh
+import "harness.tw" as h
+
+fn linspace_and_arange_construct_the_sequences_they_name() {
+  h.test("linspace and arange construct the sequences they name")
+  # linspace includes both endpoints: 5 points from 0 to 1 step 0.25.
+  h.check("linspace spans the interval inclusively",
+          h.near_all(linspace(0.0, 1.0, 5), [0.0, 0.25, 0.5, 0.75, 1.0]))
+  h.check("its length is the count asked for", h.shaped(linspace(-1.0, 1.0, 9), list(9)))
+  h.check("a one-point linspace is the start", h.near_all(linspace(3.0, 9.0, 1), [3.0]))
+  # arange is half-open: 0, 0.5, 1, 1.5, stopping before 2.
+  h.check("arange is half-open and carries the step",
+          h.near_all(arange(0.0, 2.0, 0.5), [0.0, 0.5, 1.0, 1.5]))
+  h.check("an empty arange has length zero", h.shaped(arange(5.0, 5.0, 1.0), list(0)))
+}
+
+fn the_outer_product_is_every_pairwise_product() {
+  h.test("the outer product is every pairwise product")
+  # [1, 2] outer [3, 4, 5] = [[3, 4, 5], [6, 8, 10]].
+  h.check("outer multiplies every i with every j",
+          h.near_all(num.outer([1.0, 2.0], [3.0, 4.0, 5.0]),
+                     [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]))
+  h.check("and its shape is [len a, len b]",
+          h.shaped(num.outer(zeros(4), zeros(7)), list(4, 7)))
+}
+
+fn the_diagonal_helpers_agree_with_their_definitions() {
+  h.test("the diagonal helpers agree with their definitions")
+  let m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+  h.check("diagonal reads the (i, i) entries", h.near_all(num.diagonal(m), [1.0, 5.0, 9.0]))
+  h.check("trace sums them", h.near(item(num.trace(m)), 15.0))
+  # diag builds a matrix with the vector on its diagonal and zeros elsewhere.
+  h.check("diag places the vector on the diagonal",
+          h.near_all(num.diag([2.0, 3.0]), [[2.0, 0.0], [0.0, 3.0]]))
+  # trace(diag(v)) = sum(v), so its gradient in v is all ones: a round trip that
+  # only holds if every piece is differentiable.
+  h.check("the diagonal helpers are differentiable",
+          h.near_all(grad(fn(v) = num.trace(num.diag(v)))([5.0, 6.0, 7.0]),
+                     [1.0, 1.0, 1.0]))
+}
+
+fn sign_any_all_and_tile_do_what_they_say() {
+  h.test("sign, any, all and tile do what they say")
+  h.check("sign is -1, 0, 1 by the sign of each element",
+          h.near_all(num.sign([-3.0, 0.0, 5.0]), [-1.0, 0.0, 1.0]))
+  # sign passes a zero gradient straight through rather than an undefined one.
+  h.check("sign is differentiable with a zero gradient",
+          h.near_all(grad(fn(v) = sum(num.sign(v)))([-2.0, 4.0]), [0.0, 0.0]))
+  h.check("any is true when an element is non-zero", num.any([0.0, 0.0, 2.0]))
+  h.check("any is false when all are zero", num.any([0.0, 0.0, 0.0]) == false)
+  h.check("all is true when every element is non-zero", num.all([1.0, 2.0, 3.0]))
+  h.check("all is false when one is zero", num.all([1.0, 0.0, 3.0]) == false)
+  h.check("count_nonzero counts the non-zeros", h.near(item(num.count_nonzero([0.0, 3.0, 0.0, 5.0])), 2.0))
+  # tile repeats along an axis: [1, 2] tiled three times on axis 0.
+  h.check("tile repeats a vector along its axis",
+          h.near_all(sh.tile([1.0, 2.0], 3, 0), [1.0, 2.0, 1.0, 2.0, 1.0, 2.0]))
+  h.check("tile works on a matrix too",
+          h.shaped(sh.tile(zeros(2, 3), 4, 0), list(8, 3)))
+}
+
+linspace_and_arange_construct_the_sequences_they_name()
+the_outer_product_is_every_pairwise_product()
+the_diagonal_helpers_agree_with_their_definitions()
+sign_any_all_and_tile_do_what_they_say()
+h.report("num_test")

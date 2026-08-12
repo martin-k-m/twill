@@ -130,6 +130,108 @@ func TestAnAxisThatDoesNotExistIsReported(t *testing.T) {
 	// type, which silenced everything downstream too.
 	wantOne(t, "let x = zeros(2, 3)\nprint(sum(x, 7))", "axis out of range")
 	wantOne(t, "let x = zeros(2, 3)\nprint(argmax(x, 5))", "axis out of range")
+	// transpose used to be the one axis-taking builtin that stayed silent on an
+	// out-of-range axis (NEEDS-50), so a permutation naming a nonexistent axis
+	// passed the check and failed only at run time.
+	wantOne(t, "let x = zeros(2, 3)\nprint(transpose(x, 0, 5))", "axis out of range")
+	// softmax normalises over an axis and the runtime rejects an out-of-range
+	// one, but the checker preserved shape and ignored the axis argument.
+	wantOne(t, "let x = zeros(2, 3)\nprint(softmax(x, 5))", "axis out of range")
+}
+
+func TestSoftmaxWithAValidAxisIsClean(t *testing.T) {
+	wantNone(t, "let x = zeros(2, 3)\nlet y = softmax(x, 1)")
+	wantNone(t, "let x = zeros(2, 3)\nlet y = softmax(x)")
+	wantNone(t, "let x = zeros(2, 3)\nlet y = softmax(x, -1)")
+}
+
+func TestShapePreservingAxisOpsCheckTheirAxis(t *testing.T) {
+	// flip, cumsum and sort take the axis in the second argument; roll puts the
+	// shift first, so its axis is the third. Each is a runtime error out of range.
+	wantOne(t, "let y = flip(zeros(2, 3), 5)", "axis out of range")
+	wantOne(t, "let y = cumsum(zeros(2, 3), 5)", "axis out of range")
+	wantOne(t, "let y = sort(zeros(2, 3), 5)", "axis out of range")
+	wantOne(t, "let y = roll(zeros(2, 3), 1, 5)", "axis out of range")
+}
+
+func TestShapePreservingAxisOpsAcceptAValidAxis(t *testing.T) {
+	wantNone(t, "let a = flip(zeros(2, 3), 1)\nlet b = roll(zeros(2, 3), 1, 0)\nlet c = cumsum(zeros(2, 3))\nlet d = sort(zeros(2, 3), 1)")
+	// A negative axis counts from the end and is fine.
+	wantNone(t, "let a = flip(zeros(2, 3), -1)")
+}
+
+func TestConv2dEnforcesItsShapeContracts(t *testing.T) {
+	// The three mistakes the runtime rejects and the checker used to miss: a
+	// non-rank-3 input, a non-rank-4 weight, and a channel-count mismatch.
+	wantOne(t, "let y = conv2d(zeros(3), zeros(2, 3, 3, 3))", "input must be [channels, height, width]")
+	wantOne(t, "let y = conv2d(zeros(3, 8, 8), zeros(4, 3, 3))", "weight must be [out, in, kh, kw]")
+	wantOne(t, "let y = conv2d(zeros(3, 8, 8), zeros(4, 5, 3, 3))", "input has 3 channels but weight expects 5")
+	// maxpool2d shares the [channels, height, width] input contract.
+	wantOne(t, "let y = maxpool2d(zeros(8, 8), 2)", "input must be [channels, height, width]")
+}
+
+func TestAValidConv2dIsClean(t *testing.T) {
+	// [3,8,8] input, [4,3,3,3] weight -> [4,6,6]; feeding the output on works.
+	wantNone(t, "let y = conv2d(zeros(3, 8, 8), zeros(4, 3, 3, 3))\nlet z = maxpool2d(y, 2)")
+}
+
+func TestBroadcastToChecksCompatibility(t *testing.T) {
+	// A source axis that is neither equal to the target's nor 1 cannot broadcast,
+	// and broadcasting to fewer axes than the source has is its own message.
+	wantOne(t, "let y = broadcast_to(zeros(4), list(2, 3))", "cannot broadcast [4] to [2, 3]")
+	wantOne(t, "let y = broadcast_to(zeros(2, 3), list(3))", "fewer axes in target")
+	// The separate-argument form is read too.
+	wantOne(t, "let y = broadcast_to(zeros(4), 2, 3)", "cannot broadcast")
+}
+
+func TestValidBroadcastsAreClean(t *testing.T) {
+	wantNone(t, "let y = broadcast_to(zeros(3), list(2, 3))")
+	wantNone(t, "let y = broadcast_to(zeros(3, 1), list(3, 4))")
+	wantNone(t, "let y = broadcast_to(zeros(1, 3), list(2, 3))")
+}
+
+func TestListShapeArgumentIsRead(t *testing.T) {
+	// The idiomatic list(...) shape argument is understood by every shape-taking
+	// builtin, so reshape's element-count check fires for it and a zeros(list...)
+	// carries a known shape downstream.
+	wantOne(t, "let y = reshape(zeros(6), list(2, 4))", "reshape changes the number of elements")
+	wantOne(t, "let a = zeros(list(2, 3))\nlet b = a @ zeros(4, 2)", "inner 3 != 4")
+	wantNone(t, "let y = reshape(zeros(6), list(2, 3))")
+}
+
+func TestAValidTransposePermutationIsClean(t *testing.T) {
+	wantNone(t, "let x = zeros(2, 3)\nlet y = transpose(x, 1, 0)")
+}
+
+func TestMatmulRejectsRankThreeOperands(t *testing.T) {
+	// `@` has no batched form: a rank-3 operand is a certain runtime error, and
+	// the rank is known even when the sizes are not, so the checker catches it.
+	wantOne(t, "let a = zeros(5, 2, 3)\nlet b = zeros(5, 3, 4)\nlet c = a @ b", "1-D or 2-D operands")
+	wantOne(t, "let a = zeros(2, 3, 4)\nlet x = [1.0, 2.0, 3.0, 4.0]\nlet c = a @ x", "1-D or 2-D operands")
+}
+
+func TestMatmulAcceptsVectorsAndMatrices(t *testing.T) {
+	// The 1-D and 2-D forms that `@` does support stay clean.
+	wantNone(t, "let c = zeros(2, 3) @ zeros(3, 4)")
+	wantNone(t, "let c = zeros(2, 3) @ [1.0, 2.0, 3.0]")
+	wantNone(t, "let c = [1.0, 2.0] @ zeros(2, 3)")
+}
+
+func TestMatmulRejectsAScalarOperand(t *testing.T) {
+	// A rank-0 operand is as invalid as a rank-3 one; both fail at run time.
+	wantOne(t, "let c = scalar(2.0) @ zeros(3)", "1-D or 2-D operands")
+}
+
+func TestConstantIndexOutOfRangeIsReported(t *testing.T) {
+	// twill indexes from 0 with no negative wraparound, so a constant index past
+	// the length is the runtime's out-of-range error, caught early.
+	wantOne(t, "let y = zeros(3)[3]", "index 3 out of range [0, 3)")
+	wantOne(t, "let y = [1.0, 2.0, 3.0][5]", "index 5 out of range [0, 3)")
+}
+
+func TestConstantIndexInRangeIsClean(t *testing.T) {
+	wantNone(t, "let y = zeros(3)[2]")
+	wantNone(t, "let y = zeros(3, 4)[1]")
 }
 
 func TestANegativeAxisStillCountsFromTheEnd(t *testing.T) {

@@ -113,3 +113,19 @@ fn stack(items, axis) = concat(map(fn(t) = unsqueeze(t, axis), items), axis)
 fn stack_rows(items) = stack(items, 0)
 fn stack_cols(items) = stack(items, -1)
 
+# ── Repeating ────────────────────────────────────────────────────────────────
+
+# Repeat a tensor `n` times along an existing axis: `tile([1, 2], 2, 0)` is
+# `[1, 2, 1, 2]`. Built by concatenating `n` copies, so it works on any rank and
+# stays a tensor operation the gradient can pass through. `n` must be at least 1.
+fn tile(x, n, axis) {
+  let out = x
+  for i in range(n - 1) {
+    out = concat(list(out, x), axis)
+  }
+  out
+}
+
+# The common one-dimensional case, along axis 0.
+fn tile1(x, n) = tile(x, n, 0)
+

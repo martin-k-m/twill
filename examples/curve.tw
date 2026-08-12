@@ -1,0 +1,29 @@
+# curve.tw: sampling a function on a grid, and differentiating it there.
+#
+# `linspace` lays down an evenly spaced grid, the function is evaluated on the
+# whole grid at once, and `grad` gives its derivative -- not by finite
+# differences, but by differentiating the expression. The grid makes the point
+# visible: the analytic gradient from `grad` and the slope you would measure with
+# a small step agree to the accuracy of the step, everywhere at once.
+
+# f(x) = sin(x) * exp(-x/5), a decaying oscillation.
+fn f(x) = sin(x) * exp(-x / 5.0)
+
+# Its derivative, worked out by hand, to check `grad` against:
+#   f'(x) = cos(x) e^{-x/5} - (1/5) sin(x) e^{-x/5}
+fn f_prime_exact(x) = cos(x) * exp(-x / 5.0) - 0.2 * sin(x) * exp(-x / 5.0)
+
+let xs = linspace(0.0, 10.0, 11)          # 0, 1, 2, ..., 10
+print("grid       ", xs)
+print("f(grid)    ", f(xs))
+
+# grad differentiates f at each grid point. `grad(f)` is itself a function, so
+# mapping it over the grid gives the derivative sampled on the same grid.
+let g = map(fn(x) = item(grad(f)(x)), xs)
+print("f'(grid)   ", tensor(g))
+print("exact f'   ", f_prime_exact(xs))
+
+# The largest disagreement between the two, which is zero to machine precision
+# because both are the same derivative, one taken by hand and one by the language.
+let err = max(abs(tensor(g) - f_prime_exact(xs)))
+print("max error  ", err)

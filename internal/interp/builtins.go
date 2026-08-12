@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -228,6 +229,17 @@ func (ip *Interp) installBuiltins() {
 		l, ok := a[0].(*value.List)
 		if !ok {
 			return nil, fmt.Errorf("push expects a list")
+		}
+		l.Items = append(l.Items, a[1])
+		return value.TheUnit, nil
+	})
+	// arr_push is push under the name that matches the arr_new/arr_clear family,
+	// which several systems-mode callers reach for. It appends in place and
+	// returns unit, exactly as push does.
+	def("arr_push", 2, false, func(a []value.Value) (value.Value, error) {
+		l, ok := a[0].(*value.List)
+		if !ok {
+			return nil, fmt.Errorf("arr_push expects a list")
 		}
 		l.Items = append(l.Items, a[1])
 		return value.TheUnit, nil
@@ -975,6 +987,17 @@ func (ip *Interp) installBuiltins() {
 			if len(a) == 0 || len(a) > 3 {
 				return nil, fmt.Errorf("%s expects (tensor[, axis[, descending]])", name)
 			}
+			// A list of strings sorts by the bytewise-unsigned lexicographic
+			// order docs/language-guide.md pins (Go's own string comparison), so
+			// the ecosystem's hand-written string sorts can delegate here. A list
+			// has no axis, so the optional second argument is the descending flag
+			// directly. `argsort` on strings has no defined result and is refused.
+			if l, ok := a[0].(*value.List); ok {
+				if name != "sort" {
+					return nil, fmt.Errorf("%s is defined on tensors, not a list", name)
+				}
+				return sortStringList(l, a[1:])
+			}
 			t, err := asTensor(a[0], name)
 			if err != nil {
 				return nil, err
@@ -1490,6 +1513,72 @@ func (ip *Interp) installBuiltins() {
 			d[i*n+i] = 1
 		}
 		return tensor.New(d, []int{n, n}), nil
+	})
+	// linspace(start, stop, n): n points evenly spaced from start to stop, both
+	// endpoints included. The count is explicit, as it is in every library that
+	// has this, because "how many points" is the question the caller is answering
+	// and inferring it from a step is the arange job below. The last point is set
+	// to stop exactly rather than to start + (n-1)*step, so a linspace ends where
+	// it says regardless of the rounding in the step.
+	def("linspace", 3, false, func(a []value.Value) (value.Value, error) {
+		start, err := scalarOf(a[0], "linspace")
+		if err != nil {
+			return nil, err
+		}
+		stop, err := scalarOf(a[1], "linspace")
+		if err != nil {
+			return nil, err
+		}
+		n, err := intOf(a[2], "linspace")
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("linspace: count must be non-negative, got %d", n)
+		}
+		d := make([]float64, n)
+		if n == 1 {
+			d[0] = start
+		} else if n > 1 {
+			step := (stop - start) / float64(n-1)
+			for i := 0; i < n; i++ {
+				d[i] = start + float64(i)*step
+			}
+			d[n-1] = stop
+		}
+		return tensor.New(d, []int{n}), nil
+	})
+	// arange(start, stop, step): the half-open sequence start, start+step, ...
+	// up to but not including stop. The step is required and the range is
+	// half-open, both matching range() for integers, so the two read the same
+	// way; the difference is only that arange carries a float step and returns a
+	// tensor. The length is however many steps fit, which the checker cannot know
+	// without the values, so it is a dynamic 1-D shape.
+	def("arange", 3, false, func(a []value.Value) (value.Value, error) {
+		start, err := scalarOf(a[0], "arange")
+		if err != nil {
+			return nil, err
+		}
+		stop, err := scalarOf(a[1], "arange")
+		if err != nil {
+			return nil, err
+		}
+		step, err := scalarOf(a[2], "arange")
+		if err != nil {
+			return nil, err
+		}
+		if step == 0 {
+			return nil, fmt.Errorf("arange: step must be non-zero")
+		}
+		n := int(math.Ceil((stop - start) / step))
+		if n < 0 {
+			n = 0
+		}
+		d := make([]float64, n)
+		for i := 0; i < n; i++ {
+			d[i] = start + float64(i)*step
+		}
+		return tensor.New(d, []int{n}), nil
 	})
 	// Inspection and utilities.
 	def("shape", 1, false, func(a []value.Value) (value.Value, error) {
@@ -2304,6 +2393,45 @@ func asTensor(v value.Value, who string) (*tensor.Tensor, error) {
 		return t, nil
 	}
 	return nil, fmt.Errorf("%s expects a tensor/number", who)
+}
+
+// sortStringList sorts a list of strings by the bytewise-unsigned lexicographic
+// order (docs/language-guide.md, Strings -> Ordering), which is exactly Go's
+// string comparison, and returns a new list. `rest` is the trailing arguments
+// after the list; at most one, read as a descending flag. The input is left
+// untouched, the same as the tensor sort, so a caller's list is never reordered
+// under it.
+func sortStringList(l *value.List, rest []value.Value) (value.Value, error) {
+	descending := false
+	if len(rest) == 1 {
+		switch rest[0].(type) {
+		case value.Num, value.Bool:
+			descending = value.Truthy(rest[0])
+		default:
+			return nil, fmt.Errorf("sort: the second argument on a list is a descending flag (a bool)")
+		}
+	} else if len(rest) > 1 {
+		return nil, fmt.Errorf("sort on a list takes the list and an optional descending flag")
+	}
+	out := make([]value.Value, len(l.Items))
+	strs := make([]string, len(l.Items))
+	for i, it := range l.Items {
+		s, ok := it.(value.Str)
+		if !ok {
+			return nil, fmt.Errorf("sort on a list expects every element to be a string")
+		}
+		strs[i] = string(s)
+	}
+	sort.Strings(strs)
+	if descending {
+		for i, j := 0, len(strs)-1; i < j; i, j = i+1, j-1 {
+			strs[i], strs[j] = strs[j], strs[i]
+		}
+	}
+	for i, s := range strs {
+		out[i] = value.Str(s)
+	}
+	return &value.List{Items: out}, nil
 }
 
 // scalarOf reads a single number. It reads a Num straight out rather than

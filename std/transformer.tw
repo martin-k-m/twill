@@ -1,0 +1,207 @@
+# transformer.tw: the GPT-style decoder, written in Twill.
+#
+# Import it with:  import "std/transformer" as tf. It pulls in std/nn (and so
+# std/optim and std/loss with it), so the attention, layernorm and cross-entropy
+# it composes all resolve without a second import.
+#
+# std/nn ships the pieces of a transformer -- multi-head causal attention, a
+# per-example layernorm, gelu, an embedding table. What it does not ship is the
+# thing those pieces are for: the pre-norm decoder block, stacked into a model
+# that reads a sequence of token ids and predicts the next one. That is this
+# module. There is nothing in here the examples could not already write by hand;
+# the point is that the canonical architecture of the last decade should be a
+# named thing you import, not forty lines you re-derive and get subtly wrong.
+#
+# The same two conventions from std/nn run through this file and are the reason
+# `grad(gpt_loss)(params)` works at all.
+#
+# 1. A parameter tree is tensors and nothing else, in records and lists. A GPT's
+#    parameters are a record whose `blocks` field is a *list* of block records,
+#    each of which is records of tensors. `grad` follows that structure and
+#    hands back a gradient shaped exactly like it; the optimizers walk it with
+#    `map_leaves`. Put a config number or a function in the tree and both break,
+#    which is why the config below is a separate argument, threaded through every
+#    forward call rather than stored alongside the weights.
+#
+# 2. Nothing is hidden. The block is pre-norm because that is what trains without
+#    a warmup schedule, and the code says so in the order of its lines rather
+#    than in a flag. The output head is tied to the embedding table by
+#    construction -- the same tensor, read twice -- not by an option that
+#    defaults one way in training and another at inference.
+
+import "std/nn" as nn
+import "std/loss" as loss
+
+# ── Configuration ────────────────────────────────────────────────────────────
+#
+# The shape of the model, kept out of the parameter tree. `config` fills in the
+# two knobs almost nobody changes -- the feed-forward is 4x the model width, the
+# layernorm epsilon is 1e-5 -- so a call site names only the five that matter.
+#
+#   vocab   size of the token alphabet, and so the width of the logits
+#   dim     the model (residual-stream) width; must divide by `heads`
+#   heads   number of attention heads
+#   depth   number of stacked decoder blocks
+#   max_T   the longest sequence the positional table can place
+
+fn config(vocab, dim, heads, depth, max_T) = {
+  vocab: vocab,
+  dim: dim,
+  heads: heads,
+  depth: depth,
+  max_T: max_T,
+  mlp_ratio: 4,
+  eps: 0.00001
+}
+
+# ── The feed-forward sub-layer ───────────────────────────────────────────────
+#
+# Two dense layers with a gelu between them, widening to `hidden` and back. This
+# is where most of a transformer's parameters live and, on the usual account,
+# where it does its per-token thinking; attention moves information between
+# positions, the feed-forward transforms it in place.
+#
+# It reuses nn.dense_params / nn.dense_apply unchanged, so the [T, dim] sequence
+# flows through as a batch of T independent rows with no special-casing.
+
+fn feedforward_params(dim, hidden, strategy) = {
+  fc1: nn.dense_params(hidden, dim, strategy),
+  fc2: nn.dense_params(dim, hidden, strategy)
+}
+
+fn feedforward(p, X) = nn.dense_apply(p.fc2, nn.gelu(nn.dense_apply(p.fc1, X)))
+
+# ── The decoder block ────────────────────────────────────────────────────────
+#
+# Pre-norm: the normalisation sits *inside* each residual branch, on the way in,
+# not across the residual sum. Written out,
+#
+#   h = X + attention(layernorm(X))
+#   y = h + feedforward(layernorm(h))
+#
+# The residual path from input to output is therefore an unbroken sum with no
+# layernorm on it, which is the whole reason a deep stack of these trains: the
+# gradient reaches the first block undiminished. Post-norm -- normalising the
+# sum instead -- is what the original 2017 paper did and what needed a learning-
+# rate warmup to keep from diverging early. Pre-norm is the change that let the
+# stack get deep.
+
+fn block_params(dim, heads, mlp_ratio, strategy) = {
+  ln1: nn.layernorm_params(dim),
+  attn: nn.attention_params(dim, strategy),
+  ln2: nn.layernorm_params(dim),
+  ff: feedforward_params(dim, dim * mlp_ratio, strategy)
+}
+
+fn block(p, X, heads, eps) {
+  let h = X + nn.attention_causal(p.attn, nn.layernorm(p.ln1, X, eps), heads)
+  h + feedforward(p.ff, nn.layernorm(p.ln2, h, eps))
+}
+
+# ── The whole model ──────────────────────────────────────────────────────────
+#
+# A token-embedding table, a learned positional table, `depth` decoder blocks, a
+# final layernorm. There is no separate output projection: the logits come from
+# reading the token-embedding table a second time (`hf @ transpose(tok.W)`),
+# which is weight tying. It is not a saving so much as a statement that the map
+# from a token to its vector and the map from a vector back to a token are one
+# relationship, learned once.
+#
+# The blocks are built with an explicit loop rather than `map` because the result
+# has to be a plain list of records for `grad` to walk -- exactly the list this
+# builds.
+
+fn gpt_params(cfg, strategy) {
+  let blocks = list()
+  for i in range(cfg.depth) {
+    blocks = append(blocks, block_params(cfg.dim, cfg.heads, cfg.mlp_ratio, strategy))
+  }
+  {
+    tok: { W: nn.embedding_init(cfg.vocab, cfg.dim) },
+    pos: { W: randn(cfg.max_T, cfg.dim) * 0.02 },
+    blocks: blocks,
+    lnf: nn.layernorm_params(cfg.dim)
+  }
+}
+
+# ids is a 1-D tensor (or list) of T token indices; returns the [T, vocab]
+# logits, one distribution over the next token for every position.
+#
+# Position t's row is a prediction made from positions 0..t only -- that is what
+# the causal mask inside each block enforces -- so a single forward pass scores T
+# next-token predictions at once, which is what makes the training below cheap.
+fn gpt_logits(p, ids, cfg) {
+  let T = len(ids)
+  let te = gather(p.tok.W, ids)
+  let pe = gather(p.pos.W, tensor(range(T)))
+  let h = te + pe
+  for i in range(len(p.blocks)) {
+    h = block(p.blocks[i], h, cfg.heads, cfg.eps)
+  }
+  nn.layernorm(p.lnf, h, cfg.eps) @ transpose(p.tok.W)
+}
+
+# The training loss for one sequence: predict `ids` shifted left by one. `ids`
+# is the T input tokens, `targets` the T tokens each position should predict
+# (position t's target is the token at t+1). Softmax cross-entropy, averaged
+# over the T positions.
+fn gpt_loss(p, ids, targets, cfg) =
+  loss.cross_entropy_batch(gpt_logits(p, ids, cfg), loss.onehot_rows(targets, cfg.vocab))
+
+# The mean loss over a batch of sequences. `xs` and `ys` are equal-length lists
+# of 1-D id tensors, input and shifted-target. Kept as a plain sum over the list
+# so `grad(fn(p) = gpt_loss_batch(p, xs, ys, cfg))(params)` differentiates the
+# whole batch in one reverse pass.
+fn gpt_loss_batch(p, xs, ys, cfg) {
+  let total = 0.0
+  for i in range(len(xs)) {
+    total = total + gpt_loss(p, xs[i], ys[i], cfg)
+  }
+  total / len(xs)
+}
+
+# ── Generation ───────────────────────────────────────────────────────────────
+#
+# Greedy continuation: given a prompt of token ids, append the argmax of the
+# last position's logits, `steps` times. Deterministic -- the same prompt gives
+# the same continuation -- which is what makes it testable; sampling with a
+# temperature is a one-line change at the call site (`nn.softmax(row / temp, 0)`
+# fed to a categorical draw) and is left to the caller who wants it.
+#
+# The context is truncated to the last `max_T` tokens before each step so a
+# generation longer than the positional table stays in range.
+fn generate(p, prompt, steps, cfg) {
+  let out = prompt
+  for i in range(steps) {
+    let ctx = if len(out) > cfg.max_T { slice_last(out, cfg.max_T) } else { out }
+    let logits = gpt_logits(p, ctx, cfg)
+    let next = argmax(logits[len(ctx) - 1], 0)
+    out = concat(list(out, reshape(next, list(1))), 0)
+  }
+  out
+}
+
+# The last `k` elements of a 1-D tensor.
+fn slice_last(t, k) {
+  let n = len(t)
+  let idx = list()
+  for i in range(k) {
+    idx = append(idx, n - k + i)
+  }
+  gather(t, tensor(idx))
+}
+
+# ── Parameter count ──────────────────────────────────────────────────────────
+#
+# The number of scalars in the model, walked out of the parameter tree the same
+# way `grad` walks it. Useful for the one line every model report opens with, and
+# a quick check that a config is the size you think it is.
+#
+# `map_leaves` is the tree walk the whole ecosystem uses; there is no fold over a
+# tree's leaves, so the count accumulates into a closure the walk calls once per
+# tensor, exactly as std/loss's penalties do. The returned tree is thrown away.
+fn num_params(p) {
+  let total = 0
+  map_leaves(fn(t) { total = total + fold(fn(a, d) = a * d, 1, shape(t)); t }, p)
+  total
+}

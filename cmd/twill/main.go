@@ -50,6 +50,8 @@ func main() {
 			os.Exit(runFileCanonical(args[1], !hasFlag(args, "--no-check")))
 		}
 		os.Exit(runFile(args[1], !hasFlag(args, "--no-check")))
+	case "test":
+		os.Exit(runTests(nonFlagArgs(args[1:]), hasFlag(args, "--verbose") || hasFlag(args, "-v")))
 	case "repl":
 		repl()
 	default:
@@ -279,6 +281,19 @@ func hasFlag(args []string, flag string) bool {
 	return false
 }
 
+// nonFlagArgs drops the leading-dash words, leaving the positional paths. Used
+// by `twill test`, whose arguments are any number of paths in any order with an
+// optional -v among them.
+func nonFlagArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func usage() {
 	fmt.Printf(`Twill %s
 
@@ -290,6 +305,8 @@ Usage:
   twill check <file.tw>      Shape-check only, no execution
   twill fmt <file.tw>        Print canonically formatted source
   twill fmt <file> --write   Format the file in place
+  twill test [path ...]      Run every *_test.tw under the paths (default: .)
+  twill test <paths> -v      Show each suite's output, not only failures'
   twill                      Start the REPL
   twill --version            Print the version
 

@@ -1,0 +1,121 @@
+# gpt.tw: a character-level GPT, trained end-to-end with `grad`.
+#
+# This is a decoder-only transformer -- the architecture behind modern language
+# models -- reading a stream of characters and learning to predict the next one.
+# It embeds tokens and positions, runs them through stacked pre-norm blocks of
+# masked multi-head self-attention and a gelu feed-forward, ties the output head
+# back to the embedding table, and trains on the shifted sequence. `grad`
+# differentiates the entire stack in one reverse pass; there is no tape, no
+# `.backward()`, and the same single binary that ran `hello.tw` runs this.
+#
+# The model is defined in `std/transformer`, which is itself a few dozen lines of
+# Twill over `std/nn`. This file is only the data: turn a string into token ids,
+# train, and sample the model back into text.
+
+import "std/transformer" as tf
+import "std/optim" as optim
+import "std/text" as text
+
+seed(1)
+
+# A small, repetitive corpus. A tiny model cannot learn English, but it can learn
+# the letter-by-letter shape of a few repeated lines, which is enough to watch
+# prediction work: after training it continues a prompt in the corpus's own hand.
+let corpus = "the loom weaves the warp and the weft. " +
+             "the shuttle carries the thread. " +
+             "the loom weaves the warp and the weft. " +
+             "the shuttle carries the thread. "
+
+# ── Tokenise: characters to ids ──────────────────────────────────────────────
+#
+# One id per distinct character. `to_id` maps a character code to its id; `codes`
+# is the inverse, id back to code, for turning a generated id stream into text.
+let n = text.char_len(corpus)
+let to_id = dict_new()
+let codes = list()
+for i in range(n) {
+  let c = text.char_code(corpus, i)
+  if dict_has(to_id, c) == false {
+    dict_set(to_id, c, len(codes))
+    codes = append(codes, c)
+  }
+}
+let vocab = len(codes)
+
+# The whole corpus as one id tensor.
+let data = list()
+for i in range(n) {
+  data = append(data, dict_must(to_id, text.char_code(corpus, i)))
+}
+let data_t = tensor(data)
+print("corpus", n, "chars,", vocab, "distinct")
+
+# ── Training windows ─────────────────────────────────────────────────────────
+#
+# Every length-T window is one training example: its inputs are T characters and
+# its targets are those same characters shifted left by one, so position t is
+# asked to predict position t+1. The causal mask inside the model is what makes
+# that a fair question -- position t never sees t+1 while answering.
+let T = 16
+let xs = list()
+let ys = list()
+for s in range(n - T - 1) {
+  let xi = list()
+  let yi = list()
+  for j in range(T) {
+    xi = append(xi, s + j)
+    yi = append(yi, s + j + 1)
+  }
+  xs = append(xs, gather(data_t, tensor(xi)))
+  ys = append(ys, gather(data_t, tensor(yi)))
+}
+
+# ── The model ────────────────────────────────────────────────────────────────
+let cfg = tf.config(vocab, 48, 4, 2, T)   # vocab, dim, heads, depth, context
+let p = tf.gpt_params(cfg, "xavier")
+print("model", tf.num_params(p), "parameters")
+
+# ── Train ────────────────────────────────────────────────────────────────────
+#
+# Full-batch Adam over every window. `grad(loss)(p)` returns a gradient shaped
+# exactly like the parameter tree -- records, the list of blocks, and all -- and
+# the optimizer walks it with `map_leaves`.
+let m = optim.zeros_like(p)
+let v = optim.zeros_like(p)
+print("loss before", tf.gpt_loss_batch(p, xs, ys, cfg))
+for step in range(40) {
+  let g = grad(fn(w) = tf.gpt_loss_batch(w, xs, ys, cfg))(p)
+  let out = optim.adam_step(p, g, m, v, step + 1, 0.01, 0.9, 0.999, 0.00000001)
+  p = out[0]
+  m = out[1]
+  v = out[2]
+  if step % 10 == 0 {
+    print("step", step, "loss", tf.gpt_loss_batch(p, xs, ys, cfg))
+  }
+}
+print("loss after ", tf.gpt_loss_batch(p, xs, ys, cfg))
+
+# ── Sample ───────────────────────────────────────────────────────────────────
+#
+# Encode a prompt, let the model greedily continue it, and decode the ids back to
+# characters. A trained model carries the prompt on in the corpus's own words.
+fn encode(s) {
+  let ids = list()
+  for i in range(text.char_len(s)) {
+    ids = append(ids, dict_must(to_id, text.char_code(s, i)))
+  }
+  tensor(ids)
+}
+
+fn decode(ids) {
+  let s = ""
+  for i in range(len(ids)) {
+    s = text.concat(s, text.from_byte(codes[int(item(ids[i]))]))
+  }
+  s
+}
+
+let prompt = "the loom "
+let out = tf.generate(p, encode(prompt), 48, cfg)
+print("prompt:    ", prompt)
+print("generated: ", decode(out))

@@ -1597,7 +1597,7 @@ let ARITY2: Str = "pow matmul dot conv2d maxpool2d gather maximum minimum greate
 fn builtin_arity(name: Str) -> I64 {
   if in_words(ARITY1, name) { return 1 }
   if in_words(ARITY2, name) { return 2 }
-  if in_words("where clip fold with_field", name) { return 3 }
+  if in_words("where clip fold with_field linspace arange", name) { return 3 }
   # The builtins returned by grad/grads/value_and_grad take whatever the
   # function they wrap takes; jacobian's and hessian's take exactly one.
   if in_words("jacobian(fn) hessian(fn)", name) { return 1 }
@@ -1805,7 +1805,7 @@ let ELEM_ROUND: Str = "floor ceil round"
 let DERIVATIVES: Str = "grad grads value_and_grad jacobian hessian"
 let DERIVED: Str = "grad(fn) grads(fn) value_and_grad(fn) jacobian(fn) hessian(fn)"
 let TREE_OPS: Str = "map zip fold append enumerate map_leaves zip_leaves"
-let MAKERS: Str = "tensor scalar zeros ones fill randn rand seed permutation eye"
+let MAKERS: Str = "tensor scalar zeros ones fill randn rand seed permutation eye linspace arange"
 # The makers whose trailing argument may be a dtype name (NEEDS-110). seed and
 # permutation are the two MAKERS left out: neither makes a tensor.
 let DTYPE_MAKERS: Str = "tensor scalar zeros ones fill randn rand eye"
@@ -2145,6 +2145,15 @@ fn bi_sorting(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError
   if len(args) == 0 or len(args) > 3 {
     return Err(runtime_error(line, bytes.concat(name, " expects (tensor[, axis[, descending]])")))
   }
+  # A list of strings sorts by the bytewise-unsigned lexicographic order
+  # (docs/language-guide.md, Strings -> Ordering), so the ecosystem's hand-written
+  # string sorts can delegate here. A list has no axis, so the optional second
+  # argument is the descending flag directly. `argsort` on strings has no defined
+  # result and is refused.
+  match args[0] {
+    VList(l) => return sort_string_list(name, l, args, line),
+    _ => unit,
+  }
   let t: tensor.Tensor = arg_tensor(args[0], name, line)?
   # Default to the last axis, matching softmax and argmax rather than reducing
   # over everything: sorting a matrix almost always means sorting each row.
@@ -2159,6 +2168,51 @@ fn bi_sorting(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError
   # first arithmetic done with the result. The bootstrap does the same by
   # returning a tensor with RequiresGrad clear.
   lift_v(tensor.argsort_axis(t, axis, descending), line)
+}
+
+# The list branch of `sort`: a list of strings sorted bytewise, ascending or
+# descending. Mirrors sortStringList in the Go bootstrap. The input list is left
+# untouched; a fresh list is returned.
+fn sort_string_list(name: Str, l: ListVal, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  if not bytes.equal(name, "sort") {
+    return Err(runtime_error(line, bytes.concat(name, " is defined on tensors, not a list")))
+  }
+  if len(args) > 2 {
+    return Err(runtime_error(line, "sort on a list takes the list and an optional descending flag"))
+  }
+  let descending: Bool = false
+  if len(args) == 2 {
+    match args[1] {
+      VNum(x) => descending = x != 0.0,
+      VBool(b) => descending = b,
+      _ => return Err(runtime_error(line, "sort: the second argument on a list is a descending flag (a bool)")),
+    }
+  }
+  let strs: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < len(l.items) {
+    match l.items[i] {
+      VStr(s) => push(strs, s),
+      _ => return Err(runtime_error(line, "sort on a list expects every element to be a string")),
+    }
+    i = i + 1
+  }
+  let sorted: Arr[Str] = canon_sort(strs)
+  let out: Arr[Value] = arr_new()
+  if descending {
+    let k: I64 = len(sorted) - 1
+    while k >= 0 {
+      push(out, VStr(sorted[k]))
+      k = k - 1
+    }
+  } else {
+    let j: I64 = 0
+    while j < len(sorted) {
+      push(out, VStr(sorted[j]))
+      j = j + 1
+    }
+  }
+  Ok(VList(ListVal { items: out }))
 }
 
 # topk/argtopk need k, so they take (tensor, k[, axis[, smallest]]). The flag is
@@ -3482,6 +3536,52 @@ fn bi_make(name: Str, args: Arr[Value], dt: I64, line: I64) -> Res[Value, Runtim
       i = i + 1
     }
     return Ok(VList(ListVal { items: items }))
+  }
+  # linspace(start, stop, n): n points from start to stop, both included, with
+  # the last set to stop exactly. Mirrors the bootstrap.
+  if bytes.equal(name, "linspace") {
+    let start: F64 = scalar_of(args[0], "linspace", line)?
+    let stop: F64 = scalar_of(args[1], "linspace", line)?
+    let ln: I64 = int_of(args[2], "linspace", line)?
+    if ln < 0 {
+      return Err(runtime_error(line, "linspace: count must be non-negative"))
+    }
+    let ld: Arr[F64] = arr_new()
+    if ln == 1 {
+      push(ld, start)
+    } else if ln > 1 {
+      let step: F64 = (stop - start) / f64_of_i64(ln - 1)
+      let k: I64 = 0
+      while k < ln {
+        push(ld, start + f64_of_i64(k) * step)
+        k = k + 1
+      }
+      ld[ln - 1] = stop
+    }
+    let lshape: Arr[I64] = arr_new()
+    push(lshape, ln)
+    return Ok(VTensor(tensor.mk_raw(lshape, ld, tensor.DT_F64)))
+  }
+  # arange(start, stop, step): start, start+step, ... up to but not including
+  # stop. Mirrors the bootstrap.
+  if bytes.equal(name, "arange") {
+    let astart: F64 = scalar_of(args[0], "arange", line)?
+    let astop: F64 = scalar_of(args[1], "arange", line)?
+    let astep: F64 = scalar_of(args[2], "arange", line)?
+    if astep == 0.0 {
+      return Err(runtime_error(line, "arange: step must be non-zero"))
+    }
+    let an: I64 = i64_of_f64(f64_ceil((astop - astart) / astep))
+    if an < 0 { an = 0 }
+    let ad: Arr[F64] = arr_new()
+    let j: I64 = 0
+    while j < an {
+      push(ad, astart + f64_of_i64(j) * astep)
+      j = j + 1
+    }
+    let ashape: Arr[I64] = arr_new()
+    push(ashape, an)
+    return Ok(VTensor(tensor.mk_raw(ashape, ad, tensor.DT_F64)))
   }
   let n: I64 = int_of(args[0], "eye", line)?
   let d: Arr[F64] = arr_new()
