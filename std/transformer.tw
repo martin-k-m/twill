@@ -138,7 +138,7 @@ fn gpt_logits(p, ids, cfg) {
   for i in range(len(p.blocks)) {
     h = block(p.blocks[i], h, cfg.heads, cfg.eps)
   }
-  nn.layernorm(p.lnf, h, cfg.eps) @ transpose(p.tok.W)
+  linear(nn.layernorm(p.lnf, h, cfg.eps), p.tok.W)
 }
 
 # The training loss for one sequence: predict `ids` shifted left by one. `ids`
