@@ -911,17 +911,33 @@ func (ip *Interp) installBuiltins() {
 		return tensor.Gather(x, idx)
 	})
 	// linear(x, W) is x @ Wᵀ, the fused dense-layer product. W is stored [nout,
-	// nin], so this reads it in place instead of transposing it first.
+	// nin], so this reads it in place instead of transposing it first. When W is a
+	// quantised weight (from `quantize`), it runs the int8 kernel instead, which
+	// is how a hosted model keeps its weights small without changing call sites.
 	def("linear", 2, false, func(a []value.Value) (value.Value, error) {
 		x, err := asTensor(a[0], "linear")
 		if err != nil {
 			return nil, err
+		}
+		if q, ok := a[1].(*tensor.QTensor); ok {
+			return tensor.QLinear(x, q)
 		}
 		w, err := asTensor(a[1], "linear")
 		if err != nil {
 			return nil, err
 		}
 		return tensor.MatMulNT(x, w)
+	})
+	// quantize(W) packs a 2-D weight into int8 with a per-row scale: an eighth of
+	// the memory at ~0.4% error, the lever that lets a large model's weights fit
+	// in RAM. The result is a frozen weight for `linear`, not a differentiable
+	// tensor, so it belongs to inference, not training.
+	def("quantize", 1, false, func(a []value.Value) (value.Value, error) {
+		w, err := asTensor(a[0], "quantize")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.QuantizeI8(w)
 	})
 	binTensor("maximum", tensor.Maximum)
 	binTensor("minimum", tensor.Minimum)

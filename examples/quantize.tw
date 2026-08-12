@@ -1,0 +1,21 @@
+# quantize.tw - int8 weight quantisation, the memory lever for hosting.
+#
+# A model's weights are almost all of its memory. Storing them in int8 instead
+# of f64 is an eighth of the space -- a 7B model's 56 GB becomes 7 GB -- and for
+# inference the accuracy cost is a fraction of a percent. `quantize` packs a
+# weight; `linear` runs the int8 kernel when handed a packed one, so the call
+# site does not change between full precision and quantised.
+#
+#   tw run examples/quantize.tw
+
+seed(1)
+
+let W = randn(256, 512)     # one dense layer: weight [out, in]
+let x = randn(4, 512)       # a batch of activations
+
+let full = linear(x, W)     # full-precision f64
+let qW = quantize(W)        # packed int8, ~8x smaller, frozen
+let quant = linear(x, qW)   # same call, int8 kernel
+
+print("weight:        ", qW)
+print("relative error:", sum(abs(full - quant)) / sum(abs(full)))
