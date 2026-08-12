@@ -29,3 +29,11 @@ func TestReshapeShapeTracked(t *testing.T) {
 	// reshape to [2,3]; matmul with a [2] vector should fail (inner 3 != 2).
 	wantOne(t, "let r = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3)\nlet y = r @ [1.0, 2.0]", "inner")
 }
+
+func TestWhereConditionBroadcast(t *testing.T) {
+	// where(cond, a, b) broadcasts all three together at runtime; a condition
+	// that cannot broadcast with the chosen elements is a shape error.
+	wantOne(t, "let w = where(zeros(5), zeros(3), zeros(3))", "broadcast")
+	// A scalar condition broadcasts against everything and stays valid.
+	wantNone(t, "let w = where(zeros(3), zeros(3), zeros(3))")
+}

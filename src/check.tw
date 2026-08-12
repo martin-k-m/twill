@@ -2651,8 +2651,8 @@ fn broadcast_two(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> T
   }
 }
 
-# where(cond, a, b) broadcasts its two value arguments. The condition's shape is
-# not checked against them, which is the runtime's behaviour.
+# where(cond, a, b) broadcasts all three arguments together at runtime, so the
+# condition's shape is checked against the chosen elements here as well.
 fn broadcast_where(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   if len(arg_types) != 3 { return TUnknown }
   match arg_tensor(arg_types, 1) {
@@ -2664,10 +2664,30 @@ fn broadcast_where(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
             report(c, ex.line, res.msg)
             return TUnknown
           }
+          # The condition is broadcast against the chosen elements at runtime, so
+          # a shape that cannot broadcast is a shape error to raise here rather
+          # than leaving it to the interpreter.
+          let out: Type = res.type
+          match arg_tensor(arg_types, 0) {
+            Some(cond) => {
+              match as_tensor(res.type) {
+                Some(rt) => {
+                  let cres: ShapeResult = elementwise_result(cond, rt)
+                  if len(cres.msg) > 0 {
+                    report(c, ex.line, cres.msg)
+                    return TUnknown
+                  }
+                  out = cres.type
+                },
+                None => {},
+              }
+            },
+            None => {},
+          }
           # The condition's dtype does not enter the promotion; it is read for
           # its truthiness (tensor.where3). No warning here: `where` is a
           # selector, not the arithmetic the widening warning is about.
-          set_dtype(res.type, promote_dtype(a.dtype, b.dtype))
+          set_dtype(out, promote_dtype(a.dtype, b.dtype))
         },
         None => TUnknown,
       }
