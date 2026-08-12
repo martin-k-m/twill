@@ -66,12 +66,17 @@ need to rewrite the interpreter or compile to native code to go fast.
 
 ## What this means, in priority order
 
-1. **The matmul kernel (38%) is the main lever.** It is a clean f64 scalar loop.
-   The wins stack: f32 halves the bytes moved and doubles SIMD width; SIMD +
-   cache blocking closes most of the gap to hardware peak; quantised weights
-   (int8/int4) shrink the bytes read, which matters because the kernel is
-   memory-bound. The Rust port (`raster-tensor`) is the vehicle for the SIMD
-   version.
+1. **The matmul kernel (38%) is the main lever — partly done.** `mmNT` (the
+   fused-linear kernel, now the dominant op after the transpose fusions) runs
+   four independent accumulators over its inner product, hiding FP-add latency:
+   ~1.7× on square inputs, and at prefill scale `linear()` sustains **~48–50
+   GFLOP/s vs ~25–30 for the general `@`**. Remaining kernel wins: the general
+   `mm` (streaming AXPY form, memory-bound, harder to reorder); cache blocking for
+   the large case (a 128×4096×4096 still drops to ~19 GFLOP/s, i.e. bandwidth-
+   bound); then f32 (halves bytes moved, doubles SIMD width) and quantised weights
+   (shrink the bytes read). The Rust port (`raster-tensor`) is the SIMD vehicle.
+   Small-batch decode (m≈1) is bandwidth-bound and will not show the accumulator
+   win — that regime needs f32/quantisation, not ILP.
 
 2. **Transpose (14%) — DONE.** `nn.dense_apply` was `x @ transpose(p.W)`, which
    allocated a transposed weight copy every forward pass. Fused into `linear(x, W)`
