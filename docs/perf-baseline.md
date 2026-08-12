@@ -73,13 +73,15 @@ need to rewrite the interpreter or compile to native code to go fast.
    memory-bound. The Rust port (`raster-tensor`) is the vehicle for the SIMD
    version.
 
-2. **Transpose (14%) is pure waste and the cheapest win.** `nn.dense_apply` is
-   `x @ transpose(p.W)`: every dense layer (attention Q/K/V/O and both FFN
-   layers, ×depth) allocates and fills a transposed copy of its weight matrix on
-   every forward pass. A fused `x·Wᵀ` kernel reads `W` in its stored `[nout,nin]`
-   layout and computes `sum_p x[i,p]·W[j,p]` — the *same* accumulation order, so
-   it is bit-for-bit identical (parity-safe), while removing the allocation, the
-   `memclr`, and the transpose pass. It also happens to be the layout SIMD wants.
+2. **Transpose (14%) — DONE.** `nn.dense_apply` was `x @ transpose(p.W)`, which
+   allocated a transposed weight copy every forward pass. Fused into `linear(x, W)`
+   (`tensor.MatMulNT` / `mmNT`), which reads `W` in its stored `[nout,nin]` layout
+   and computes `sum_p x[i,p]·W[j,p]` in the same accumulation order — bit-for-bit
+   identical, parity-safe. Measured win: dim-384 forward **27.9ms → 11.1ms (2.5×)**,
+   larger than the transpose share alone because the fused dot-product is
+   cache-friendlier and skips the allocation and `memclr`. The next transpose to
+   fuse the same way is the single-head `scores = (X@Wq) @ transpose(X@Wk)` in
+   `std/nn.tw`, and attention's einsum path is the larger remaining kernel.
 
 3. **Attention einsum (20%) is the second kernel** to give the f32/SIMD treatment
    after matmul, since the two share the same inner product.
