@@ -1302,6 +1302,12 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
+	case "quantize":
+		// A quantised weight is an opaque frozen value, not a shaped tensor; it
+		// only ever flows into `linear`, whose quantised branch needs no shape
+		// from the checker. Typing it Unknown keeps it from being used in tensor
+		// arithmetic by accident while not inventing a type the language lacks.
+		return tUnknown{}
 	case "shape":
 		return tList{}
 	case "transpose":
@@ -1969,7 +1975,7 @@ func constIntElems(elems []ast.Expr) ([]int, bool) {
 var builtinNames = map[string]bool{
 	"print": true, "relu": true, "exp": true, "log": true, "sin": true,
 	"cos": true, "tanh": true, "sigmoid": true, "sqrt": true, "sum": true, "prod": true, "median": true,
-	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true, "linear": true,
+	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true, "linear": true, "quantize": true,
 	"grad": true, "grads": true, "value_and_grad": true, "map": true, "zip": true,
 	"tensor": true, "scalar": true, "zeros": true, "ones": true, "fill": true,
 	"randn": true, "rand": true, "eye": true, "linspace": true, "arange": true, "transpose": true, "shape": true,
