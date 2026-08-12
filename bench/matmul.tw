@@ -1,0 +1,26 @@
+# bench/matmul.tw - raw square matmul throughput, the kernel ceiling.
+#
+# This is the fastest the current f64 `@` goes on well-shaped (large, square)
+# inputs. It is the ceiling a forward pass is measured against: the gap between
+# a forward pass's effective GFLOP/s and this number is the overhead that fusion,
+# f32, and quantisation are there to close.
+#
+#   tw run bench/matmul.tw
+
+fn gflops(n, ms) = 2.0 * pow(f64_of_i64(n), 3.0) / (f64_of_i64(ms) * 0.001) / 1000000000.0
+
+fn bench(n) {
+  let a = randn(n, n)
+  let b = randn(n, n)
+  let _ = a @ b                                # warm
+  let iters = 10
+  let t0 = clock_now_ms()
+  for i in range(iters) { let c = a @ b }
+  let t1 = clock_now_ms()
+  let ms = (t1 - t0) / iters
+  print("n", n, "ms", ms, "GFLOPs", gflops(n, ms))
+}
+
+bench(256)
+bench(512)
+bench(1024)
