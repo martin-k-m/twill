@@ -1456,6 +1456,44 @@ fn matmul_result(a: TensorType, b: TensorType) -> ShapeResult {
   ShapeResult { type: tensor_of(dims), msg: "" }
 }
 
+# linear(x, W) = x @ transpose(W). x is 1-D [k] or 2-D [m,k]; W is the dense
+# weight, 2-D [n,k]. The contracted dim is the last of each. Mirrors the Go
+# checker's linearResult so the two report the same shape errors.
+fn linear_result(a: TensorType, w: TensorType) -> ShapeResult {
+  if len(a.dims) < 1 or len(a.dims) > 2 {
+    return ShapeResult {
+      type: TUnknown,
+      msg: bytes.concat("linear requires a 1-D or 2-D input, got ", dims_string(a)),
+    }
+  }
+  if len(w.dims) != 2 {
+    return ShapeResult {
+      type: TUnknown,
+      msg: bytes.concat("linear requires a 2-D weight, got ", dims_string(w)),
+    }
+  }
+  let k: I64 = a.dims[len(a.dims) - 1]
+  let n: I64 = w.dims[0]
+  let k2: I64 = w.dims[1]
+  if k >= 0 and k2 >= 0 and k != k2 {
+    return ShapeResult {
+      type: TUnknown,
+      msg: bytes.concat("shape mismatch in linear: ", bytes.concat(dims_string(a),
+        bytes.concat(" @ ", bytes.concat(dims_string(w),
+        bytes.concat("ᵀ (inner ", bytes.concat(str(k),
+        bytes.concat(" != ", bytes.concat(str(k2), ")")))))))),
+    }
+  }
+  let dims: Arr[I64] = arr_new()
+  if len(a.dims) == 1 {
+    push(dims, n)
+    return ShapeResult { type: tensor_of(dims), msg: "" }
+  }
+  push(dims, a.dims[0])
+  push(dims, n)
+  ShapeResult { type: tensor_of(dims), msg: "" }
+}
+
 # element_count multiplies a shape out, when every dimension is known.
 #
 # An unknown dimension makes the product meaningless rather than small, so this
@@ -2163,6 +2201,28 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
               }
               return set_dtype(with_unit(res.type, unit_mul(a.unit, b.unit)),
                 promote_and_warn(c, ex.line, a.dtype, b.dtype))
+            },
+            None => return TUnknown,
+          }
+        },
+        None => return TUnknown,
+      }
+    }
+    return TUnknown
+  }
+  if bytes.equal(name, "linear") {
+    if len(arg_types) == 2 {
+      match arg_tensor(arg_types, 0) {
+        Some(a) => {
+          match arg_tensor(arg_types, 1) {
+            Some(w) => {
+              let res: ShapeResult = linear_result(a, w)
+              if len(res.msg) > 0 {
+                report(c, ex.line, res.msg)
+                return TUnknown
+              }
+              return set_dtype(with_unit(res.type, unit_mul(a.unit, w.unit)),
+                promote_and_warn(c, ex.line, a.dtype, w.dtype))
             },
             None => return TUnknown,
           }

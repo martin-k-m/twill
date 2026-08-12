@@ -910,6 +910,19 @@ func (ip *Interp) installBuiltins() {
 		}
 		return tensor.Gather(x, idx)
 	})
+	// linear(x, W) is x @ Wᵀ, the fused dense-layer product. W is stored [nout,
+	// nin], so this reads it in place instead of transposing it first.
+	def("linear", 2, false, func(a []value.Value) (value.Value, error) {
+		x, err := asTensor(a[0], "linear")
+		if err != nil {
+			return nil, err
+		}
+		w, err := asTensor(a[1], "linear")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.MatMulNT(x, w)
+	})
 	binTensor("maximum", tensor.Maximum)
 	binTensor("minimum", tensor.Minimum)
 	binTensor("greater", tensor.Greater)

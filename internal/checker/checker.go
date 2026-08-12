@@ -1288,6 +1288,20 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
+	case "linear":
+		if len(argTypes) == 2 {
+			a, aok := argTypes[0].(tTensor)
+			w, wok := argTypes[1].(tTensor)
+			if aok && wok {
+				res, msg := linearResult(a, w)
+				if msg != "" {
+					c.report(ex.Line, "%s", msg)
+					return tUnknown{}
+				}
+				return withUnit(res, unitMul(a.unit, w.unit))
+			}
+		}
+		return tUnknown{}
 	case "shape":
 		return tList{}
 	case "transpose":
@@ -1867,6 +1881,27 @@ func matmulResult(a, b tTensor) (Type, string) {
 	}
 }
 
+// linearResult types linear(x, W) = x @ Wᵀ. x is 1-D [k] or 2-D [m,k]; W is the
+// dense weight, 2-D [n,k] in [nout, nin] layout. The contracted dim is the last
+// of each. It mirrors matmulResult's handling of unknown (-1) dims.
+func linearResult(a, w tTensor) (Type, string) {
+	if len(a.dims) < 1 || len(a.dims) > 2 {
+		return nil, fmt.Sprintf("linear requires a 1-D or 2-D input, got %s", dimsString(a))
+	}
+	if len(w.dims) != 2 {
+		return nil, fmt.Sprintf("linear requires a 2-D weight, got %s", dimsString(w))
+	}
+	k := a.dims[len(a.dims)-1]
+	n, k2 := w.dims[0], w.dims[1]
+	if k >= 0 && k2 >= 0 && k != k2 {
+		return nil, fmt.Sprintf("shape mismatch in linear: %s @ %sᵀ (inner %d != %d)", dimsString(a), dimsString(w), k, k2)
+	}
+	if len(a.dims) == 1 {
+		return tTensor{dims: []int{n}}, ""
+	}
+	return tTensor{dims: []int{a.dims[0], n}}, ""
+}
+
 // join returns a if a and b agree, otherwise Unknown.
 func join(a, b Type) Type {
 	at, aok := a.(tTensor)
@@ -1934,7 +1969,7 @@ func constIntElems(elems []ast.Expr) ([]int, bool) {
 var builtinNames = map[string]bool{
 	"print": true, "relu": true, "exp": true, "log": true, "sin": true,
 	"cos": true, "tanh": true, "sigmoid": true, "sqrt": true, "sum": true, "prod": true, "median": true,
-	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true,
+	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true, "linear": true,
 	"grad": true, "grads": true, "value_and_grad": true, "map": true, "zip": true,
 	"tensor": true, "scalar": true, "zeros": true, "ones": true, "fill": true,
 	"randn": true, "rand": true, "eye": true, "linspace": true, "arange": true, "transpose": true, "shape": true,

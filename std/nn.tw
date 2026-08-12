@@ -149,9 +149,13 @@ fn self_attention(Wq, Wk, Wv, X) {
 # The transpose is not an accident of taste. Storing W as [nout, nin] means row
 # i is the weights of output unit i, which is how every initialiser scales it
 # (fan-in along the row) and how the single-example `dense` above reads. The
-# batched form then needs W transposed, and doing it here rather than storing
-# the transpose keeps one layout in the parameter tree.
-fn dense_apply(p, x) = x @ transpose(p.W) + p.b
+# batched form then needs W transposed.
+#
+# `linear(x, W)` is the fused x @ transpose(W): the same product and the same
+# gradient, but it reads W in its [nout, nin] layout instead of materialising a
+# transposed copy on every forward pass. That transpose was ~14% of a forward
+# pass (see docs/perf-baseline.md); the fused kernel removes it bit-for-bit.
+fn dense_apply(p, x) = linear(x, p.W) + p.b
 
 fn dense_params(nout, nin, strategy) = { W: init(strategy, nout, nin), b: zeros(nout) }
 

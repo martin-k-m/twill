@@ -661,6 +661,101 @@ func transpose2d(a []float64, rows, cols int) []float64 {
 	return t
 }
 
+// mmNT computes a @ wᵀ directly: a is [m,k] row-major, w is [n,k] row-major
+// (the [nout, nin] layout dense weights are stored in), and the result is [m,n].
+// It reads w in place instead of transposing it first, which is where the win
+// is: no [k,n] copy allocated and zeroed per call.
+//
+// The result is bit-identical to mm(a, transpose2d(w)): each c[i,j] is the sum
+// over p ascending of a[i,p]*w[j,p], with the same aip==0 skip, so the sequence
+// of floating-point additions is exactly the one mm would perform. That is what
+// lets dense_apply switch to it without moving a single numeric test.
+func mmNT(a []float64, m, k int, w []float64, n int) []float64 {
+	c := make([]float64, m*n)
+	runChunks(m, workersFor(m*k*n), func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			aRow := a[i*k : i*k+k]
+			cRow := i * n
+			for j := 0; j < n; j++ {
+				wRow := w[j*k : j*k+k]
+				var s float64
+				for p := 0; p < k; p++ {
+					aip := aRow[p]
+					if aip == 0 {
+						continue
+					}
+					s += aip * wRow[p]
+				}
+				c[cRow+j] = s
+			}
+		}
+	})
+	return c
+}
+
+// MatMulNT computes a @ bᵀ, where b is the [nout, nin] weight of a dense layer.
+// It is the fused form of MatMul(a, Transpose(b)): same result, same gradient,
+// but without materialising the transposed weight on every call. a is 1-D [k] or
+// 2-D [m,k]; b must be 2-D [n,k]; the result is [n] or [m,n] to match.
+func MatMulNT(a, b *Tensor) (*Tensor, error) {
+	a2 := a.Shape
+	if len(a.Shape) == 1 {
+		a2 = []int{1, a.Shape[0]}
+	}
+	if len(a2) != 2 || len(b.Shape) != 2 {
+		return nil, fmt.Errorf("linear requires a 1-D or 2-D input and a 2-D weight")
+	}
+	m, k := a2[0], a2[1]
+	n, k2 := b.Shape[0], b.Shape[1]
+	if k != k2 {
+		return nil, fmt.Errorf("shape mismatch in linear: %v @ %vᵀ (inner %d != %d)", a.Shape, b.Shape, k, k2)
+	}
+	outData := mmNT(a.Data, m, k, b.Data, n)
+	var outShape []int
+	if len(a.Shape) == 1 {
+		outShape = []int{n}
+	} else {
+		outShape = []int{m, n}
+	}
+	res := &Tensor{Data: outData, Shape: outShape}
+	if recordJets && (a.RequiresGrad || b.RequiresGrad) {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			// (a@bᵀ)' = a'@bᵀ + a@b'ᵀ; (a@bᵀ)'' = a''@bᵀ + 2 a'@b'ᵀ + a@b''ᵀ.
+			ad1 := mmNT(a.jet.d, m, k, b.Data, n)
+			bd1 := mmNT(a.Data, m, k, b.jet.d, n)
+			ad2 := mmNT(a.jet.dd, m, k, b.Data, n)
+			cross := mmNT(a.jet.d, m, k, b.jet.d, n)
+			bd2 := mmNT(a.Data, m, k, b.jet.dd, n)
+			rd, rdd := res.jet.d, res.jet.dd
+			for i := range rd {
+				rd[i] = ad1[i] + bd1[i]
+				rdd[i] = ad2[i] + 2*cross[i] + bd2[i]
+			}
+		}
+	}
+	return track2(res, a, b, func() {
+		g := res.Grad // flat length m*n
+		if a.RequiresGrad {
+			// dA = g @ b, since y = a bᵀ means ∂y[i,j]/∂a[i,p] = b[j,p].
+			dA := mm(g, m, n, b.Data, k)
+			ga := a.ensureGrad()
+			for i := range dA {
+				ga[i] += dA[i]
+			}
+		}
+		if b.RequiresGrad {
+			// dB = gᵀ @ a, shaped [n,k] like b.
+			gt := transpose2d(g, m, n)
+			dB := mm(gt, n, m, a.Data, k)
+			gb := b.ensureGrad()
+			for i := range dB {
+				gb[i] += dB[i]
+			}
+		}
+	}), nil
+}
+
 // MatMul multiplies 1-D or 2-D operands (the `@` operator).
 func MatMul(a, b *Tensor) (*Tensor, error) {
 	a2 := a.Shape
