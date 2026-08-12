@@ -1,0 +1,33 @@
+# bench/forward.tw - transformer forward-pass (inference) scaling.
+#
+# Times a pure forward pass at growing model dimension, fixed context and depth,
+# so the cost curve isolates how the kernels scale with width. Run:
+#
+#   tw run bench/forward.tw          (or)   twill run bench/forward.tw
+#
+# The number that matters is fwd_ms against params: when it grows slower than
+# params, the pass is overhead-bound (small ops, allocation, transpose copies);
+# when it tracks params, it has become compute-bound and kernel speed rules.
+
+import "std/transformer" as tf
+
+seed(1)
+
+fn bench(dim, heads, T) {
+  let cfg = tf.config(64, dim, heads, 2, T)
+  let p = tf.gpt_params(cfg, "xavier")
+  let ids = tensor(range(T))
+  let _ = tf.gpt_logits(p, ids, cfg)          # warm
+  let iters = 20
+  let t0 = clock_now_ms()
+  for i in range(iters) {
+    let logits = tf.gpt_logits(p, ids, cfg)
+  }
+  let t1 = clock_now_ms()
+  print("dim", dim, "params", tf.num_params(p), "fwd_ms", (t1 - t0) / iters)
+}
+
+bench(48, 4, 16)
+bench(96, 4, 16)
+bench(192, 8, 16)
+bench(384, 8, 16)
