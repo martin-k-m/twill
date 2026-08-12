@@ -153,3 +153,45 @@ fn cov(a, b) = mean((a - mean(a)) * (b - mean(b)))
 # deviations, which is what makes it scale-free: correlation does not change
 # when either input is multiplied by a constant.
 fn corr(a, b) = cov(a, b) / (std(a) * std(b))
+
+# ── Elementwise sign, and any/all over a mask ────────────────────────────────
+
+# The sign of each element: -1 where negative, 0 where zero, 1 where positive.
+# Built from two `where`s rather than a division, which would be NaN at zero, and
+# differentiable the way the pieces are: its gradient is zero everywhere, so it
+# passes a straight-through zero rather than an undefined one.
+fn sign(x) = where(greater(x, 0.0), 1.0, 0.0) - where(less(x, 0.0), 1.0, 0.0)
+
+# True when any element is non-zero, and true when every element is. Both read a
+# tensor as a mask, so they answer `any(greater(x, k))` the obvious way. `all`
+# uses the smallest magnitude and `any` the largest, so a single exact zero flips
+# `all` to false and a single non-zero flips `any` to true.
+fn any(x) = max(abs(x)) > 0.0
+fn all(x) = min(abs(x)) > 0.0
+
+# The number of non-zero elements, as a count.
+fn count_nonzero(x) = sum(where(equal(x, 0.0), 0.0, 1.0))
+
+# ── Matrix diagonals and products ────────────────────────────────────────────
+#
+# Composed from `eye`, `einsum` and the reductions, so each is differentiable
+# the same way the statistics above are: `grad(fn(v) = trace(diag(v) @ A))`
+# works with no backward pass written for any of them. They are built out of
+# masks and contractions rather than index loops so they stay vectorised and the
+# gradient stays a tensor operation.
+
+# The outer product of two 1-D tensors: `outer([a, b], [c, d])` is the [2, 2]
+# matrix of every product a_i * b_j.
+fn outer(a, b) = einsum("i,j->ij", a, b)
+
+# The diagonal of a square matrix as a 1-D tensor. `eye(n)` masks off everything
+# but the diagonal, and summing each row collects the surviving element, so the
+# result is differentiable in the matrix.
+fn diagonal(m) = sum(m * eye(len(m)), 1)
+
+# The trace: the sum of the diagonal. Same mask, summed whole rather than by row.
+fn trace(m) = sum(m * eye(len(m)))
+
+# A square matrix with `v` on its diagonal and zeros elsewhere. `eye(n)` scaled
+# row-wise by `v` puts v_i at position (i, i) and nowhere else.
+fn diag(v) = eye(len(v)) * reshape(v, len(v), 1)

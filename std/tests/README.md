@@ -1,15 +1,21 @@
 # std/tests
 
-Two test suites live here, and only one of them runs today.
+Run the whole tree with the test runner, which discovers every `*_test.tw` file
+under a path and reports one line per suite plus a summary:
 
-Run a suite by handing the file to the interpreter:
+```
+twill test std/tests
+```
+
+Or run a single suite by handing the file to the interpreter:
 
 ```
 twill run std/tests/nn_test.tw
 ```
 
 A passing suite prints one line per check and ends with `OK`. A failing one ends
-with `FAILED` and exits non-zero, so a script can gate on it.
+with `FAILED`, so a person can read it and `twill test` can gate on it (the
+runner exits non-zero when any suite fails).
 
 ## Runs today
 
@@ -24,17 +30,24 @@ interpreter actually implements. They import `harness.tw` as a file.
 | `metrics_test.tw` | `std/metrics` |
 | `nn_test.tw` | `std/nn` |
 | `optim_test.tw` | `std/optim` |
+| `transformer_test.tw` | `std/transformer` |
 
 `harness.tw` is the numeric-mode harness, not a suite. Running it directly does
 nothing and prints nothing.
 
 ## Written ahead of the language
 
-These are `mode systems` suites, and the bootstrap interpreter rejects them at
-parse time. That is expected. They were written alongside the systems-mode
-modules they cover, and they are kept in the tree so the modules are not
-shipping untested once the front end catches up. They are not a regression and
-they are not skipped tests waiting on a bug fix.
+These are `mode systems` suites. Since the front end learned to parse and run
+systems mode, most now run on the bootstrap: `io`, `json`, `linalg` and `stats`
+pass today. The two that do not are written ahead of the language rather than
+broken -- `random` implements xoshiro256\*\* and needs the true 64-bit integer
+arithmetic the f64 bootstrap does not have (`docs/needs.md` NEEDS-2), so its
+exact-stream draws come out wrong, and `text` fails one UTF-8 edge case for the
+same class of reason. They are kept in the tree so the modules are not shipping
+untested once the language catches up. They are not a regression and they are
+not skipped tests waiting on a bug fix; `twill test` runs them and reports the
+failures honestly, and the Go-side regression guard
+(`cmd/twill/test_test.go`) asserts only the numeric suites, which do all pass.
 
 | Suite | Module under test |
 | --- | --- |

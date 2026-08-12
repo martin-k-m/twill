@@ -247,19 +247,31 @@ errors.
 
 ## NEEDS-12: `continue` in `while` and `for`
 
-**Status:** specified; the parser and interpreter change is still blocking.
-`src/lex.tw:305` and the whole scanner loop. **The normative text is
+**Status:** done (2026-08-11). **The normative text is
 `docs/language-guide.md`, Control flow → `break` and `continue`**, which covers
 `break` as well: innermost loop only, no labels, statements rather than
 expressions, no crossing a function boundary, and keywords in systems mode only
 so that a numeric-mode `let break = 3` keeps working.
 
-The Go lexer's main loop is a chain of `continue`s and the twill port is the
-same shape. Rewriting it as nested `else` would nest eight deep.
+`break` and `continue` lex as keywords, parse to `ast.Break`/`ast.Continue`
+statements, format, and run: the interpreter unwinds each to its enclosing loop
+with a `breakSignal`/`continueSignal` that `runLoopBody` recovers, the same way
+`returnSignal` unwinds a function (`internal/interp/interp.go`). The scanner loop
+in `src/lex.tw` that this was blocking is a chain of `continue`s and reads as one.
 
-*Go bootstrap:* Go `continue`. `internal/interp/interp.go` implements `for` and
-`while` with no loop-control statements at all; the language has neither
-`break` nor `continue`.
+**The last piece landed the checker rule (2026-08-11):** the checker tracks a
+lexical loop depth, reset to zero at every function boundary, and reports
+`break`/`continue` outside a loop -- including one inside a `fn` nested in a
+loop, which cannot cross the boundary. Before this a stray `break` passed
+`twill check` and reached the interpreter as an uncaught signal. Both
+implementations carry it: `internal/checker/checker.go` (`loopDepth`, the
+`While`/`For` and `Break`/`Continue` cases, and the two body walks
+`checkFnDef`/`inferUserCall`) and `src/check.tw` in lockstep (`Checker.loop_depth`,
+`infer_stmt`'s loop and control cases, and `infer_fn_body`), with tests in
+`internal/checker/loopctl_test.go` and `internal/interp/selfhost_test.go` that
+pin the two to the same diagnostics.
+
+*Go bootstrap:* Go `continue`, `internal/interp/interp.go`.
 
 ## NEEDS-13: `Unit` as a value, and `unit` as its literal
 
@@ -392,13 +404,26 @@ Go's `v, ok := m[k]` is two returns; twill has one. `Opt` is the whole reason
 
 ## NEEDS-23: sorting a `Arr[Str]`
 
-**Status:** the ordering is specified; a `sort` builtin is still open.
-`src/check.tw` `unit_string`. **The normative text is
+**Status:** done (2026-08-11). The `sort` builtin now accepts a list of strings
+and orders it bytewise, in both implementations. **The normative text is
 `docs/language-guide.md`, Strings → Ordering**, which pins bytewise-unsigned
 lexicographic order, shorter-is-smaller on a shared prefix, so that the eleven
 hand-written sorts in the ecosystem agree with `sort.Strings` and with each
 other. It also records that `<` stays undefined on `Str`, which is why
 `str_greater` is a function.
+
+`sort([...strings])` returns a new list ordered ascending, or descending with a
+truthy second argument; a list has no axis, so the flag takes the axis slot the
+tensor form uses. `argsort` on a list is refused (positions into a string list
+have no defined meaning), a non-string element is an error, and the input list is
+left untouched. The bootstrap sorts with `sort.Strings`
+(`internal/interp/builtins.go` `sortStringList`); the self-hosted evaluator
+reuses its own `canon_sort`, the bytewise insertion sort it already had for
+record keys (`src/eval.tw` `sort_string_list`). Tests pin the ordering
+(`internal/interp/sortstr_test.go`) and the cross-implementation agreement
+(`internal/interp/selfhost_test.go`). The hand-written sorts can now delegate,
+though `check.tw`'s `unit_string` insertion sort is left in place since it also
+sorts fine.
 
 `internal/checker/checker.go` `unitString` calls `sort.Strings` on the unit's
 base names before joining, so that `USD*year^-1` renders the same regardless of
@@ -967,12 +992,14 @@ checker, which is an uncomfortable place to be and worth naming.
 
 ## NEEDS-50: an out-of-range axis in `transpose`
 
-**Status:** open, low priority. `src/check.tw` `transpose_result`.
-
-An axis outside the tensor's rank makes the result unknown rather than a
-diagnostic, matching `internal/checker/checker.go`. Every other axis-taking
-builtin reports it through `report_axis`. Fixing this means changing the Go side
-too, or the diagnostics diverge.
+**Status:** done (2026-08-11). `src/check.tw` `transpose_result` and
+`internal/checker/checker.go` (the `transpose` case) now report an out-of-range
+permutation axis through `report_axis`/`reportAxis`, the same path every other
+axis-taking builtin uses, so a `transpose(x, 0, 5)` on a rank-2 tensor is a
+diagnostic (`axis out of range for [2, 3]: ...`) rather than a silent unknown
+that failed only at run time. Both sides changed together and produce
+byte-identical diagnostics; tests in `internal/checker/checker_test.go` and
+`internal/interp/selfhost_test.go`.
 
 ## NEEDS-51: the import resolver
 

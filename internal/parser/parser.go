@@ -211,16 +211,23 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	var unit *ast.UnitAnno
 	var typeName string
 	if p.match(":") {
-		unit, err = p.parseUnitExpr()
-		if err != nil {
-			return nil, err
-		}
-		if (p.check(".") || p.check("[")) && len(unit.Factors) == 1 && unit.Factors[0].Exp == 1 {
-			typeName, err = p.typeSuffix(unit.Factors[0].Name)
+		if p.check("fn") {
+			typeName, err = p.parseFnType()
 			if err != nil {
 				return nil, err
 			}
-			unit = nil
+		} else {
+			unit, err = p.parseUnitExpr()
+			if err != nil {
+				return nil, err
+			}
+			if (p.check(".") || p.check("[")) && len(unit.Factors) == 1 && unit.Factors[0].Exp == 1 {
+				typeName, err = p.typeSuffix(unit.Factors[0].Name)
+				if err != nil {
+					return nil, err
+				}
+				unit = nil
+			}
 		}
 	}
 	if _, err := p.expect("="); err != nil {
@@ -712,6 +719,11 @@ func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, *ast.UnitAnno, s
 			if err != nil {
 				return nil, nil, nil, "", err
 			}
+		} else if p.check("fn") {
+			retType, err = p.parseFnType()
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
 		} else {
 			retUnit, err = p.parseUnitExpr()
 			if err != nil {
@@ -775,6 +787,58 @@ func (p *parser) parseTypeRef() (string, error) {
 		return "", err
 	}
 	return p.typeSuffix(name)
+}
+
+// parseTypeExpr parses one type in a type position: a function type, or a plain
+// type reference (a name, a qualified name, or a generic). It is what a type
+// argument or a struct field type is, wherever a `fn(...)` may appear alongside
+// an ordinary name.
+func (p *parser) parseTypeExpr() (string, error) {
+	if p.check("fn") {
+		return p.parseFnType()
+	}
+	return p.parseTypeRef()
+}
+
+// parseFnType parses a function-type annotation `fn(T, ...) -> R`. Each argument
+// and the result is itself a type, so function types nest: a higher-order
+// callback is `fn(fn(F64) -> F64) -> F64`. Systems-mode type annotations are
+// advisory, so this returns the type as its text form and the checker treats it
+// as an unresolved name it does not check, the same as any other systems type.
+// It assumes the current token is `fn`.
+func (p *parser) parseFnType() (string, error) {
+	p.next() // 'fn'
+	if _, err := p.expect("("); err != nil {
+		return "", err
+	}
+	out := "fn("
+	if !p.check(")") {
+		for i := 0; ; i++ {
+			t, err := p.parseTypeExpr()
+			if err != nil {
+				return "", err
+			}
+			if i > 0 {
+				out += ", "
+			}
+			out += t
+			if !p.match(",") {
+				break
+			}
+		}
+	}
+	if _, err := p.expect(")"); err != nil {
+		return "", err
+	}
+	out += ")"
+	if p.match("->") {
+		r, err := p.parseTypeExpr()
+		if err != nil {
+			return "", err
+		}
+		out += " -> " + r
+	}
+	return out, nil
 }
 
 // parseTypeArgs reads `[T, U, ...]` after a type name, each T a full type
@@ -856,6 +920,13 @@ func (p *parser) parseParam() (ast.Param, error) {
 				return ast.Param{}, err
 			}
 			param.Shape = shape
+		} else if p.check("fn") {
+			// A function-typed parameter, e.g. `step: fn(Tree, Tensor) -> Tree`.
+			// Advisory, kept as text like any other systems-mode type name.
+			param.TypeName, err = p.parseFnType()
+			if err != nil {
+				return ast.Param{}, err
+			}
 		} else {
 			u, err := p.parseUnitExpr()
 			if err != nil {
@@ -1036,7 +1107,7 @@ func (p *parser) parseStructDecl() (ast.Stmt, error) {
 		if _, err := p.expect(":"); err != nil {
 			return nil, err
 		}
-		ftype, err := p.parseTypeRef()
+		ftype, err := p.parseTypeExpr()
 		if err != nil {
 			return nil, err
 		}

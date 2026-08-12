@@ -1,0 +1,100 @@
+# transformer_test.tw: std/transformer.
+#
+# Run with:  twill std/tests/transformer_test.tw
+#
+# The model is composed from std/nn's layers, which nn_test already checks on
+# paper; these tests cover the three things this module adds and could get
+# wrong -- the parameter tree's size and shape, the causal masking that makes it
+# a *decoder*, and that the whole stack differentiates and learns.
+
+import "std/transformer" as tf
+import "harness.tw" as h
+
+seed(3)
+
+fn the_parameter_count_is_the_sum_of_the_pieces() {
+  h.test("the parameter count is the sum of the pieces")
+  # config(vocab=3, dim=4, heads=2, depth=1, max_T=5). By hand:
+  #   tok.W  [3,4] = 12      pos.W [5,4] = 20
+  #   block: ln1 8 + attn 4*[4,4]=64 + ln2 8
+  #          ff  fc1 W[16,4]+b[16] = 80,  fc2 W[4,16]+b[4] = 68  -> 148
+  #          block total 228
+  #   lnf 8
+  #   total 12 + 20 + 228 + 8 = 268
+  let cfg = tf.config(3, 4, 2, 1, 5)
+  let p = tf.gpt_params(cfg, "xavier")
+  h.check("num_params walks every leaf of the tree", tf.num_params(p) == 268)
+}
+
+fn the_logits_have_one_row_per_position_and_one_column_per_token() {
+  h.test("the logits have one row per position and one column per token")
+  let cfg = tf.config(6, 8, 2, 2, 10)
+  let p = tf.gpt_params(cfg, "xavier")
+  let logits = tf.gpt_logits(p, tensor([0, 3, 5, 1]), cfg)
+  # 4 input positions, vocab 6.
+  h.check("logits are [T, vocab]", h.shaped(logits, list(4, 6)))
+}
+
+fn a_position_cannot_see_the_future() {
+  h.test("a position cannot see the future")
+  # The defining property of a causal decoder: position t's logits depend only
+  # on tokens 0..t. So changing the *last* token of a sequence must leave the
+  # first row of the logits bit-for-bit unchanged, because position 0 attends to
+  # position 0 alone through every block's mask.
+  let cfg = tf.config(7, 8, 2, 2, 10)
+  let p = tf.gpt_params(cfg, "he")
+  let a = tf.gpt_logits(p, tensor([2, 4, 1]), cfg)
+  let b = tf.gpt_logits(p, tensor([2, 4, 6]), cfg)
+  h.check("row 0 is invariant to a later token", h.near_all(a[0], b[0]))
+  # And row 1, which sees positions 0 and 1, is likewise invariant to position 2.
+  h.check("row 1 is invariant to a later token", h.near_all(a[1], b[1]))
+  # But the last row, which does see the changed token, must move.
+  h.check("the last row is not invariant", max(abs(a[2] - b[2])) > 0.0)
+}
+
+fn a_pre_norm_block_preserves_the_residual_stream_shape() {
+  h.test("a pre-norm block preserves the residual stream shape")
+  # Every block is a map [T, dim] -> [T, dim]; that is what lets them stack.
+  let X = randn(5, 8)
+  let bp = tf.block_params(8, 2, 4, "xavier")
+  h.check("block output matches its input shape",
+          h.shaped(tf.block(bp, X, 2, 0.00001), list(5, 8)))
+}
+
+fn the_stack_differentiates_and_learns_a_pattern() {
+  h.test("the stack differentiates and learns a pattern")
+  # A single reverse pass through embeddings, two masked-attention blocks, the
+  # tied head and the cross-entropy must reach every weight, and following it
+  # must lower the loss. The target is the next id in a cyclic sequence, which a
+  # tiny model can memorise, so the loss should fall to near zero.
+  import "std/optim" as optim
+  let cfg = tf.config(5, 16, 2, 2, 8)
+  let p = tf.gpt_params(cfg, "xavier")
+  let xs = list(tensor([0, 1, 2, 3, 4, 0, 1]))
+  let ys = list(tensor([1, 2, 3, 4, 0, 1, 2]))
+  let before = item(tf.gpt_loss_batch(p, xs, ys, cfg))
+  let m = optim.zeros_like(p)
+  let v = optim.zeros_like(p)
+  for step in range(60) {
+    let g = grad(fn(w) = tf.gpt_loss_batch(w, xs, ys, cfg))(p)
+    let out = optim.adam_step(p, g, m, v, step + 1, 0.02, 0.9, 0.999, 0.00000001)
+    p = out[0]
+    m = out[1]
+    v = out[2]
+  }
+  let after = item(tf.gpt_loss_batch(p, xs, ys, cfg))
+  h.check("the loss falls under training", after < before)
+  h.check("and reaches near zero on a memorisable pattern", after < 0.05)
+  # Greedy generation from a prefix should then reproduce the cycle: after
+  # [0,1,2] the next four ids are 3,4,0,1.
+  let gen = tf.generate(p, tensor([0, 1, 2]), 4, cfg)
+  h.check("greedy generation reproduces the learned cycle",
+          h.near_all(gen, tensor([0, 1, 2, 3, 4, 0, 1])))
+}
+
+the_parameter_count_is_the_sum_of_the_pieces()
+the_logits_have_one_row_per_position_and_one_column_per_token()
+a_position_cannot_see_the_future()
+a_pre_norm_block_preserves_the_residual_stream_shape()
+the_stack_differentiates_and_learns_a_pattern()
+h.report("transformer_test")

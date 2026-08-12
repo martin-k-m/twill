@@ -284,6 +284,14 @@ depending on which branch answers.
 
 ### 7. A test runner
 
+**Done in this repository (2026-08-11).** `twill test [path ...]` discovers every
+`*_test.tw` under the given paths, runs each, and reports pass/fail with a
+summary, exiting non-zero on any failure -- so a new suite is in the run the
+moment it exists, with no CI list to maintain (`cmd/twill/test.go`). The shared
+runner replaces the per-file shell loop; the harness the suites already use is
+unchanged. What remains for the other repositories is to depend on it rather than
+carry their own copy.
+
 **Five callers.** loom entry 15, bobbin entry 8, weft entry 12, warp entry 13,
 and this repository, which has `std/tests/harness.tw` for the same reason. spool
 is cited by weft and warp as having recorded it and did not; see

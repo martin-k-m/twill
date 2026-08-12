@@ -175,6 +175,7 @@ go build -o twill ./cmd/twill
 twill examples/autodiff.tw      # run a program
 twill check examples/shapes.tw  # shape-check without running
 twill fmt examples/hello.tw     # print canonically formatted source
+twill test std/tests            # run every *_test.tw under a path
 twill                           # start the REPL (multi-line aware)
 ```
 
@@ -297,7 +298,8 @@ The `std/` libraries are written in twill itself and compiled into the binary, s
 
 | Module | Contents |
 | --- | --- |
-| `std/nn` | dense layers, activations (`gelu`, `softplus`, ...), He and Xavier initializers, losses including softmax cross-entropy, `nn.conv` |
+| `std/nn` | dense layers, activations (`gelu`, `softplus`, ...), He and Xavier initializers, losses including softmax cross-entropy, `nn.conv`, multi-head causal attention |
+| `std/transformer` | the GPT-style decoder: pre-norm blocks, tied embedding head, next-token loss, greedy generation, over the `std/nn` pieces |
 | `std/optim` | SGD, momentum and Adam, over a model held as a positional list or a named record |
 | `std/data` | standardizing, train/test splitting, minibatching |
 | `std/backtest` | returns, moving averages, equity curves, drawdown, Sharpe, Sortino, CAGR |

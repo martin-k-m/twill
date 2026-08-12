@@ -367,6 +367,12 @@ several plausible ones. `<` on a string would read as "alphabetically before",
 which is a promise about language that a byte comparison does not keep. A named
 function is a place to put that sentence.
 
+`sort` applies this order directly to a list of strings: `sort(["b", "a"])` is
+`["a", "b"]`, and a truthy second argument sorts descending. It returns a new
+list and leaves its argument untouched. This is the one place the ordering is
+reachable without hand-writing the byte comparison; `<` on the strings
+themselves stays an error.
+
 ### Concatenation
 
 **`Str + Str` exists and produces a new `Str`.** It is the one overload of `+`
@@ -915,8 +921,10 @@ the labels in the output remain. Omitting `->` keeps the labels that appear once
 yet.)
 
 Construction: `tensor(list)`, `scalar(x)`, `zeros(...shape)`, `ones(...shape)`,
-`fill(value, ...shape)`, `eye(n)`, `randn(...shape)` (standard normal),
-`rand(...shape)` (uniform), `seed(n)`. Shapes may be separate args or a list.
+`fill(value, ...shape)`, `eye(n)`, `linspace(start, stop, n)` (n points, both
+endpoints included), `arange(start, stop, step)` (half-open, like `range` with a
+float step), `randn(...shape)` (standard normal), `rand(...shape)` (uniform),
+`seed(n)`. Shapes may be separate args or a list.
 Randomness is **deterministic by default**: a program gives the same result
 every run, and `seed(n)` chooses the starting point. That reproducibility
 matters for model governance and audit.

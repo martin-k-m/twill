@@ -2,6 +2,143 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`linspace` and `arange` construction builtins** (2026-08-11): the two tensor
+  constructors a numerical program reaches for first are now built in, alongside
+  `zeros`/`ones`/`eye`. `linspace(start, stop, n)` gives `n` points with both
+  endpoints included (the last set to `stop` exactly); `arange(start, stop, step)`
+  gives the half-open sequence, the float-stepped, tensor-returning sibling of
+  `range`. Both require their arguments explicitly, matching twill's no-hidden-
+  defaults style, and both landed in the Go bootstrap and the self-hosted
+  evaluator and checker together, with the length statically known for a literal
+  `linspace` count. Cross-implementation parity tests included.
+- **`std/num` and `std/shapes`: common elementwise and repeat helpers**
+  (2026-08-11): `num.sign` (−1/0/1, differentiable with a zero gradient),
+  `num.any`/`num.all`/`num.count_nonzero` (reading a tensor as a mask), and
+  `shapes.tile`/`tile1` (repeat along an axis, any rank, gradient-transparent).
+  All pure twill composed from existing ops; covered by `std/tests/num_test.tw`.
+- **`std/num`: matrix diagonals and products** (2026-08-11): `outer(a, b)` (outer
+  product), `diagonal(m)` (the `(i,i)` entries), `trace(m)`, and `diag(v)` (a
+  matrix with `v` on its diagonal). Each is composed from `eye`/`einsum`/the
+  reductions, so all are differentiable -- `grad(fn(v) = trace(diag(v)))` works
+  -- and stay vectorised. Covered by a new `std/tests/num_test.tw`, which the
+  test runner and the CI regression guard now include.
+- **`twill test`: a test runner** (2026-08-11): discovers every `*_test.tw` file
+  under the given paths (or the working directory), runs each on a fresh
+  interpreter, and reports one line per suite with its check counts plus a
+  summary, exiting non-zero if any suite failed. A file's verdict follows the
+  harness contract std/tests documents -- an error, or a `FAILED` marker, fails
+  the suite. Output is captured at the OS level so a suite that prints through
+  `write_out` is caught too. This removes the by-hand CI suite list that made a
+  new test file invisible until someone remembered to register it (roadmap #7,
+  five callers). A Go-side guard (`cmd/twill/test_test.go`) runs the numeric
+  standard-library suites so a regression in them fails `go test`. Running it
+  surfaced that `std/tests/random` (systems-mode, needs true 64-bit integers)
+  and one `text` UTF-8 case fail on the f64 bootstrap -- known, and now visible.
+- **`sort` orders a list of strings** (2026-08-11): `sort(["banana", "apple"])`
+  returns a new list in the bytewise-unsigned lexicographic order
+  `docs/language-guide.md` pins (uppercase before lowercase, shorter prefix
+  first) -- the order Go's `sort.Strings` gives -- with a truthy second argument
+  for descending. Previously `sort` accepted only tensors and the ecosystem
+  hand-wrote the string comparison in eleven places. `argsort` on a list is
+  refused, a non-string element errors, and the input is left unmutated. Landed
+  in the Go bootstrap and the self-hosted evaluator (which reuses its existing
+  `canon_sort`) together, with a cross-implementation parity test. Closes
+  `docs/needs.md` NEEDS-23.
+
+### Fixed
+
+- **The checker enforces `conv2d` and `maxpool2d` shape contracts**
+  (2026-08-11): the three mistakes the runtime rejects and the checker used to
+  wave through -- a `conv2d` input that is not `[channels, height, width]`, a
+  weight that is not `[out, in, kh, kw]`, a channel count that disagrees between
+  them, and a `maxpool2d` input that is not rank 3 -- are now diagnostics with
+  the runtime's own wording, caught before the net runs. Both implementations,
+  byte-identical; the valid CNN paths are unaffected.
+- **The checker rejects a rank-3-or-higher `@`** (2026-08-11): `@` is a plain
+  matrix product with no batched form -- the interpreter rejects a rank-3 operand
+  at run time -- but the checker returned an unknown shape and stayed silent, so
+  `zeros(5,2,3) @ zeros(5,3,4)` passed the check and failed only when run. The
+  rank is structural and known even when the sizes are not, so it is now a
+  diagnostic (`@ (matmul) requires 1-D or 2-D operands, got ...`). Fixed in the
+  Go bootstrap and the self-hosted `src/check.tw` together; the 1-D and 2-D forms
+  are unaffected.
+- **`std/tests/text`: a corrupted UTF-8 test literal** (2026-08-11): the "lone
+  continuation byte is not valid utf8" case held the bytes `c2 80` -- a *valid*
+  two-byte encoding of U+0080, the classic Latin-1-to-UTF-8 mojibake of a lone
+  `80` -- so `char_valid` correctly returned true and the assertion that it be
+  false failed. twill source is UTF-8 with no byte escape, so the byte is now
+  produced with `chr(128)`, which is what the test meant. Surfaced by `twill
+  test`; the suite passes 80/0.
+- **A constant out-of-range index is caught, and a scalar `@` operand**
+  (2026-08-11): `zeros(3)[3]` (twill indexes from 0 with no negative
+  wraparound) is now the runtime's `index 3 out of range [0, 3)` raised at check
+  time, whenever the index is a literal and the axis length is known. And a
+  rank-0 operand to `@` (`scalar(2.0) @ x`) joins the rank-3 case as a reported
+  error, since matmul takes only 1-D and 2-D operands. Both implementations.
+- **`broadcast_to` compatibility, and `list(...)` shapes, are checked**
+  (2026-08-11): `broadcast_to(x, target)` where the source cannot broadcast to
+  the target (a source axis that is neither 1 nor equal to the target's, or more
+  axes than the target) is now a diagnostic with the runtime's wording, instead
+  of passing the check. In the same change the checker learned to read the
+  idiomatic `list(2, 3)` shape argument -- previously only the separate-argument
+  form (`reshape(x, 2, 3)`) was understood -- so `reshape`'s element-count check,
+  the new broadcast check, and the shape of `zeros(list(2, 3))` all now hold for
+  the form the standard library and examples actually write. Both implementations,
+  byte-identical.
+- **Every axis-taking builtin now checks its axis** (2026-08-11): `flip`,
+  `roll`, `cumsum`, `cumprod`, `cummax`, `cummin` and a tensor `sort` took an
+  optional axis the checker ignored, so an out-of-range one (`flip(x, 5)` on a
+  rank-2 tensor, or `roll(x, 1, 5)` with roll's shift-first argument order)
+  passed the check and failed only at run time. All are now validated through one
+  shared path, in both implementations. This closes the gap the `transpose` and
+  `softmax` fixes opened: the axis argument is checked wherever a builtin takes
+  one.
+- **`transpose` and `softmax` report an out-of-range axis** (2026-08-11): a
+  permutation that names an axis outside the tensor's rank
+  (`transpose(x, 0, 5)` on a rank-2 tensor), or a `softmax(x, 5)` over an axis
+  that does not exist, is now a checker diagnostic
+  (`axis out of range for [2, 3]: ...`) rather than a silent unknown that failed
+  only at run time. These were the axis-taking builtins that stayed quiet;
+  they now report through the same path as `sum`, `argmax` and `concat`. Fixed
+  in the Go bootstrap and the self-hosted `src/check.tw` together, producing
+  byte-identical diagnostics. Closes `docs/needs.md` NEEDS-50.
+- **The checker enforces the `break`/`continue` scoping rules** (2026-08-11):
+  a `break` or `continue` outside any loop, or inside a function nested in a
+  loop, is now a diagnostic (`break outside a loop`) rather than passing
+  `twill check` and reaching the interpreter as an uncaught unwind signal. The
+  checker tracks a lexical loop depth reset to zero at every function boundary,
+  so loop control binds to the innermost enclosing loop and never crosses a
+  `fn`, matching `docs/language-guide.md`. The rule lands in both the Go
+  bootstrap (`internal/checker`) and the self-hosted `src/check.tw` in lockstep,
+  which the self-hosted checker tests confirm produce byte-identical
+  diagnostics. Closes the last open piece of `docs/needs.md` NEEDS-12.
+
+### Added
+
+- **`std/transformer`: the GPT-style decoder, in Twill** (2026-08-11): a new
+  standard-library module that composes `std/nn`'s attention, layernorm, gelu and
+  embedding pieces into the canonical decoder-only transformer. It ships the
+  pre-norm block (`block`, `block_params`), the whole model
+  (`gpt_params`, `gpt_logits`) with a weight-tied output head and learned
+  positional embeddings, the next-token training loss (`gpt_loss`,
+  `gpt_loss_batch`), greedy `generate`, and a `num_params` walk. The entire
+  stack -- embeddings, stacked masked-attention blocks and the tied head --
+  differentiates in a single reverse pass, so a full training step is
+  `grad(gpt_loss_batch)(params)` and the existing optimizers walk the gradient
+  unchanged. The module is a few dozen lines of Twill over `std/nn`; it adds no
+  primitives.
+- **`examples/gpt.tw`**: a character-level GPT that tokenises a string, trains
+  on its shifted windows with Adam, and greedily samples the model back into
+  text. On a small repeated corpus it drives the loss from 3.0 to 0.15 and
+  continues a prompt in the corpus's own words.
+- **`std/tests/transformer_test.tw`**: checks the parameter count against a
+  hand-derived total, the `[T, vocab]` logit shape, the causal property (an
+  earlier position's logits are bit-for-bit invariant to a later token), block
+  shape preservation, and that the stack differentiates and learns a memorisable
+  cycle.
+
 ## [1.4.0] - 2026-08-11
 
 The self-hosting release. The twill compiler written in twill (`src/*.tw`) now
@@ -447,6 +584,23 @@ unchanged and fully backward compatible.
   different arrangement, and the gradient follows the arrangement.
 
 ## [Unreleased]
+
+### Added
+
+- **Function types in annotations** (2026-08-11): `fn(A, B) -> C` is now a type
+  the parser accepts wherever a type annotation may appear -- a parameter, a
+  return, a `let`, or a struct field -- so a callback can be typed
+  (`step: fn(Tree, st.OptState) -> st.StepResult`). The types nest, so a
+  higher-order callback (`fn(fn(F64) -> F64) -> F64`) parses, and a qualified
+  result name is carried through. Like every systems-mode type it is advisory:
+  it parses, formats and round-trips, and the checker leaves it unresolved rather
+  than checking it. This was the single largest blocker to the training and
+  inference packages parsing on the bootstrap (loom, heddle, shuttle, selvedge),
+  and with it plus `arr_push` the package sources that check clean went from 36
+  to 86 of 123.
+- **`arr_push` builtin** (2026-08-11): the append that the `arr_new`/`arr_clear`
+  family was missing, which several systems-mode callers reach for by that name.
+  Identical to `push` -- appends to a growable array in place and returns unit.
 
 ### Fixed
 

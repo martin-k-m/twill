@@ -224,7 +224,7 @@ fn main() -> I64 {
     not tx.char_valid(tx.slice("café", 0, 4)))
 
   t.check(rp, "plain ascii is valid utf eight", tx.char_valid("hello"))
-  t.check(rp, "a lone continuation byte is not valid utf eight", not tx.char_valid(""))
+  t.check(rp, "a lone continuation byte is not valid utf eight", not tx.char_valid(chr(128)))
 
   # Reversal is by character, so the accented character survives.
   t.check_eq_str(rp, "reversing works on characters and not bytes",

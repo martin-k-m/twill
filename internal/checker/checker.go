@@ -143,6 +143,12 @@ type checker struct {
 	// names like cp.Caps), so an unresolved type annotation is advisory there
 	// rather than the error it is in numeric mode.
 	systems bool
+	// Lexical count of enclosing loops for the statement being checked, reset to
+	// zero at every function boundary. A `break`/`continue` is a diagnostic when
+	// this is zero: outside any loop, or inside a function nested in one, which
+	// the language forbids crossing. See inferStmt (Break/Continue, While/For)
+	// and the two body walks (checkFnDef, inferUserCall).
+	loopDepth int
 }
 
 func (c *checker) registerType(td *ast.TypeDecl) {
@@ -408,12 +414,16 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		}
 	case *ast.While:
 		c.inferExpr(st.Cond, env)
+		c.loopDepth++
 		c.inferBlock(st.Body, newEnv(env))
+		c.loopDepth--
 	case *ast.For:
 		iter := c.inferExpr(st.Iter, env)
 		scope := newEnv(env)
 		scope.define(st.Name, elemType(iter))
+		c.loopDepth++
 		c.inferBlock(st.Body, scope)
+		c.loopDepth--
 	case *ast.Return:
 		if st.Value != nil {
 			c.inferExpr(st.Value, env)
@@ -427,8 +437,14 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		}
 	case *ast.TypeDecl, *ast.UnitDecl, *ast.EnumDecl, *ast.StructDecl:
 		// Already registered in the pre-pass.
-	case *ast.Break, *ast.Continue:
-		// Loop control carries no type and defines no name.
+	case *ast.Break:
+		if c.loopDepth == 0 {
+			c.report(st.Line, "break outside a loop")
+		}
+	case *ast.Continue:
+		if c.loopDepth == 0 {
+			c.report(st.Line, "continue outside a loop")
+		}
 	case *ast.ExprStmt:
 		c.inferExpr(st.X, env)
 	case *ast.Block:
@@ -790,6 +806,14 @@ func (c *checker) inferIndex(ex *ast.Index, env *checkEnv) Type {
 			c.report(ex.Line, "cannot index a scalar")
 			return tUnknown{}
 		}
+		// A constant index into a known-length axis is bounds-checkable: twill
+		// indexes from 0 with no negative wraparound, so anything outside
+		// [0, len) is the error the runtime raises.
+		if v.dims[0] >= 0 {
+			if idx, ok := constInt(ex.Index); ok && (idx < 0 || idx >= v.dims[0]) {
+				c.report(ex.Line, "index %d out of range [0, %d)", idx, v.dims[0])
+			}
+		}
 		if len(v.dims) == 1 {
 			return tTensor{dims: []int{}, unit: v.unit}
 		}
@@ -906,12 +930,17 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 		c.resolveUnit(fn.RetUnit, fn.Line)
 	}
 	c.stack[fn] = true
+	// A function body is a fresh scope for loop control: a `break` in a `fn`
+	// written inside a loop is an error, not a way out of that loop.
+	savedDepth := c.loopDepth
+	c.loopDepth = 0
 	var bodyType Type
 	if blk, ok := fn.Body.(*ast.Block); ok {
 		bodyType = c.inferBlock(blk, scope)
 	} else {
 		bodyType = c.inferExpr(fn.Body, scope)
 	}
+	c.loopDepth = savedDepth
 	delete(c.stack, fn)
 
 	if fn.Ret != nil {
@@ -997,12 +1026,17 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		return tUnknown{}
 	}
 	c.stack[fn.node] = true
+	// The callee's body is a fresh function scope for loop control, even when the
+	// call itself sits inside a loop. See checkFnDef.
+	savedDepth := c.loopDepth
+	c.loopDepth = 0
 	var bodyType Type
 	if blk, ok := fn.body.(*ast.Block); ok {
 		bodyType = c.inferBlock(blk, scope)
 	} else {
 		bodyType = c.inferExpr(fn.body, scope)
 	}
+	c.loopDepth = savedDepth
 	delete(c.stack, fn.node)
 
 	if fn.ret != nil {
@@ -1114,7 +1148,7 @@ func substitute(dims []ast.Dim, subst map[string]int) []int {
 
 func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) Type {
 	switch name {
-	case "relu", "abs", "softmax":
+	case "relu", "abs":
 		// Shape and unit preserved.
 		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
@@ -1122,6 +1156,11 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
+	case "softmax":
+		// Shape and unit preserved, but softmax normalises over one axis and the
+		// runtime rejects an out-of-range one, so a constant axis is checked here
+		// the same way the reductions check theirs.
+		return c.axisPreserveResult(ex, argTypes, 1)
 	case "exp", "log", "sin", "cos", "tanh", "sigmoid":
 		// Transcendental functions need a dimensionless argument.
 		if len(argTypes) >= 1 {
@@ -1185,6 +1224,21 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 									"reshape changes the number of elements: %s has %d, %s needs %d",
 									dimsString(tTensor{dims: in.dims}), from, dimsString(tTensor{dims: dims}), to)
 							}
+						}
+					}
+				}
+				if name == "broadcast_to" {
+					// A source shape broadcasts to the target when, right-aligned,
+					// each of its axes is 1 or equals the target's, and it has no
+					// more axes than the target. Both known here means the runtime
+					// error is one the checker can raise instead.
+					if in, ok := argTypes[0].(tTensor); ok {
+						if len(in.dims) > len(dims) {
+							c.report(ex.Line, "cannot broadcast %s to %s: fewer axes in target",
+								dimsString(tTensor{dims: in.dims}), dimsString(tTensor{dims: dims}))
+						} else if !dimsBroadcastable(in.dims, dims) {
+							c.report(ex.Line, "cannot broadcast %s to %s",
+								dimsString(tTensor{dims: in.dims}), dimsString(tTensor{dims: dims}))
 						}
 					}
 				}
@@ -1257,6 +1311,11 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				perm := make([]int, len(axes))
 				for i, ax := range axes {
 					if ax < 0 || ax >= len(t.dims) {
+						// An axis outside the rank is the same mistake every other
+						// axis-taking builtin reports through reportAxis; transpose
+						// stayed silent, so a permutation naming a nonexistent axis
+						// passed the check and failed only at run time.
+						c.reportAxis(ex, t)
 						return tUnknown{}
 					}
 					perm[i] = t.dims[ax]
@@ -1284,6 +1343,20 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
+	case "linspace":
+		// A 1-D tensor whose length is the third argument, known when it is a
+		// literal.
+		if len(ex.Args) == 3 {
+			if n, ok := constInt(ex.Args[2]); ok && n >= 0 {
+				return tTensor{dims: []int{n}}
+			}
+		}
+		return tTensor{dims: []int{-1}}
+	case "arange":
+		// A 1-D tensor whose length depends on the start, stop and step values,
+		// which the checker does not evaluate, so the rank is known and the size
+		// is not.
+		return tTensor{dims: []int{-1}}
 	case "range", "list", "map", "zip", "permutation":
 		return tList{}
 	case "print":
@@ -1316,13 +1389,21 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}
-	case "cumsum", "cumprod", "cummax", "cummin", "floor", "ceil", "round", "flip", "roll":
-		// A cumulative scan, a reversal, or elementwise rounding all preserve
-		// the input's shape.
+	case "floor", "ceil", "round":
+		// Elementwise rounding preserves the input's shape.
 		if t, ok := argTypes[0].(tTensor); ok {
 			return tTensor{dims: t.dims}
 		}
 		return tUnknown{}
+	case "cumsum", "cumprod", "cummax", "cummin", "flip", "sort":
+		// A cumulative scan, a reversal, or a sort preserve the input's shape and
+		// take the axis in the second argument; an out-of-range one is the error
+		// the runtime raises. (sort of a list is handled by returning unknown
+		// here, since its argument is not a tensor.)
+		return c.axisPreserveResult(ex, argTypes, 1)
+	case "roll":
+		// roll puts the shift first, so its axis is the third argument.
+		return c.axisPreserveResult(ex, argTypes, 2)
 	case "gather":
 		// Selecting rows keeps the trailing dims but the row count is dynamic.
 		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) >= 1 {
@@ -1333,11 +1414,16 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		}
 		return tUnknown{}
 	case "conv2d":
-		return convResult(argTypes)
+		return c.convResult(ex, argTypes)
 	case "maxpool2d":
 		// [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
-		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) == 3 {
-			return tTensor{dims: []int{t.dims[0], -1, -1}}
+		// A non-rank-3 input is the error the runtime raises, reported here.
+		if t, ok := argTypes[0].(tTensor); ok {
+			if len(t.dims) != 3 {
+				c.report(ex.Line, "maxpool2d: input must be [channels, height, width], got %s", dimsString(t))
+			} else {
+				return tTensor{dims: []int{t.dims[0], -1, -1}}
+			}
 		}
 		return tTensor{dims: []int{-1, -1, -1}}
 	case "gbm_fit":
@@ -1393,14 +1479,28 @@ func (c *checker) inferEinsum(ex *ast.Call, argTypes []Type) Type {
 
 // convResult infers the output shape of conv2d: input [Cin, H, W] and weight
 // [Cout, Cin, KH, KW] give [Cout, H-KH+1, W-KW+1], with any unknown dimension
-// left as -1.
-func convResult(argTypes []Type) Type {
+// left as -1. The three shape contracts the runtime enforces -- a rank-3 input,
+// a rank-4 weight, and matching channel counts -- are the mistakes people make
+// wiring a net together, so a statically knowable violation is reported here
+// with the message the runtime would have raised.
+func (c *checker) convResult(ex *ast.Call, argTypes []Type) Type {
 	dims := []int{-1, -1, -1}
 	if len(argTypes) != 2 {
 		return tTensor{dims: dims}
 	}
 	in, okIn := argTypes[0].(tTensor)
 	w, okW := argTypes[1].(tTensor)
+	if okIn && len(in.dims) != 3 {
+		c.report(ex.Line, "conv2d: input must be [channels, height, width], got %s", dimsString(in))
+	}
+	if okW && len(w.dims) != 4 {
+		c.report(ex.Line, "conv2d: weight must be [out, in, kh, kw], got %s", dimsString(w))
+	}
+	if okIn && len(in.dims) == 3 && okW && len(w.dims) == 4 {
+		if in.dims[0] >= 0 && w.dims[1] >= 0 && in.dims[0] != w.dims[1] {
+			c.report(ex.Line, "conv2d: input has %d channels but weight expects %d", in.dims[0], w.dims[1])
+		}
+	}
 	if okW && len(w.dims) == 4 {
 		dims[0] = w.dims[0] // Cout
 		if okIn && len(in.dims) == 3 {
@@ -1503,6 +1603,24 @@ func (c *checker) reportAxis(ex *ast.Call, t tTensor) {
 		dimsString(t), len(t.dims), plural(len(t.dims), "axis", "axes"), len(t.dims)-1)
 }
 
+// dimsBroadcastable reports whether src, right-aligned against target, can
+// broadcast to it: every known axis pair is equal or the source's is 1. The
+// caller has already established that src has no more axes than target. An
+// unknown dimension on either side is not a certain mismatch and is skipped.
+func dimsBroadcastable(src, target []int) bool {
+	for i := 1; i <= len(src); i++ {
+		sd := src[len(src)-i]
+		td := target[len(target)-i]
+		if sd < 0 || td < 0 {
+			continue
+		}
+		if sd != td && sd != 1 {
+			return false
+		}
+	}
+	return true
+}
+
 func plural(n int, one, many string) string {
 	if n == 1 {
 		return one
@@ -1532,6 +1650,32 @@ func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
 		}
 	}
 	return tUnknown{}
+}
+
+// axisPreserveResult validates the optional axis of a shape-preserving axis op
+// and returns the input shape and unit unchanged. axisArg is the argument index
+// the axis is passed in -- 1 for softmax/flip/cumsum, 2 for roll, which puts the
+// shift first. A constant axis outside the rank is the error the runtime raises;
+// a non-constant axis, or an unknown input, is left alone.
+func (c *checker) axisPreserveResult(ex *ast.Call, argTypes []Type, axisArg int) Type {
+	if len(argTypes) == 0 {
+		return tUnknown{}
+	}
+	t, ok := argTypes[0].(tTensor)
+	if !ok {
+		return tUnknown{}
+	}
+	if len(ex.Args) > axisArg && len(t.dims) > 0 {
+		if ax, ok := constInt(ex.Args[axisArg]); ok {
+			if ax < 0 {
+				ax += len(t.dims)
+			}
+			if ax < 0 || ax >= len(t.dims) {
+				c.reportAxis(ex, t)
+			}
+		}
+	}
+	return t
 }
 
 // axisReduceResult handles argmax/logsumexp, which always reduce one axis
@@ -1674,6 +1818,14 @@ func elementwiseResult(a, b tTensor) (Type, string) {
 }
 
 func matmulResult(a, b tTensor) (Type, string) {
+	// `@` is a plain matrix product: it takes 1-D or 2-D operands and has no
+	// batched form, so an operand that is a scalar (rank 0) or rank 3 or higher
+	// is not an unknown shape to leave alone, it is a certain runtime error. The
+	// rank is structural and known even when the individual sizes are not, so
+	// this is caught here rather than only when the program runs.
+	if len(a.dims) < 1 || len(a.dims) > 2 || len(b.dims) < 1 || len(b.dims) > 2 {
+		return nil, fmt.Sprintf("@ (matmul) requires 1-D or 2-D operands, got %s @ %s", dimsString(a), dimsString(b))
+	}
 	a2 := a.dims
 	if len(a.dims) == 1 {
 		a2 = []int{1, a.dims[0]}
@@ -1737,20 +1889,27 @@ func constInt(e ast.Expr) (int, bool) {
 func constShape(args []ast.Expr) ([]int, bool) {
 	if len(args) == 1 {
 		if lst, ok := args[0].(*ast.ListLit); ok {
-			dims := make([]int, len(lst.Elements))
-			for i, el := range lst.Elements {
-				n, ok := constInt(el)
-				if !ok {
-					return nil, false
-				}
-				dims[i] = n
+			return constIntElems(lst.Elements)
+		}
+		// list(2, 3): the idiomatic shape argument, a call to the list builtin
+		// with integer literals. Reading it lets reshape's count check and
+		// broadcast_to's compatibility check fire for `reshape(x, list(2, 3))`,
+		// the form the standard library and examples actually use, not only the
+		// separate-argument form.
+		if call, ok := args[0].(*ast.Call); ok {
+			if id, ok := call.Callee.(*ast.Ident); ok && id.Name == "list" {
+				return constIntElems(call.Args)
 			}
-			return dims, true
 		}
 	}
-	dims := make([]int, len(args))
-	for i, a := range args {
-		n, ok := constInt(a)
+	return constIntElems(args)
+}
+
+// constIntElems reads a run of expressions as integer literals, all or nothing.
+func constIntElems(elems []ast.Expr) ([]int, bool) {
+	dims := make([]int, len(elems))
+	for i, el := range elems {
+		n, ok := constInt(el)
 		if !ok {
 			return nil, false
 		}
@@ -1765,7 +1924,7 @@ var builtinNames = map[string]bool{
 	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true,
 	"grad": true, "grads": true, "value_and_grad": true, "map": true, "zip": true,
 	"tensor": true, "scalar": true, "zeros": true, "ones": true, "fill": true,
-	"randn": true, "rand": true, "eye": true, "transpose": true, "shape": true,
+	"randn": true, "rand": true, "eye": true, "linspace": true, "arange": true, "transpose": true, "shape": true,
 	"len": true, "item": true, "range": true, "list": true, "str": true,
 	"square": true, "maximum": true, "minimum": true, "greater": true,
 	"less": true, "greater_equal": true, "less_equal": true, "equal": true,
@@ -1790,7 +1949,7 @@ var builtinNames = map[string]bool{
 	"f64_of_i64": true, "i64_of_f64": true, "f64_bits": true,
 	"f64_from_bits": true, "f64_signbit": true,
 	// Systems collections: growable list, ordered dict, byte buffer.
-	"arr_new": true, "push": true, "pop": true,
+	"arr_new": true, "push": true, "arr_push": true, "pop": true,
 	"dict_new": true, "dict_set": true, "dict_get": true, "dict_has": true,
 	"dict_must": true, "dict_or": true, "dict_keys": true,
 	"bytes_new": true, "bytes_push": true, "bytes_to_str": true, "abort": true,

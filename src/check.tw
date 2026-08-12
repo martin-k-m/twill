@@ -493,6 +493,11 @@ struct Checker {
   # has no definition for (I64, Str, Bool, and qualified names like cp.Caps), so
   # an unresolved type annotation is advisory there rather than an error.
   systems: Bool,
+  # Lexical count of enclosing loops for the statement being checked, reset to
+  # zero at every function boundary (infer_fn_body). A `break`/`continue` is a
+  # diagnostic when this is zero: outside any loop, or inside a function nested
+  # in one, which the language forbids crossing.
+  loop_depth: I64,
 }
 
 fn report(c: Checker, line: I64, msg: Str) {
@@ -527,6 +532,7 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     blind_import: false,
     aliased_import: false,
     systems: bytes.equal(prog.mode, "systems"),
+    loop_depth: 0,
   }
 
   # Register declared record types and units first so forward references
@@ -752,13 +758,17 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     },
     SWhile(st) => {
       infer_expr(c, st.cond, env)
+      c.loop_depth = c.loop_depth + 1
       infer_block(c, st.body, new_env(Some(env)))
+      c.loop_depth = c.loop_depth - 1
     },
     SFor(st) => {
       let iter: Type = infer_expr(c, st.iter, env)
       let scope: CheckEnv = new_env(Some(env))
       scope_define_elem(scope, st.name, iter)
+      c.loop_depth = c.loop_depth + 1
       infer_block(c, st.body, scope)
+      c.loop_depth = c.loop_depth - 1
     },
     SReturn(st) => {
       match st.value {
@@ -782,9 +792,10 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     SEnum(_) => unit,
     SExpr(st) => infer_expr(c, st.x, env),
     SBlock(b) => infer_block(c, b, new_env(Some(env))),
-    # Loop control carries no type and defines no name.
-    SBreak(_) => unit,
-    SContinue(_) => unit,
+    # Loop control binds to the innermost enclosing loop only and never crosses
+    # a function boundary, so outside any loop (depth zero) it is an error.
+    SBreak(st) => if c.loop_depth == 0 { report(c, st.line, "break outside a loop") },
+    SContinue(st) => if c.loop_depth == 0 { report(c, st.line, "continue outside a loop") },
   }
 }
 
@@ -1203,6 +1214,18 @@ fn infer_index(c: Checker, ex: ast.Index, env: CheckEnv) -> Type {
         report(c, ex.line, "cannot index a scalar")
         return TUnknown
       }
+      # A constant index into a known-length axis is bounds-checkable: twill
+      # indexes from 0 with no negative wraparound, so anything outside [0, len)
+      # is the error the runtime raises.
+      if v.dims[0] >= 0 {
+        match const_int(ex.index) {
+          Some(idx) => if idx < 0 or idx >= v.dims[0] {
+            report(c, ex.line, bytes.concat("index ", bytes.concat(str(idx),
+              bytes.concat(" out of range [0, ", bytes.concat(str(v.dims[0]), ")")))))
+          },
+          None => unit,
+        }
+      }
       # Indexing removes the leading axis. The unit and the dtype ride along,
       # because x[0] of a price list is a price and x[0] of a bf16 tensor is
       # a bf16 value.
@@ -1373,6 +1396,18 @@ fn elementwise_result(a: TensorType, b: TensorType) -> ShapeResult {
 # column, and the result drops the promoted axis again. That is the numpy rule
 # and it is what makes `v @ M` and `M @ v` both mean what a reader expects.
 fn matmul_result(a: TensorType, b: TensorType) -> ShapeResult {
+  # `@` is a plain matrix product: it takes 1-D or 2-D operands and has no
+  # batched form, so a scalar (rank 0) or a rank-3-or-higher operand is a certain
+  # runtime error, not an unknown shape to leave alone. The rank is structural and
+  # known even when the sizes are not, so it is caught here rather than only when
+  # the program runs.
+  if len(a.dims) < 1 or len(a.dims) > 2 or len(b.dims) < 1 or len(b.dims) > 2 {
+    return ShapeResult {
+      type: TUnknown,
+      msg: bytes.concat("@ (matmul) requires 1-D or 2-D operands, got ",
+        bytes.concat(dims_string(a), bytes.concat(" @ ", dims_string(b)))),
+    }
+  }
   let a2: Arr[I64] = a.dims
   if len(a.dims) == 1 {
     a2 = arr_new()
@@ -1385,9 +1420,9 @@ fn matmul_result(a: TensorType, b: TensorType) -> ShapeResult {
     push(b2, b.dims[0])
     push(b2, 1)
   }
-  # Rank 3 or higher is a batched matmul the checker does not model, so it says
-  # nothing rather than guessing. Note this returns Unknown with no message,
-  # which is a success with no information, not a failure.
+  # A rank-0 (scalar) operand reaches here, which `@` also rejects, but the sizes
+  # tell nothing useful, so it says nothing rather than guessing. This returns
+  # Unknown with no message, a success with no information, not a failure.
   if len(a2) != 2 or len(b2) != 2 {
     return ShapeResult { type: TUnknown, msg: "" }
   }
@@ -1660,10 +1695,17 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
 # A body is either a block, whose type is its last expression statement, or a
 # single expression after `=`.
 fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv) -> Type {
-  match body {
+  # A function body is a fresh scope for loop control, even when the call or the
+  # definition sits inside a loop: a `break` in a `fn` written inside a loop is
+  # an error, not a way out of that loop.
+  let saved: I64 = c.loop_depth
+  c.loop_depth = 0
+  let t: Type = match body {
     EBlock(blk) => infer_block(c, blk, scope),
     _ => infer_expr(c, body, scope),
   }
+  c.loop_depth = saved
+  t
 }
 
 # is_advisory_type_anno reports whether a single-name return annotation is a type
@@ -2021,11 +2063,32 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
       None => return TUnknown,
     }
   }
-  # abs and softmax also preserve shape and unit, but not an integer dtype;
-  # see float_result_dtype for why that is unknown here rather than f32.
-  if in_set(name, "abs softmax") {
+  # abs preserves shape and unit, but not an integer dtype; see
+  # float_result_dtype for why that is unknown here rather than f32.
+  if in_set(name, "abs") {
     match arg_tensor(arg_types, 0) {
       Some(t) => return set_dtype(TTensor(t), float_result_dtype(t.dtype)),
+      None => return TUnknown,
+    }
+  }
+  # softmax likewise preserves shape and dtype, but it normalises over one axis
+  # and the runtime rejects an out-of-range one, so a constant axis is checked
+  # here the same way the reductions check theirs.
+  if in_set(name, "softmax") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(ex.args) >= 2 and len(t.dims) > 0 {
+          match const_int(ex.args[1]) {
+            Some(ax0) => {
+              let ax: I64 = ax0
+              if ax < 0 { ax = ax + len(t.dims) }
+              if ax < 0 or ax >= len(t.dims) { report_axis(c, ex, t) }
+            },
+            None => unit,
+          }
+        }
+        return set_dtype(TTensor(t), float_result_dtype(t.dtype))
+      },
       None => return TUnknown,
     }
   }
@@ -2109,7 +2172,7 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     }
     return TUnknown
   }
-  if bytes.equal(name, "transpose") { return transpose_result(ex, arg_types) }
+  if bytes.equal(name, "transpose") { return transpose_result(c, ex, arg_types) }
   # A constructor without a dtype argument builds f64, the documented default
   # (docs/dtypes.md). With one, it builds what was named.
   let ctor_dt: I64 = tensor.DT_F64
@@ -2144,6 +2207,29 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     }
     return TUnknown
   }
+  # linspace(start, stop, n): a 1-D tensor whose length is the third argument,
+  # known when it is a literal. arange's length depends on the values, so it has
+  # a known rank and an unknown size.
+  if bytes.equal(name, "linspace") {
+    if len(ctor_args) == 3 {
+      match const_int(ctor_args[2]) {
+        Some(n) => if n >= 0 {
+          let d: Arr[I64] = arr_new()
+          push(d, n)
+          return tensor_with_dtype(d, ctor_dt)
+        },
+        None => unit,
+      }
+    }
+    let du: Arr[I64] = arr_new()
+    push(du, -1)
+    return tensor_with_dtype(du, ctor_dt)
+  }
+  if bytes.equal(name, "arange") {
+    let da: Arr[I64] = arr_new()
+    push(da, -1)
+    return tensor_with_dtype(da, ctor_dt)
+  }
   # The loaded value's type depends on the file, so leave it unknown.
   if bytes.equal(name, "load") { return TUnknown }
   if bytes.equal(name, "str") { return TStr }
@@ -2157,11 +2243,20 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # A cumulative scan, a reversal, or elementwise rounding all preserve the
   # input's shape and dtype but not necessarily its unit, so the unit is
   # dropped.
-  if in_set(name, "cumsum cumprod cummax cummin floor ceil round flip roll") {
+  if in_set(name, "floor ceil round") {
     match arg_tensor(arg_types, 0) {
       Some(t) => return set_dtype(tensor_of(t.dims), t.dtype),
       None => return TUnknown,
     }
+  }
+  # A cumulative scan, a reversal, or a sort preserve the input's shape and take
+  # the axis in the second argument; roll puts the shift first, so its axis is
+  # the third. An out-of-range axis is the error the runtime raises.
+  if in_set(name, "cumsum cumprod cummax cummin flip sort") {
+    return axis_preserve_result(c, ex, arg_types, 1)
+  }
+  if bytes.equal(name, "roll") {
+    return axis_preserve_result(c, ex, arg_types, 2)
   }
   # Selecting rows keeps the trailing dims and the dtype, but the row count is
   # dynamic.
@@ -2178,7 +2273,7 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
       None => return TUnknown,
     }
   }
-  if bytes.equal(name, "conv2d") { return conv_result(arg_types) }
+  if bytes.equal(name, "conv2d") { return conv_result(c, ex, arg_types) }
   # [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
   # A pool selects, so the dtype is the input's, unrounded.
   if bytes.equal(name, "maxpool2d") {
@@ -2192,6 +2287,8 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
         pdt = t.dtype
         if len(t.dims) == 3 {
           dims[0] = t.dims[0]
+        } else {
+          report(c, ex.line, bytes.concat("maxpool2d: input must be [channels, height, width], got ", dims_string(t)))
         }
       },
       None => unit,
@@ -2261,6 +2358,25 @@ fn reshape_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> 
       None => unit,
     }
   }
+  if bytes.equal(name, "broadcast_to") {
+    # A source shape broadcasts to the target when, right-aligned, each of its
+    # axes is 1 or equals the target's, and it has no more axes than the target.
+    match arg_tensor(arg_types, 0) {
+      Some(in_) => {
+        if len(in_.dims) > len(s.dims) {
+          report(c, ex.line, bytes.concat("cannot broadcast ",
+            bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
+            bytes.concat(" to ", bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
+            ": fewer axes in target")))))
+        } else if not dims_broadcastable(in_.dims, s.dims) {
+          report(c, ex.line, bytes.concat("cannot broadcast ",
+            bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
+            bytes.concat(" to ", dims_string(TensorType { dims: s.dims, unit: dict_new(), dtype: DT_UNKNOWN })))))
+        }
+      },
+      None => unit,
+    }
+  }
   # A reshape or a broadcast rearranges elements without re-rounding them, so
   # the dtype rides through.
   let rdt: I64 = DT_UNKNOWN
@@ -2269,6 +2385,20 @@ fn reshape_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> 
     None => unit,
   }
   set_dtype(tensor_of(s.dims), rdt)
+}
+
+# Reports whether src, right-aligned against target, can broadcast to it: every
+# known axis pair is equal or the source's is 1. The caller has already checked
+# that src has no more axes than target. An unknown dimension is skipped.
+fn dims_broadcastable(src: Arr[I64], target: Arr[I64]) -> Bool {
+  let i: I64 = 1
+  while i <= len(src) {
+    let sd: I64 = src[len(src) - i]
+    let td: I64 = target[len(target) - i]
+    if sd >= 0 and td >= 0 and sd != td and sd != 1 { return false }
+    i = i + 1
+  }
+  true
 }
 
 fn pow_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
@@ -2325,7 +2455,7 @@ fn tensor_builtin_result(arg_types: Arr[Type], dt: I64) -> Type {
   TUnknown
 }
 
-fn transpose_result(ex: ast.Call, arg_types: Arr[Type]) -> Type {
+fn transpose_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   match arg_tensor(arg_types, 0) {
     Some(t) => {
       if len(ex.args) == 1 {
@@ -2351,10 +2481,14 @@ fn transpose_result(ex: ast.Call, arg_types: Arr[Type]) -> Type {
       let k: I64 = 0
       while k < len(axes) {
         let ax: I64 = axes[k]
-        # A negative axis in a permutation is not supported by the runtime
-        # either, so an out-of-range axis makes the result unknown rather than a
-        # diagnostic. Reporting it is NEEDS-50.
-        if ax < 0 or ax >= len(t.dims) { return TUnknown }
+        # An axis outside the rank is the same mistake every other axis-taking
+        # builtin reports through report_axis; transpose stayed silent, so a
+        # permutation naming a nonexistent axis passed the check and failed only
+        # at run time.
+        if ax < 0 or ax >= len(t.dims) {
+          report_axis(c, ex, t)
+          return TUnknown
+        }
         push(perm, t.dims[ax])
         k = k + 1
       }
@@ -2425,6 +2559,30 @@ fn reduce_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> T
     }
   }
   TUnknown
+}
+
+# axis_preserve_result validates the optional axis of a shape-preserving axis op
+# and returns the input tensor unchanged. axis_arg is the argument index the axis
+# is passed in -- 1 for flip/cumsum/sort, 2 for roll, which puts the shift first.
+# A constant axis outside the rank is the error the runtime raises; a non-constant
+# axis, or a non-tensor argument (a list sorted by sort), is left alone.
+fn axis_preserve_result(c: Checker, ex: ast.Call, arg_types: Arr[Type], axis_arg: I64) -> Type {
+  match arg_tensor(arg_types, 0) {
+    Some(t) => {
+      if len(ex.args) > axis_arg and len(t.dims) > 0 {
+        match const_int(ex.args[axis_arg]) {
+          Some(ax0) => {
+            let ax: I64 = ax0
+            if ax < 0 { ax = ax + len(t.dims) }
+            if ax < 0 or ax >= len(t.dims) { report_axis(c, ex, t) }
+          },
+          None => unit,
+        }
+      }
+      set_dtype(TTensor(t), t.dtype)
+    },
+    None => TUnknown,
+  }
 }
 
 # axis_reduce_result handles argmax/argmin/logsumexp, which always reduce one
@@ -2521,19 +2679,36 @@ fn broadcast_where(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
 # conv_result infers the output shape of conv2d: input [Cin, H, W] and weight
 # [Cout, Cin, KH, KW] give [Cout, H-KH+1, W-KW+1], with any unknown dimension
 # left unknown. There is no padding and no stride, so the arithmetic is exact.
-fn conv_result(arg_types: Arr[Type]) -> Type {
+fn conv_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   let dims: Arr[I64] = arr_new()
   push(dims, -1)
   push(dims, -1)
   push(dims, -1)
   if len(arg_types) != 2 { return tensor_of(dims) }
+  # The three shape contracts the runtime enforces -- a rank-3 input, a rank-4
+  # weight, and matching channel counts -- are the mistakes people make wiring a
+  # net together, so a statically knowable violation is reported here with the
+  # message the runtime would have raised.
+  match arg_tensor(arg_types, 0) {
+    Some(in_) => if len(in_.dims) != 3 {
+      report(c, ex.line, bytes.concat("conv2d: input must be [channels, height, width], got ", dims_string(in_)))
+    },
+    None => unit,
+  }
   match arg_tensor(arg_types, 1) {
     Some(w) => {
+      if len(w.dims) != 4 {
+        report(c, ex.line, bytes.concat("conv2d: weight must be [out, in, kh, kw], got ", dims_string(w)))
+      }
       if len(w.dims) == 4 {
         dims[0] = w.dims[0]
         match arg_tensor(arg_types, 0) {
           Some(in_) => {
             if len(in_.dims) == 3 {
+              if in_.dims[0] >= 0 and w.dims[1] >= 0 and in_.dims[0] != w.dims[1] {
+                report(c, ex.line, bytes.concat("conv2d: input has ",
+                  bytes.concat(str(in_.dims[0]), bytes.concat(" channels but weight expects ", str(w.dims[1])))))
+              }
               if in_.dims[1] >= 0 and w.dims[2] >= 0 {
                 dims[1] = in_.dims[1] - w.dims[2] + 1
               }
@@ -2719,25 +2894,28 @@ fn const_shape(args: Arr[ast.Expr], from: I64) -> Dims {
   }
   if len(rest) == 1 {
     match rest[0] {
-      EList(lst) => {
-        let dims: Arr[I64] = arr_new()
-        let k: I64 = 0
-        while k < len(lst.elements) {
-          match const_int(lst.elements[k]) {
-            Some(n) => push(dims, n),
-            None => return no_dims(),
-          }
-          k = k + 1
+      EList(lst) => return const_int_elems(lst.elements),
+      # list(2, 3): the idiomatic shape argument, a call to the list builtin with
+      # integer literals. Reading it lets the reshape and broadcast checks fire
+      # for the form the library and examples use, not only separate arguments.
+      ECall(call) => {
+        match call.callee {
+          EIdent(id) => if bytes.equal(id.name, "list") { return const_int_elems(call.args) },
+          _ => unit,
         }
-        return Dims { dims: dims, ok: true }
       },
       _ => unit,
     }
   }
+  const_int_elems(rest)
+}
+
+# Reads a run of expressions as integer literals, all or nothing.
+fn const_int_elems(elems: Arr[ast.Expr]) -> Dims {
   let dims: Arr[I64] = arr_new()
-  i = 0
-  while i < len(rest) {
-    match const_int(rest[i]) {
+  let i: I64 = 0
+  while i < len(elems) {
+    match const_int(elems[i]) {
       Some(n) => push(dims, n),
       None => return no_dims(),
     }
