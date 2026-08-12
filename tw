@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# tw - the pretty twill CLI, written in twill and run on the bootstrap binary.
+# Pathed relative to this script so it works from any directory.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$here/twill.exe" run "$here/src/cli/main.tw" "$@"

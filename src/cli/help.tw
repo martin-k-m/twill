@@ -32,27 +32,19 @@ struct Group {
 
 fn item(name: Str, args: Str, about: Str) -> Item = Item { name: name, args: args, about: about }
 
-# The grouping. Four groups, because five is where a reader stops seeing groups
-# and starts seeing a list again.
+# The grouping. Only commands the twill CLI actually implements are listed here:
+# a help page is a promise, and advertising a command that answers with "not yet
+# available" is a promise broken at the one moment a newcomer is trusting it.
+# The wider command set (build, test, packages, inspect) lives on the roadmap in
+# docs/ until it is wired in, and is added back a group at a time as it lands.
 fn groups() -> Arr[Group] {
   arr(
     Group { title: "Run", items: arr(
-      item("run", "<file.tw>", "Evaluate a program and print what it returns."),
-      item("repl", "", "Start an interactive session."),
-      item("fmt", "[paths]", "Format twill source in place."),
+      item("run", "<file.tw>", "Shape-check, then evaluate a program."),
+      item("fmt", "<file.tw> [--write]", "Print or rewrite canonically formatted source."),
     )},
-    Group { title: "Build", items: arr(
-      item("build", "<file.tw>", "Type and shape check, then emit a module."),
-      item("check", "[paths]", "Check without emitting anything."),
-      item("test", "[paths]", "Run every test in the given files."),
-    )},
-    Group { title: "Packages", items: arr(
-      item("add", "<package>", "Add a dependency with spool and record it."),
-      item("sync", "", "Install exactly what the lockfile pins."),
-    )},
-    Group { title: "Inspect", items: arr(
-      item("shapes", "<file.tw>", "Print the inferred shape of every binding."),
-      item("dump", "<module>", "Print a module's canonical textual form."),
+    Group { title: "Check", items: arr(
+      item("check", "<file.tw>", "Shape-check a program without running it."),
     )},
   )
 }

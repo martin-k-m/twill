@@ -1,32 +1,51 @@
-# main.tw - argument dispatch, and the rules about when the tool decorates.
+# main.tw - the twill CLI, in twill, with the decoration wired in.
 #
-# This file is short on purpose. Everything it does is decide which renderer
-# runs; nothing here formats anything itself. The value it adds is the three
-# policies at the bottom, which are the ones that get quietly violated when a
-# command is added in a hurry.
+# This is the pretty front-end. Unlike src/main.tw (which is byte-locked to the
+# Go bootstrap for the differential harness and so must stay plain), this driver
+# is free to decorate: it renders the banner, the grouped help, and the Rust-
+# style shape diagnostic from src/cli/. It still does the real work by calling
+# the same compiler pipeline the plain CLI does -- lex, parse, check, eval, fmt.
+#
+# Decoration degrades on its own. Every renderer here is handed a Caps, and Caps
+# reports LEVEL_PLAIN with no colour and ASCII glyphs when stdout is not a
+# terminal, so `twill check foo.tw | cat` still prints a clean, uncoloured
+# diagnostic. Nothing here decides to decorate; caps.detect() does.
 
 mode systems
+
+import "../lex.tw" as lex
+import "../parse.tw" as parse
+import "../check.tw" as check
+import "../fmt.tw" as fmt
+import "../eval.tw" as eval
 
 import "../term/caps.tw" as cp
 import "../term/ansi.tw" as ansi
 import "theme.tw" as th
-import "help.tw" as help
 import "banner.tw" as banner
-import "repl.tw" as repl
+import "help.tw" as help
+import "diagnostic.tw" as diag
 
 let VERSION: Str = "1.4.0"
+
+let EXIT_OK: I64 = 0
+let EXIT_ERROR: I64 = 1
+let EXIT_USAGE: I64 = 2
 
 fn main() -> I64 {
   let argv = args()
   let c = negotiate(argv)
-  if len(argv) <= 1 { write_out(greeting(c)); 0 }
-  else { dispatch(c, argv[1], rest(argv)) }
+  # A bare `twill` is someone looking for a way in: show the welcome panel.
+  if len(argv) <= 1 {
+    write_out(banner.welcome(c, VERSION))
+    return EXIT_OK
+  }
+  dispatch(c, argv[1], rest(argv))
 }
 
-# The command line can only ever reduce capability, never raise it above what
-# the terminal supports. `--color` forcing colour into a pipe is a flag people
-# ask for and it belongs in FORCE_COLOR, where it is at least visible to every
-# tool in the pipeline rather than to this one.
+# The command line can only ever reduce capability below what the terminal
+# supports, never raise it. Forcing colour into a pipe is FORCE_COLOR's job, and
+# caps.detect() already honours it.
 fn negotiate(argv: Arr[Str]) -> cp.Caps {
   let c = cp.detect()
   if has_flag(argv, "--no-color") { c.level = cp.LEVEL_PLAIN }
@@ -34,67 +53,287 @@ fn negotiate(argv: Arr[Str]) -> cp.Caps {
   c
 }
 
-fn dispatch(c: cp.Caps, cmd: Str, rest: Arr[Str]) -> I64 {
-  if cmd == "--help" || cmd == "-h" || cmd == "help" { write_out(help.render(c, VERSION)); 0 }
-  else if cmd == "--version" { write_out(VERSION + "\n"); 0 }
-  else if cmd == "repl" { run_repl(c) }
-  else { run_command(c, cmd, rest) }
+fn dispatch(c: cp.Caps, cmd: Str, rst: Arr[Str]) -> I64 {
+  if cmd == "--help" or cmd == "-h" or cmd == "help" {
+    write_out(help.render(c, VERSION)); return EXIT_OK
+  }
+  if cmd == "--version" or cmd == "-v" or cmd == "version" {
+    write_out(ansi.paint(c, th.emphasis(), "twill") + " " +
+      ansi.paint(c, th.muted(), VERSION) + "\n"); return EXIT_OK
+  }
+  if cmd == "run" {
+    if len(rst) < 1 { return want_file(c, "run") }
+    return run_file(c, rst[0])
+  }
+  if cmd == "check" {
+    if len(rst) < 1 { return want_file(c, "check") }
+    return check_file(c, rst[0])
+  }
+  if cmd == "fmt" {
+    if len(rst) < 1 { return want_file(c, "fmt") }
+    return format_file(c, rst[0], has_flag(rst, "--write") or has_flag(rst, "-w"))
+  }
+  if cmd == "repl" {
+    write_err(ansi.paint(c, th.warning(), th.mark_warn(c)) +
+      " the REPL needs a line reader (NEEDS-47)\n")
+    return EXIT_ERROR
+  }
+  # A leading dash that reached here is an option nobody recognised. Reading it
+  # as a filename would send the user hunting for a file they never named.
+  if starts_with(cmd, "-") {
+    write_err(unknown_flag(c, cmd)); return EXIT_USAGE
+  }
+  # Words on the roadmap but not yet wired into this CLI. Naming them explicitly
+  # keeps `tw build foo` from failing as "cannot read file build", which reads as
+  # a bug in the user's invocation rather than a feature that has not landed.
+  if is_reserved(cmd) {
+    write_err(not_yet(c, cmd)); return EXIT_USAGE
+  }
+  # Anything else is taken to be a path to run, mirroring the bare-file form of
+  # the plain CLI (`twill foo.tw`).
+  run_file(c, cmd)
 }
 
-# ── The three policies ──────────────────────────────────────────────────────
+# ── run ───────────────────────────────────────────────────────────────────────
 
-# One: the banner appears on a bare `twill` and on `twill --help`, and nowhere
-# else. Both are moments where a person is looking for orientation. Every other
-# command is a person who knows what they want, and showing them the logo is
-# taking two lines of their terminal to tell them what tool they just ran.
-fn greeting(c: cp.Caps) -> Str = banner.welcome(c, VERSION)
-
-# Two: animation is for things that take time. A command decides between the
-# spinner and the progress bar by whether it knows its total, and it decides
-# whether to use either at all by whether the work can plausibly exceed the
-# spinner's own delay gate. `twill --version` gets no spinner; neither does
-# formatting one file. This function exists to make that a decision someone has
-# to write down rather than a default they inherit.
-fn wants_indicator(cmd: Str, work_items: I64) -> Bool {
-  if cmd == "--version" || cmd == "--help" { false }
-  else { work_items > 1 }
+fn run_file(c: cp.Caps, path: Str) -> I64 {
+  let src: Str = ""
+  match read_file(path) {
+    Ok(b) => src = b,
+    Err(_) => { write_err(cannot_read(c, path)); return EXIT_ERROR },
+  }
+  # Run type-checks first and refuses to run on a diagnostic: a shape error
+  # found statically is the same one the program would hit mid-run, and catching
+  # it before anything executes is the whole point of the checker.
+  match parse.parse(src) {
+    Err(e) => { write_err(render_syntax(c, path, src, e)); return EXIT_ERROR },
+    Ok(prog) => {
+      let diags: Arr[check.Diagnostic] = check.check(prog)
+      if len(diags) > 0 {
+        write_err(render_diags(c, path, src, diags))
+        return EXIT_ERROR
+      }
+      let env: eval.Env = eval.new_env(None)
+      let i: I64 = 0
+      while i < len(prog.body) {
+        match eval.exec_stmt(prog.body[i], env) {
+          Ok(_) => unit,
+          Err(er) => {
+            write_err(render_runtime(c, path, src, er))
+            return EXIT_ERROR
+          },
+        }
+        i = i + 1
+      }
+      return EXIT_OK
+    },
+  }
 }
 
-# Three: exit codes are the API. A rendered diagnostic that exits 0 is a broken
-# build that CI reports as green, which is worse than an ugly error message by
-# a wide margin. Anything that renders an error returns 1 from here.
-fn exit_code(errors: I64) -> I64 = if errors > 0 { 1 } else { 0 }
+# ── check ─────────────────────────────────────────────────────────────────────
 
-fn run_repl(c: cp.Caps) -> I64 {
-  let r = repl.new(c)
-  write_out(repl.greet(r, VERSION))
-  # The read loop belongs to the host, which owns line editing and history.
-  # What this file owns is the prompt and the framing, which is what is here.
-  0
+fn check_file(c: cp.Caps, path: Str) -> I64 {
+  let src: Str = ""
+  match read_file(path) {
+    Ok(b) => src = b,
+    Err(_) => { write_err(cannot_read(c, path)); return EXIT_ERROR },
+  }
+  match parse.parse(src) {
+    Err(e) => { write_err(render_syntax(c, path, src, e)); return EXIT_ERROR },
+    Ok(prog) => {
+      let diags: Arr[check.Diagnostic] = check.check(prog)
+      if len(diags) == 0 {
+        write_out(ansi.paint(c, th.success(), th.mark_ok(c)) + " " +
+          ansi.paint(c, th.emphasis(), path) + " " +
+          ansi.paint(c, th.muted(), "no shape problems found") + "\n")
+        return EXIT_OK
+      }
+      write_err(render_diags(c, path, src, diags))
+      return EXIT_ERROR
+    },
+  }
 }
 
-fn run_command(c: cp.Caps, cmd: Str, rest: Arr[Str]) -> I64 {
-  write_err(unknown(c, cmd))
-  2
+# ── fmt ───────────────────────────────────────────────────────────────────────
+
+fn format_file(c: cp.Caps, path: Str, write: Bool) -> I64 {
+  let src: Str = ""
+  match read_file(path) {
+    Ok(b) => src = b,
+    Err(_) => { write_err(cannot_read(c, path)); return EXIT_ERROR },
+  }
+  let out: Str = ""
+  match fmt.source(src) {
+    Ok(text) => out = text,
+    Err(e) => { write_err(render_fmt_error(c, path, src, e)); return EXIT_ERROR },
+  }
+  if write {
+    match write_file(path, out) {
+      Ok(_) => {
+        write_out(ansi.paint(c, th.success(), th.mark_ok(c)) + " " +
+          ansi.paint(c, th.emphasis(), path) + " " +
+          ansi.paint(c, th.muted(), "formatted") + "\n")
+        return EXIT_OK
+      },
+      Err(_) => {
+        write_err(cannot_write(c, path)); return EXIT_ERROR
+      },
+    }
+  }
+  write_out(out)
+  EXIT_OK
 }
 
-# An unknown command is a mistyped one, so the reply is a suggestion and not the
-# help page. Dumping forty lines of help at someone who typed `twill buidl` is
-# the tool making them find their own typo.
-fn unknown(c: cp.Caps, cmd: Str) -> Str {
-  ansi.paint(c, th.error(), th.mark_err(c)) + " unknown command " +
-    ansi.paint(c, th.emphasis(), cmd) + "\n" +
-    ansi.paint(c, th.muted(), "  twill --help lists the commands\n")
-}
+# ── diagnostics: adapt the compiler's errors to the pretty renderer ───────────
 
-fn has_flag(argv: Arr[Str], flag: Str) -> Bool {
+# The checker reports (line, msg) with no column, so the span underlines the
+# whole meaningful part of the line: from its first non-space to its last. That
+# points at the offending statement without pretending to a precision the
+# checker did not give us.
+fn render_diags(c: cp.Caps, path: Str, src: Str, diags: Arr[check.Diagnostic]) -> Str {
+  let out: Str = ""
   let i: I64 = 0
-  let found = false
-  while i < len(argv) {
-    if argv[i] == flag { found = true }
+  while i < len(diags) {
+    let d: check.Diagnostic = diags[i]
+    out = out + diag.render(c, diag.Diagnostic {
+      severity: 0,
+      code: "",
+      title: d.msg,
+      span: line_span(path, src, d.line),
+      explain: "",
+      help: "",
+    })
     i = i + 1
   }
-  found
+  out
+}
+
+# A syntax error does carry a column, so its span is a single cell there.
+fn render_syntax(c: cp.Caps, path: Str, src: Str, e: lex.SyntaxError) -> Str {
+  let text = line_at(src, e.line)
+  diag.render(c, diag.Diagnostic {
+    severity: 0,
+    code: "",
+    title: "syntax error: " + e.msg,
+    span: diag.Span { file: path, line: e.line, col: e.col, len: 1, text: text },
+    explain: "",
+    help: "",
+  })
+}
+
+fn render_runtime(c: cp.Caps, path: Str, src: Str, e: eval.RuntimeError) -> Str {
+  diag.render(c, diag.Diagnostic {
+    severity: 0,
+    code: "",
+    title: "runtime error: " + e.msg,
+    span: line_span(path, src, e.line),
+    explain: "",
+    help: "",
+  })
+}
+
+fn render_fmt_error(c: cp.Caps, path: Str, src: Str, e: fmt.FormatError) -> Str {
+  match e {
+    FSyntax(s) => render_syntax(c, path, src, s),
+    FRefused(m) => ansi.paint(c, th.error(), th.mark_err(c)) + " " +
+      ansi.paint(c, th.emphasis(), m) + "\n",
+  }
+}
+
+# Build a Span that underlines the trimmed content of a source line.
+fn line_span(path: Str, src: Str, line: I64) -> diag.Span {
+  let text = line_at(src, line)
+  let lead = leading_spaces(text)
+  let trimmed_len = trimmed_length(text, lead)
+  diag.Span {
+    file: path,
+    line: line,
+    col: lead + 1,
+    len: if trimmed_len < 1 { 1 } else { trimmed_len },
+    text: text,
+  }
+}
+
+fn line_at(src: Str, line: I64) -> Str {
+  if line < 1 { return "" }
+  let lines = split_lines(src)
+  if line > len(lines) { return "" }
+  lines[line - 1]
+}
+
+fn split_lines(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = arr()
+  let start: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 10 {
+      push(out, s[start:i])
+      start = i + 1
+    }
+    i = i + 1
+  }
+  push(out, s[start:len(s)])
+  out
+}
+
+fn leading_spaces(s: Str) -> I64 {
+  let i: I64 = 0
+  while i < len(s) and (s[i] == 32 or s[i] == 9) { i = i + 1 }
+  i
+}
+
+fn trimmed_length(s: Str, lead: I64) -> I64 {
+  let e: I64 = len(s)
+  while e > lead and (s[e - 1] == 32 or s[e - 1] == 9) { e = e - 1 }
+  e - lead
+}
+
+# ── small message helpers ─────────────────────────────────────────────────────
+
+fn want_file(c: cp.Caps, cmd: Str) -> I64 {
+  write_err(ansi.paint(c, th.error(), th.mark_err(c)) + " " +
+    ansi.paint(c, th.emphasis(), cmd) + " needs a file: " +
+    ansi.paint(c, th.muted(), "twill " + cmd + " <file.tw>") + "\n")
+  EXIT_USAGE
+}
+
+fn cannot_read(c: cp.Caps, path: Str) -> Str =
+  ansi.paint(c, th.error(), th.mark_err(c)) + " cannot read file " +
+    ansi.paint(c, th.emphasis(), path) + "\n"
+
+fn cannot_write(c: cp.Caps, path: Str) -> Str =
+  ansi.paint(c, th.error(), th.mark_err(c)) + " cannot write file " +
+    ansi.paint(c, th.emphasis(), path) + "\n"
+
+fn is_reserved(cmd: Str) -> Bool =
+  cmd == "build" or cmd == "test" or cmd == "add" or cmd == "sync" or
+  cmd == "shapes" or cmd == "dump"
+
+fn not_yet(c: cp.Caps, cmd: Str) -> Str =
+  ansi.paint(c, th.warning(), th.mark_warn(c)) + " " +
+    ansi.paint(c, th.emphasis(), cmd) +
+    " is on the roadmap but not yet in the twill CLI\n" +
+    ansi.paint(c, th.muted(), "  twill --help lists what works today\n")
+
+fn unknown_flag(c: cp.Caps, cmd: Str) -> Str =
+  ansi.paint(c, th.error(), th.mark_err(c)) + " unknown flag " +
+    ansi.paint(c, th.emphasis(), cmd) + "\n" +
+    ansi.paint(c, th.muted(), "  twill --help lists the commands\n")
+
+# ── argument helpers ──────────────────────────────────────────────────────────
+
+fn has_flag(a: Arr[Str], flag: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] == flag { return true }
+    i = i + 1
+  }
+  false
+}
+
+fn starts_with(s: Str, p: Str) -> Bool {
+  if len(p) > len(s) { return false }
+  s[0:len(p)] == p
 }
 
 fn rest(argv: Arr[Str]) -> Arr[Str] {
