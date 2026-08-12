@@ -1734,6 +1734,19 @@ func (c *checker) broadcastWhere(ex *ast.Call, argTypes []Type) Type {
 		c.report(ex.Line, "%s", msg)
 		return tUnknown{}
 	}
+	// The condition is broadcast against the chosen elements at runtime, so a
+	// shape that cannot broadcast is a shape error the checker can raise here
+	// rather than leaving it to the interpreter.
+	if cond, ok := argTypes[0].(tTensor); ok {
+		if resT, ok := res.(tTensor); ok {
+			combined, condMsg := elementwiseResult(cond, resT)
+			if condMsg != "" {
+				c.report(ex.Line, "%s", condMsg)
+				return tUnknown{}
+			}
+			res = combined
+		}
+	}
 	return res
 }
 
