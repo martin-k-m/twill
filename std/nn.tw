@@ -132,7 +132,7 @@ fn embed(table, ids) = gather(table, ids)
 # Single-head self-attention over a sequence X ([T, dim]).
 fn self_attention(Wq, Wk, Wv, X) {
   let dim = len(X[0])
-  let scores = (X @ Wq) @ transpose(X @ Wk) / sqrt(dim)
+  let scores = linear(X @ Wq, X @ Wk) / sqrt(dim)
   softmax(scores, 1) @ (X @ Wv)
 }
 
