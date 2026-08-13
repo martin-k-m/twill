@@ -178,6 +178,18 @@ func TestSelfHostedCheckCatchesFixedArity(t *testing.T) {
 	}
 }
 
+// quantize packs a 2-D weight; the self-hosted checker owns the same rank rule
+// even though its evaluator leaves quantize unimplemented (it types the result
+// Unknown), so the check must still fire and a valid weight must pass.
+func TestSelfHostedCheckCatchesQuantizeRank(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let y = quantize(zeros(5))\n"); code != 1 {
+		t.Fatalf("check of quantize on a rank-1 weight exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let y = quantize(zeros(4, 8))\n"); code != 0 {
+		t.Fatalf("check of quantize on a 2-D weight exited %d, want 0", code)
+	}
+}
+
 // A constant gather index past the first dimension is the runtime's
 // out-of-range error; the self-hosted checker must fold it just as the Go one.
 func TestSelfHostedCheckCatchesGatherIndex(t *testing.T) {
