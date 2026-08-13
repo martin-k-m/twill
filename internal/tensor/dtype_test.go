@@ -175,6 +175,30 @@ func TestTensorDTypeField(t *testing.T) {
 	}
 }
 
+// Cast rounds every element to the target dtype, tags the result, and keeps the
+// shape. The negatives round correctly here, which is where the self-hosted
+// reference has its NEEDS-2 sign bug, so this is Go-only.
+func TestCast(t *testing.T) {
+	x := New([]float64{0.1, 0.3, -0.3, 65505}, []int{4})
+	y := Cast(x, DTBF16)
+	if y.DType() != DTBF16 {
+		t.Errorf("cast result is %s, want bf16", DTypeName(y.DType()))
+	}
+	want := []float64{0.10009765625, 0.30078125, -0.30078125, 65536}
+	for i, w := range want {
+		if y.Data[i] != w {
+			t.Errorf("cast[%d] = %g, want %g", i, y.Data[i], w)
+		}
+	}
+	if len(y.Shape) != 1 || y.Shape[0] != 4 {
+		t.Errorf("cast changed the shape to %v", y.Shape)
+	}
+	// The source is untouched: a cast is not a mutation.
+	if x.DType() != DTF64 || x.Data[2] != -0.3 {
+		t.Error("cast mutated its input")
+	}
+}
+
 func TestDTypeNames(t *testing.T) {
 	for _, dt := range []DType{DTBool, DTI8, DTI32, DTF16, DTBF16, DTF32, DTF64} {
 		name := DTypeName(dt)

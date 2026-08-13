@@ -898,6 +898,15 @@ func (c *checker) inferSlice(ex *ast.Slice, env *checkEnv) Type {
 // --- calls -----------------------------------------------------------------
 
 func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
+	// x.to(f32) casts x, and here is only a call whose callee is a field access
+	// named `to` with one dtype-name argument. The dims and unit ride through
+	// unchanged -- a cast changes the values' format, not what they mean -- and
+	// the dtype name is read from the syntax rather than inferred, so it is not
+	// flagged as an unknown variable. A target that is not a visible tensor makes
+	// it unknown and says nothing, leaving the runtime to reject an uncastable to.
+	if t, ok := c.inferCast(ex, env); ok {
+		return t
+	}
 	callee := c.inferExpr(ex.Callee, env)
 	argTypes := make([]Type, len(ex.Args))
 	for i, a := range ex.Args {
@@ -916,6 +925,33 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 		return tUnknown{}
 	}
 	return tUnknown{}
+}
+
+// inferCast recognises x.to(dt): a call whose callee is a `to` field access with
+// one bare dtype-name argument that the environment does not bind (a binding
+// wins, since the name could be an ordinary variable). It returns the target's
+// tensor type with the shape and unit unchanged, or unknown for a non-tensor
+// target; ok is false when this is not a to-cast, so the caller falls through to
+// ordinary inference. It mirrors the self-hosted infer_cast.
+func (c *checker) inferCast(ex *ast.Call, env *checkEnv) (Type, bool) {
+	fld, ok := ex.Callee.(*ast.Field)
+	if !ok || fld.Name != "to" || len(ex.Args) != 1 {
+		return nil, false
+	}
+	id, ok := ex.Args[0].(*ast.Ident)
+	if !ok {
+		return nil, false
+	}
+	if _, bound := env.get(id.Name); bound {
+		return nil, false
+	}
+	if _, isDType := tensor.DTypeOfName(id.Name); !isDType {
+		return nil, false
+	}
+	if t, ok := c.inferExpr(fld.Target, env).(tTensor); ok {
+		return tTensor{dims: t.dims, unit: t.unit}, true
+	}
+	return tUnknown{}, true
 }
 
 // paramType gives a parameter's type from its annotation alone (for checking a
