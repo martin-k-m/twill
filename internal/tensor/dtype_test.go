@@ -2,6 +2,7 @@ package tensor
 
 import (
 	"math"
+	"strconv"
 	"testing"
 )
 
@@ -196,6 +197,40 @@ func TestCast(t *testing.T) {
 	// The source is untouched: a cast is not a mutation.
 	if x.DType() != DTF64 || x.Data[2] != -0.3 {
 		t.Error("cast mutated its input")
+	}
+}
+
+func TestShortestForDType(t *testing.T) {
+	// The stored bf16 value of 0.1 spells back to "0.1"; whole and integer dtypes
+	// print at natural length; the specials keep Go's spellings.
+	cases := []struct {
+		dt   DType
+		in   float64
+		want string
+	}{
+		{DTBF16, RoundToDType(DTBF16, 0.1), "0.1"},
+		{DTF16, RoundToDType(DTF16, 3.14159), "3.14"},
+		{DTBF16, 1, "1"},
+		{DTI8, 3, "3"},
+		{DTBF16, math.Inf(1), "+Inf"},
+		{DTF16, math.NaN(), "NaN"},
+	}
+	for _, c := range cases {
+		if got := ShortestForDType(c.dt, c.in); got != c.want {
+			t.Errorf("ShortestForDType(%s, %g) = %q, want %q", DTypeName(c.dt), c.in, got, c.want)
+		}
+	}
+	// The shortest spelling really round-trips: parsed and re-rounded, it is the
+	// stored value again, for a sweep of bf16 and f16 values.
+	for _, x := range []float64{0.3, 2.5, 100, 0.333, 65504, 1.0009765625} {
+		for _, dt := range []DType{DTBF16, DTF16} {
+			stored := RoundToDType(dt, x)
+			s := ShortestForDType(dt, stored)
+			back, err := strconv.ParseFloat(s, 64)
+			if err != nil || RoundToDType(dt, back) != stored {
+				t.Errorf("%s %g -> %q does not round-trip", DTypeName(dt), x, s)
+			}
+		}
 	}
 }
 
