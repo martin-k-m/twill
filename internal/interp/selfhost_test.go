@@ -222,6 +222,20 @@ func TestSelfHostedContractionDtypeMatches(t *testing.T) {
 	}
 }
 
+// Softmax accumulates its exponentials at the accumulation dtype and stores a
+// narrow quotient; an integer input comes back as f32. Both interpreters must
+// agree on the dtype and, for a bf16 result, on the printed values.
+func TestSelfHostedSoftmaxDtypeMatches(t *testing.T) {
+	src := "let x = tensor([1.0, 2.0, 3.0, 4.0]).to(bf16)\n" +
+		"print(dtype(softmax(x, 0)))\nprint(softmax(x, 0))\n" +
+		"print(dtype(softmax(ones(3, i8), 0)))\n" +
+		"print(dtype(softmax(zeros(4), 0)))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("softmax dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A rearrangement carries elements through unchanged, so it keeps the input
 // dtype (concat promotes its pieces); both interpreters must agree.
 func TestSelfHostedRearrangementDtypeMatches(t *testing.T) {

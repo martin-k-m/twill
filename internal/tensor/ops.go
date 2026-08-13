@@ -367,6 +367,18 @@ func Softmax(t *Tensor, axis int) (*Tensor, error) {
 	}
 	before, L, after := axisSpans(t.Shape, axis)
 	out := make([]float64, len(t.Data))
+	// An integer softmax is not an integer, so it comes back as f32; a float keeps
+	// its dtype. The exponentials and their total are held at the accumulation
+	// dtype and only the quotient is stored. This is the op where a narrow
+	// accumulator does the most damage: the terms span orders of magnitude by
+	// construction, so a bf16 total is the largest term and nothing else. f64 keeps
+	// its plain running sum, bit-identical to before.
+	dt := t.DType()
+	if isIntDType(dt) {
+		dt = DTF32
+	}
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	for i := 0; i < before; i++ {
 		for j := 0; j < after; j++ {
 			base := i*L*after + j
@@ -379,15 +391,20 @@ func Softmax(t *Tensor, axis int) (*Tensor, error) {
 			sum := 0.0
 			for k := 0; k < L; k++ {
 				e := math.Exp(t.Data[base+k*after] - m)
+				if narrow {
+					e = RoundToDType(acc, e)
+					sum = RoundToDType(acc, sum+e)
+				} else {
+					sum += e
+				}
 				out[base+k*after] = e
-				sum += e
 			}
 			for k := 0; k < L; k++ {
 				out[base+k*after] /= sum
 			}
 		}
 	}
-	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	res := contractionResult(out, append([]int(nil), t.Shape...), dt)
 	// Forward-mode 2-jet. The jacobian is y_i(d_ij - y_j), so the first tangent
 	// is yd_i = y_i(xd_i - s) with s the y-weighted mean of the input tangents.
 	// Differentiating that once more along the direction gives the second, where
