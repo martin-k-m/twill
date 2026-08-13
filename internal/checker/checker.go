@@ -1192,7 +1192,18 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	case "int":
 		return tTensor{dims: []int{}}
-	case "item", "len":
+	case "item":
+		// item reads the sole element out, so a tensor with a statically known
+		// count other than one is the runtime error, caught here.
+		if len(argTypes) >= 1 {
+			if t, ok := argTypes[0].(tTensor); ok {
+				if n, ok := elementCount(t.dims); ok && n != 1 {
+					c.report(ex.Line, "item expects a single-element tensor, got %s", dimsString(t))
+				}
+			}
+		}
+		return scalar()
+	case "len":
 		return scalar()
 	case "sum", "mean", "max", "min", "prod", "median":
 		return c.reduceResult(ex, argTypes)
@@ -1219,7 +1230,22 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				if name == "reshape" {
 					if in, ok := argTypes[0].(tTensor); ok {
 						if from, ok := elementCount(in.dims); ok {
-							if to, ok := elementCount(dims); ok && from != to {
+							// A negative target dimension is not an inferred axis:
+							// twill has no -1 reshape, so it is a certain runtime
+							// error the checker can name, rather than the silent
+							// pass elementCount(dims) gives it (it bails on any
+							// negative). Saying why spares the numpy reflex.
+							neg := false
+							for _, d := range dims {
+								if d < 0 {
+									neg = true
+								}
+							}
+							if neg {
+								c.report(ex.Line,
+									"reshape: cannot fit %d elements into %s; twill has no -1 dimension inference",
+									from, dimsString(tTensor{dims: dims}))
+							} else if to, ok := elementCount(dims); ok && from != to {
 								c.report(ex.Line,
 									"reshape changes the number of elements: %s has %d, %s needs %d",
 									dimsString(tTensor{dims: in.dims}), from, dimsString(tTensor{dims: dims}), to)
@@ -1427,6 +1453,14 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// roll puts the shift first, so its axis is the third argument.
 		return c.axisPreserveResult(ex, argTypes, 2)
 	case "gather":
+		// The index selects rows, so it must be a 1-D list of positions; a rank-2
+		// or higher index is the runtime error, and its rank is known here.
+		if len(argTypes) >= 2 {
+			if idx, ok := argTypes[1].(tTensor); ok && len(idx.dims) > 1 {
+				c.report(ex.Line, "gather expects a 1-D tensor or list of indices, got %s", dimsString(idx))
+				return tUnknown{}
+			}
+		}
 		// Selecting rows keeps the trailing dims but the row count is dynamic.
 		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) >= 1 {
 			dims := make([]int, len(t.dims))
@@ -1931,6 +1965,15 @@ func isDefiniteNonTensor(t Type) bool {
 // --- literal shape extraction ---------------------------------------------
 
 func constInt(e ast.Expr) (int, bool) {
+	// A negated literal like `-1` parses as a unary minus over a number, not as a
+	// negative NumberLit, so read through it. This is what lets the reshape check
+	// see the -1 in `reshape(x, -1, 4)` — the numpy habit twill does not honour —
+	// rather than giving up on a shape it cannot fold.
+	if u, ok := e.(*ast.Unary); ok && u.Op == "-" {
+		if v, ok := constInt(u.Operand); ok {
+			return -v, true
+		}
+	}
 	if n, ok := e.(*ast.NumberLit); ok {
 		iv := int(n.Value)
 		if float64(iv) == n.Value {
