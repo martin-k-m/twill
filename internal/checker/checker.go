@@ -2409,7 +2409,9 @@ var builtinArity = map[string]int{
 	"args": 0, "arr_new": 0, "bytes_new": 0, "clock_now_ms": 0, "dict_new": 0,
 	"gpu_available": 0, "gpu_device_count": 0, "is_tty_stdout": 0, "rng_normal": 0,
 	"rng_uniform": 0, "window_size": 0,
-	// unary
+	// unary -- elementwise math (unaryOp / elemOp) and the rest
+	"relu": 1, "exp": 1, "log": 1, "sin": 1, "cos": 1, "tanh": 1, "sigmoid": 1,
+	"sqrt": 1, "square": 1, "floor": 1, "ceil": 1, "round": 1,
 	"abort": 1, "abs": 1, "arr_clear": 1, "bnot": 1, "buf_len": 1, "buf_new": 1,
 	"bytes_to_str": 1, "chr": 1, "columns": 1, "dict_keys": 1, "emit_line": 1,
 	"enumerate": 1, "env": 1, "eye": 1, "f64_bits": 1, "f64_from_bits": 1,
@@ -2421,7 +2423,10 @@ var builtinArity = map[string]int{
 	"rng_perm": 1, "rng_seed": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,
 	"str_quote": 1, "str_to_f64": 1, "tensor": 1, "value_and_grad": 1,
 	"write_err": 1, "write_out": 1,
-	// binary
+	// binary -- elementwise/tensor pairs (binTensor), bit ops (bitOp), and the rest
+	"matmul": 2, "dot": 2, "conv2d": 2, "maximum": 2, "minimum": 2, "greater": 2,
+	"less": 2, "greater_equal": 2, "less_equal": 2, "equal": 2,
+	"and": 2, "or": 2, "xor": 2, "shl": 2, "shr": 2,
 	"append": 2, "arr_push": 2, "buf_get8": 2, "bytes_push": 2, "concat": 2,
 	"dict_del": 2, "dict_get": 2, "dict_has": 2, "dict_must": 2, "f64_mod": 2,
 	"f64_pow": 2, "field": 2, "gather": 2, "is_same": 2, "linear": 2, "map": 2,
