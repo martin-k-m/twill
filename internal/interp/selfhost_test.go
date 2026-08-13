@@ -207,6 +207,21 @@ func TestSelfHostedElementwisePromotionMatches(t *testing.T) {
 	}
 }
 
+// A contraction accumulates in f32 for narrow operands and produces the promoted
+// dtype. Both the general odometer and the batched-matmul fast path are covered;
+// the values here are exact in bf16, so both interpreters agree byte for byte.
+func TestSelfHostedContractionDtypeMatches(t *testing.T) {
+	src := "let a = tensor([[1.0, 2.0]]).to(bf16)\nlet b = tensor([[1.0], [1.0]]).to(bf16)\n" +
+		"print(a @ b)\nprint(dtype(a @ b))\n" +
+		"print(einsum(\"ij,jk->ik\", a, b))\n" +
+		"let q = reshape(tensor([1.0, 1.0, 1.0, 1.0]), 1, 2, 2).to(bf16)\n" +
+		"print(einsum(\"bxc,byc->bxy\", q, q))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("contraction dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A rearrangement carries elements through unchanged, so it keeps the input
 // dtype (concat promotes its pieces); both interpreters must agree.
 func TestSelfHostedRearrangementDtypeMatches(t *testing.T) {

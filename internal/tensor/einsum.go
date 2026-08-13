@@ -93,7 +93,7 @@ func EinsumOutputDims(inSubs []string, outSub string, inputDims [][]int) (dims [
 }
 
 // einsumRaw computes the einsum forward pass without autodiff.
-func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error) {
+func einsumRaw(inSubs []string, outSub string, inputs []*Tensor, dt DType) (*Tensor, error) {
 	for k, sub := range inSubs {
 		if len(sub) != len(inputs[k].Shape) {
 			return nil, fmt.Errorf("einsum: operand %d has rank %d but subscript %q has %d labels", k, len(inputs[k].Shape), sub, len(sub))
@@ -103,7 +103,7 @@ func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error
 	// The general odometer below re-derives a multi-dimensional index for every
 	// scalar multiply; dispatching each batch to the tuned 2-D kernels removes
 	// that per-element bookkeeping and inherits their tiling and accumulators.
-	if r := tryBatchedMatmul(inSubs, outSub, inputs); r != nil {
+	if r := tryBatchedMatmul(inSubs, outSub, inputs, dt); r != nil {
 		return r, nil
 	}
 	inputDims := make([][]int, len(inputs))
@@ -161,12 +161,20 @@ func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error
 	counter := make([]int, L)
 	offK := make([]int, len(inputs))
 	offOut := 0
+	// A narrow contraction rounds each accumulation step to the accumulation
+	// dtype; f64 is a plain running sum, bit-identical to before.
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	for step := 0; step < total; step++ {
 		prod := 1.0
 		for k := range inputs {
 			prod *= inputs[k].Data[offK[k]]
 		}
-		outData[offOut] += prod
+		if narrow {
+			outData[offOut] = RoundToDType(acc, outData[offOut]+prod)
+		} else {
+			outData[offOut] += prod
+		}
 		for li := L - 1; li >= 0; li-- {
 			counter[li]++
 			for k := range inputs {
@@ -183,7 +191,7 @@ func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error
 			offOut -= outContrib[li] * dims[li]
 		}
 	}
-	return &Tensor{Data: outData, Shape: outShape}, nil
+	return contractionResult(outData, outShape, dt), nil
 }
 
 // tryBatchedMatmul handles the two rank-3 batched matmuls attention is built
@@ -193,7 +201,7 @@ func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error
 // caller falls back to the general path; a shape it does not recognise is never
 // mishandled, only left alone. The result differs from the odometer by the
 // kernels' summation order, within tolerance, as the fused linear kernel does.
-func tryBatchedMatmul(inSubs []string, outSub string, inputs []*Tensor) *Tensor {
+func tryBatchedMatmul(inSubs []string, outSub string, inputs []*Tensor, dt DType) *Tensor {
 	if len(inputs) != 2 || len(outSub) != 3 {
 		return nil
 	}
@@ -238,19 +246,29 @@ func tryBatchedMatmul(inSubs []string, outSub string, inputs []*Tensor) *Tensor 
 		return nil
 	}
 	out := make([]float64, B*X*Y)
+	narrow := dt != DTF64
+	acc := AccDType(dt)
 	for batch := 0; batch < B; batch++ {
 		aMat := ta.Data[batch*X*C : batch*X*C+X*C]
 		var oMat []float64
 		if transposed {
 			bMat := tb.Data[batch*Y*C : batch*Y*C+Y*C]
-			oMat = mmNT(aMat, X, C, bMat, Y) // [X,C] · [Y,C]ᵀ -> [X,Y]
+			if narrow {
+				oMat = mmAccNT(aMat, X, C, bMat, Y, acc)
+			} else {
+				oMat = mmNT(aMat, X, C, bMat, Y) // [X,C] · [Y,C]ᵀ -> [X,Y]
+			}
 		} else {
 			bMat := tb.Data[batch*C*Y : batch*C*Y+C*Y]
-			oMat = mm(aMat, X, C, bMat, Y) // [X,C] · [C,Y] -> [X,Y]
+			if narrow {
+				oMat = mmAcc(aMat, X, C, bMat, Y, acc)
+			} else {
+				oMat = mm(aMat, X, C, bMat, Y) // [X,C] · [C,Y] -> [X,Y]
+			}
 		}
 		copy(out[batch*X*Y:batch*X*Y+X*Y], oMat)
 	}
-	return &Tensor{Data: out, Shape: []int{B, X, Y}}
+	return contractionResult(out, []int{B, X, Y}, dt)
 }
 
 // Einsum evaluates an Einstein-summation spec over the inputs, with autodiff.
@@ -261,7 +279,13 @@ func Einsum(spec string, inputs []*Tensor) (*Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := einsumRaw(inSubs, outSub, inputs)
+	// A contraction produces the promotion of its operands and accumulates in f32
+	// for anything narrower (docs/dtypes.md). The gradient einsums below stay f64.
+	dt := inputs[0].DType()
+	for _, in := range inputs[1:] {
+		dt = Promote(dt, in.DType())
+	}
+	res, err := einsumRaw(inSubs, outSub, inputs, dt)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +316,7 @@ func Einsum(spec string, inputs []*Tensor) (*Tensor, error) {
 					gSubs = append(gSubs, inSubs[j])
 				}
 			}
-			gp, err := einsumRaw(gSubs, inSubs[p], gInputs)
+			gp, err := einsumRaw(gSubs, inSubs[p], gInputs, DTF64)
 			if err != nil {
 				continue
 			}
