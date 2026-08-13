@@ -42,3 +42,11 @@ func TestNegativeConstructorDimCaught(t *testing.T) {
 	wantNone(t, "let a = eye(4)")
 	wantNone(t, "let a = linspace(0.0, 1.0, 5)")
 }
+
+func TestConvKernelLargerThanInputCaught(t *testing.T) {
+	// A kernel bigger than the input produces an empty output; the runtime
+	// rejects it, and both spatial pairs are known here.
+	wantOne(t, "let x = zeros(3, 8, 8)\nlet y = conv2d(x, zeros(4, 3, 10, 10))", "larger than input")
+	// A kernel that fits stays clean.
+	wantNone(t, "let x = zeros(3, 8, 8)\nlet y = conv2d(x, zeros(4, 3, 3, 3))")
+}

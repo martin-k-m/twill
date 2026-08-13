@@ -1587,6 +1587,15 @@ func (c *checker) convResult(ex *ast.Call, argTypes []Type) Type {
 	if okW && len(w.dims) == 4 {
 		dims[0] = w.dims[0] // Cout
 		if okIn && len(in.dims) == 3 {
+			// A kernel wider or taller than the input gives H-KH+1 < 1: an empty
+			// output, which the runtime rejects. When both spatial pairs are known
+			// this is certain, so it is named here rather than left as the silent
+			// negative dimension the arithmetic below would otherwise return.
+			if in.dims[1] >= 0 && in.dims[2] >= 0 && w.dims[2] >= 0 && w.dims[3] >= 0 &&
+				(w.dims[2] > in.dims[1] || w.dims[3] > in.dims[2]) {
+				c.report(ex.Line, "conv2d: kernel %dx%d is larger than input %dx%d",
+					w.dims[2], w.dims[3], in.dims[1], in.dims[2])
+			}
 			if in.dims[1] >= 0 && w.dims[2] >= 0 {
 				dims[1] = in.dims[1] - w.dims[2] + 1
 			}
