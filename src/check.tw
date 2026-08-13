@@ -2552,6 +2552,33 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
         pdt = t.dtype
         if len(t.dims) == 3 {
           dims[0] = t.dims[0]
+          # A constant window settles the pooled height and width, and the two
+          # runtime rejections: a window below one, or one so large it pools
+          # nothing (h/k or w/k rounds to zero).
+          match const_int(ex.args[1]) {
+            Some(k) => {
+              if k < 1 {
+                report(c, ex.line, bytes.concat("maxpool2d: window must be >= 1, got ", str(k)))
+                return TUnknown
+              }
+              let h: I64 = t.dims[1]
+              let w: I64 = t.dims[2]
+              # h / k rounds to zero exactly when h < k (both non-negative); the
+              # self-hosted `/` is float division, so the comparison is written
+              # directly and the floor is taken with int() for the output dims.
+              let h_empty: Bool = h >= 0 and h < k
+              let w_empty: Bool = w >= 0 and w < k
+              if h_empty or w_empty {
+                report(c, ex.line, bytes.concat("maxpool2d: window ", bytes.concat(str(k),
+                  bytes.concat(" is larger than input ", bytes.concat(str(h),
+                  bytes.concat("x", str(w)))))))
+                return TUnknown
+              }
+              if h >= 0 { dims[1] = int(h / k) }
+              if w >= 0 { dims[2] = int(w / k) }
+            },
+            None => unit,
+          }
         } else {
           report(c, ex.line, bytes.concat("maxpool2d: input must be [channels, height, width], got ", dims_string(t)))
         }

@@ -1683,7 +1683,28 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			if len(t.dims) != 3 {
 				c.report(ex.Line, "maxpool2d: input must be [channels, height, width], got %s", dimsString(t))
 			} else {
-				return tTensor{dims: []int{t.dims[0], -1, -1}}
+				dims := []int{t.dims[0], -1, -1}
+				// A constant window settles the pooled height and width, and the
+				// two runtime rejections: a window below one, or one so large it
+				// pools nothing (h/k or w/k rounds to zero).
+				if k, ok := constInt(ex.Args[1]); ok {
+					if k < 1 {
+						c.report(ex.Line, "maxpool2d: window must be >= 1, got %d", k)
+						return tUnknown{}
+					}
+					h, w := t.dims[1], t.dims[2]
+					if (h >= 0 && h/k == 0) || (w >= 0 && w/k == 0) {
+						c.report(ex.Line, "maxpool2d: window %d is larger than input %dx%d", k, h, w)
+						return tUnknown{}
+					}
+					if h >= 0 {
+						dims[1] = h / k
+					}
+					if w >= 0 {
+						dims[2] = w / k
+					}
+				}
+				return tTensor{dims: dims}
 			}
 		}
 		return tTensor{dims: []int{-1, -1, -1}}
