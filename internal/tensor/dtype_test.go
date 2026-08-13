@@ -200,6 +200,30 @@ func TestCast(t *testing.T) {
 	}
 }
 
+// An elementwise op produces the promoted dtype and rounds each element to it
+// once; f64 operands are untouched, keeping the hot path and the goldens intact.
+func TestElementwisePromotion(t *testing.T) {
+	bf := func(d []float64) *Tensor {
+		return Cast(New(append([]float64(nil), d...), []int{len(d)}), DTBF16)
+	}
+	sum, err := Add(bf([]float64{0.1, 1}), bf([]float64{1, 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.DType() != DTBF16 {
+		t.Errorf("bf16 + bf16 is %s, want bf16", DTypeName(sum.DType()))
+	}
+	// 1.1 is not a bf16 value; the sum is rounded to the nearest, 1.1015625.
+	if sum.Data[0] != RoundToDType(DTBF16, 1.1) {
+		t.Errorf("sum[0] = %v, want the bf16 rounding of 1.1", sum.Data[0])
+	}
+	// f64 stays f64 with no rounding and no tag.
+	f, _ := Add(New([]float64{0.1}, []int{1}), New([]float64{0.2}, []int{1}))
+	if f.DType() != DTF64 || f.Data[0] != 0.30000000000000004 {
+		t.Errorf("f64 add changed: dtype %s, value %v", DTypeName(f.DType()), f.Data[0])
+	}
+}
+
 func TestShortestForDType(t *testing.T) {
 	// The stored bf16 value of 0.1 spells back to "0.1"; whole and integer dtypes
 	// print at natural length; the specials keep Go's spellings.

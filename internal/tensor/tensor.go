@@ -228,6 +228,22 @@ func track1(out, a *Tensor, backward func()) *Tensor {
 	return out
 }
 
+// roundedBinaryResult wraps an elementwise op's output buffer, rounding each
+// element to the promoted dtype and tagging it. For f64 -- every operand that
+// existed before dtypes -- it is a plain &Tensor with no rounding and no tag, so
+// the hot path is unchanged. The rounding is in place, before any backward
+// closure reads the output, so a gradient computed from the primal sees the same
+// rounded value the store did, matching the self-hosted reference.
+func roundedBinaryResult(out []float64, shape []int, dt DType) *Tensor {
+	if dt == DTF64 {
+		return &Tensor{Data: out, Shape: shape}
+	}
+	for i := range out {
+		out[i] = RoundToDType(dt, out[i])
+	}
+	return (&Tensor{Data: out, Shape: shape}).WithDType(dt)
+}
+
 // track2 wires a two-input op into the autodiff graph when needed.
 func track2(out, a, b *Tensor, backward func()) *Tensor {
 	if a.RequiresGrad || b.RequiresGrad {
@@ -334,9 +350,20 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	//
 	// Gated on gradients and jets being off rather than handled here, because
 	// the backward closure is the part worth having exactly one copy of.
+	// An elementwise op runs in f64 and rounds once on store to the promoted
+	// dtype, which for a single operation is exactly the result dtype's own
+	// arithmetic (docs/dtypes.md). Promote(f64, f64) is f64, so f64 operands take
+	// the untouched path -- no rounding and no tag -- and every existing program
+	// behaves exactly as before.
+	dt := Promote(a.DType(), b.DType())
+
 	if !recordJets && !a.RequiresGrad && !b.RequiresGrad &&
 		len(a.Shape) == 0 && len(b.Shape) == 0 {
-		return Scalar(f(a.Data[0], b.Data[0])), nil
+		v := f(a.Data[0], b.Data[0])
+		if dt != DTF64 {
+			return Scalar(RoundToDType(dt, v)).WithDType(dt), nil
+		}
+		return Scalar(v), nil
 	}
 
 	shape, ok := BroadcastShape(a.Shape, b.Shape)
@@ -359,7 +386,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 				out[i] = f(ad[i], bd[i])
 			}
 		})
-		res := &Tensor{Data: out, Shape: shape}
+		res := roundedBinaryResult(out, shape, dt)
 		if !rg {
 			return res, nil
 		}
@@ -393,7 +420,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 				out[i] = f(ad[i], bs)
 			}
 		})
-		res := &Tensor{Data: out, Shape: shape}
+		res := roundedBinaryResult(out, shape, dt)
 		if !rg {
 			return res, nil
 		}
@@ -423,7 +450,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 				out[i] = f(as, bd[i])
 			}
 		})
-		res := &Tensor{Data: out, Shape: shape}
+		res := roundedBinaryResult(out, shape, dt)
 		if !rg {
 			return res, nil
 		}
@@ -477,7 +504,7 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 			ib -= effB[d] * shape[d]
 		}
 	}
-	res := &Tensor{Data: out, Shape: shape}
+	res := roundedBinaryResult(out, shape, dt)
 	if !rg {
 		return res, nil
 	}

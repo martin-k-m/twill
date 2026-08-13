@@ -193,6 +193,20 @@ func TestSelfHostedDtypeBuiltinMatches(t *testing.T) {
 	}
 }
 
+// An elementwise op produces the promoted dtype and rounds each element to it;
+// both interpreters must agree. A comparison yields the promoted dtype, not bool
+// (Go's compareOp returns a plain 0/1 tensor), so it is tested here too.
+func TestSelfHostedElementwisePromotionMatches(t *testing.T) {
+	src := "print(fill(0.1, 2, bf16) + ones(2, bf16))\n" +
+		"print(ones(2, i8) + ones(2, i8))\n" +
+		"print(greater(fill(1.0, 2, bf16), fill(2.0, 2, bf16)))\n" +
+		"print(zeros(2) + ones(2))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("elementwise dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // An operation whose result is an index produces i32 (docs/dtypes.md), so
 // argmax/argsort/argtopk print with a dtype=i32 tag. This closes a long-standing
 // divergence: the self-hosted evaluator always tagged them and the Go bootstrap,
