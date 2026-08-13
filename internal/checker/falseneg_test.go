@@ -78,6 +78,21 @@ func TestSplitIsAKnownBuiltin(t *testing.T) {
 	// unreachable. A valid split is now clean.
 	wantNone(t, "let x = zeros(6)\nlet p = split(x, 2, 0)")
 	wantNone(t, "let x = zeros(6)\nlet p = split(x, [2, 4], 0)")
+	wantNone(t, "let x = zeros(2, 6)\nlet p = split(x, 3, 1)")
+}
+
+func TestSplitBoundsCaught(t *testing.T) {
+	// The mismatches split raises at runtime are static when the axis length and
+	// the count or explicit sizes are constant.
+	wantOne(t, "let x = zeros(7)\nlet p = split(x, 3, 0)", "does not divide evenly")
+	wantOne(t, "let x = zeros(6)\nlet p = split(x, 0, 0)", "count must be positive")
+	wantOne(t, "let x = zeros(6)\nlet p = split(x, [2, 2], 0)", "sizes sum to 4 but axis 0 has length 6")
+	wantOne(t, "let x = zeros(6)\nlet p = split(x, list(2, 2), 0)", "sizes sum to 4")
+	wantOne(t, "let x = zeros(6)\nlet p = split(x, [2, -1], 0)", "negative size -1")
+	wantOne(t, "let x = zeros(6)\nlet p = split(x, 2, 5)", "axis out of range")
+	// Sizes that add up, and a count that divides, stay clean.
+	wantNone(t, "let x = zeros(6)\nlet p = split(x, [2, 4], 0)")
+	wantNone(t, "let x = zeros(6)\nlet p = split(x, 3, 0)")
 }
 
 func TestConcatEmptyListCaught(t *testing.T) {

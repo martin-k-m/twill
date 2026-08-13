@@ -2223,7 +2223,8 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # fold's result is whatever the folded function returns, which depends on a
   # value the checker does not have.
   if bytes.equal(name, "fold") { return TUnknown }
-  if in_set(name, "append enumerate columns split shape range list map zip permutation") {
+  if bytes.equal(name, "split") { return infer_split(c, ex, arg_types) }
+  if in_set(name, "append enumerate columns shape range list map zip permutation") {
     return TList(ListType { elems: None })
   }
   if in_set(name, "write_frame print save") { return TUnit }
@@ -3143,6 +3144,94 @@ fn infer_concat(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   let dims: Arr[I64] = copy_dims(parts[0].dims)
   dims[axis] = total
   tensor_with_unit(dims, parts[0].unit)
+}
+
+# const_split_sizes reads split's second argument as an explicit list of sizes:
+# a list literal, an all-numeric bracket literal (which parses as a tensor), or a
+# list(...) call of integer literals. A bare integer is the equal-pieces count, a
+# different case, so this returns ok=false for it.
+fn const_split_sizes(e: ast.Expr) -> Dims {
+  match e {
+    EList(lst) => return const_int_elems(lst.elements),
+    ETensor(tl) => return const_int_elems(tl.elements),
+    ECall(call) => {
+      match call.callee {
+        EIdent(id) => if bytes.equal(id.name, "list") { return const_int_elems(call.args) },
+        _ => unit,
+      }
+    },
+    _ => unit,
+  }
+  no_dims()
+}
+
+# infer_split checks concat's inverse. When the axis length, the piece count or
+# the explicit sizes are constant, the same mismatches the runtime raises are
+# knowable here: an axis out of range, a count that does not divide the axis
+# evenly, or sizes that do not sum to it. Anything dynamic is an unknown list.
+fn infer_split(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
+  let unknown_list: Type = TList(ListType { elems: None })
+  match arg_tensor(arg_types, 0) {
+    Some(t) => {
+      if len(t.dims) == 0 { return unknown_list }
+      let axis: I64 = 0
+      if len(ex.args) >= 3 {
+        match const_int(ex.args[2]) {
+          Some(a) => axis = a,
+          None => return unknown_list,
+        }
+      }
+      if axis < 0 { axis = axis + len(t.dims) }
+      if axis < 0 or axis >= len(t.dims) {
+        report_axis(c, ex, t)
+        return TUnknown
+      }
+      let el: I64 = t.dims[axis]
+      if len(ex.args) >= 2 {
+        let sizes: Dims = const_split_sizes(ex.args[1])
+        if sizes.ok {
+          if len(sizes.dims) == 0 {
+            report(c, ex.line, "split: need at least one piece")
+            return TUnknown
+          }
+          let total: I64 = 0
+          let i: I64 = 0
+          while i < len(sizes.dims) {
+            if sizes.dims[i] < 0 {
+              report(c, ex.line, bytes.concat("split: negative size ", str(sizes.dims[i])))
+              return TUnknown
+            }
+            total = total + sizes.dims[i]
+            i = i + 1
+          }
+          if el >= 0 and total != el {
+            report(c, ex.line, bytes.concat("split: sizes sum to ", bytes.concat(str(total),
+              bytes.concat(" but axis ", bytes.concat(str(axis),
+              bytes.concat(" has length ", str(el)))))))
+            return TUnknown
+          }
+        } else {
+          match const_int(ex.args[1]) {
+            Some(n) => {
+              if n <= 0 {
+                report(c, ex.line, bytes.concat("split: piece count must be positive, got ", str(n)))
+                return TUnknown
+              }
+              if el >= 0 and el % n != 0 {
+                report(c, ex.line, bytes.concat("split: axis ", bytes.concat(str(axis),
+                  bytes.concat(" has length ", bytes.concat(str(el),
+                  bytes.concat(", which ", bytes.concat(str(n), " does not divide evenly")))))))
+                return TUnknown
+              }
+            },
+            None => unit,
+          }
+        }
+      }
+      unknown_list
+    },
+    None => unknown_list,
+  }
 }
 
 # ---- literal shape extraction ---------------------------------------------

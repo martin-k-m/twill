@@ -1316,7 +1316,63 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return c.inferConcat(ex, argTypes)
 	case "fold":
 		return tUnknown{}
-	case "append", "enumerate", "columns", "split":
+	case "append", "enumerate", "columns":
+		return tList{}
+	case "split":
+		// split(t, n | sizes[, axis]) is concat's inverse. When the axis length,
+		// the piece count or the explicit sizes are all constant, the same
+		// mismatches the runtime raises are knowable here: an axis out of range, a
+		// count that does not divide the axis evenly, or sizes that do not sum to
+		// it. Anything dynamic is left as an unknown-length list.
+		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) > 0 {
+			axis := 0
+			if len(ex.Args) >= 3 {
+				a, ok := constInt(ex.Args[2])
+				if !ok {
+					return tList{}
+				}
+				axis = a
+			}
+			if axis < 0 {
+				axis += len(t.dims)
+			}
+			if axis < 0 || axis >= len(t.dims) {
+				c.reportAxis(ex, t)
+				return tUnknown{}
+			}
+			L := t.dims[axis]
+			if len(ex.Args) >= 2 {
+				// A list literal, or a list(...) call, means explicit sizes; a bare
+				// integer means that many equal pieces.
+				if sizes, ok := constSplitSizes(ex.Args[1]); ok {
+					if len(sizes) == 0 {
+						c.report(ex.Line, "split: need at least one piece")
+						return tUnknown{}
+					}
+					total := 0
+					for _, s := range sizes {
+						if s < 0 {
+							c.report(ex.Line, "split: negative size %d", s)
+							return tUnknown{}
+						}
+						total += s
+					}
+					if L >= 0 && total != L {
+						c.report(ex.Line, "split: sizes sum to %d but axis %d has length %d", total, axis, L)
+						return tUnknown{}
+					}
+				} else if n, ok := constInt(ex.Args[1]); ok {
+					if n <= 0 {
+						c.report(ex.Line, "split: piece count must be positive, got %d", n)
+						return tUnknown{}
+					}
+					if L >= 0 && L%n != 0 {
+						c.report(ex.Line, "split: axis %d has length %d, which %d does not divide evenly", axis, L, n)
+						return tUnknown{}
+					}
+				}
+			}
+		}
 		return tList{}
 	case "write_frame":
 		return tUnit{}
@@ -2143,6 +2199,27 @@ func constShape(args []ast.Expr) ([]int, bool) {
 		}
 	}
 	return constIntElems(args)
+}
+
+// constSplitSizes reads split's second argument as an explicit list of sizes:
+// a list literal or a list(...) call of integer literals. A bare integer is the
+// equal-pieces count, a different case, so this reports ok=false for it.
+func constSplitSizes(e ast.Expr) ([]int, bool) {
+	if lst, ok := e.(*ast.ListLit); ok {
+		return constIntElems(lst.Elements)
+	}
+	// An all-numeric bracket literal parses as a tensor, not a list, so sizes
+	// written [2, 4] arrive here as a TensorLit; the runtime reads it as a 1-D
+	// tensor of lengths just the same.
+	if tl, ok := e.(*ast.TensorLit); ok {
+		return constIntElems(tl.Elements)
+	}
+	if call, ok := e.(*ast.Call); ok {
+		if id, ok := call.Callee.(*ast.Ident); ok && id.Name == "list" {
+			return constIntElems(call.Args)
+		}
+	}
+	return nil, false
 }
 
 // constIntElems reads a run of expressions as integer literals, all or nothing.
