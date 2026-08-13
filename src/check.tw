@@ -1504,6 +1504,23 @@ struct Count {
   ok: Bool,
 }
 
+# report_neg_dim flags a constructor asked for a negative dimension. Untyped it
+# reaches the runtime as an allocation with a negative length and panics there
+# ("makeslice: len out of range"), which names nothing; caught here it reads like
+# any other shape diagnostic.
+fn report_neg_dim(c: Checker, line: I64, name: Str, dims: Arr[I64]) -> Bool {
+  let i: I64 = 0
+  while i < len(dims) {
+    if dims[i] < 0 {
+      report(c, line, bytes.concat(name, bytes.concat(": dimension ",
+        bytes.concat(str(dims[i]), " is negative"))))
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
 fn element_count(dims: Arr[I64]) -> Count {
   let n: I64 = 1
   let i: I64 = 0
@@ -2263,13 +2280,19 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   }
   if in_set(name, "zeros ones randn rand") {
     let s: Dims = const_shape(ctor_args, 0)
-    if s.ok { return tensor_with_dtype(s.dims, ctor_dt) }
+    if s.ok {
+      if report_neg_dim(c, ex.line, name, s.dims) { return TUnknown }
+      return tensor_with_dtype(s.dims, ctor_dt)
+    }
     return TUnknown
   }
   if bytes.equal(name, "fill") {
     if len(ctor_args) >= 1 {
       let s: Dims = const_shape(ctor_args, 1)
-      if s.ok { return tensor_with_dtype(s.dims, ctor_dt) }
+      if s.ok {
+        if report_neg_dim(c, ex.line, name, s.dims) { return TUnknown }
+        return tensor_with_dtype(s.dims, ctor_dt)
+      }
     }
     return TUnknown
   }
@@ -2277,6 +2300,9 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     if len(ctor_args) == 1 {
       match const_int(ctor_args[0]) {
         Some(n) => {
+          let one: Arr[I64] = arr_new()
+          push(one, n)
+          if report_neg_dim(c, ex.line, name, one) { return TUnknown }
           let d: Arr[I64] = arr_new()
           push(d, n)
           push(d, n)
@@ -2293,7 +2319,10 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   if bytes.equal(name, "linspace") {
     if len(ctor_args) == 3 {
       match const_int(ctor_args[2]) {
-        Some(n) => if n >= 0 {
+        Some(n) => {
+          let one: Arr[I64] = arr_new()
+          push(one, n)
+          if report_neg_dim(c, ex.line, name, one) { return TUnknown }
           let d: Arr[I64] = arr_new()
           push(d, n)
           return tensor_with_dtype(d, ctor_dt)

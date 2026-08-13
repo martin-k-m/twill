@@ -27,3 +27,18 @@ func TestItemSingleElementCaught(t *testing.T) {
 	wantNone(t, "let y = item(zeros(1))")
 	wantNone(t, "let y = item(sum(zeros(3)))")
 }
+
+func TestNegativeConstructorDimCaught(t *testing.T) {
+	// These used to reach the runtime and panic in make([]float64, n) with n < 0,
+	// surfacing as "makeslice: len out of range" naming no call site.
+	wantOne(t, "let a = zeros(-2, 3)", "negative")
+	wantOne(t, "let a = ones(3, -1)", "negative")
+	wantOne(t, "let a = randn(-4)", "negative")
+	wantOne(t, "let a = fill(5.0, -2)", "negative")
+	wantOne(t, "let a = eye(-3)", "negative")
+	wantOne(t, "let a = linspace(0.0, 1.0, -3)", "negative")
+	// Valid constructors stay clean.
+	wantNone(t, "let a = zeros(2, 3)")
+	wantNone(t, "let a = eye(4)")
+	wantNone(t, "let a = linspace(0.0, 1.0, 5)")
+}

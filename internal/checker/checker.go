@@ -594,6 +594,21 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 // A negative dimension is this checker's way of saying "not known yet", and one
 // of those makes the product meaningless rather than small, so it reports
 // nothing instead of a number that would produce a confident wrong answer.
+// reportNegDim flags a constructor asked for a negative dimension. Untyped, it
+// reaches the runtime as a make([]float64, n) with n < 0 and panics there, which
+// surfaces as an unhelpful "makeslice: len out of range" rather than a shape
+// error naming the offending call. Caught here, it reads like every other shape
+// diagnostic.
+func (c *checker) reportNegDim(line int, name string, dims []int) bool {
+	for _, d := range dims {
+		if d < 0 {
+			c.report(line, "%s: dimension %d is negative", name, d)
+			return true
+		}
+	}
+	return false
+}
+
 func elementCount(dims []int) (int, bool) {
 	n := 1
 	for _, d := range dims {
@@ -1374,12 +1389,18 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	case "zeros", "ones", "randn", "rand":
 		if dims, ok := constShape(ex.Args); ok {
+			if c.reportNegDim(ex.Line, name, dims) {
+				return tUnknown{}
+			}
 			return tTensor{dims: dims}
 		}
 		return tUnknown{}
 	case "fill":
 		if len(ex.Args) >= 1 {
 			if dims, ok := constShape(ex.Args[1:]); ok {
+				if c.reportNegDim(ex.Line, name, dims) {
+					return tUnknown{}
+				}
 				return tTensor{dims: dims}
 			}
 		}
@@ -1387,6 +1408,9 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "eye":
 		if len(ex.Args) == 1 {
 			if n, ok := constInt(ex.Args[0]); ok {
+				if c.reportNegDim(ex.Line, name, []int{n}) {
+					return tUnknown{}
+				}
 				return tTensor{dims: []int{n, n}}
 			}
 		}
@@ -1395,7 +1419,10 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// A 1-D tensor whose length is the third argument, known when it is a
 		// literal.
 		if len(ex.Args) == 3 {
-			if n, ok := constInt(ex.Args[2]); ok && n >= 0 {
+			if n, ok := constInt(ex.Args[2]); ok {
+				if c.reportNegDim(ex.Line, name, []int{n}) {
+					return tUnknown{}
+				}
 				return tTensor{dims: []int{n}}
 			}
 		}
