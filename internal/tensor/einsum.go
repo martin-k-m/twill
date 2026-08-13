@@ -99,6 +99,13 @@ func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error
 			return nil, fmt.Errorf("einsum: operand %d has rank %d but subscript %q has %d labels", k, len(inputs[k].Shape), sub, len(sub))
 		}
 	}
+	// Fast path: the rank-3 batched matmul that attention spells as an einsum.
+	// The general odometer below re-derives a multi-dimensional index for every
+	// scalar multiply; dispatching each batch to the tuned 2-D kernels removes
+	// that per-element bookkeeping and inherits their tiling and accumulators.
+	if r := tryBatchedMatmul(inSubs, outSub, inputs); r != nil {
+		return r, nil
+	}
 	inputDims := make([][]int, len(inputs))
 	for k := range inputs {
 		inputDims[k] = inputs[k].Shape
@@ -177,6 +184,73 @@ func einsumRaw(inSubs []string, outSub string, inputs []*Tensor) (*Tensor, error
 		}
 	}
 	return &Tensor{Data: outData, Shape: outShape}, nil
+}
+
+// tryBatchedMatmul handles the two rank-3 batched matmuls attention is built
+// from -- "bxc,byc->bxy" (contracting the last axis of each, e.g. Q·Kᵀ over
+// heads) and "bxc,bcy->bxy" (a per-batch matmul, e.g. attn·V) -- by running each
+// batch through the tuned 2-D kernels. It returns nil for any other spec, so the
+// caller falls back to the general path; a shape it does not recognise is never
+// mishandled, only left alone. The result differs from the odometer by the
+// kernels' summation order, within tolerance, as the fused linear kernel does.
+func tryBatchedMatmul(inSubs []string, outSub string, inputs []*Tensor) *Tensor {
+	if len(inputs) != 2 || len(outSub) != 3 {
+		return nil
+	}
+	a, bSub := inSubs[0], inSubs[1]
+	if len(a) != 3 || len(bSub) != 3 {
+		return nil
+	}
+	// Batch label leads all three; the output's other two labels are the free
+	// axes, one from each input. Require the first input to be [batch, x, c] with
+	// x the output's first free axis and c the contracted axis (the shape
+	// attention produces); anything else falls back.
+	bl := outSub[0]
+	x, y := outSub[1], outSub[2]
+	if a[0] != bl || bSub[0] != bl || a[1] != x {
+		return nil
+	}
+	c := a[2] // contracted: must not appear in the output
+	if c == x || c == y {
+		return nil
+	}
+	ta, tb := inputs[0], inputs[1]
+	B := ta.Shape[0]
+	if tb.Shape[0] != B {
+		return nil
+	}
+	X, C := ta.Shape[1], ta.Shape[2]
+	// Second input holds y and c in some order; that order picks the kernel.
+	var Y int
+	transposed := false // true when b is [batch, y, c] and we need y·cᵀ (mmNT)
+	if bSub[1] == y && bSub[2] == c {
+		transposed = true
+		Y = tb.Shape[1]
+		if tb.Shape[2] != C {
+			return nil
+		}
+	} else if bSub[1] == c && bSub[2] == y {
+		Y = tb.Shape[2]
+		if tb.Shape[1] != C {
+			return nil
+		}
+	} else {
+		return nil
+	}
+	out := make([]float64, B*X*Y)
+	for batch := 0; batch < B; batch++ {
+		aMat := ta.Data[batch*X*C : batch*X*C+X*C]
+		var oMat []float64
+		if transposed {
+			bMat := tb.Data[batch*Y*C : batch*Y*C+Y*C]
+			oMat = mmNT(aMat, X, C, bMat, Y) // [X,C] · [Y,C]ᵀ -> [X,Y]
+		} else {
+			bMat := tb.Data[batch*C*Y : batch*C*Y+C*Y]
+			oMat = mm(aMat, X, C, bMat, Y) // [X,C] · [C,Y] -> [X,Y]
+		}
+		copy(out[batch*X*Y:batch*X*Y+X*Y], oMat)
+	}
+	return &Tensor{Data: out, Shape: []int{B, X, Y}}
 }
 
 // Einsum evaluates an Einstein-summation spec over the inputs, with autodiff.
