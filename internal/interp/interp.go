@@ -1042,7 +1042,46 @@ func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {
 		return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
 	}
 	callee := ip.evalExpr(ex.Callee, env)
+	// A trailing dtype name on a tensor constructor, `zeros([2, 3], bf16)`. The
+	// name is contextual, not reserved: it counts as a dtype only on a maker, only
+	// when it is one of the seven, and only when nothing in scope binds it, so a
+	// program using f32 as an ordinary variable keeps its meaning. The maker builds
+	// its f64 tensor from the remaining arguments and the result is cast once,
+	// which rounds and tags it.
+	if b, ok := callee.(*value.Builtin); ok && dtypeMakers[b.Name] && len(ex.Args) > 0 {
+		if dt, ok := contextualDType(ex.Args[len(ex.Args)-1], env); ok {
+			rest := ip.evalArgs(ex.Args[:len(ex.Args)-1], env)
+			out := ip.Apply(callee, rest, ex.Line)
+			if t, ok := out.(*tensor.Tensor); ok {
+				return tensor.Cast(t, dt)
+			}
+			return out
+		}
+	}
 	return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
+}
+
+// dtypeMakers are the tensor constructors whose trailing argument may be a dtype
+// name (docs/dtypes.md). seed and permutation are the makers left out: neither
+// builds a tensor.
+var dtypeMakers = map[string]bool{
+	"tensor": true, "scalar": true, "zeros": true, "ones": true,
+	"fill": true, "randn": true, "rand": true, "eye": true,
+}
+
+// contextualDType reads an expression as a trailing dtype name: a bare
+// identifier that names one of the seven dtypes and that the environment does
+// not bind. A binding wins, since the same trailing position holds shape
+// dimensions and an ordinary variable there has to keep meaning one.
+func contextualDType(e ast.Expr, env *value.Env) (tensor.DType, bool) {
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return 0, false
+	}
+	if _, bound := env.Get(id.Name); bound {
+		return 0, false
+	}
+	return tensor.DTypeOfName(id.Name)
 }
 
 // evalArgs evaluates a call's arguments left to right.

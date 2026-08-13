@@ -193,6 +193,20 @@ func TestSelfHostedDtypeBuiltinMatches(t *testing.T) {
 	}
 }
 
+// A dtype-carrying constructor tags its tensor, and dtype() reads the tag back;
+// both interpreters must agree on the name for every maker and both arities.
+func TestSelfHostedConstructorDtypeMatches(t *testing.T) {
+	src := "print(dtype(zeros(2, 3, bf16)))\nprint(dtype(eye(3, f32)))\n" +
+		"print(dtype(scalar(1.5, i8)))\nprint(dtype(ones(4)))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("constructor dtype differs: Go %q vs self-hosted %q", goOut, selfOut)
+	}
+	if goOut != "bf16f32i8f64" {
+		t.Fatalf("constructor dtype output = %q", goOut)
+	}
+}
+
 // quantize packs a 2-D weight; the self-hosted checker owns the same rank rule
 // even though its evaluator leaves quantize unimplemented (it types the result
 // Unknown), so the check must still fire and a valid weight must pass.
