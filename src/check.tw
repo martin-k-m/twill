@@ -2164,7 +2164,22 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     }
   }
   if bytes.equal(name, "int") { return tensor_of(arr_new()) }
-  if in_set(name, "item len") { return scalar() }
+  if bytes.equal(name, "item") {
+    # item reads the sole element out, so a known count other than one is the
+    # runtime error, caught here.
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        let cnt: Count = element_count(t.dims)
+        if cnt.ok and cnt.n != 1 {
+          report(c, ex.line, bytes.concat("item expects a single-element tensor, got ",
+            dims_string(TensorType { dims: t.dims, unit: dict_new(), dtype: DT_UNKNOWN })))
+        }
+      },
+      None => unit,
+    }
+    return scalar()
+  }
+  if bytes.equal(name, "len") { return scalar() }
   if in_set(name, "sum mean max min prod median") { return reduce_result(c, name, ex, arg_types) }
   if in_set(name, "argmax argmin logsumexp") { return axis_reduce_result(c, name, ex, arg_types) }
   if in_set(name, "maximum minimum greater less greater_equal less_equal equal") {
@@ -2326,6 +2341,18 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # Selecting rows keeps the trailing dims and the dtype, but the row count is
   # dynamic.
   if bytes.equal(name, "gather") {
+    # The index selects rows, so it must be a 1-D list of positions; a rank-2 or
+    # higher index is the runtime error, and its rank is known here.
+    match arg_tensor(arg_types, 1) {
+      Some(idx) => {
+        if len(idx.dims) > 1 {
+          report(c, ex.line, bytes.concat("gather expects a 1-D tensor or list of indices, got ",
+            dims_string(TensorType { dims: idx.dims, unit: dict_new(), dtype: DT_UNKNOWN })))
+          return TUnknown
+        }
+      },
+      None => unit,
+    }
     match arg_tensor(arg_types, 0) {
       Some(t) => {
         if len(t.dims) >= 1 {
@@ -2410,13 +2437,29 @@ fn reshape_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> 
       Some(in_) => {
         let from: Count = element_count(in_.dims)
         if from.ok {
-          let to: Count = element_count(s.dims)
-          if to.ok and from.n != to.n {
-            report(c, ex.line, bytes.concat("reshape changes the number of elements: ",
-              bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
-              bytes.concat(" has ", bytes.concat(str(from.n),
-              bytes.concat(", ", bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
-              bytes.concat(" needs ", str(to.n)))))))))
+          # A negative target dimension is not an inferred axis: twill has no -1
+          # reshape, so it is a certain error rather than the silent pass
+          # element_count(s.dims) gives it (it bails on any negative).
+          let neg: Bool = false
+          let ni: I64 = 0
+          while ni < len(s.dims) {
+            if s.dims[ni] < 0 { neg = true }
+            ni = ni + 1
+          }
+          if neg {
+            report(c, ex.line, bytes.concat("reshape: cannot fit ",
+              bytes.concat(str(from.n), bytes.concat(" elements into ",
+              bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
+              "; twill has no -1 dimension inference")))))
+          } else {
+            let to: Count = element_count(s.dims)
+            if to.ok and from.n != to.n {
+              report(c, ex.line, bytes.concat("reshape changes the number of elements: ",
+                bytes.concat(dims_string(TensorType { dims: in_.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
+                bytes.concat(" has ", bytes.concat(str(from.n),
+                bytes.concat(", ", bytes.concat(dims_string(TensorType { dims: s.dims, unit: dict_new(), dtype: DT_UNKNOWN }),
+                bytes.concat(" needs ", str(to.n)))))))))
+            }
           }
         }
       },
@@ -2962,6 +3005,19 @@ fn const_int(e: ast.Expr) -> Opt[I64] {
       let iv: I64 = i64_of_f64(n.value)
       if f64_of_i64(iv) == n.value { return Some(iv) }
       None
+    },
+    # A negated literal like `-1` parses as unary minus over a number, not a
+    # negative literal, so read through it. This is what lets the reshape check
+    # see the -1 in `reshape(x, -1, 4)`, the numpy habit twill does not honour.
+    EUnary(u) => {
+      if bytes.equal(u.op, "-") {
+        match const_int(u.operand) {
+          Some(v) => Some(0 - v),
+          None => None,
+        }
+      } else {
+        None
+      }
     },
     _ => None,
   }
