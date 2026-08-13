@@ -229,7 +229,9 @@ func TestSelfHostedSoftmaxDtypeMatches(t *testing.T) {
 	src := "let x = tensor([1.0, 2.0, 3.0, 4.0]).to(bf16)\n" +
 		"print(dtype(softmax(x, 0)))\nprint(softmax(x, 0))\n" +
 		"print(dtype(softmax(ones(3, i8), 0)))\n" +
-		"print(dtype(softmax(zeros(4), 0)))\n"
+		"print(dtype(softmax(zeros(4), 0)))\n" +
+		"print(dtype(logsumexp(x, 0)))\nprint(logsumexp(x, 0))\n" +
+		"print(dtype(logsumexp(ones(3, i8), 0)))\nprint(logsumexp(zeros(4), 0))\n"
 	goOut, selfOut := runBothWays(t, src)
 	if goOut != selfOut {
 		t.Fatalf("softmax dtype differs:\n Go  %q\n self %q", goOut, selfOut)
