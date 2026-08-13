@@ -267,6 +267,24 @@ func TestSelfHostedRearrangementDtypeMatches(t *testing.T) {
 	}
 }
 
+// Selections and slices carry their chosen elements through unchanged, so they
+// keep the input dtype; where promotes its two branches. Both interpreters must
+// agree on the tag and the printed values.
+func TestSelfHostedSelectionDtypeMatches(t *testing.T) {
+	src := "let x = tensor([3.0, 1.0, 4.0, 1.5]).to(bf16)\n" +
+		"print(dtype(sort(x)))\nprint(sort(x))\n" +
+		"print(dtype(topk(x, 2)))\nprint(topk(x, 2))\n" +
+		"let m = reshape(tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 3, 2).to(bf16)\n" +
+		"print(dtype(m[1]))\nprint(m[1])\n" +
+		"print(dtype(m[0:2]))\n" +
+		"let w = where(tensor([1.0, 0.0]), tensor([2.0, 2.0]).to(bf16), tensor([9.0, 9.0]).to(bf16))\n" +
+		"print(dtype(w))\nprint(w)\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("selection dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A reduction runs at the accumulation dtype and stores the result dtype, and a
 // selection (max/min/median) carries the input dtype through unrounded. Both
 // interpreters must agree, including mean of an integer promoting to f32.
