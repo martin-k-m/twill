@@ -142,6 +142,17 @@ func TestSelfHostedCheckCatchesTopKBounds(t *testing.T) {
 	}
 }
 
+// An empty list handed to concat has nothing to join; the self-hosted checker
+// must reject it just as the Go one does, keying on the literal.
+func TestSelfHostedCheckCatchesEmptyConcat(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let y = concat([], 0)\n"); code != 1 {
+		t.Fatalf("check of an empty concat exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let y = concat([zeros(2), ones(3)], 0)\n"); code != 0 {
+		t.Fatalf("check of a valid concat exited %d, want 0", code)
+	}
+}
+
 // Loop-control checking (docs/language-guide.md, break/continue) is one of the
 // non-shape diagnostics the checker owns, so the self-hosted checker must agree
 // with the Go one on it: a break outside any loop is an error, a break inside a
