@@ -2487,6 +2487,13 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
   # A pool selects, so the dtype is the input's, unrounded.
   if bytes.equal(name, "maxpool2d") {
+    # maxpool2d takes exactly the tensor and the window; the wrong number of
+    # arguments is a runtime error the checker can settle here, since a call
+    # reaches this case only when the name is the real builtin, not a shadow.
+    if len(ex.args) != 2 {
+      report(c, ex.line, bytes.concat("maxpool2d expects 2 argument(s), got ", str(len(ex.args))))
+      return TUnknown
+    }
     let dims: Arr[I64] = arr_new()
     push(dims, -1)
     push(dims, -1)
