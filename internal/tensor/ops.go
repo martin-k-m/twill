@@ -467,6 +467,16 @@ func LogSumExp(t *Tensor, axis int) (*Tensor, error) {
 	outN := before * after
 	out := make([]float64, outN)
 	soft := make([]float64, len(t.Data)) // softmax weights for the backward pass
+	// An integer logsumexp comes back as f32; a float keeps its dtype. The total
+	// is held at the accumulation dtype, as in softmax and for the same reason:
+	// the terms differ by orders of magnitude on purpose. f64 keeps its plain
+	// running sum, bit-identical to before.
+	dt := t.DType()
+	if isIntDType(dt) {
+		dt = DTF32
+	}
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	for i := 0; i < before; i++ {
 		for j := 0; j < after; j++ {
 			base := i*L*after + j
@@ -480,7 +490,11 @@ func LogSumExp(t *Tensor, axis int) (*Tensor, error) {
 			for k := 0; k < L; k++ {
 				e := math.Exp(t.Data[base+k*after] - m)
 				soft[base+k*after] = e
-				sum += e
+				if narrow {
+					sum = RoundToDType(acc, sum+e)
+				} else {
+					sum += e
+				}
 			}
 			out[i*after+j] = m + math.Log(sum)
 			for k := 0; k < L; k++ {
@@ -488,7 +502,7 @@ func LogSumExp(t *Tensor, axis int) (*Tensor, error) {
 			}
 		}
 	}
-	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
+	res := roundedBinaryResult(out, removeAxis(t.Shape, axis), dt)
 	// Forward-mode. The gradient of logsumexp is softmax, so the first output
 	// tangent is s, the y-weighted mean of the input tangents, and the second is
 	// its derivative along the direction. y is recomputed as exp(x - out) rather
