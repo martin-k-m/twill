@@ -1619,26 +1619,35 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// diff takes successive differences along an axis (second argument),
 		// shrinking that axis by one. An out-of-range axis is the runtime error;
 		// it was previously unchecked while flip, roll and the scans were not.
-		if t, ok := argTypes[0].(tTensor); ok {
-			if len(ex.Args) > 1 && len(t.dims) > 0 {
-				if ax, ok := constInt(ex.Args[1]); ok {
-					a := ax
-					if a < 0 {
-						a += len(t.dims)
-					}
-					if a < 0 || a >= len(t.dims) {
-						c.reportAxis(ex, t)
-						return tUnknown{}
-					}
-					dims := make([]int, len(t.dims))
-					copy(dims, t.dims)
-					if dims[a] > 0 {
-						dims[a]--
-					}
-					return tTensor{dims: dims}
+		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) > 0 {
+			// The axis defaults to the last one; only a constant is foldable.
+			a := len(t.dims) - 1
+			if len(ex.Args) > 1 {
+				ax, ok := constInt(ex.Args[1])
+				if !ok {
+					return tUnknown{}
 				}
+				a = ax
 			}
-			return tUnknown{}
+			if a < 0 {
+				a += len(t.dims)
+			}
+			if a < 0 || a >= len(t.dims) {
+				c.reportAxis(ex, t)
+				return tUnknown{}
+			}
+			// Successive differences need at least two elements along the axis;
+			// one leaves nothing to subtract, the error the runtime raises.
+			if L := t.dims[a]; L >= 0 && L < 2 {
+				c.report(ex.Line, "diff needs at least 2 elements along axis %d, got %d", a, L)
+				return tUnknown{}
+			}
+			dims := make([]int, len(t.dims))
+			copy(dims, t.dims)
+			if dims[a] > 0 {
+				dims[a]--
+			}
+			return tTensor{dims: dims}
 		}
 		return tUnknown{}
 	case "gather":
