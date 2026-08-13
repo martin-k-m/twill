@@ -224,6 +224,32 @@ func TestElementwisePromotion(t *testing.T) {
 	}
 }
 
+// A narrow matmul accumulates in f32 and stores the promoted dtype. The values
+// here are exact in bf16, so the result is checked exactly; the point is the
+// dtype and that accumulation runs wider than the store.
+func TestMatMulContraction(t *testing.T) {
+	bf := func(d []float64, sh []int) *Tensor { return Cast(New(d, sh), DTBF16) }
+	a := bf([]float64{1, 2, 3, 4}, []int{2, 2})
+	id := bf([]float64{1, 0, 0, 1}, []int{2, 2})
+	got, err := MatMul(a, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DType() != DTBF16 {
+		t.Errorf("bf16 @ bf16 is %s, want bf16", DTypeName(got.DType()))
+	}
+	for i, w := range []float64{1, 2, 3, 4} {
+		if got.Data[i] != w {
+			t.Errorf("matmul[%d] = %v, want %v", i, got.Data[i], w)
+		}
+	}
+	// f64 keeps f64 and the fast kernel.
+	f, _ := MatMul(New([]float64{1, 2, 3, 4}, []int{2, 2}), New([]float64{1, 0, 0, 1}, []int{2, 2}))
+	if f.DType() != DTF64 {
+		t.Errorf("f64 matmul became %s", DTypeName(f.DType()))
+	}
+}
+
 func TestShortestForDType(t *testing.T) {
 	// The stored bf16 value of 0.1 spells back to "0.1"; whole and integer dtypes
 	// print at natural length; the specials keep Go's spellings.
