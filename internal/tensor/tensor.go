@@ -528,7 +528,12 @@ func broadcastBinary(a, b *Tensor, f func(x, y float64) float64,
 	}), nil
 }
 
-func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64, ddf func(x, o float64) float64) *Tensor {
+// unary applies an elementwise function. preservesInt records whether the op
+// keeps an integer input integral: neg, relu, square and clip do, so they keep
+// the dtype, while a transcendental of an integer is not an integer and promotes
+// to f32 (docs/dtypes.md). A float input always keeps its dtype. For f64 -- every
+// tensor before dtypes -- the result is f64 with no rounding and no tag.
+func unary(a *Tensor, preservesInt bool, f func(x float64) float64, df func(x, o float64) float64, ddf func(x, o float64) float64) *Tensor {
 	n := len(a.Data)
 	out := make([]float64, n)
 	ad := a.Data
@@ -537,7 +542,16 @@ func unary(a *Tensor, f func(x float64) float64, df func(x, o float64) float64, 
 			out[i] = f(ad[i])
 		}
 	})
+	dt := unaryResultDType(preservesInt, a.DType())
+	if dt != DTF64 {
+		for i := range out {
+			out[i] = RoundToDType(dt, out[i])
+		}
+	}
 	res := &Tensor{Data: out, Shape: append([]int(nil), a.Shape...)}
+	if dt != DTF64 {
+		res.WithDType(dt)
+	}
 	if !a.RequiresGrad {
 		return res
 	}
@@ -599,15 +613,15 @@ func Mod(a, b *Tensor) (*Tensor, error) {
 func zeroU(x, o float64) float64 { return 0 }
 
 func PowScalar(a *Tensor, p float64) *Tensor {
-	return unary(a, func(x float64) float64 { return math.Pow(x, p) },
+	return unary(a, false, func(x float64) float64 { return math.Pow(x, p) },
 		func(x, o float64) float64 { return p * math.Pow(x, p-1) },
 		func(x, o float64) float64 { return p * (p - 1) * math.Pow(x, p-2) })
 }
 func Neg(a *Tensor) *Tensor {
-	return unary(a, func(x float64) float64 { return -x }, func(x, o float64) float64 { return -1 }, zeroU)
+	return unary(a, true, func(x float64) float64 { return -x }, func(x, o float64) float64 { return -1 }, zeroU)
 }
 func Relu(a *Tensor) *Tensor {
-	return unary(a, func(x float64) float64 {
+	return unary(a, true, func(x float64) float64 {
 		if x > 0 {
 			return x
 		}
@@ -620,25 +634,25 @@ func Relu(a *Tensor) *Tensor {
 	}, zeroU)
 }
 func Exp(a *Tensor) *Tensor {
-	return unary(a, math.Exp, func(x, o float64) float64 { return o }, func(x, o float64) float64 { return o })
+	return unary(a, false, math.Exp, func(x, o float64) float64 { return o }, func(x, o float64) float64 { return o })
 }
 func Log(a *Tensor) *Tensor {
-	return unary(a, math.Log, func(x, o float64) float64 { return 1 / x }, func(x, o float64) float64 { return -1 / (x * x) })
+	return unary(a, false, math.Log, func(x, o float64) float64 { return 1 / x }, func(x, o float64) float64 { return -1 / (x * x) })
 }
 func Sin(a *Tensor) *Tensor {
-	return unary(a, math.Sin, func(x, o float64) float64 { return math.Cos(x) }, func(x, o float64) float64 { return -o })
+	return unary(a, false, math.Sin, func(x, o float64) float64 { return math.Cos(x) }, func(x, o float64) float64 { return -o })
 }
 func Cos(a *Tensor) *Tensor {
-	return unary(a, math.Cos, func(x, o float64) float64 { return -math.Sin(x) }, func(x, o float64) float64 { return -o })
+	return unary(a, false, math.Cos, func(x, o float64) float64 { return -math.Sin(x) }, func(x, o float64) float64 { return -o })
 }
 func Sqrt(a *Tensor) *Tensor {
-	return unary(a, math.Sqrt, func(x, o float64) float64 { return 0.5 / o }, func(x, o float64) float64 { return -0.25 / (o * o * o) })
+	return unary(a, false, math.Sqrt, func(x, o float64) float64 { return 0.5 / o }, func(x, o float64) float64 { return -0.25 / (o * o * o) })
 }
 func Tanh(a *Tensor) *Tensor {
-	return unary(a, math.Tanh, func(x, o float64) float64 { return 1 - o*o }, func(x, o float64) float64 { return -2 * o * (1 - o*o) })
+	return unary(a, false, math.Tanh, func(x, o float64) float64 { return 1 - o*o }, func(x, o float64) float64 { return -2 * o * (1 - o*o) })
 }
 func Sigmoid(a *Tensor) *Tensor {
-	return unary(a, func(x float64) float64 { return 1 / (1 + math.Exp(-x)) },
+	return unary(a, false, func(x float64) float64 { return 1 / (1 + math.Exp(-x)) },
 		func(x, o float64) float64 { return o * (1 - o) },
 		func(x, o float64) float64 { return o * (1 - o) * (1 - 2*o) })
 }

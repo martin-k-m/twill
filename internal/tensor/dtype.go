@@ -252,6 +252,17 @@ func ShortestForDType(dt DType, x float64) string {
 	return strconv.FormatFloat(x, 'g', -1, 64)
 }
 
+// unaryResultDType gives a unary op's result dtype: a float input keeps its
+// dtype, and an integer input keeps it only for the ops that preserve
+// integrality (neg, relu, square, clip); the transcendentals promote it to f32,
+// the rule numpy applies (docs/dtypes.md).
+func unaryResultDType(preservesInt bool, dt DType) DType {
+	if isFloatDType(dt) || preservesInt {
+		return dt
+	}
+	return DTF32
+}
+
 // Cast rounds every element to dt, once from the source value, and tags the
 // result -- the value each element takes when stored in dt and read back
 // (docs/dtypes.md, "The cast is spelled .to(dt)"). It carries a straight-through

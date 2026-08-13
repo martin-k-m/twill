@@ -207,6 +207,17 @@ func TestSelfHostedElementwisePromotionMatches(t *testing.T) {
 	}
 }
 
+// A unary op keeps a float operand's dtype and rounds to it; both interpreters
+// must agree, and f64 is left untouched.
+func TestSelfHostedUnaryPromotionMatches(t *testing.T) {
+	src := "print(relu(fill(0.5, 2, bf16)))\nprint(exp(fill(1.0, 2, bf16)))\n" +
+		"print(square(fill(0.1, 2, bf16)))\nprint(relu(zeros(2)))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("unary dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // An operation whose result is an index produces i32 (docs/dtypes.md), so
 // argmax/argsort/argtopk print with a dtype=i32 tag. This closes a long-standing
 // divergence: the self-hosted evaluator always tagged them and the Go bootstrap,

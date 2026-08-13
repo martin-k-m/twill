@@ -67,14 +67,14 @@ var (
 )
 
 func Square(a *Tensor) *Tensor {
-	return unary(a, func(x float64) float64 { return x * x }, func(x, o float64) float64 { return 2 * x },
+	return unary(a, true, func(x float64) float64 { return x * x }, func(x, o float64) float64 { return 2 * x },
 		func(x, o float64) float64 { return 2 })
 }
 
 // Clip clamps values into [lo, hi]; the gradient passes through only the
 // interior.
 func Clip(a *Tensor, lo, hi float64) *Tensor {
-	return unary(a,
+	return unary(a, true,
 		func(x float64) float64 { return math.Min(math.Max(x, lo), hi) },
 		func(x, o float64) float64 {
 			if x > lo && x < hi {
