@@ -317,13 +317,13 @@ fn attention_heads(p, X, heads) {
   let T = len(X)
   let dim = len(X[0])
   let dh = dim / heads
-  let Q = split_heads(X @ p.Wq, T, heads, dh)
-  let K = split_heads(X @ p.Wk, T, heads, dh)
-  let V = split_heads(X @ p.Wv, T, heads, dh)
+  let Q = split_heads(linear(X, p.Wq), T, heads, dh)
+  let K = split_heads(linear(X, p.Wk), T, heads, dh)
+  let V = split_heads(linear(X, p.Wv), T, heads, dh)
   let scores = einsum("hti,hsi->hts", Q, K) / sqrt(dh)
   let attn = softmax(scores, 2)
   let ctx = einsum("hts,hsi->hti", attn, V)
-  merge_heads(ctx, T, dim) @ p.Wo
+  linear(merge_heads(ctx, T, dim), p.Wo)
 }
 
 # Causal (masked) multi-head self-attention: position t may attend to positions
@@ -339,13 +339,13 @@ fn attention_causal(p, X, heads) {
   let T = len(X)
   let dim = len(X[0])
   let dh = dim / heads
-  let Q = split_heads(X @ p.Wq, T, heads, dh)
-  let K = split_heads(X @ p.Wk, T, heads, dh)
-  let V = split_heads(X @ p.Wv, T, heads, dh)
+  let Q = split_heads(linear(X, p.Wq), T, heads, dh)
+  let K = split_heads(linear(X, p.Wk), T, heads, dh)
+  let V = split_heads(linear(X, p.Wv), T, heads, dh)
   let scores = einsum("hti,hsi->hts", Q, K) / sqrt(dh)
   let attn = softmax(scores + causal_mask(T), 2)
   let ctx = einsum("hts,hsi->hti", attn, V)
-  merge_heads(ctx, T, dim) @ p.Wo
+  linear(merge_heads(ctx, T, dim), p.Wo)
 }
 
 # A [T, T] matrix, 0 on and below the diagonal and -1e9 above it. Broadcasts
@@ -360,11 +360,17 @@ fn causal_mask(T) {
   greater(cols, rows) * -1000000000.0
 }
 
+# The projections are stored [out, in] and applied with `linear`, the same
+# dense-layer path as the feed-forward. That storage is the layout `linear`'s
+# fused kernel reads directly and the one `quantize` packs, so an attention
+# weight is as fast and as compressible as any other dense weight -- there is no
+# second matmul shape in the model. `linear(X, W)` is X @ Wᵀ, so a [out, in]
+# weight maps a [T, in] sequence to [T, out], exactly as the old transpose did.
 fn attention_params(dim, strategy) = {
-  Wq: transpose(init(strategy, dim, dim)),
-  Wk: transpose(init(strategy, dim, dim)),
-  Wv: transpose(init(strategy, dim, dim)),
-  Wo: transpose(init(strategy, dim, dim))
+  Wq: init(strategy, dim, dim),
+  Wk: init(strategy, dim, dim),
+  Wv: init(strategy, dim, dim),
+  Wo: init(strategy, dim, dim)
 }
 
 # [T, dim] to [heads, T, dh]. The reshape splits the feature axis, and the
