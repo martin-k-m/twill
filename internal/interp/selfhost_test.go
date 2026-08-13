@@ -142,6 +142,14 @@ func TestSelfHostedCheckCatchesTopKBounds(t *testing.T) {
 	}
 }
 
+// split was unreachable until its name was added to the front end; both
+// checkers must now accept a valid split rather than call it an unknown name.
+func TestSelfHostedCheckAcceptsSplit(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let x = zeros(6)\nlet p = split(x, 2, 0)\n"); code != 0 {
+		t.Fatalf("check of a valid split exited %d, want 0", code)
+	}
+}
+
 // An empty list handed to concat has nothing to join; the self-hosted checker
 // must reject it just as the Go one does, keying on the literal.
 func TestSelfHostedCheckCatchesEmptyConcat(t *testing.T) {
