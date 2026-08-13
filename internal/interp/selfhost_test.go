@@ -193,6 +193,23 @@ func TestSelfHostedDtypeBuiltinMatches(t *testing.T) {
 	}
 }
 
+// An operation whose result is an index produces i32 (docs/dtypes.md), so
+// argmax/argsort/argtopk print with a dtype=i32 tag. This closes a long-standing
+// divergence: the self-hosted evaluator always tagged them and the Go bootstrap,
+// with no dtype, did not.
+func TestSelfHostedIndexOpsAreI32(t *testing.T) {
+	src := "print(argmax(tensor([[3.0, 1.0], [2.0, 5.0]]), 1))\n" +
+		"print(argsort(tensor([3.0, 1.0, 4.0])))\n" +
+		"print(argtopk(tensor([3.0, 1.0, 4.0, 1.5]), 2))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("index-op dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+	if !strings.Contains(goOut, "dtype=i32") {
+		t.Fatalf("expected an i32 tag, got %q", goOut)
+	}
+}
+
 // Printing a narrow tensor shows the dtype tag and the dtype's shortest decimal,
 // and both interpreters must agree. Positive values only: the self-hosted cast
 // has a NEEDS-2 sign bug, so negatives are not a valid parity reference.

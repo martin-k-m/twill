@@ -278,7 +278,9 @@ func argExtremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
 			out[i*after+j] = float64(bestK)
 		}
 	}
-	return &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}, nil
+	// An index, so i32 (docs/dtypes.md): an argmax returned in a narrow float
+	// would round to the wrong element once the count passed the mantissa.
+	return (&Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}).WithDType(DTI32), nil
 }
 
 // FlipAxis reverses the order along one axis, keeping the shape.
@@ -1280,7 +1282,7 @@ func ArgsortAxis(t *Tensor, axis int, descending bool) (*Tensor, error) {
 			}
 		}
 	}
-	return &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}, nil
+	return (&Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}).WithDType(DTI32), nil
 }
 
 // TopKAxis keeps the k largest values along an axis, largest first.
@@ -1394,5 +1396,5 @@ func ArgTopKAxis(t *Tensor, k, axis int, largest bool) (*Tensor, error) {
 			}
 		}
 	}
-	return &Tensor{Data: out, Shape: shape}, nil
+	return (&Tensor{Data: out, Shape: shape}).WithDType(DTI32), nil
 }
