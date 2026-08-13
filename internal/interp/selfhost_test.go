@@ -207,6 +207,19 @@ func TestSelfHostedElementwisePromotionMatches(t *testing.T) {
 	}
 }
 
+// A reduction runs at the accumulation dtype and stores the result dtype, and a
+// selection (max/min/median) carries the input dtype through unrounded. Both
+// interpreters must agree, including mean of an integer promoting to f32.
+func TestSelfHostedReductionPromotionMatches(t *testing.T) {
+	src := "print(dtype(sum(fill(0.1, 4, bf16))))\nprint(dtype(mean(ones(4, i8))))\n" +
+		"print(dtype(prod(fill(2.0, 3, bf16))))\nprint(dtype(max(fill(0.1, 4, bf16))))\n" +
+		"print(sum(fill(0.1, 4, bf16)))\nprint(median(fill(0.1, 4, bf16)))\nprint(sum(zeros(4)))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("reduction dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A unary op keeps a float operand's dtype and rounds to it; both interpreters
 // must agree, and f64 is left untouched.
 func TestSelfHostedUnaryPromotionMatches(t *testing.T) {

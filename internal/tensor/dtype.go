@@ -252,6 +252,45 @@ func ShortestForDType(dt DType, x float64) string {
 	return strconv.FormatFloat(x, 'g', -1, 64)
 }
 
+// reduceResultDType gives a sum/mean's result dtype: the input's, except that a
+// mean of an integer is not an integer and promotes to f32 (docs/dtypes.md).
+func reduceResultDType(dt DType, mean bool) DType {
+	if mean && isIntDType(dt) {
+		return DTF32
+	}
+	return dt
+}
+
+// blockSumAcc sums data at the accumulation dtype acc, rounding each step, in the
+// same fixed-block order the f64 parallelSum uses so a narrow reduction is
+// deterministic and matches the self-hosted block_sum. Below minParallel it is a
+// plain running sum; at or above, fixed sumChunk-element blocks are summed and
+// their partials combined in block order. Callers use this only for narrow
+// dtypes; f64 stays on parallelSum, whose last-bit order the goldens depend on.
+func blockSumAcc(data []float64, acc DType) float64 {
+	n := len(data)
+	if n < minParallel {
+		s := 0.0
+		for _, x := range data {
+			s = RoundToDType(acc, s+x)
+		}
+		return s
+	}
+	total := 0.0
+	for start := 0; start < n; start += sumChunk {
+		end := start + sumChunk
+		if end > n {
+			end = n
+		}
+		s := 0.0
+		for i := start; i < end; i++ {
+			s = RoundToDType(acc, s+data[i])
+		}
+		total = RoundToDType(acc, total+s)
+	}
+	return total
+}
+
 // unaryResultDType gives a unary op's result dtype: a float input keeps its
 // dtype, and an integer input keeps it only for the ops that preserve
 // integrality (neg, relu, square, clip); the transcendentals promote it to f32,

@@ -244,6 +244,16 @@ func roundedBinaryResult(out []float64, shape []int, dt DType) *Tensor {
 	return (&Tensor{Data: out, Shape: shape}).WithDType(dt)
 }
 
+// withDTypeLike tags t with src's dtype, for a selection op that carries chosen
+// elements through unchanged. f64 leaves the tag at its zero value, so an f64
+// result stays canonical.
+func (t *Tensor) withDTypeLike(src *Tensor) *Tensor {
+	if src.DType() != DTF64 {
+		t.WithDType(src.DType())
+	}
+	return t
+}
+
 // track2 wires a two-input op into the autodiff graph when needed.
 func track2(out, a, b *Tensor, backward func()) *Tensor {
 	if a.RequiresGrad || b.RequiresGrad {
@@ -659,12 +669,25 @@ func Sigmoid(a *Tensor) *Tensor {
 
 func reduceAll(a *Tensor, mean bool) *Tensor {
 	n := len(a.Data)
-	s := parallelSum(a.Data)
+	// A narrow reduction runs at the accumulation dtype (f32 for anything below
+	// it) and rounds to the result dtype once, which is what keeps a bf16 sum from
+	// stalling once it passes 256 times a term (docs/dtypes.md). f64 stays on
+	// parallelSum, whose last-bit order the goldens depend on.
+	dt := reduceResultDType(a.DType(), mean)
+	var s float64
+	if dt == DTF64 {
+		s = parallelSum(a.Data)
+	} else {
+		s = blockSumAcc(a.Data, AccDType(dt))
+	}
 	scale := 1.0
 	if mean {
 		scale = 1.0 / float64(n)
 	}
 	res := Scalar(s * scale)
+	if dt != DTF64 {
+		res = Scalar(RoundToDType(dt, s*scale)).WithDType(dt)
+	}
 	if recordJets && a.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {

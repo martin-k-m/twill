@@ -176,17 +176,31 @@ func reduceAxis(t *Tensor, axis int, mean bool) (*Tensor, error) {
 	if mean {
 		scale = 1.0 / float64(L)
 	}
+	// A narrow reduction accumulates at the accumulation dtype and rounds to the
+	// result dtype once; f64 keeps the plain running sum, bit-identical to before.
+	dt := reduceResultDType(t.DType(), mean)
+	acc := AccDType(dt)
 	for i := 0; i < before; i++ {
 		for j := 0; j < after; j++ {
 			s := 0.0
 			base := i*L*after + j
-			for k := 0; k < L; k++ {
-				s += t.Data[base+k*after]
+			if dt == DTF64 {
+				for k := 0; k < L; k++ {
+					s += t.Data[base+k*after]
+				}
+				out[i*after+j] = s * scale
+			} else {
+				for k := 0; k < L; k++ {
+					s = RoundToDType(acc, s+t.Data[base+k*after])
+				}
+				out[i*after+j] = RoundToDType(dt, s*scale)
 			}
-			out[i*after+j] = s * scale
 		}
 	}
 	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
+	if dt != DTF64 {
+		res.WithDType(dt)
+	}
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -233,7 +247,9 @@ func extremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
 			argFlat[i*after+j] = bestIdx
 		}
 	}
-	res := &Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}
+	// A selection carries a chosen element through unchanged, so it keeps the
+	// input dtype and needs no rounding: the element is already a value of it.
+	res := (&Tensor{Data: out, Shape: removeAxis(t.Shape, axis)}).withDTypeLike(t)
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -330,7 +346,7 @@ func extremeAll(t *Tensor, wantMax bool) *Tensor {
 			best, bestIdx = v, i
 		}
 	}
-	res := Scalar(best)
+	res := Scalar(best).withDTypeLike(t)
 	return track1(res, t, func() {
 		if t.RequiresGrad {
 			t.ensureGrad()[bestIdx] += res.Grad[0]
@@ -803,6 +819,12 @@ func prodOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 	nzProd := make([]float64, outN)
 	zeros := make([]int, outN)
 
+	// A narrow product runs at the accumulation dtype and rounds to the result
+	// dtype once, for the same reason a sum does -- more so, since a running
+	// product leaves a narrow exponent range fast (docs/dtypes.md). f64 keeps the
+	// plain running product.
+	dt := t.DType()
+	acc := AccDType(dt)
 	for i := 0; i < before; i++ {
 		for j := 0; j < after; j++ {
 			base := i*L*after + j
@@ -811,7 +833,11 @@ func prodOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 			z := 0
 			for k := 0; k < L; k++ {
 				v := t.Data[base+k*after]
-				p *= v
+				if dt == DTF64 {
+					p *= v
+				} else {
+					p = RoundToDType(acc, p*v)
+				}
 				if v == 0 {
 					z++
 				} else {
@@ -819,13 +845,20 @@ func prodOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 				}
 			}
 			idx := i*after + j
-			out[idx] = p
+			if dt == DTF64 {
+				out[idx] = p
+			} else {
+				out[idx] = RoundToDType(dt, p)
+			}
 			nzProd[idx] = nz
 			zeros[idx] = z
 		}
 	}
 
 	res := &Tensor{Data: out, Shape: outShape}
+	if dt != DTF64 {
+		res.WithDType(dt)
+	}
 	// Forward-mode. The first tangent is p*u with u the sum of d_k/x_k, and the
 	// second follows from differentiating that. Zeros break the division, so the
 	// zero count splits it into cases, the forward twin of the backward's split:
@@ -973,7 +1006,9 @@ func medianOver(t *Tensor, L, before, after int, outShape []int) *Tensor {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: outShape}
+	// A selection keeps the input dtype (docs/dtypes.md); the even-count case
+	// stores the mean of the two middle elements unrounded, as the reference does.
+	res := (&Tensor{Data: out, Shape: outShape}).withDTypeLike(t)
 	// Forward-mode. Median is a selection, locally linear, so a tangent rides
 	// with the value it selects and there is no second-order term of its own: the
 	// output tangent is the input's at the middle element, or the average of the
