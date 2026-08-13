@@ -939,6 +939,13 @@ func (ip *Interp) installBuiltins() {
 		}
 		return tensor.QuantizeI8(w)
 	})
+	// nbytes(v) reports the in-memory footprint of a value in bytes, walking into
+	// records and lists. It exists so a model's memory is a number the language
+	// can print — the question a host actually asks — and so the saving from
+	// `quantize` is measured rather than asserted.
+	def("nbytes", 1, false, func(a []value.Value) (value.Value, error) {
+		return value.Num(nbytesOf(a[0])), nil
+	})
 	binTensor("maximum", tensor.Maximum)
 	binTensor("minimum", tensor.Minimum)
 	binTensor("greater", tensor.Greater)
@@ -2416,6 +2423,35 @@ func (ip *Interp) applyToTensor(f value.Value, arg *tensor.Tensor) (*tensor.Tens
 }
 
 // --- argument coercion -----------------------------------------------------
+
+// nbytesOf sums the payload bytes of a value: eight per f64 tensor element, the
+// packed footprint of a quantised weight, and the recursive total of a record or
+// list. It counts the numeric data a model is made of, not Go bookkeeping, so
+// two models differ here by exactly the weights they hold.
+func nbytesOf(v value.Value) float64 {
+	switch t := v.(type) {
+	case *tensor.Tensor:
+		return float64(len(t.Data) * 8)
+	case *tensor.QTensor:
+		return float64(t.Bytes())
+	case value.Num:
+		return 8
+	case *value.List:
+		total := 0.0
+		for _, it := range t.Items {
+			total += nbytesOf(it)
+		}
+		return total
+	case *value.Record:
+		total := 0.0
+		for _, f := range t.Fields {
+			total += nbytesOf(f)
+		}
+		return total
+	default:
+		return 0
+	}
+}
 
 func asTensor(v value.Value, who string) (*tensor.Tensor, error) {
 	if t, ok := value.AsTensor(v); ok {
