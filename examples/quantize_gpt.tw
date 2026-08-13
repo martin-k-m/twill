@@ -72,15 +72,18 @@ for step in range(40) {
 print("trained, final loss", tf.gpt_loss_batch(p, xs, ys, cfg))
 
 # ── Quantise the feed-forward weights ────────────────────────────────────────
-fn quantize_dense(d) = with_field(d, "W", quantize(d.W))
-fn quantize_ff(ff) =
-  with_field(with_field(ff, "fc1", quantize_dense(ff.fc1)), "fc2", quantize_dense(ff.fc2))
-fn quantize_ffn(model) =
-  with_field(model, "blocks", map(fn(b) = with_field(b, "ff", quantize_ff(b.ff)), model.blocks))
+fn quantize_dense(d, bits) = with_field(d, "W", quantize(d.W, bits))
+fn quantize_ff(ff, bits) =
+  with_field(with_field(ff, "fc1", quantize_dense(ff.fc1, bits)), "fc2", quantize_dense(ff.fc2, bits))
+fn quantize_ffn(model, bits) =
+  with_field(model, "blocks", map(fn(b) = with_field(b, "ff", quantize_ff(b.ff, bits)), model.blocks))
 
-let pq = quantize_ffn(p)
-print("ff loss after int8 quantise", tf.gpt_loss_batch(pq, xs, ys, cfg))
-print("model bytes  full:", nbytes(p), " int8 ff:", nbytes(pq))
+let p8 = quantize_ffn(p, 8)
+let p4 = quantize_ffn(p, 4)
+print("loss  full:", tf.gpt_loss_batch(p, xs, ys, cfg),
+      " int8:", tf.gpt_loss_batch(p8, xs, ys, cfg),
+      " int4:", tf.gpt_loss_batch(p4, xs, ys, cfg))
+print("bytes full:", nbytes(p), " int8:", nbytes(p8), " int4:", nbytes(p4))
 
 # ── Sample from both ─────────────────────────────────────────────────────────
 fn encode(s) {
@@ -101,4 +104,5 @@ fn decode(ids) {
 let prompt = "the loom "
 print("prompt:         ", prompt)
 print("full precision: ", decode(tf.generate(p, encode(prompt), 48, cfg)))
-print("int8 feed-fwd:  ", decode(tf.generate(pq, encode(prompt), 48, cfg)))
+print("int8 feed-fwd:  ", decode(tf.generate(p8, encode(prompt), 48, cfg)))
+print("int4 feed-fwd:  ", decode(tf.generate(p4, encode(prompt), 48, cfg)))
