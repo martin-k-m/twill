@@ -1809,7 +1809,7 @@ let MAKERS: Str = "tensor scalar zeros ones fill randn rand seed permutation eye
 # The makers whose trailing argument may be a dtype name (NEEDS-110). seed and
 # permutation are the two MAKERS left out: neither makes a tensor.
 let DTYPE_MAKERS: Str = "tensor scalar zeros ones fill randn rand eye"
-let INSPECT: Str = "shape len item range list str int"
+let INSPECT: Str = "shape len item range list str int dtype"
 let FILE_OPS: Str = "read_csv read_frame write_frame save load columns field with_field"
 
 fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {

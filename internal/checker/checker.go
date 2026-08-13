@@ -1449,6 +1449,9 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return tUnknown{}
 	case "nbytes":
 		return scalar()
+	case "dtype":
+		// The element type as its surface name, a string.
+		return tStr{}
 	case "shape":
 		return tList{}
 	case "transpose":
@@ -2343,7 +2346,7 @@ func constIntElems(elems []ast.Expr) ([]int, bool) {
 var builtinNames = map[string]bool{
 	"print": true, "relu": true, "exp": true, "log": true, "sin": true,
 	"cos": true, "tanh": true, "sigmoid": true, "sqrt": true, "sum": true, "prod": true, "median": true,
-	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true, "linear": true, "quantize": true, "nbytes": true,
+	"mean": true, "abs": true, "pow": true, "matmul": true, "dot": true, "linear": true, "quantize": true, "nbytes": true, "dtype": true,
 	"grad": true, "grads": true, "value_and_grad": true, "map": true, "zip": true,
 	"tensor": true, "scalar": true, "zeros": true, "ones": true, "fill": true,
 	"randn": true, "rand": true, "eye": true, "linspace": true, "arange": true, "transpose": true, "shape": true,
@@ -2416,7 +2419,7 @@ var builtinArity = map[string]int{
 	"bytes_to_str": 1, "chr": 1, "columns": 1, "dict_keys": 1, "emit_line": 1,
 	"enumerate": 1, "env": 1, "eye": 1, "f64_bits": 1, "f64_from_bits": 1,
 	"f64_hex": 1, "f64_of_i64": 1, "f64_signbit": 1, "f64_to_str": 1,
-	"gbm_describe": 1, "grad": 1, "grads": 1, "hessian": 1, "i64_of_f64": 1,
+	"gbm_describe": 1, "grad": 1, "grads": 1, "hessian": 1, "dtype": 1, "i64_of_f64": 1,
 	"i64_of_str": 1, "int": 1, "item": 1, "jacobian": 1, "len": 1, "list_dir": 1,
 	"load": 1, "load_value": 1, "module_source": 1, "nbytes": 1, "num_to_text": 1,
 	"permutation": 1, "pop": 1, "read_csv": 1, "read_file": 1, "read_frame": 1,

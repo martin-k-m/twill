@@ -153,6 +153,28 @@ func TestAccDType(t *testing.T) {
 	}
 }
 
+// A tensor's dtype defaults to f64 (the zero value of the internal field), and
+// WithDType stamps another without disturbing the data.
+func TestTensorDTypeField(t *testing.T) {
+	x := New([]float64{1, 2, 3}, []int{3})
+	if x.DType() != DTF64 {
+		t.Errorf("a fresh tensor is %s, want f64", DTypeName(x.DType()))
+	}
+	// A raw intermediate (no constructor) is f64 too, via the zero value.
+	if (&Tensor{Data: []float64{0}, Shape: []int{1}}).DType() != DTF64 {
+		t.Error("a bare &Tensor{} should read as f64")
+	}
+	x.WithDType(DTBF16)
+	if x.DType() != DTBF16 {
+		t.Errorf("after WithDType(bf16) got %s", DTypeName(x.DType()))
+	}
+	// bool is code 0; the plus-one encoding must not confuse it with the default.
+	b := New([]float64{1, 0}, []int{2}).WithDType(DTBool)
+	if b.DType() != DTBool {
+		t.Errorf("bool tensor read back as %s", DTypeName(b.DType()))
+	}
+}
+
 func TestDTypeNames(t *testing.T) {
 	for _, dt := range []DType{DTBool, DTI8, DTI32, DTF16, DTBF16, DTF32, DTF64} {
 		name := DTypeName(dt)
