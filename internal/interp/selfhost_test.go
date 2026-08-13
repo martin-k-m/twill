@@ -207,6 +207,19 @@ func TestSelfHostedElementwisePromotionMatches(t *testing.T) {
 	}
 }
 
+// A rearrangement carries elements through unchanged, so it keeps the input
+// dtype (concat promotes its pieces); both interpreters must agree.
+func TestSelfHostedRearrangementDtypeMatches(t *testing.T) {
+	src := "let x = tensor([1.0, 2.0, 3.0, 4.0]).to(bf16)\n" +
+		"print(dtype(transpose(reshape(x, 2, 2))))\nprint(dtype(flip(x, 0)))\n" +
+		"print(dtype(gather(x, [0, 2])))\n" +
+		"print(dtype(concat([tensor([1.0]).to(bf16), tensor([2.0]).to(bf16)], 0)))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("rearrangement dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A reduction runs at the accumulation dtype and stores the result dtype, and a
 // selection (max/min/median) carries the input dtype through unrounded. Both
 // interpreters must agree, including mean of an integer promoting to f32.

@@ -321,7 +321,7 @@ func FlipAxis(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	res := (&Tensor{Data: out, Shape: append([]int{}, t.Shape...)}).withDTypeLike(t)
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -528,7 +528,7 @@ func Reshape(t *Tensor, shape []int) (*Tensor, error) {
 	}
 	data := make([]float64, len(t.Data))
 	copy(data, t.Data)
-	res := &Tensor{Data: data, Shape: append([]int(nil), shape...)}
+	res := (&Tensor{Data: data, Shape: append([]int(nil), shape...)}).withDTypeLike(t)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -586,7 +586,7 @@ func TransposePerm(t *Tensor, axes []int) (*Tensor, error) {
 	for o := 0; o < n; o++ {
 		out[o] = t.Data[inIndex(o)]
 	}
-	res := &Tensor{Data: out, Shape: outShape}
+	res := (&Tensor{Data: out, Shape: outShape}).withDTypeLike(t)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -739,7 +739,13 @@ func Concat(tensors []*Tensor, axis int) (*Tensor, error) {
 	}
 	prev := make([]*Tensor, len(tensors))
 	copy(prev, tensors)
-	res := &Tensor{Data: out, Shape: outShape}
+	// Concatenation joins elements unchanged, so the result is the promotion of
+	// the pieces' dtypes; the elements are already valid in it, so nothing rounds.
+	catDT := tensors[0].DType()
+	for _, t := range tensors[1:] {
+		catDT = Promote(catDT, t.DType())
+	}
+	res := (&Tensor{Data: out, Shape: outShape}).WithDType(catDT)
 	anyRG := false
 	for _, t := range tensors {
 		if t.RequiresGrad {
@@ -1107,7 +1113,7 @@ func BroadcastTo(t *Tensor, shape []int) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int(nil), shape...)}
+	res := (&Tensor{Data: out, Shape: append([]int(nil), shape...)}).withDTypeLike(t)
 	return track1(res, t, func() {
 		gt := t.ensureGrad()
 		for o := 0; o < n; o++ {
