@@ -677,29 +677,71 @@ func transpose2d(a []float64, rows, cols int) []float64 {
 // self-hosted src/tensor.tw stays the naive reference and agrees to tolerance.
 func mmNT(a []float64, m, k int, w []float64, n int) []float64 {
 	c := make([]float64, m*n)
+	// Cache tiling. Without it, the inner j-loop walks all n rows of w for every
+	// row of x, so w is re-read from memory m times; once w exceeds the L2 cache
+	// (a 2048x2048 weight is 32 MB) the kernel becomes memory-bound and throughput
+	// halves. Blocking j into panels that fit L2 keeps each panel resident while
+	// the whole x-chunk streams through it, cutting w's memory traffic to roughly
+	// once per panel. The block loop is outermost, so for a small n it runs once
+	// and this is exactly the untiled kernel.
+	//
+	// Bit-exact: each c[i,j] is still the full k-length dot summed in k order with
+	// the same four accumulators; only the order of visiting (i,j) pairs changes.
+	jb := blockN(k, n)
 	runChunks(m, workersFor(m*k*n), func(lo, hi int) {
-		for i := lo; i < hi; i++ {
-			aRow := a[i*k : i*k+k]
-			cRow := i * n
-			for j := 0; j < n; j++ {
-				wRow := w[j*k : j*k+k]
-				var s0, s1, s2, s3 float64
-				p := 0
-				for ; p+4 <= k; p += 4 {
-					s0 += aRow[p] * wRow[p]
-					s1 += aRow[p+1] * wRow[p+1]
-					s2 += aRow[p+2] * wRow[p+2]
-					s3 += aRow[p+3] * wRow[p+3]
+		for j0 := 0; j0 < n; j0 += jb {
+			j1 := j0 + jb
+			if j1 > n {
+				j1 = n
+			}
+			for i := lo; i < hi; i++ {
+				aRow := a[i*k : i*k+k]
+				cRow := i * n
+				for j := j0; j < j1; j++ {
+					wRow := w[j*k : j*k+k]
+					var s0, s1, s2, s3 float64
+					p := 0
+					for ; p+4 <= k; p += 4 {
+						s0 += aRow[p] * wRow[p]
+						s1 += aRow[p+1] * wRow[p+1]
+						s2 += aRow[p+2] * wRow[p+2]
+						s3 += aRow[p+3] * wRow[p+3]
+					}
+					s := (s0 + s1) + (s2 + s3)
+					for ; p < k; p++ {
+						s += aRow[p] * wRow[p]
+					}
+					c[cRow+j] = s
 				}
-				s := (s0 + s1) + (s2 + s3)
-				for ; p < k; p++ {
-					s += aRow[p] * wRow[p]
-				}
-				c[cRow+j] = s
 			}
 		}
 	})
 	return c
+}
+
+// blockN decides the w-row panel width. Tiling only pays when w is too big to
+// stay in cache across the x sweep; below that it just re-reads x for no reason
+// (a large-m, small-n product like 4096x4096x256 has a huge x and a w that fits,
+// so tiling there is pure loss). So the whole of w fitting a generous last-level
+// budget means no tiling (panel = n); past it, panels are sized to L2 so each one
+// stays resident while the chunk streams through.
+func blockN(k, n int) int {
+	if k <= 0 {
+		return n
+	}
+	const llcBudget = 16 * 1024 * 1024 // ~last-level cache; below this, do not tile
+	const l2Budget = 512 * 1024        // panel target once tiling is worth it
+	if n*k*8 <= llcBudget {
+		return n
+	}
+	jb := l2Budget / (k * 8)
+	if jb < 8 {
+		jb = 8
+	}
+	if jb > n {
+		jb = n
+	}
+	return jb
 }
 
 // MatMulNT computes a @ bᵀ, where b is the [nout, nin] weight of a dense layer.
