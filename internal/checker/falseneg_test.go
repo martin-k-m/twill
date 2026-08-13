@@ -95,6 +95,17 @@ func TestSplitBoundsCaught(t *testing.T) {
 	wantNone(t, "let x = zeros(6)\nlet p = split(x, 3, 0)")
 }
 
+func TestMaxpool2dArityCaught(t *testing.T) {
+	// The wrong number of arguments reached the runtime; maxpool2d takes exactly
+	// the tensor and the window.
+	wantOne(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x)", "expects 2 argument(s), got 1")
+	wantOne(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x, 2, 3)", "expects 2 argument(s), got 3")
+	// The right count stays clean, and a user function of the same name is not the
+	// builtin, so its own arity governs.
+	wantNone(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x, 2)")
+	wantNone(t, "fn maxpool2d(a) = a\nlet y = maxpool2d(5.0)")
+}
+
 func TestConcatEmptyListCaught(t *testing.T) {
 	// An empty list has nothing to join; the runtime needs at least one tensor.
 	wantOne(t, "let y = concat([], 0)", "need at least one tensor")

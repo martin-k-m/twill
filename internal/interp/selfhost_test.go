@@ -158,6 +158,18 @@ func TestSelfHostedCheckAcceptsSplit(t *testing.T) {
 	}
 }
 
+// maxpool2d takes exactly two arguments; the wrong count is a runtime error the
+// self-hosted checker must catch too, while a same-named user function is left
+// to its own arity.
+func TestSelfHostedCheckCatchesMaxpoolArity(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x)\n"); code != 1 {
+		t.Fatalf("check of maxpool2d with one argument exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x, 2)\n"); code != 0 {
+		t.Fatalf("check of a valid maxpool2d exited %d, want 0", code)
+	}
+}
+
 // An empty list handed to concat has nothing to join; the self-hosted checker
 // must reject it just as the Go one does, keying on the literal.
 func TestSelfHostedCheckCatchesEmptyConcat(t *testing.T) {

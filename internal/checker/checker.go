@@ -1651,6 +1651,13 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return c.convResult(ex, argTypes)
 	case "maxpool2d":
 		// [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
+		// maxpool2d takes exactly the tensor and the window; the wrong number of
+		// arguments is a runtime error the checker can settle here, since a call
+		// reaches this case only when the name is the real builtin, not a shadow.
+		if len(ex.Args) != 2 {
+			c.report(ex.Line, "maxpool2d expects 2 argument(s), got %d", len(ex.Args))
+			return tUnknown{}
+		}
 		// A non-rank-3 input is the error the runtime raises, reported here.
 		if t, ok := argTypes[0].(tTensor); ok {
 			if len(t.dims) != 3 {
