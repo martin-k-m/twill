@@ -98,25 +98,35 @@ func QLinear(x *Tensor, q *QTensor) (*Tensor, error) {
 	}
 	n := q.Rows
 	out := make([]float64, m*n)
+	// Cache-tiled over the weight rows, as mmNT: a panel of int8 rows stays
+	// resident while the x-chunk streams through it. The int8 weight is an eighth
+	// of an f64 one, so the panel budget counts bytes not elements.
+	jb := blockNBytes(k, n, 1)
 	runChunks(m, workersFor(m*k*n), func(lo, hi int) {
-		for i := lo; i < hi; i++ {
-			xRow := x.Data[i*k : i*k+k]
-			cRow := i * n
-			for j := 0; j < n; j++ {
-				qRow := q.Q[j*k : j*k+k]
-				var s0, s1, s2, s3 float64
-				p := 0
-				for ; p+4 <= k; p += 4 {
-					s0 += xRow[p] * float64(qRow[p])
-					s1 += xRow[p+1] * float64(qRow[p+1])
-					s2 += xRow[p+2] * float64(qRow[p+2])
-					s3 += xRow[p+3] * float64(qRow[p+3])
+		for j0 := 0; j0 < n; j0 += jb {
+			j1 := j0 + jb
+			if j1 > n {
+				j1 = n
+			}
+			for i := lo; i < hi; i++ {
+				xRow := x.Data[i*k : i*k+k]
+				cRow := i * n
+				for j := j0; j < j1; j++ {
+					qRow := q.Q[j*k : j*k+k]
+					var s0, s1, s2, s3 float64
+					p := 0
+					for ; p+4 <= k; p += 4 {
+						s0 += xRow[p] * float64(qRow[p])
+						s1 += xRow[p+1] * float64(qRow[p+1])
+						s2 += xRow[p+2] * float64(qRow[p+2])
+						s3 += xRow[p+3] * float64(qRow[p+3])
+					}
+					s := (s0 + s1) + (s2 + s3)
+					for ; p < k; p++ {
+						s += xRow[p] * float64(qRow[p])
+					}
+					out[cRow+j] = s * q.Scale[j]
 				}
-				s := (s0 + s1) + (s2 + s3)
-				for ; p < k; p++ {
-					s += xRow[p] * float64(qRow[p])
-				}
-				out[cRow+j] = s * q.Scale[j]
 			}
 		}
 	})
