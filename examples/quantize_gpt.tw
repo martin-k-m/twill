@@ -1,0 +1,104 @@
+# quantize_gpt.tw - train a GPT, then run it with int8 feed-forward weights.
+#
+# The feed-forward layers are about two-thirds of a transformer's parameters and
+# go through dense_apply, whose `linear` runs the int8 kernel the moment its
+# weight is a quantised one. So quantising them needs no change to the model:
+# rebuild the parameter tree with each ff weight packed, and generation runs on
+# the small weights. Attention, embeddings, biases and norms stay full precision
+# (attention applies its weights with a plain @, a different layout, and the
+# embedding table is shared with the tied output head).
+#
+# The point of the demo: the quantised model continues the prompt the same way
+# the full-precision one does, at an eighth the memory for those weights.
+#
+#   tw run examples/quantize_gpt.tw
+
+import "std/transformer" as tf
+import "std/optim" as optim
+import "std/text" as text
+
+seed(1)
+
+let corpus = "the loom weaves the warp and the weft. " +
+             "the shuttle carries the thread. " +
+             "the loom weaves the warp and the weft. " +
+             "the shuttle carries the thread. "
+
+# ── Tokenise ─────────────────────────────────────────────────────────────────
+let n = text.char_len(corpus)
+let to_id = dict_new()
+let codes = list()
+for i in range(n) {
+  let c = text.char_code(corpus, i)
+  if dict_has(to_id, c) == false {
+    dict_set(to_id, c, len(codes))
+    codes = append(codes, c)
+  }
+}
+let vocab = len(codes)
+let data = list()
+for i in range(n) {
+  data = append(data, dict_must(to_id, text.char_code(corpus, i)))
+}
+let data_t = tensor(data)
+
+# ── Training windows ─────────────────────────────────────────────────────────
+let T = 16
+let xs = list()
+let ys = list()
+for s in range(n - T - 1) {
+  let xi = list()
+  let yi = list()
+  for j in range(T) {
+    xi = append(xi, s + j)
+    yi = append(yi, s + j + 1)
+  }
+  xs = append(xs, gather(data_t, tensor(xi)))
+  ys = append(ys, gather(data_t, tensor(yi)))
+}
+
+# ── Train ────────────────────────────────────────────────────────────────────
+let cfg = tf.config(vocab, 48, 4, 2, T)
+let p = tf.gpt_params(cfg, "xavier")
+let m = optim.zeros_like(p)
+let v = optim.zeros_like(p)
+for step in range(40) {
+  let g = grad(fn(w) = tf.gpt_loss_batch(w, xs, ys, cfg))(p)
+  let out = optim.adam_step(p, g, m, v, step + 1, 0.01, 0.9, 0.999, 0.00000001)
+  p = out[0]
+  m = out[1]
+  v = out[2]
+}
+print("trained, final loss", tf.gpt_loss_batch(p, xs, ys, cfg))
+
+# ── Quantise the feed-forward weights ────────────────────────────────────────
+fn quantize_dense(d) = with_field(d, "W", quantize(d.W))
+fn quantize_ff(ff) =
+  with_field(with_field(ff, "fc1", quantize_dense(ff.fc1)), "fc2", quantize_dense(ff.fc2))
+fn quantize_ffn(model) =
+  with_field(model, "blocks", map(fn(b) = with_field(b, "ff", quantize_ff(b.ff)), model.blocks))
+
+let pq = quantize_ffn(p)
+print("ff loss after int8 quantise", tf.gpt_loss_batch(pq, xs, ys, cfg))
+print("model bytes  full:", nbytes(p), " int8 ff:", nbytes(pq))
+
+# ── Sample from both ─────────────────────────────────────────────────────────
+fn encode(s) {
+  let ids = list()
+  for i in range(text.char_len(s)) {
+    ids = append(ids, dict_must(to_id, text.char_code(s, i)))
+  }
+  tensor(ids)
+}
+fn decode(ids) {
+  let s = ""
+  for i in range(len(ids)) {
+    s = text.concat(s, text.from_byte(codes[int(item(ids[i]))]))
+  }
+  s
+}
+
+let prompt = "the loom "
+print("prompt:         ", prompt)
+print("full precision: ", decode(tf.generate(p, encode(prompt), 48, cfg)))
+print("int8 feed-fwd:  ", decode(tf.generate(pq, encode(prompt), 48, cfg)))
