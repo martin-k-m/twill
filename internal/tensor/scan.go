@@ -16,12 +16,21 @@ import (
 func CumSum(t *Tensor) *Tensor {
 	n := len(t.Data)
 	out := make([]float64, n)
+	// A running sum accumulates at the accumulation dtype and stores the result
+	// dtype, like every other reduction; f64 keeps its plain running sum.
+	dt := t.DType()
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	run := 0.0
 	for i, v := range t.Data {
-		run += v
+		if narrow {
+			run = RoundToDType(acc, run+v)
+		} else {
+			run += v
+		}
 		out[i] = run
 	}
-	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	res := contractionResult(out, append([]int(nil), t.Shape...), dt)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -54,12 +63,21 @@ func CumSum(t *Tensor) *Tensor {
 func CumProd(t *Tensor) *Tensor {
 	n := len(t.Data)
 	out := make([]float64, n)
+	// A running product accumulates at the accumulation dtype and stores the
+	// result dtype; f64 keeps its plain running product.
+	dt := t.DType()
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	run := 1.0
 	for i, v := range t.Data {
-		run *= v
+		if narrow {
+			run = RoundToDType(acc, run*v)
+		} else {
+			run *= v
+		}
 		out[i] = run
 	}
-	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	res := contractionResult(out, append([]int(nil), t.Shape...), dt)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -123,7 +141,7 @@ func cumExtreme(t *Tensor, wantMax bool) *Tensor {
 			arg[i] = arg[i-1]
 		}
 	}
-	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	res := (&Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}).withDTypeLike(t)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -159,18 +177,25 @@ func CumsumAxis(t *Tensor, axis int) (*Tensor, error) {
 	before, L, after := axisSpans(t.Shape, axis)
 
 	out := make([]float64, len(t.Data))
+	dt := t.DType()
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	for i := 0; i < before; i++ {
 		for j := 0; j < after; j++ {
 			base := i*L*after + j
 			run := 0.0
 			for k := 0; k < L; k++ {
-				run += t.Data[base+k*after]
+				if narrow {
+					run = RoundToDType(acc, run+t.Data[base+k*after])
+				} else {
+					run += t.Data[base+k*after]
+				}
 				out[base+k*after] = run
 			}
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	res := contractionResult(out, append([]int{}, t.Shape...), dt)
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -201,18 +226,25 @@ func CumprodAxis(t *Tensor, axis int) (*Tensor, error) {
 	before, L, after := axisSpans(t.Shape, axis)
 
 	out := make([]float64, len(t.Data))
+	dt := t.DType()
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	for i := 0; i < before; i++ {
 		for j := 0; j < after; j++ {
 			base := i*L*after + j
 			run := 1.0
 			for k := 0; k < L; k++ {
-				run *= t.Data[base+k*after]
+				if narrow {
+					run = RoundToDType(acc, run*t.Data[base+k*after])
+				} else {
+					run *= t.Data[base+k*after]
+				}
 				out[base+k*after] = run
 			}
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	res := contractionResult(out, append([]int{}, t.Shape...), dt)
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -299,7 +331,7 @@ func cumExtremeAxis(t *Tensor, axis int, wantMax bool) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	res := (&Tensor{Data: out, Shape: append([]int{}, t.Shape...)}).withDTypeLike(t)
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
@@ -392,7 +424,9 @@ func DiffAxis(t *Tensor, axis int) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: outShape}
+	// A single subtraction per element, so f64 and one rounding on store is the
+	// dtype's own subtraction exactly; no accumulator is live here.
+	res := roundedBinaryResult(out, outShape, t.DType())
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return
