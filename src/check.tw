@@ -2866,6 +2866,16 @@ fn conv_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
                 report(c, ex.line, bytes.concat("conv2d: input has ",
                   bytes.concat(str(in_.dims[0]), bytes.concat(" channels but weight expects ", str(w.dims[1])))))
               }
+              # A kernel wider or taller than the input gives an empty output,
+              # which the runtime rejects; certain when both spatial pairs known.
+              let spatial_known: Bool = in_.dims[1] >= 0 and in_.dims[2] >= 0 and w.dims[2] >= 0 and w.dims[3] >= 0
+              let kernel_too_big: Bool = w.dims[2] > in_.dims[1] or w.dims[3] > in_.dims[2]
+              if spatial_known and kernel_too_big {
+                report(c, ex.line, bytes.concat("conv2d: kernel ",
+                  bytes.concat(str(w.dims[2]), bytes.concat("x", bytes.concat(str(w.dims[3]),
+                  bytes.concat(" is larger than input ", bytes.concat(str(in_.dims[1]),
+                  bytes.concat("x", str(in_.dims[2])))))))))
+              }
               if in_.dims[1] >= 0 and w.dims[2] >= 0 {
                 dims[1] = in_.dims[1] - w.dims[2] + 1
               }
