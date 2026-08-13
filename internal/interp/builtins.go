@@ -922,6 +922,9 @@ func (ip *Interp) installBuiltins() {
 		if q, ok := a[1].(*tensor.QTensor); ok {
 			return tensor.QLinear(x, q)
 		}
+		if q, ok := a[1].(*tensor.QTensorI4); ok {
+			return tensor.QLinear4(x, q)
+		}
 		w, err := asTensor(a[1], "linear")
 		if err != nil {
 			return nil, err
@@ -929,15 +932,35 @@ func (ip *Interp) installBuiltins() {
 		return tensor.MatMulNT(x, w)
 	})
 	// quantize(W) packs a 2-D weight into int8 with a per-row scale: an eighth of
-	// the memory at ~0.4% error, the lever that lets a large model's weights fit
-	// in RAM. The result is a frozen weight for `linear`, not a differentiable
-	// tensor, so it belongs to inference, not training.
-	def("quantize", 1, false, func(a []value.Value) (value.Value, error) {
+	// the memory at ~0.4% error. quantize(W, 4) packs it into 4-bit blocks
+	// instead, ~13x smaller for a few percent error — the size that lets a
+	// billion-parameter model's weights fit in a laptop's RAM. Either result is a
+	// frozen weight for `linear`, not a differentiable tensor, so it belongs to
+	// inference, not training.
+	def("quantize", -1, true, func(a []value.Value) (value.Value, error) {
+		if len(a) < 1 || len(a) > 2 {
+			return nil, fmt.Errorf("quantize expects (weight) or (weight, bits)")
+		}
 		w, err := asTensor(a[0], "quantize")
 		if err != nil {
 			return nil, err
 		}
-		return tensor.QuantizeI8(w)
+		bits := 8
+		if len(a) == 2 {
+			b, err := scalarOf(a[1], "quantize")
+			if err != nil {
+				return nil, err
+			}
+			bits = int(b)
+		}
+		switch bits {
+		case 8:
+			return tensor.QuantizeI8(w)
+		case 4:
+			return tensor.QuantizeI4(w, 32)
+		default:
+			return nil, fmt.Errorf("quantize supports 4 or 8 bits, got %d", bits)
+		}
 	})
 	// nbytes(v) reports the in-memory footprint of a value in bytes, walking into
 	// records and lists. It exists so a model's memory is a number the language
@@ -2433,6 +2456,8 @@ func nbytesOf(v value.Value) float64 {
 	case *tensor.Tensor:
 		return float64(len(t.Data) * 8)
 	case *tensor.QTensor:
+		return float64(t.Bytes())
+	case *tensor.QTensorI4:
 		return float64(t.Bytes())
 	case value.Num:
 		return 8

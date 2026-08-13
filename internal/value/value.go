@@ -344,6 +344,8 @@ func Format(v Value) string {
 		return "tensor(" + formatNested(t.ToNested()) + ", shape=[" + joinInts(t.Shape) + "])"
 	case *tensor.QTensor:
 		return "quantized(i8, shape=[" + joinInts([]int{t.Rows, t.Cols}) + "])"
+	case *tensor.QTensorI4:
+		return "quantized(i4, shape=[" + joinInts([]int{t.Rows, t.Cols}) + "])"
 	case Bool:
 		if t {
 			return "true"
