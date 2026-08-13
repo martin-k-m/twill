@@ -20,8 +20,10 @@ that three separate efforts are all blocked on the same fact:
 ## What this change does and does not do
 
 It lands the *semantics* of a dtype: which values exist, what a store rounds to,
-what an operation promotes to, and what it accumulates in. It does not yet land
-the *layout*: the buffer is still `Arr[F64]`, one F64 per element.
+what an operation promotes to, and what it accumulates in — in full, across
+every forward op and in both implementations (see "What has landed" below). It
+does not yet land the *layout*: the buffer is still `Arr[F64]`, one F64 per
+element.
 
 The two are separable because of one invariant, which `src/tensor.tw` enforces
 in `mk` and which every kernel depends on:
@@ -333,18 +335,46 @@ against the thing it claims to test does not belong next to it. What it does
 establish is that the algorithm is right, which is the part that cannot be found
 by reading.
 
+## What has landed
+
+The numerics are complete and byte-identical across both implementations. Both
+the self-hosted evaluator (`src/tensor.tw`) and the Go bootstrap (`internal/
+tensor`) now agree, element for element, on every forward op that touches a
+dtype:
+
+- **construction and the cast** — `zeros(shape, bf16)`, `.to(dt)`, and the
+  dtype-suffixed makers (NEEDS-110, landed).
+- **elementwise and unary** — promotion of the operands, one rounding on store;
+  an integer-preserving op (`neg`, `square`, `clip`) keeps its kind.
+- **reductions and scans** — `sum`/`mean`/`prod`, `cumsum`/`cumprod`,
+  `softmax`/`logsumexp`, each accumulating at the accumulation dtype (f32 for
+  anything narrower) and storing the result dtype; `mean` of an integer promotes
+  to f32.
+- **selections and rearrangements** — `max`/`min`/`median`, `sort`/`topk`,
+  indexing, slicing, `split`, `gather`, `reshape`/`transpose`/`flip`/`roll`,
+  `concat` (promoting its pieces) carry the input dtype through unchanged;
+  `where` promotes its two branches; `argmax`/`argsort`/`argtopk` produce i32.
+- **the four contractions** — `matmul`/`linear`, `einsum`, `conv2d` accumulate
+  in f32 for a narrow input and round to the promotion of the operands.
+- **printing** — a narrow tensor prints the value it holds, not the f64 it was
+  widened to, via the shortest decimal that re-rounds to the stored value
+  (NEEDS-114, landed).
+
+f64 is untouched throughout: `Promote(f64, f64) = f64` routes it past every
+narrow path, so its goldens stay bit-for-bit as before.
+
 ## What is still open
 
-`docs/needs.md` NEEDS-110 through NEEDS-114, in dependency order:
+`docs/needs.md`, in dependency order:
 
-- **110** dtype syntax: a dtype as a name, `zeros(shape, bf16)`, and `.to(dt)`.
 - **101** a packed, byte-addressable buffer. Until this lands, no memory is
-  saved and shuttle's report stands.
+  saved and shuttle's report stands. The buffer invariant above is what lets
+  this land with no kernel changing.
 - **102** `backward_scaled` and `grads_finite`, the loss-scaling surface above.
-- **113** dtype in the static checker, so `f16 + bf16` is known to be f32 before
-  it runs.
-- **114** dtype-aware printing and parsing, so a bf16 tensor prints the value it
-  holds rather than the f64 it was widened to.
+- **113** dtype in the static checker, so `f16 + bf16` is known to be f32, and a
+  lossy widening is flagged, before it runs. The self-hosted checker already
+  tracks a tensor's dtype; the Go checker's type system does not yet carry one,
+  so this is the one place the two still differ in what they can prove.
 
 ## See also
 
