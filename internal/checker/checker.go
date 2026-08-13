@@ -1384,6 +1384,11 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 					perm[i] = t.dims[ax]
 				}
 				return tTensor{dims: perm}
+			} else if len(t.dims) > 0 {
+				// A permutation must name every axis exactly once, so a count
+				// other than the rank is a certain error the runtime raises.
+				c.report(ex.Line, "transpose: got %d axes for a rank-%d tensor", len(axes), len(t.dims))
+				return tUnknown{}
 			}
 		}
 		return tUnknown{}
@@ -1479,6 +1484,32 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "roll":
 		// roll puts the shift first, so its axis is the third argument.
 		return c.axisPreserveResult(ex, argTypes, 2)
+	case "diff":
+		// diff takes successive differences along an axis (second argument),
+		// shrinking that axis by one. An out-of-range axis is the runtime error;
+		// it was previously unchecked while flip, roll and the scans were not.
+		if t, ok := argTypes[0].(tTensor); ok {
+			if len(ex.Args) > 1 && len(t.dims) > 0 {
+				if ax, ok := constInt(ex.Args[1]); ok {
+					a := ax
+					if a < 0 {
+						a += len(t.dims)
+					}
+					if a < 0 || a >= len(t.dims) {
+						c.reportAxis(ex, t)
+						return tUnknown{}
+					}
+					dims := make([]int, len(t.dims))
+					copy(dims, t.dims)
+					if dims[a] > 0 {
+						dims[a]--
+					}
+					return tTensor{dims: dims}
+				}
+			}
+			return tUnknown{}
+		}
+		return tUnknown{}
 	case "gather":
 		// The index selects rows, so it must be a 1-D list of positions; a rank-2
 		// or higher index is the runtime error, and its rank is known here.

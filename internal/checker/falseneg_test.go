@@ -50,3 +50,15 @@ func TestConvKernelLargerThanInputCaught(t *testing.T) {
 	// A kernel that fits stays clean.
 	wantNone(t, "let x = zeros(3, 8, 8)\nlet y = conv2d(x, zeros(4, 3, 3, 3))")
 }
+
+func TestDiffAxisCaught(t *testing.T) {
+	// diff's axis was unchecked while flip/roll/scans were not.
+	wantOne(t, "let y = diff(zeros(2, 3), 7)", "axis out of range")
+	wantNone(t, "let y = diff(zeros(2, 3), 1)")
+}
+
+func TestTransposeAxisCountCaught(t *testing.T) {
+	// A permutation must name every axis exactly once.
+	wantOne(t, "let y = transpose(zeros(2, 3), 0, 1, 2)", "rank-2 tensor")
+	wantNone(t, "let y = transpose(zeros(2, 3), 1, 0)")
+}

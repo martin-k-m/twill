@@ -2367,6 +2367,33 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   if bytes.equal(name, "roll") {
     return axis_preserve_result(c, ex, arg_types, 2)
   }
+  if bytes.equal(name, "diff") {
+    # diff takes successive differences along an axis (second argument), shrinking
+    # that axis by one. An out-of-range axis is the runtime error; it was
+    # previously unchecked while flip, roll and the scans were not.
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(ex.args) > 1 and len(t.dims) > 0 {
+          match const_int(ex.args[1]) {
+            Some(ax) => {
+              let a: I64 = ax
+              if a < 0 { a = a + len(t.dims) }
+              if a < 0 or a >= len(t.dims) {
+                report_axis(c, ex, t)
+                return TUnknown
+              }
+              let d: Arr[I64] = copy_dims(t.dims)
+              if d[a] > 0 { d[a] = d[a] - 1 }
+              return set_dtype(tensor_of(d), t.dtype)
+            },
+            None => return TUnknown,
+          }
+        }
+        return TUnknown
+      },
+      None => return TUnknown,
+    }
+  }
   # Selecting rows keeps the trailing dims and the dtype, but the row count is
   # dynamic.
   if bytes.equal(name, "gather") {
@@ -2613,7 +2640,16 @@ fn transpose_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
         }
         i = i + 1
       }
-      if len(axes) != len(t.dims) { return TUnknown }
+      if len(axes) != len(t.dims) {
+        # A permutation must name every axis exactly once, so a count other than
+        # the rank is a certain error the runtime raises.
+        if len(t.dims) > 0 {
+          report(c, ex.line, bytes.concat("transpose: got ",
+            bytes.concat(str(len(axes)), bytes.concat(" axes for a rank-",
+            bytes.concat(str(len(t.dims)), " tensor")))))
+        }
+        return TUnknown
+      }
       let perm: Arr[I64] = arr_new()
       let k: I64 = 0
       while k < len(axes) {
