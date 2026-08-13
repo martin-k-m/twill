@@ -25,6 +25,11 @@ func Conv2D(input, weight *Tensor) (*Tensor, error) {
 	hw, khw, cinkhw := h*w, kh*kw, cin*kh*kw
 	ohw := oh * ow
 	out := make([]float64, cout*ohw)
+	// A narrow convolution accumulates in f32 and rounds to the promoted dtype,
+	// like every other contraction; f64 keeps its plain running sum.
+	dt := Promote(input.DType(), weight.DType())
+	acc := AccDType(dt)
+	narrow := dt != DTF64
 	for co := 0; co < cout; co++ {
 		for i := 0; i < oh; i++ {
 			for j := 0; j < ow; j++ {
@@ -32,7 +37,12 @@ func Conv2D(input, weight *Tensor) (*Tensor, error) {
 				for ci := 0; ci < cin; ci++ {
 					for a := 0; a < kh; a++ {
 						for b := 0; b < kw; b++ {
-							sum += input.Data[ci*hw+(i+a)*w+(j+b)] * weight.Data[co*cinkhw+ci*khw+a*kw+b]
+							term := input.Data[ci*hw+(i+a)*w+(j+b)] * weight.Data[co*cinkhw+ci*khw+a*kw+b]
+							if narrow {
+								sum = RoundToDType(acc, sum+term)
+							} else {
+								sum += term
+							}
 						}
 					}
 				}
@@ -40,7 +50,7 @@ func Conv2D(input, weight *Tensor) (*Tensor, error) {
 			}
 		}
 	}
-	res := &Tensor{Data: out, Shape: []int{cout, oh, ow}}
+	res := contractionResult(out, []int{cout, oh, ow}, dt)
 	// Forward-mode. conv is bilinear in (input, weight): each output is a sum of
 	// products input*weight over the receptive field, so the first tangent is the
 	// sum of xd*w + x*wd and the second is the bilinear product rule, xdd*w +
