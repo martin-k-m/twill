@@ -687,7 +687,7 @@ func mmNT(a []float64, m, k int, w []float64, n int) []float64 {
 	//
 	// Bit-exact: each c[i,j] is still the full k-length dot summed in k order with
 	// the same four accumulators; only the order of visiting (i,j) pairs changes.
-	jb := blockN(k, n)
+	jb := blockNBytes(k, n, 8)
 	runChunks(m, workersFor(m*k*n), func(lo, hi int) {
 		for j0 := 0; j0 < n; j0 += jb {
 			j1 := j0 + jb
@@ -719,22 +719,24 @@ func mmNT(a []float64, m, k int, w []float64, n int) []float64 {
 	return c
 }
 
-// blockN decides the w-row panel width. Tiling only pays when w is too big to
+// blockNBytes decides the w-row panel width for a weight whose element is
+// bytesPer bytes (8 for f64, 1 for int8). Tiling only pays when w is too big to
 // stay in cache across the x sweep; below that it just re-reads x for no reason
 // (a large-m, small-n product like 4096x4096x256 has a huge x and a w that fits,
 // so tiling there is pure loss). So the whole of w fitting a generous last-level
 // budget means no tiling (panel = n); past it, panels are sized to L2 so each one
 // stays resident while the chunk streams through.
-func blockN(k, n int) int {
+func blockNBytes(k, n, bytesPer int) int {
 	if k <= 0 {
 		return n
 	}
+	rowBytes := k * bytesPer
 	const llcBudget = 16 * 1024 * 1024 // ~last-level cache; below this, do not tile
 	const l2Budget = 512 * 1024        // panel target once tiling is worth it
-	if n*k*8 <= llcBudget {
+	if n*rowBytes <= llcBudget {
 		return n
 	}
-	jb := l2Budget / (k * 8)
+	jb := l2Budget / rowBytes
 	if jb < 8 {
 		jb = 8
 	}

@@ -144,26 +144,35 @@ func QLinear4(x *Tensor, q *QTensorI4) (*Tensor, error) {
 	bpr := blocksPerRow(k, q.Block)
 	rb := rowBytes(k)
 	out := make([]float64, m*n)
+	// Cache-tiled over weight rows as mmNT; the int4 weight is ~half a byte per
+	// element, so the panel budget counts its packed row bytes.
+	jb := blockNBytes(k, n, 1) // rb ~ k/2 bytes; treat as <=1 byte/elem, tiles rarely
 	runChunks(m, workersFor(m*k*n), func(lo, hi int) {
-		for i := lo; i < hi; i++ {
-			xRow := x.Data[i*k : i*k+k]
-			cRow := i * n
-			for j := 0; j < n; j++ {
-				base := j * rb
-				var y float64
-				for b := 0; b < bpr; b++ {
-					p0 := b * q.Block
-					p1 := p0 + q.Block
-					if p1 > k {
-						p1 = k
+		for j0 := 0; j0 < n; j0 += jb {
+			j1 := j0 + jb
+			if j1 > n {
+				j1 = n
+			}
+			for i := lo; i < hi; i++ {
+				xRow := x.Data[i*k : i*k+k]
+				cRow := i * n
+				for j := j0; j < j1; j++ {
+					base := j * rb
+					var y float64
+					for b := 0; b < bpr; b++ {
+						p0 := b * q.Block
+						p1 := p0 + q.Block
+						if p1 > k {
+							p1 = k
+						}
+						var acc float64
+						for p := p0; p < p1; p++ {
+							acc += xRow[p] * float64(getNibble(q.Q, base, p))
+						}
+						y += acc * q.Scale[j*bpr+b]
 					}
-					var acc float64
-					for p := p0; p < p1; p++ {
-						acc += xRow[p] * float64(getNibble(q.Q, base, p))
-					}
-					y += acc * q.Scale[j*bpr+b]
+					out[cRow+j] = y
 				}
-				out[cRow+j] = y
 			}
 		}
 	})
