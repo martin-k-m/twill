@@ -148,6 +148,14 @@ func TestSelfHostedCheckAcceptsSplit(t *testing.T) {
 	if code := runSelfHostedCheck(t, "let x = zeros(6)\nlet p = split(x, 2, 0)\n"); code != 0 {
 		t.Fatalf("check of a valid split exited %d, want 0", code)
 	}
+	// The same bounds mismatches the runtime raises are caught statically, and the
+	// self-hosted checker must agree: sizes that do not sum, and a bad divisor.
+	if code := runSelfHostedCheck(t, "let x = zeros(6)\nlet p = split(x, [2, 2], 0)\n"); code != 1 {
+		t.Fatalf("check of a split with sizes that do not sum exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let x = zeros(7)\nlet p = split(x, 3, 0)\n"); code != 1 {
+		t.Fatalf("check of a split count that does not divide exited %d, want 1", code)
+	}
 }
 
 // An empty list handed to concat has nothing to join; the self-hosted checker
