@@ -2169,7 +2169,7 @@ var builtinNames = map[string]bool{
 	"square": true, "maximum": true, "minimum": true, "greater": true,
 	"less": true, "greater_equal": true, "less_equal": true, "equal": true,
 	"where": true, "clip": true, "max": true, "min": true, "argmax": true, "argmin": true, "flip": true, "roll": true, "diff": true,
-	"softmax": true, "logsumexp": true, "sort": true, "topk": true, "argtopk": true, "reshape": true, "broadcast_to": true, "concat": true,
+	"softmax": true, "logsumexp": true, "sort": true, "topk": true, "argtopk": true, "reshape": true, "broadcast_to": true, "concat": true, "split": true,
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
 	"einsum": true, "map_leaves": true, "zip_leaves": true, "seed": true,
 	"read_frame": true, "write_frame": true, "columns": true, "field": true,

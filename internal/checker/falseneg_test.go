@@ -72,6 +72,14 @@ func TestTopKBoundsCaught(t *testing.T) {
 	wantNone(t, "let y = argtopk(zeros(5), 2)")
 }
 
+func TestSplitIsAKnownBuiltin(t *testing.T) {
+	// split is implemented in both interpreters but was missing from the name
+	// tables, so the checker rejected it as an unknown name and it was
+	// unreachable. A valid split is now clean.
+	wantNone(t, "let x = zeros(6)\nlet p = split(x, 2, 0)")
+	wantNone(t, "let x = zeros(6)\nlet p = split(x, [2, 4], 0)")
+}
+
 func TestConcatEmptyListCaught(t *testing.T) {
 	// An empty list has nothing to join; the runtime needs at least one tensor.
 	wantOne(t, "let y = concat([], 0)", "need at least one tensor")
