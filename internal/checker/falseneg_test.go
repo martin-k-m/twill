@@ -147,6 +147,11 @@ func TestFixedArityBuiltinsCaught(t *testing.T) {
 	wantOne(t, "let y = linear(zeros(2, 3))", "linear expects 2 argument(s), got 1")
 	wantOne(t, "let y = clip(zeros(3), 0.0)", "clip expects 3 argument(s), got 2")
 	wantOne(t, "let y = where(zeros(3), zeros(3))", "where expects 3 argument(s), got 2")
+	// Builtins registered through the interpreter's helper functions (unaryOp,
+	// elemOp, bitOp, binTensor) are fixed-arity too and were once absent.
+	wantOne(t, "let y = conv2d(zeros(1, 4, 4), zeros(2, 1, 2, 2), 0)", "conv2d expects 2 argument(s), got 3")
+	wantOne(t, "let y = relu(zeros(3), 1)", "relu expects 1 argument(s), got 2")
+	wantOne(t, "let y = maximum(zeros(3))", "maximum expects 2 argument(s), got 1")
 	// Correct counts stay clean; variadic builtins are not constrained.
 	wantNone(t, "let y = clip(zeros(3), 0.0, 1.0)")
 	wantNone(t, "let y = transpose(zeros(2, 3))")
