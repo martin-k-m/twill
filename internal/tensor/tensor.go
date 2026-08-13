@@ -738,6 +738,55 @@ func mm(a []float64, m, k int, b []float64, n int) []float64 {
 	return c
 }
 
+// mmAcc is mm at a narrow accumulation dtype: each multiply-add rounds to acc,
+// which for bf16 and f16 is f32 (docs/dtypes.md, "the rule that decides whether
+// the whole thing works"). A bf16 accumulator stops moving once the sum passes a
+// few hundred times a term; accumulating in f32 and rounding on store is what
+// fixes it. Used only for narrow contractions -- f64 keeps the fast mm -- so it
+// is written for clarity, not speed, and skips the zero-skip and tiling of mm.
+func mmAcc(a []float64, m, k int, b []float64, n int, acc DType) []float64 {
+	c := make([]float64, m*n)
+	for i := 0; i < m; i++ {
+		for j := 0; j < n; j++ {
+			s := 0.0
+			for p := 0; p < k; p++ {
+				s = RoundToDType(acc, s+a[i*k+p]*b[p*n+j])
+			}
+			c[i*n+j] = s
+		}
+	}
+	return c
+}
+
+// mmAccNT is mmNT at a narrow accumulation dtype: a is [m,k], w is [n,k], and the
+// result is a @ wᵀ, [m,n], each dot rounded to acc as it accumulates.
+func mmAccNT(a []float64, m, k int, w []float64, n int, acc DType) []float64 {
+	c := make([]float64, m*n)
+	for i := 0; i < m; i++ {
+		for j := 0; j < n; j++ {
+			s := 0.0
+			for p := 0; p < k; p++ {
+				s = RoundToDType(acc, s+a[i*k+p]*w[j*k+p])
+			}
+			c[i*n+j] = s
+		}
+	}
+	return c
+}
+
+// contractionResult builds a contraction's output: for a narrow result dtype it
+// rounds the accumulated buffer to that dtype and tags it; for f64 it is the
+// plain tensor the kernels always returned.
+func contractionResult(out []float64, shape []int, dt DType) *Tensor {
+	if dt == DTF64 {
+		return &Tensor{Data: out, Shape: shape}
+	}
+	for i := range out {
+		out[i] = RoundToDType(dt, out[i])
+	}
+	return (&Tensor{Data: out, Shape: shape}).WithDType(dt)
+}
+
 func transpose2d(a []float64, rows, cols int) []float64 {
 	t := make([]float64, rows*cols)
 	for i := 0; i < rows; i++ {
@@ -850,14 +899,22 @@ func MatMulNT(a, b *Tensor) (*Tensor, error) {
 	if k != k2 {
 		return nil, fmt.Errorf("shape mismatch in linear: %v @ %vᵀ (inner %d != %d)", a.Shape, b.Shape, k, k2)
 	}
-	outData := mmNT(a.Data, m, k, b.Data, n)
+	// A narrow contraction accumulates in f32 and rounds to the promoted dtype;
+	// f64 keeps the fast four-accumulator, cache-tiled mmNT.
+	dt := Promote(a.DType(), b.DType())
+	var outData []float64
+	if dt == DTF64 {
+		outData = mmNT(a.Data, m, k, b.Data, n)
+	} else {
+		outData = mmAccNT(a.Data, m, k, b.Data, n, AccDType(dt))
+	}
 	var outShape []int
 	if len(a.Shape) == 1 {
 		outShape = []int{n}
 	} else {
 		outShape = []int{m, n}
 	}
-	res := &Tensor{Data: outData, Shape: outShape}
+	res := contractionResult(outData, outShape, dt)
 	if recordJets && (a.RequiresGrad || b.RequiresGrad) {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -914,7 +971,13 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 	if k != k2 {
 		return nil, fmt.Errorf("shape mismatch in @: %v @ %v (inner %d != %d)", a.Shape, b.Shape, k, k2)
 	}
-	outData := mm(a.Data, m, k, b.Data, n)
+	dt := Promote(a.DType(), b.DType())
+	var outData []float64
+	if dt == DTF64 {
+		outData = mm(a.Data, m, k, b.Data, n)
+	} else {
+		outData = mmAcc(a.Data, m, k, b.Data, n, AccDType(dt))
+	}
 	var outShape []int
 	switch {
 	case len(a.Shape) == 1 && len(b.Shape) == 1:
@@ -926,7 +989,7 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 	default:
 		outShape = []int{m, n}
 	}
-	res := &Tensor{Data: outData, Shape: outShape}
+	res := contractionResult(outData, outShape, dt)
 	if recordJets && (a.RequiresGrad || b.RequiresGrad) {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
