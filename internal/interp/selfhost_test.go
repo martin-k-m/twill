@@ -127,6 +127,21 @@ func TestSelfHostedCheckCatchesBadAxis(t *testing.T) {
 	}
 }
 
+// topk/argtopk shorten an axis to k, so a k past the axis length is a runtime
+// error the self-hosted checker must catch too -- and argtopk was unreachable
+// until its name was added to the front end, so this also guards that.
+func TestSelfHostedCheckCatchesTopKBounds(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let y = topk(zeros(3), 5)\n"); code != 1 {
+		t.Fatalf("check of topk k past the axis exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let y = argtopk(zeros(3), 5)\n"); code != 1 {
+		t.Fatalf("check of argtopk k past the axis exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let y = topk(zeros(3), 2)\n"); code != 0 {
+		t.Fatalf("check of a valid topk exited %d, want 0", code)
+	}
+}
+
 // Loop-control checking (docs/language-guide.md, break/continue) is one of the
 // non-shape diagnostics the checker owns, so the self-hosted checker must agree
 // with the Go one on it: a break outside any loop is an error, a break inside a

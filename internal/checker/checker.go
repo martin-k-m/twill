@@ -1504,6 +1504,47 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		// the runtime raises. (sort of a list is handled by returning unknown
 		// here, since its argument is not a tensor.)
 		return c.axisPreserveResult(ex, argTypes, 1)
+	case "topk", "argtopk":
+		// Take the k largest (or smallest) values along an axis. The result has
+		// the same shape but with that axis shortened to k, so a k larger than the
+		// axis -- or a non-positive k, or an out-of-range axis -- is the runtime
+		// error, all knowable here when k, the axis and the dims are constant.
+		// The axis defaults to the last one; smallest is a flag we ignore.
+		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) > 0 {
+			axis := len(t.dims) - 1
+			if len(ex.Args) > 2 {
+				a, ok := constInt(ex.Args[2])
+				if !ok {
+					return tUnknown{}
+				}
+				axis = a
+			}
+			if axis < 0 {
+				axis += len(t.dims)
+			}
+			if axis < 0 || axis >= len(t.dims) {
+				c.reportAxis(ex, t)
+				return tUnknown{}
+			}
+			if len(ex.Args) > 1 {
+				if k, ok := constInt(ex.Args[1]); ok {
+					L := t.dims[axis]
+					if k <= 0 {
+						c.report(ex.Line, "%s: k must be positive, got %d", name, k)
+						return tUnknown{}
+					}
+					if L >= 0 && k > L {
+						c.report(ex.Line, "%s: k is %d but axis %d has length %d", name, k, axis, L)
+						return tUnknown{}
+					}
+					dims := make([]int, len(t.dims))
+					copy(dims, t.dims)
+					dims[axis] = k
+					return tTensor{dims: dims}
+				}
+			}
+		}
+		return tUnknown{}
 	case "roll":
 		// roll puts the shift first, so its axis is the third argument.
 		return c.axisPreserveResult(ex, argTypes, 2)
@@ -2118,7 +2159,7 @@ var builtinNames = map[string]bool{
 	"square": true, "maximum": true, "minimum": true, "greater": true,
 	"less": true, "greater_equal": true, "less_equal": true, "equal": true,
 	"where": true, "clip": true, "max": true, "min": true, "argmax": true, "argmin": true, "flip": true, "roll": true, "diff": true,
-	"softmax": true, "logsumexp": true, "sort": true, "topk": true, "reshape": true, "broadcast_to": true, "concat": true,
+	"softmax": true, "logsumexp": true, "sort": true, "topk": true, "argtopk": true, "reshape": true, "broadcast_to": true, "concat": true,
 	"fold": true, "append": true, "enumerate": true, "read_csv": true,
 	"einsum": true, "map_leaves": true, "zip_leaves": true, "seed": true,
 	"read_frame": true, "write_frame": true, "columns": true, "field": true,
