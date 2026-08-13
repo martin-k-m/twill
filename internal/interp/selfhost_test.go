@@ -236,6 +236,22 @@ func TestSelfHostedSoftmaxDtypeMatches(t *testing.T) {
 	}
 }
 
+// Scans keep the input dtype: cumsum/cumprod accumulate at the accumulation
+// dtype and store the result dtype, cummax/cummin carry the chosen element
+// through, and diff is a single rounded subtraction. Both interpreters agree.
+func TestSelfHostedScanDtypeMatches(t *testing.T) {
+	src := "let x = tensor([1.0, 2.0, 3.0, 4.0]).to(bf16)\n" +
+		"print(dtype(cumsum(x)))\nprint(cumsum(x))\n" +
+		"print(dtype(cumprod(x)))\nprint(cumprod(x))\n" +
+		"print(dtype(cummax(x)))\nprint(cummax(x))\n" +
+		"print(dtype(diff(x, 0)))\nprint(diff(x, 0))\n" +
+		"print(cumsum(zeros(3)))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("scan dtype differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A rearrangement carries elements through unchanged, so it keeps the input
 // dtype (concat promotes its pieces); both interpreters must agree.
 func TestSelfHostedRearrangementDtypeMatches(t *testing.T) {
