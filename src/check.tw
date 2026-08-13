@@ -2381,6 +2381,53 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   if bytes.equal(name, "roll") {
     return axis_preserve_result(c, ex, arg_types, 2)
   }
+  # Take the k largest (or smallest) values along an axis. The result keeps the
+  # input's shape with that axis shortened to k, so a k larger than the axis -- or
+  # a non-positive k, or an out-of-range axis -- is the runtime error, all knowable
+  # here when k, the axis and the dims are constant. The axis defaults to the last.
+  if in_set(name, "topk argtopk") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => {
+        if len(t.dims) > 0 {
+          let axis: I64 = len(t.dims) - 1
+          if len(ex.args) > 2 {
+            match const_int(ex.args[2]) {
+              Some(a) => axis = a,
+              None => return TUnknown,
+            }
+          }
+          if axis < 0 { axis = axis + len(t.dims) }
+          if axis < 0 or axis >= len(t.dims) {
+            report_axis(c, ex, t)
+            return TUnknown
+          }
+          if len(ex.args) > 1 {
+            match const_int(ex.args[1]) {
+              Some(k) => {
+                let el: I64 = t.dims[axis]
+                if k <= 0 {
+                  report(c, ex.line, bytes.concat(name, bytes.concat(": k must be positive, got ", str(k))))
+                  return TUnknown
+                }
+                if el >= 0 and k > el {
+                  report(c, ex.line, bytes.concat(name, bytes.concat(": k is ", bytes.concat(str(k),
+                    bytes.concat(" but axis ", bytes.concat(str(axis),
+                    bytes.concat(" has length ", str(el))))))))
+                  return TUnknown
+                }
+                let d: Arr[I64] = copy_dims(t.dims)
+                d[axis] = k
+                return tensor_of(d)
+              },
+              None => return TUnknown,
+            }
+          }
+        }
+        return TUnknown
+      },
+      None => return TUnknown,
+    }
+  }
   if bytes.equal(name, "diff") {
     # diff takes successive differences along an axis (second argument), shrinking
     # that axis by one. An out-of-range axis is the runtime error; it was

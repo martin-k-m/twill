@@ -57,6 +57,21 @@ func TestDiffAxisCaught(t *testing.T) {
 	wantNone(t, "let y = diff(zeros(2, 3), 1)")
 }
 
+func TestTopKBoundsCaught(t *testing.T) {
+	// k larger than the axis, or a non-positive k, both reached the runtime; so
+	// did an out-of-range axis. argtopk shares the same reasoning.
+	wantOne(t, "let y = topk(zeros(3), 5)", "k is 5 but axis 0 has length 3")
+	wantOne(t, "let y = topk(zeros(3), 0)", "k must be positive")
+	wantOne(t, "let y = topk(zeros(2, 4), 5, 0)", "k is 5 but axis 0 has length 2")
+	wantOne(t, "let y = topk(zeros(3), 2, 3)", "axis out of range")
+	wantOne(t, "let y = argtopk(zeros(3), 9)", "k is 9 but axis 0 has length 3")
+	// A k that fits stays clean, on the default and a named axis, and negative axis.
+	wantNone(t, "let y = topk(zeros(3), 2)")
+	wantNone(t, "let y = topk(zeros(2, 4), 3, 1)")
+	wantNone(t, "let y = topk(zeros(2, 4), 2, -1)")
+	wantNone(t, "let y = argtopk(zeros(5), 2)")
+}
+
 func TestTransposeAxisCountCaught(t *testing.T) {
 	// A permutation must name every axis exactly once.
 	wantOne(t, "let y = transpose(zeros(2, 3), 0, 1, 2)", "rank-2 tensor")
