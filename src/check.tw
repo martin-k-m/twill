@@ -1257,9 +1257,11 @@ fn infer_slice(c: Checker, ex: ast.Slice, env: CheckEnv) -> Type {
         report(c, ex.line, "cannot slice a scalar")
         return TUnknown
       }
-      # The trailing axes survive a slice; only the first changes, and its new
-      # length is known only when both ends are constants, or when the end is
-      # absent and the original length is known.
+      # The trailing axes survive a slice; only the first changes. A negative
+      # endpoint counts from the end, then the slice must satisfy
+      # 0 <= start <= end <= dim0 -- the runtime's rule, checked here when the
+      # first dim and both endpoints are known, so "slice [a:b] out of range for
+      # first dim n" is raised before the program runs.
       let first: I64 = -1
       let s: I64 = 0
       let sok: Bool = true
@@ -1272,22 +1274,34 @@ fn infer_slice(c: Checker, ex: ast.Slice, env: CheckEnv) -> Type {
         },
         None => unit,
       }
+      let en: I64 = 0
+      let eok: Bool = false
       match ex.end {
         Some(e) => {
           match const_int(e) {
-            Some(n) => {
-              if sok and n - s >= 0 {
-                first = n - s
-              }
-            },
+            Some(n) => { en = n; eok = true },
             None => unit,
           }
         },
-        None => {
-          if sok and v.dims[0] >= 0 and v.dims[0] - s >= 0 {
-            first = v.dims[0] - s
-          }
-        },
+        None => unit,
+      }
+      let dim0: I64 = v.dims[0]
+      if dim0 >= 0 and sok {
+        let lo: I64 = s
+        if lo < 0 { lo = lo + dim0 }
+        let hi: I64 = dim0
+        if eok {
+          hi = en
+          if hi < 0 { hi = hi + dim0 }
+        }
+        if lo < 0 or hi > dim0 or lo > hi {
+          report(c, ex.line, bytes.concat("slice [", bytes.concat(str(lo),
+            bytes.concat(":", bytes.concat(str(hi), bytes.concat("] out of range for first dim ", str(dim0)))))))
+          return TUnknown
+        }
+        first = hi - lo
+      } else {
+        if eok and sok and en - s >= 0 { first = en - s }
       }
       let dims: Arr[I64] = arr_new()
       push(dims, first)

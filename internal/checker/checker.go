@@ -858,12 +858,35 @@ func (c *checker) inferSlice(ex *ast.Slice, env *checkEnv) Type {
 		if ex.Start != nil {
 			s, sok = constInt(ex.Start)
 		}
+		e, eok := 0, false
 		if ex.End != nil {
-			if e, eok := constInt(ex.End); eok && sok && e-s >= 0 {
-				first = e - s
+			e, eok = constInt(ex.End)
+		}
+		// Bounds check, when the first dim and both endpoints are known. It
+		// mirrors the runtime: a negative endpoint counts from the end, then the
+		// slice must satisfy 0 <= start <= end <= dim0. This reached the runtime
+		// as "slice [a:b] out of range for first dim n", a message the checker can
+		// raise before the program runs.
+		dim0 := v.dims[0]
+		if dim0 >= 0 && sok {
+			as := s
+			if as < 0 {
+				as += dim0
 			}
-		} else if sok && v.dims[0] >= 0 && v.dims[0]-s >= 0 {
-			first = v.dims[0] - s
+			ae := dim0
+			if eok {
+				ae = e
+				if ae < 0 {
+					ae += dim0
+				}
+			}
+			if as < 0 || ae > dim0 || as > ae {
+				c.report(ex.Line, "slice [%d:%d] out of range for first dim %d", as, ae, dim0)
+				return tUnknown{}
+			}
+			first = ae - as
+		} else if eok && sok && e-s >= 0 {
+			first = e - s
 		}
 		return tTensor{dims: append([]int{first}, v.dims[1:]...), unit: v.unit}
 	case tList:
