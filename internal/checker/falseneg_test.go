@@ -136,6 +136,16 @@ func TestFixedArityBuiltinsCaught(t *testing.T) {
 	wantNone(t, "fn item(a, b) = a\nlet y = item(1.0, 2.0)")
 }
 
+func TestMaxpool2dWindowCaught(t *testing.T) {
+	// A window below one, or one larger than the input's height or width (so the
+	// pooled dimension rounds to zero), are the runtime's two window rejections.
+	wantOne(t, "let y = maxpool2d(zeros(3, 8, 8), 0)", "window must be >= 1, got 0")
+	wantOne(t, "let y = maxpool2d(zeros(3, 4, 4), 9)", "window 9 is larger than input 4x4")
+	wantOne(t, "let y = maxpool2d(zeros(3, 8, 4), 5)", "window 5 is larger than input 8x4")
+	// A window that fits stays clean, and the pooled shape is now exact.
+	wantNone(t, "let y = maxpool2d(zeros(3, 8, 8), 2)")
+}
+
 func TestConcatEmptyListCaught(t *testing.T) {
 	// An empty list has nothing to join; the runtime needs at least one tensor.
 	wantOne(t, "let y = concat([], 0)", "need at least one tensor")
