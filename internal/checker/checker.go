@@ -908,16 +908,31 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 		return t
 	}
 	callee := c.inferExpr(ex.Callee, env)
-	argTypes := make([]Type, len(ex.Args))
-	for i, a := range ex.Args {
+	// A trailing dtype name on a maker, `zeros([2, 3], bf16)`, is contextual: it
+	// counts only on a maker and only when nothing in scope binds it. Strip it so
+	// the maker infers its shape from the rest -- the dtype changes the element
+	// type, which the shape checker does not track, not the shape -- and so the
+	// arity check counts the arguments the maker actually received.
+	callEx := ex
+	if b, ok := callee.(tBuiltin); ok && dtypeMakerNames[b.name] && len(ex.Args) > 0 {
+		if id, ok := ex.Args[len(ex.Args)-1].(*ast.Ident); ok {
+			if _, bound := env.get(id.Name); !bound {
+				if _, isDType := tensor.DTypeOfName(id.Name); isDType {
+					callEx = &ast.Call{Callee: ex.Callee, Args: ex.Args[:len(ex.Args)-1], Line: ex.Line}
+				}
+			}
+		}
+	}
+	argTypes := make([]Type, len(callEx.Args))
+	for i, a := range callEx.Args {
 		argTypes[i] = c.inferExpr(a, env)
 	}
 
 	switch fn := callee.(type) {
 	case tBuiltin:
-		return c.inferBuiltinCall(fn.name, ex, argTypes)
+		return c.inferBuiltinCall(fn.name, callEx, argTypes)
 	case tFn:
-		return c.inferUserCall(fn, ex, argTypes)
+		return c.inferUserCall(fn, callEx, argTypes)
 	case tUnknown:
 		return tUnknown{}
 	case tList, tBool, tStr, tUnit, tRecord:
@@ -925,6 +940,13 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 		return tUnknown{}
 	}
 	return tUnknown{}
+}
+
+// dtypeMakerNames are the tensor constructors whose trailing argument may be a
+// dtype name (docs/dtypes.md); it matches the interpreter's dtypeMakers.
+var dtypeMakerNames = map[string]bool{
+	"tensor": true, "scalar": true, "zeros": true, "ones": true,
+	"fill": true, "randn": true, "rand": true, "eye": true,
 }
 
 // inferCast recognises x.to(dt): a call whose callee is a `to` field access with

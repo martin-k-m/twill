@@ -32,6 +32,21 @@ func TestToCastTypesClean(t *testing.T) {
 	wantOne(t, "let y = tensor([1.0]).to(nope)", "unknown name \"nope\"")
 }
 
+func TestConstructorDtypeSuffix(t *testing.T) {
+	// A trailing dtype name on a maker is read as a dtype, not inferred as a
+	// variable, and the shape comes from the arguments before it.
+	wantNone(t, "let w = zeros(2, 3, bf16)")
+	wantNone(t, "let w = ones(4, f16)")
+	// Arity-1 makers accept the suffix: the dtype is stripped before the count,
+	// so scalar(x, dt) and eye(n, dt) are not flagged as too many arguments.
+	wantNone(t, "let s = scalar(1.5, f16)")
+	wantNone(t, "let e = eye(3, f32)")
+	// Without the suffix the arity check still holds.
+	wantOne(t, "let s = scalar(1.5, 2.0)", "scalar expects 1 argument(s), got 2")
+	// A shape is still checked with the dtype stripped.
+	wantOne(t, "let w = zeros(-2, 3, bf16)", "negative")
+}
+
 func TestQuantizeRankCaught(t *testing.T) {
 	// Quantisation packs a 2-D weight; any other rank is the runtime error.
 	wantOne(t, "let y = quantize(zeros(5))", "expects a 2-D weight, got rank 1")

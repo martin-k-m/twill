@@ -1664,19 +1664,26 @@ fn infer_call(c: Checker, ex: ast.Call, env: CheckEnv) -> Type {
     },
     _ => unit,
   }
+  # With a trailing dtype, the maker sees only the arguments before it: its shape
+  # comes from them and its arity is counted over them, so `scalar(1.5, f32)` and
+  # `eye(3, f32)` pass the fixed-arity check the same as without the dtype.
+  let n: I64 = len(ex.args)
+  if dtype_known(ctor_dt) { n = n - 1 }
+  let call_args: Arr[ast.Expr] = arr_new()
   let arg_types: Arr[Type] = arr_new()
   let i: I64 = 0
-  while i < len(ex.args) {
-    if dtype_known(ctor_dt) and i == len(ex.args) - 1 {
-      push(arg_types, TUnknown)
-    } else {
-      push(arg_types, infer_expr(c, ex.args[i], env))
-    }
+  while i < n {
+    push(call_args, ex.args[i])
+    push(arg_types, infer_expr(c, ex.args[i], env))
     i = i + 1
   }
+  let call_ex: ast.Call = ex
+  if dtype_known(ctor_dt) {
+    call_ex = ast.Call { id: ex.id, callee: ex.callee, args: call_args, line: ex.line }
+  }
   match callee {
-    TBuiltin(fn_) => infer_builtin_call(c, fn_.name, ex, arg_types, ctor_dt),
-    TFn(fn_) => infer_user_call(c, fn_, ex, arg_types),
+    TBuiltin(fn_) => infer_builtin_call(c, fn_.name, call_ex, arg_types, ctor_dt),
+    TFn(fn_) => infer_user_call(c, fn_, call_ex, arg_types),
     TUnknown => TUnknown,
     # A number is not callable either, but `f(x)` where f is a tensor is a
     # plausible typo for indexing and worth naming. TFn and TBuiltin are handled
