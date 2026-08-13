@@ -21,6 +21,17 @@ func TestGatherIndexRankCaught(t *testing.T) {
 	wantNone(t, "let y = gather(zeros(3, 4), zeros(2))")
 }
 
+func TestToCastTypesClean(t *testing.T) {
+	// x.to(dt) is a cast: the dtype name is read from the syntax, not inferred as
+	// a variable, and the result keeps x's shape and unit.
+	wantNone(t, "let y = tensor([1.0, 2.0]).to(f32)")
+	wantNone(t, "let y = zeros(2, 3).to(bf16)")
+	wantNone(t, "let y = zeros(2, 3).to(bf16).to(f16)") // chains
+	// A non-dtype argument is not a cast, so it falls through and the unknown
+	// name is reported as usual.
+	wantOne(t, "let y = tensor([1.0]).to(nope)", "unknown name \"nope\"")
+}
+
 func TestQuantizeRankCaught(t *testing.T) {
 	// Quantisation packs a 2-D weight; any other rank is the runtime error.
 	wantOne(t, "let y = quantize(zeros(5))", "expects a 2-D weight, got rank 1")

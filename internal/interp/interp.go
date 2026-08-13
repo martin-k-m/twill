@@ -690,16 +690,7 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		}
 		return rec
 	case *ast.Field:
-		target := ip.evalExpr(ex.Target, env)
-		rec, ok := target.(*value.Record)
-		if !ok {
-			ip.panicf(ex.Line, "cannot access field %q of a non-record", ex.Name)
-		}
-		v, ok := rec.Get(ex.Name)
-		if !ok {
-			ip.panicf(ex.Line, "record has no field %q", ex.Name)
-		}
-		return v
+		return ip.recordField(ip.evalExpr(ex.Target, env), ex.Name, ex.Line)
 	case *ast.IfExpr:
 		if value.Truthy(ip.evalExpr(ex.Cond, env)) {
 			return ip.execBlockIn(ex.Then, value.NewEnv(env))
@@ -1036,12 +1027,61 @@ func intsEqual(a, b []int) bool {
 }
 
 func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {
+	// A call whose callee is a field access, target.name(args). The dtype cast
+	// target.to(dt) lives here, read from the syntax before the field or the
+	// arguments are evaluated -- `to` is not a real field and a dtype name is not
+	// a value, so `x.to(f32)` casts even where f32 is bound (mirrors the
+	// self-hosted eval_cast). Anything else is an ordinary call of a function held
+	// in a record field; the target is evaluated once and reused either way.
+	if fld, ok := ex.Callee.(*ast.Field); ok {
+		target := ip.evalExpr(fld.Target, env)
+		if t, isTensor := target.(*tensor.Tensor); isTensor && fld.Name == "to" {
+			return ip.evalCast(t, ex)
+		}
+		callee := ip.recordField(target, fld.Name, ex.Line)
+		return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
+	}
 	callee := ip.evalExpr(ex.Callee, env)
-	args := make([]value.Value, len(ex.Args))
-	for i, a := range ex.Args {
+	return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
+}
+
+// evalArgs evaluates a call's arguments left to right.
+func (ip *Interp) evalArgs(exprs []ast.Expr, env *value.Env) []value.Value {
+	args := make([]value.Value, len(exprs))
+	for i, a := range exprs {
 		args[i] = ip.evalExpr(a, env)
 	}
-	return ip.Apply(callee, args, ex.Line)
+	return args
+}
+
+// recordField reads a field off an already-evaluated value, the shared body of
+// field access whether it appears alone or as a call's callee.
+func (ip *Interp) recordField(target value.Value, name string, line int) value.Value {
+	rec, ok := target.(*value.Record)
+	if !ok {
+		ip.panicf(line, "cannot access field %q of a non-record", name)
+	}
+	v, ok := rec.Get(name)
+	if !ok {
+		ip.panicf(line, "record has no field %q", name)
+	}
+	return v
+}
+
+// evalCast carries out target.to(dt): the dtype name is read straight from the
+// syntax, since it is contextual and not a value, and the cast rounds once.
+func (ip *Interp) evalCast(t *tensor.Tensor, ex *ast.Call) value.Value {
+	if len(ex.Args) != 1 {
+		ip.panicf(ex.Line, "to expects 1 argument(s), got %d", len(ex.Args))
+	}
+	id, ok := ex.Args[0].(*ast.Ident)
+	if ok {
+		if dt, ok := tensor.DTypeOfName(id.Name); ok {
+			return tensor.Cast(t, dt)
+		}
+	}
+	ip.panicf(ex.Line, "to expects a dtype name (bool, i8, i32, f16, bf16, f32, f64)")
+	return value.TheUnit
 }
 
 // Apply calls a closure or builtin.

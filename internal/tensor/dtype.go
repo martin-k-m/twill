@@ -218,6 +218,38 @@ func Promote(a, b DType) DType {
 // Promote3 folds Promote over three dtypes.
 func Promote3(a, b, c DType) DType { return Promote(Promote(a, b), c) }
 
+// Cast rounds every element to dt, once from the source value, and tags the
+// result -- the value each element takes when stored in dt and read back
+// (docs/dtypes.md, "The cast is spelled .to(dt)"). It carries a straight-through
+// gradient: the vjp copies the incoming gradient unchanged, so a cast inside a
+// differentiated function -- a bf16 weight with an f32 master -- does not detach
+// its input. Casting from a narrow dtype to another goes directly and not
+// through f64, because the buffer already holds the source value's f64 widening,
+// so RoundToDType rounds it once.
+func Cast(t *Tensor, dt DType) *Tensor {
+	data := make([]float64, len(t.Data))
+	for i, x := range t.Data {
+		data[i] = RoundToDType(dt, x)
+	}
+	res := (&Tensor{Data: data, Shape: append([]int(nil), t.Shape...)}).WithDType(dt)
+	if recordJets && t.RequiresGrad {
+		res.jet = &jetState{}
+		res.jet.jvp = func() {
+			copy(res.jet.d, t.jet.d)
+			copy(res.jet.dd, t.jet.dd)
+		}
+	}
+	return track1(res, t, func() {
+		if !t.RequiresGrad {
+			return
+		}
+		gt := t.ensureGrad()
+		for i := range gt {
+			gt[i] += res.Grad[i]
+		}
+	})
+}
+
 // AccDType is the dtype an operation class accumulates in, given the dtype it
 // stores. The one rule that decides whether narrow dtypes work at all: anything
 // narrower than f32 accumulates in f32, f32 in f32, f64 in f64, and the integers
