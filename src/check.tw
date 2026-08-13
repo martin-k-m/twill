@@ -2508,6 +2508,27 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
         if len(t.dims) >= 1 {
           let dims: Arr[I64] = copy_dims(t.dims)
           dims[0] = -1
+          # A constant index list pins the row count and lets every position be
+          # checked against the first dimension, the out-of-range runtime error.
+          if len(ex.args) >= 2 {
+            let idx: Dims = const_index_list(ex.args[1])
+            if idx.ok {
+              let n: I64 = t.dims[0]
+              if n >= 0 {
+                let i: I64 = 0
+                while i < len(idx.dims) {
+                  let ix: I64 = idx.dims[i]
+                  if ix < 0 or ix >= n {
+                    report(c, ex.line, bytes.concat("gather: index ", bytes.concat(str(ix),
+                      bytes.concat(" out of range [0, ", bytes.concat(str(n), ")")))))
+                    return TUnknown
+                  }
+                  i = i + 1
+                }
+              }
+              dims[0] = len(idx.dims)
+            }
+          }
           return set_dtype(tensor_of(dims), t.dtype)
         }
         return TUnknown
@@ -3191,6 +3212,29 @@ fn const_split_sizes(e: ast.Expr) -> Dims {
     ECall(call) => {
       match call.callee {
         EIdent(id) => if bytes.equal(id.name, "list") { return const_int_elems(call.args) },
+        _ => unit,
+      }
+    },
+    _ => unit,
+  }
+  no_dims()
+}
+
+# const_index_list reads gather's index argument as a constant list of integers:
+# a bracket literal, a list(...) call (both handled by const_split_sizes), or the
+# tensor([...]) form the standard library tends to write. Anything else is not
+# foldable and comes back with ok = false.
+fn const_index_list(e: ast.Expr) -> Dims {
+  let base: Dims = const_split_sizes(e)
+  if base.ok { return base }
+  match e {
+    ECall(call) => {
+      match call.callee {
+        EIdent(id) => {
+          if bytes.equal(id.name, "tensor") and len(call.args) == 1 {
+            return const_index_list(call.args[0])
+          }
+        },
         _ => unit,
       }
     },
