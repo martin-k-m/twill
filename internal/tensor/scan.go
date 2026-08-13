@@ -344,7 +344,7 @@ func RollAxis(t *Tensor, shift, axis int) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int{}, t.Shape...)}
+	res := (&Tensor{Data: out, Shape: append([]int{}, t.Shape...)}).withDTypeLike(t)
 	return track1(res, t, func() {
 		if !t.RequiresGrad {
 			return

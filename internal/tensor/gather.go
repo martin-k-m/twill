@@ -26,7 +26,7 @@ func Gather(x *Tensor, idx []int) (*Tensor, error) {
 	outShape := make([]int, len(x.Shape))
 	outShape[0] = len(idx)
 	copy(outShape[1:], x.Shape[1:])
-	res := &Tensor{Data: out, Shape: outShape}
+	res := (&Tensor{Data: out, Shape: outShape}).withDTypeLike(x)
 	if recordJets && x.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
