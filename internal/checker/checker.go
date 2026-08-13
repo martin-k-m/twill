@@ -1185,6 +1185,17 @@ func substitute(dims []ast.Dim, subst map[string]int) []int {
 }
 
 func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) Type {
+	// Every builtin registered with a fixed arity rejects the wrong argument
+	// count at runtime; that is decidable here, and a call reaches this function
+	// only when the name is the real builtin (a same-named user function resolves
+	// to a tFn and never arrives), so a shadow keeps its own arity. Variadic
+	// builtins -- reshape, transpose, the reductions, conv2d, sort, and the rest
+	// that take an optional axis or a run of dimensions -- are absent from the
+	// table and left to their per-shape cases.
+	if arity, ok := builtinArity[name]; ok && len(ex.Args) != arity {
+		c.report(ex.Line, "%s expects %d argument(s), got %d", name, arity, len(ex.Args))
+		return tUnknown{}
+	}
 	switch name {
 	case "relu", "abs":
 		// Shape and unit preserved.
@@ -1651,14 +1662,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		return c.convResult(ex, argTypes)
 	case "maxpool2d":
 		// [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
-		// maxpool2d takes exactly the tensor and the window; the wrong number of
-		// arguments is a runtime error the checker can settle here, since a call
-		// reaches this case only when the name is the real builtin, not a shadow.
-		if len(ex.Args) != 2 {
-			c.report(ex.Line, "maxpool2d expects 2 argument(s), got %d", len(ex.Args))
-			return tUnknown{}
-		}
-		// A non-rank-3 input is the error the runtime raises, reported here.
+		// The arity (exactly the tensor and the window) is settled by the fixed
+		// table above; here a non-rank-3 input is the error the runtime raises.
 		if t, ok := argTypes[0].(tTensor); ok {
 			if len(t.dims) != 3 {
 				c.report(ex.Line, "maxpool2d: input must be [channels, height, width], got %s", dimsString(t))
@@ -2298,4 +2303,38 @@ var builtinNames = map[string]bool{
 	"gpu_finish": true, "gpu_device_info_i64": true, "env": true,
 	"gpu_set_arg_i64": true, "gpu_set_arg_f64": true, "clock_now_ms": true,
 	"str_to_f64": true, "f64_to_str": true, "num_to_text": true, "module_source": true, "f64_hex": true, "gbm_describe": true,
+}
+
+// builtinArity lists the builtins the runtime registers with a fixed number of
+// arguments, mirroring the def(name, n, ...) calls in the interpreter. A call
+// with the wrong count is a certain runtime error, so it is caught statically.
+// Variadic builtins (those the interpreter registers with -1, taking an optional
+// axis, a run of dimensions, or a trailing flag) are deliberately absent; their
+// per-shape cases handle what can be known. Keep this in step with the runtime.
+var builtinArity = map[string]int{
+	// nullary
+	"args": 0, "arr_new": 0, "bytes_new": 0, "clock_now_ms": 0, "dict_new": 0,
+	"gpu_available": 0, "gpu_device_count": 0, "is_tty_stdout": 0, "rng_normal": 0,
+	"rng_uniform": 0, "window_size": 0,
+	// unary
+	"abort": 1, "abs": 1, "arr_clear": 1, "bnot": 1, "buf_len": 1, "buf_new": 1,
+	"bytes_to_str": 1, "chr": 1, "columns": 1, "dict_keys": 1, "emit_line": 1,
+	"enumerate": 1, "env": 1, "eye": 1, "f64_bits": 1, "f64_from_bits": 1,
+	"f64_hex": 1, "f64_of_i64": 1, "f64_signbit": 1, "f64_to_str": 1,
+	"gbm_describe": 1, "grad": 1, "grads": 1, "hessian": 1, "i64_of_f64": 1,
+	"i64_of_str": 1, "int": 1, "item": 1, "jacobian": 1, "len": 1, "list_dir": 1,
+	"load": 1, "load_value": 1, "module_source": 1, "nbytes": 1, "num_to_text": 1,
+	"permutation": 1, "pop": 1, "read_csv": 1, "read_file": 1, "read_frame": 1,
+	"rng_perm": 1, "rng_seed": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,
+	"str_quote": 1, "str_to_f64": 1, "tensor": 1, "value_and_grad": 1,
+	"write_err": 1, "write_out": 1,
+	// binary
+	"append": 2, "arr_push": 2, "buf_get8": 2, "bytes_push": 2, "concat": 2,
+	"dict_del": 2, "dict_get": 2, "dict_has": 2, "dict_must": 2, "f64_mod": 2,
+	"f64_pow": 2, "field": 2, "gather": 2, "is_same": 2, "linear": 2, "map": 2,
+	"map_leaves": 2, "maxpool2d": 2, "pow": 2, "push": 2, "save": 2,
+	"save_value": 2, "write_file": 2, "write_frame": 2, "zip_leaves": 2,
+	// ternary
+	"arange": 3, "buf_set8": 3, "clip": 3, "dict_or": 3, "dict_set": 3, "fold": 3,
+	"linspace": 3, "slice": 3, "where": 3, "with_field": 3,
 }

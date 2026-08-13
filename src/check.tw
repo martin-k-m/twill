@@ -2123,7 +2123,39 @@ fn arg_tensor(arg_types: Arr[Type], i: I64) -> Opt[TensorType] {
 # infer_call read it before inferring the arguments, so when it is known the
 # last entry of arg_types is a placeholder and the last entry of ex.args is
 # not part of the shape.
+# builtin_fixed_arity returns the argument count of a builtin the runtime
+# registers with a fixed arity, or -1 for a variadic one (or a non-builtin).
+# It mirrors the def(name, n, ...) calls in the interpreter; the variadic
+# builtins -- those taking an optional axis, a run of dimensions, or a trailing
+# flag -- are deliberately left out so their per-shape cases govern. Keep this in
+# step with the Go checker's builtinArity table.
+fn builtin_fixed_arity(name: Str) -> I64 {
+  if in_set(name, "args arr_new bytes_new clock_now_ms dict_new gpu_available gpu_device_count is_tty_stdout rng_normal rng_uniform window_size") {
+    return 0
+  }
+  if in_set(name, "abort abs arr_clear bnot buf_len buf_new bytes_to_str chr columns dict_keys emit_line enumerate env eye f64_bits f64_from_bits f64_hex f64_of_i64 f64_signbit f64_to_str gbm_describe grad grads hessian i64_of_f64 i64_of_str int item jacobian len list_dir load load_value module_source nbytes num_to_text permutation pop read_csv read_file read_frame rng_perm rng_seed scalar seed shape str str_quote str_to_f64 tensor value_and_grad write_err write_out") {
+    return 1
+  }
+  if in_set(name, "append arr_push buf_get8 bytes_push concat dict_del dict_get dict_has dict_must f64_mod f64_pow field gather is_same linear map map_leaves maxpool2d pow push save save_value write_file write_frame zip_leaves") {
+    return 2
+  }
+  if in_set(name, "arange buf_set8 clip dict_or dict_set fold linspace slice where with_field") {
+    return 3
+  }
+  -1
+}
+
 fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type], dt: I64) -> Type {
+  # Every builtin the runtime registers with a fixed argument count rejects the
+  # wrong count; that is decidable here, and this function is reached only when
+  # the name is the real builtin (a same-named user function resolves elsewhere),
+  # so a shadow keeps its own arity. Variadic builtins are absent from the table.
+  let arity: I64 = builtin_fixed_arity(name)
+  if arity >= 0 and len(ex.args) != arity {
+    report(c, ex.line, bytes.concat(name, bytes.concat(" expects ", bytes.concat(str(arity),
+      bytes.concat(" argument(s), got ", str(len(ex.args)))))))
+    return TUnknown
+  }
   # Shape and unit preserved. So is the dtype: relu and clip preserve
   # integrality and keep it (tensor.unary_result_dtype).
   if in_set(name, "relu clip") {
@@ -2487,13 +2519,8 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # [C, H, W] -> [C, H/k, W/k]; only the channel count is statically known.
   # A pool selects, so the dtype is the input's, unrounded.
   if bytes.equal(name, "maxpool2d") {
-    # maxpool2d takes exactly the tensor and the window; the wrong number of
-    # arguments is a runtime error the checker can settle here, since a call
-    # reaches this case only when the name is the real builtin, not a shadow.
-    if len(ex.args) != 2 {
-      report(c, ex.line, bytes.concat("maxpool2d expects 2 argument(s), got ", str(len(ex.args))))
-      return TUnknown
-    }
+    # The arity (exactly the tensor and the window) is settled by the fixed table
+    # above; here a non-rank-3 input is the error the runtime raises.
     let dims: Arr[I64] = arr_new()
     push(dims, -1)
     push(dims, -1)

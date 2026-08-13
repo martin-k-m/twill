@@ -106,10 +106,28 @@ func TestMaxpool2dArityCaught(t *testing.T) {
 	wantNone(t, "fn maxpool2d(a) = a\nlet y = maxpool2d(5.0)")
 }
 
+func TestFixedArityBuiltinsCaught(t *testing.T) {
+	// A representative sweep across the arity table: the wrong count is settled
+	// statically, mirroring the runtime's "expects N argument(s)".
+	wantOne(t, "let y = item(zeros(1), 2)", "item expects 1 argument(s), got 2")
+	wantOne(t, "let y = shape()", "shape expects 1 argument(s), got 0")
+	wantOne(t, "let y = linear(zeros(2, 3))", "linear expects 2 argument(s), got 1")
+	wantOne(t, "let y = clip(zeros(3), 0.0)", "clip expects 3 argument(s), got 2")
+	wantOne(t, "let y = where(zeros(3), zeros(3))", "where expects 3 argument(s), got 2")
+	// Correct counts stay clean; variadic builtins are not constrained.
+	wantNone(t, "let y = clip(zeros(3), 0.0, 1.0)")
+	wantNone(t, "let y = transpose(zeros(2, 3))")
+	wantNone(t, "let y = sum(zeros(2, 3), 0)")
+	wantNone(t, "let y = reshape(zeros(6), 2, 3)")
+	// A user function shadowing a builtin keeps its own arity, not the table's.
+	wantNone(t, "fn item(a, b) = a\nlet y = item(1.0, 2.0)")
+}
+
 func TestConcatEmptyListCaught(t *testing.T) {
 	// An empty list has nothing to join; the runtime needs at least one tensor.
 	wantOne(t, "let y = concat([], 0)", "need at least one tensor")
-	wantOne(t, "let y = concat([])", "need at least one tensor")
+	// concat with a single argument is an arity error before it is an empty one.
+	wantOne(t, "let y = concat([])", "expects 2 argument(s), got 1")
 	// A non-empty concat stays clean; a dynamic list is left alone (not literal).
 	wantNone(t, "let y = concat([zeros(2), ones(3)], 0)")
 }

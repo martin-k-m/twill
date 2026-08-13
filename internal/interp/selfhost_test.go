@@ -158,15 +158,23 @@ func TestSelfHostedCheckAcceptsSplit(t *testing.T) {
 	}
 }
 
-// maxpool2d takes exactly two arguments; the wrong count is a runtime error the
-// self-hosted checker must catch too, while a same-named user function is left
-// to its own arity.
-func TestSelfHostedCheckCatchesMaxpoolArity(t *testing.T) {
+// The fixed-arity table catches the wrong argument count for any builtin the
+// runtime registers with a set arity; the self-hosted checker owns the same
+// table and must agree. A same-named user function keeps its own arity, and a
+// variadic builtin is not constrained.
+func TestSelfHostedCheckCatchesFixedArity(t *testing.T) {
 	if code := runSelfHostedCheck(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x)\n"); code != 1 {
 		t.Fatalf("check of maxpool2d with one argument exited %d, want 1", code)
 	}
+	if code := runSelfHostedCheck(t, "let y = clip(zeros(3), 0.0)\n"); code != 1 {
+		t.Fatalf("check of clip with two arguments exited %d, want 1", code)
+	}
 	if code := runSelfHostedCheck(t, "let x = zeros(3, 8, 8)\nlet y = maxpool2d(x, 2)\n"); code != 0 {
 		t.Fatalf("check of a valid maxpool2d exited %d, want 0", code)
+	}
+	// A variadic builtin (transpose takes an optional permutation) is not fixed.
+	if code := runSelfHostedCheck(t, "let y = transpose(zeros(2, 3))\n"); code != 0 {
+		t.Fatalf("check of a variadic transpose exited %d, want 0", code)
 	}
 }
 
