@@ -178,6 +178,17 @@ func TestSelfHostedCheckCatchesFixedArity(t *testing.T) {
 	}
 }
 
+// A constant gather index past the first dimension is the runtime's
+// out-of-range error; the self-hosted checker must fold it just as the Go one.
+func TestSelfHostedCheckCatchesGatherIndex(t *testing.T) {
+	if code := runSelfHostedCheck(t, "let y = gather(zeros(3, 2), [7])\n"); code != 1 {
+		t.Fatalf("check of a gather index out of range exited %d, want 1", code)
+	}
+	if code := runSelfHostedCheck(t, "let y = gather(zeros(3, 2), [2, 0])\n"); code != 0 {
+		t.Fatalf("check of an in-range gather exited %d, want 0", code)
+	}
+}
+
 // An empty list handed to concat has nothing to join; the self-hosted checker
 // must reject it just as the Go one does, keying on the literal.
 func TestSelfHostedCheckCatchesEmptyConcat(t *testing.T) {

@@ -1650,11 +1650,26 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				return tUnknown{}
 			}
 		}
-		// Selecting rows keeps the trailing dims but the row count is dynamic.
+		// Selecting rows keeps the trailing dims. The row count is usually dynamic,
+		// but a constant index list pins it -- and lets every position be checked
+		// against the first dimension, the out-of-range error the runtime raises.
 		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) >= 1 {
 			dims := make([]int, len(t.dims))
 			dims[0] = -1
 			copy(dims[1:], t.dims[1:])
+			if len(ex.Args) >= 2 {
+				if idx, ok := constIndexList(ex.Args[1]); ok {
+					if n := t.dims[0]; n >= 0 {
+						for _, ix := range idx {
+							if ix < 0 || ix >= n {
+								c.report(ex.Line, "gather: index %d out of range [0, %d)", ix, n)
+								return tUnknown{}
+							}
+						}
+					}
+					dims[0] = len(idx)
+				}
+			}
 			return tTensor{dims: dims}
 		}
 		return tUnknown{}
@@ -2229,6 +2244,22 @@ func constSplitSizes(e ast.Expr) ([]int, bool) {
 	if call, ok := e.(*ast.Call); ok {
 		if id, ok := call.Callee.(*ast.Ident); ok && id.Name == "list" {
 			return constIntElems(call.Args)
+		}
+	}
+	return nil, false
+}
+
+// constIndexList reads gather's index argument as a constant list of integers:
+// a bracket literal (list or all-numeric tensor), a list(...) call, or the
+// tensor([...]) form the standard library tends to write. Anything else -- a
+// variable, a computed expression -- is not foldable and returns ok=false.
+func constIndexList(e ast.Expr) ([]int, bool) {
+	if idx, ok := constSplitSizes(e); ok {
+		return idx, true
+	}
+	if call, ok := e.(*ast.Call); ok {
+		if id, ok := call.Callee.(*ast.Ident); ok && id.Name == "tensor" && len(call.Args) == 1 {
+			return constIndexList(call.Args[0])
 		}
 	}
 	return nil, false

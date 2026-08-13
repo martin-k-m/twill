@@ -21,6 +21,19 @@ func TestGatherIndexRankCaught(t *testing.T) {
 	wantNone(t, "let y = gather(zeros(3, 4), zeros(2))")
 }
 
+func TestGatherConstIndexBoundsCaught(t *testing.T) {
+	// A constant index past the first dimension, or a negative one, is the
+	// out-of-range error the runtime raises; both the bracket and tensor([...])
+	// forms are read, and a whole list is checked position by position.
+	wantOne(t, "let y = gather(zeros(3, 2), [7])", "index 7 out of range [0, 3)")
+	wantOne(t, "let y = gather(zeros(3, 2), [-1])", "index -1 out of range [0, 3)")
+	wantOne(t, "let y = gather(zeros(3, 2), [1, 5])", "index 5 out of range [0, 3)")
+	wantOne(t, "let y = gather(zeros(3, 2), tensor([7]))", "index 7 out of range [0, 3)")
+	// Indices in range stay clean; a dynamic index is left alone.
+	wantNone(t, "let y = gather(zeros(3, 2), [2, 0])")
+	wantNone(t, "fn f(i) = gather(zeros(3, 2), i)")
+}
+
 func TestItemSingleElementCaught(t *testing.T) {
 	wantOne(t, "let y = item(zeros(3))", "single-element")
 	// A scalar or a 1-element tensor is fine; a reduction to a scalar is fine.
