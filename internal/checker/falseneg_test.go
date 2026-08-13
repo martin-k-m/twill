@@ -155,6 +155,16 @@ func TestConcatEmptyListCaught(t *testing.T) {
 	wantNone(t, "let y = concat([zeros(2), ones(3)], 0)")
 }
 
+func TestDiffMinLengthCaught(t *testing.T) {
+	// Successive differences need two elements along the axis; one leaves nothing
+	// to subtract. The axis defaults to the last, so the bare form is checked too.
+	wantOne(t, "let y = diff(zeros(3, 1), 1)", "at least 2 elements along axis 1, got 1")
+	wantOne(t, "let y = diff(zeros(3, 1))", "at least 2 elements along axis 1, got 1")
+	// Two or more along the axis is fine; a different axis with room is fine.
+	wantNone(t, "let y = diff(zeros(3, 4), 1)")
+	wantNone(t, "let y = diff(zeros(3, 1), 0)")
+}
+
 func TestTransposeAxisCountCaught(t *testing.T) {
 	// A permutation must name every axis exactly once.
 	wantOne(t, "let y = transpose(zeros(2, 3), 0, 1, 2)", "rank-2 tensor")

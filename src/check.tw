@@ -2467,20 +2467,33 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     # previously unchecked while flip, roll and the scans were not.
     match arg_tensor(arg_types, 0) {
       Some(t) => {
-        if len(ex.args) > 1 and len(t.dims) > 0 {
-          match const_int(ex.args[1]) {
-            Some(ax) => {
-              let a: I64 = ax
-              if a < 0 { a = a + len(t.dims) }
-              if a < 0 or a >= len(t.dims) {
-                report_axis(c, ex, t)
-                return TUnknown
-              }
-              let d: Arr[I64] = copy_dims(t.dims)
-              if d[a] > 0 { d[a] = d[a] - 1 }
-              return set_dtype(tensor_of(d), t.dtype)
-            },
-            None => return TUnknown,
+        if len(t.dims) > 0 {
+          # The axis defaults to the last one; only a constant is foldable.
+          let a: I64 = len(t.dims) - 1
+          let known: Bool = true
+          if len(ex.args) > 1 {
+            match const_int(ex.args[1]) {
+              Some(ax) => a = ax,
+              None => known = false,
+            }
+          }
+          if known {
+            if a < 0 { a = a + len(t.dims) }
+            if a < 0 or a >= len(t.dims) {
+              report_axis(c, ex, t)
+              return TUnknown
+            }
+            # Successive differences need at least two elements along the axis;
+            # one leaves nothing to subtract, the error the runtime raises.
+            let el: I64 = t.dims[a]
+            if el >= 0 and el < 2 {
+              report(c, ex.line, bytes.concat("diff needs at least 2 elements along axis ",
+                bytes.concat(str(a), bytes.concat(", got ", str(el)))))
+              return TUnknown
+            }
+            let d: Arr[I64] = copy_dims(t.dims)
+            if d[a] > 0 { d[a] = d[a] - 1 }
+            return set_dtype(tensor_of(d), t.dtype)
           }
         }
         return TUnknown
