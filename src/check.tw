@@ -2210,6 +2210,11 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     }
     return TUnknown
   }
+  # quantize(W) packs a weight to int8/int4 on the Go bootstrap; its result is an
+  # opaque frozen weight, not a shaped tensor, so it types Unknown here exactly as
+  # in the Go checker. nbytes(v) is a byte count, a scalar.
+  if bytes.equal(name, "quantize") { return TUnknown }
+  if bytes.equal(name, "nbytes") { return scalar() }
   if bytes.equal(name, "linear") {
     if len(arg_types) == 2 {
       match arg_tensor(arg_types, 0) {
