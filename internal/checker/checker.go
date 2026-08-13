@@ -1720,6 +1720,16 @@ func (c *checker) inferConcat(ex *ast.Call, argTypes []Type) Type {
 	if len(argTypes) < 1 {
 		return tUnknown{}
 	}
+	// A written-out empty list has nothing to join, which the runtime rejects
+	// with "need at least one tensor". Only the literal is certain -- a list
+	// whose length is dynamic may well be non-empty at runtime -- so this keys
+	// on the syntax, not the inferred element count.
+	if len(ex.Args) >= 1 {
+		if ll, ok := ex.Args[0].(*ast.ListLit); ok && len(ll.Elements) == 0 {
+			c.report(ex.Line, "concat: need at least one tensor")
+			return tUnknown{}
+		}
+	}
 	lst, ok := argTypes[0].(tList)
 	if !ok || len(lst.elems) == 0 {
 		return tUnknown{}

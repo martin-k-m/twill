@@ -72,6 +72,14 @@ func TestTopKBoundsCaught(t *testing.T) {
 	wantNone(t, "let y = argtopk(zeros(5), 2)")
 }
 
+func TestConcatEmptyListCaught(t *testing.T) {
+	// An empty list has nothing to join; the runtime needs at least one tensor.
+	wantOne(t, "let y = concat([], 0)", "need at least one tensor")
+	wantOne(t, "let y = concat([])", "need at least one tensor")
+	// A non-empty concat stays clean; a dynamic list is left alone (not literal).
+	wantNone(t, "let y = concat([zeros(2), ones(3)], 0)")
+}
+
 func TestTransposeAxisCountCaught(t *testing.T) {
 	// A permutation must name every axis exactly once.
 	wantOne(t, "let y = transpose(zeros(2, 3), 0, 1, 2)", "rank-2 tensor")

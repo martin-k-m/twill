@@ -3048,6 +3048,20 @@ fn infer_einsum_dims(c: Checker, ex: ast.Call, arg_types: Arr[Type],
 # a whole pipeline built on a concat was unchecked from that point on.
 fn infer_concat(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   if len(arg_types) < 1 { return TUnknown }
+  # A written-out empty list has nothing to join, which the runtime rejects with
+  # "need at least one tensor". Only the literal is certain -- a list whose length
+  # is dynamic may be non-empty at runtime -- so this keys on the syntax.
+  if len(ex.args) >= 1 {
+    match ex.args[0] {
+      EList(lst) => {
+        if len(lst.elements) == 0 {
+          report(c, ex.line, "concat: need at least one tensor")
+          return TUnknown
+        }
+      },
+      _ => unit,
+    }
+  }
   let elems: Arr[Type] = arr_new()
   match arg_types[0] {
     TList(lst) => {
