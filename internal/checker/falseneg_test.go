@@ -21,6 +21,16 @@ func TestGatherIndexRankCaught(t *testing.T) {
 	wantNone(t, "let y = gather(zeros(3, 4), zeros(2))")
 }
 
+func TestQuantizeRankCaught(t *testing.T) {
+	// Quantisation packs a 2-D weight; any other rank is the runtime error.
+	wantOne(t, "let y = quantize(zeros(5))", "expects a 2-D weight, got rank 1")
+	wantOne(t, "let y = quantize(zeros(2, 3, 4))", "expects a 2-D weight, got rank 3")
+	wantOne(t, "let y = quantize(zeros(5), 4)", "expects a 2-D weight, got rank 1")
+	// A 2-D weight, at either width, is fine.
+	wantNone(t, "let y = quantize(zeros(4, 8))")
+	wantNone(t, "let y = quantize(zeros(4, 8), 4)")
+}
+
 func TestGatherConstIndexBoundsCaught(t *testing.T) {
 	// A constant index past the first dimension, or a negative one, is the
 	// out-of-range error the runtime raises; both the bracket and tensor([...])

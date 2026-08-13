@@ -2292,7 +2292,20 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   # quantize(W) packs a weight to int8/int4 on the Go bootstrap; its result is an
   # opaque frozen weight, not a shaped tensor, so it types Unknown here exactly as
   # in the Go checker. nbytes(v) is a byte count, a scalar.
-  if bytes.equal(name, "quantize") { return TUnknown }
+  if bytes.equal(name, "quantize") {
+    # Quantisation packs a 2-D weight; any other rank is the runtime error, and a
+    # tensor argument always carries its rank here.
+    match arg_tensor(arg_types, 0) {
+      Some(w) => {
+        if len(w.dims) != 2 {
+          report(c, ex.line, bytes.concat("quantize expects a 2-D weight, got rank ", str(len(w.dims))))
+          return TUnknown
+        }
+      },
+      None => unit,
+    }
+    return TUnknown
+  }
   if bytes.equal(name, "nbytes") { return scalar() }
   if bytes.equal(name, "linear") {
     if len(arg_types) == 2 {

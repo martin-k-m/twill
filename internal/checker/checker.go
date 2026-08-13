@@ -1434,6 +1434,14 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		}
 		return tUnknown{}
 	case "quantize":
+		// Quantisation packs a 2-D weight; any other rank is the runtime error,
+		// and a tensor argument always carries its rank here.
+		if len(argTypes) >= 1 {
+			if w, ok := argTypes[0].(tTensor); ok && len(w.dims) != 2 {
+				c.report(ex.Line, "quantize expects a 2-D weight, got rank %d", len(w.dims))
+				return tUnknown{}
+			}
+		}
 		// A quantised weight is an opaque frozen value, not a shaped tensor; it
 		// only ever flows into `linear`, whose quantised branch needs no shape
 		// from the checker. Typing it Unknown keeps it from being used in tensor
