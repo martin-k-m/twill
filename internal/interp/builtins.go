@@ -1651,6 +1651,17 @@ func (ip *Interp) installBuiltins() {
 		}
 		return &value.List{Items: items}, nil
 	})
+	// dtype(t): the element type as its surface name (docs/dtypes.md). Every
+	// tensor is f64 until a cast or a dtype-carrying constructor says otherwise,
+	// so this reads f64 for the whole language today; it is the query the rest of
+	// the dtype surface reports through, and matches the self-hosted builtin.
+	def("dtype", 1, false, func(a []value.Value) (value.Value, error) {
+		t, err := asTensor(a[0], "dtype")
+		if err != nil {
+			return nil, err
+		}
+		return value.Str(tensor.DTypeName(t.DType())), nil
+	})
 	def("len", 1, false, func(a []value.Value) (value.Value, error) {
 		switch t := a[0].(type) {
 		case *tensor.Tensor:

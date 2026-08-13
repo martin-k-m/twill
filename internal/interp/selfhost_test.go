@@ -178,6 +178,21 @@ func TestSelfHostedCheckCatchesFixedArity(t *testing.T) {
 	}
 }
 
+// dtype(t) names a tensor's element type. Every tensor is f64 until a cast or a
+// dtype-carrying constructor exists, so both interpreters must return "f64" and
+// agree; this also guards that the self-hosted builtin is reachable (it was dead
+// code, missing from the INSPECT dispatch list) and that Go recognises the name
+// (it rejected it as unknown before dtype landed in the Go bootstrap).
+func TestSelfHostedDtypeBuiltinMatches(t *testing.T) {
+	goOut, selfOut := runBothWays(t, "let x = zeros(2, 3)\nprint(dtype(x))\nprint(dtype(sum(x)))\n")
+	if goOut != selfOut {
+		t.Fatalf("dtype output differs: Go %q vs self-hosted %q", goOut, selfOut)
+	}
+	if goOut != "f64f64" {
+		t.Fatalf("dtype output = %q, want f64 twice", goOut)
+	}
+}
+
 // quantize packs a 2-D weight; the self-hosted checker owns the same rank rule
 // even though its evaluator leaves quantize unimplemented (it types the result
 // Unknown), so the check must still fire and a valid weight must pass.

@@ -23,6 +23,29 @@ type Tensor struct {
 	// Forward-mode state, allocated only during a second-derivative computation
 	// (nil in normal training and grad), so the common Tensor stays small.
 	jet *jetState
+	// Element type, stored as the code plus one so the zero value -- what the
+	// many &Tensor{...} intermediates get -- reads as f64, the default, without
+	// colliding with bool (code 0). Read it through DType, never directly.
+	dtp uint8
+}
+
+// DType reports the tensor's element type. The zero value of the internal field
+// means f64, so an intermediate built without naming a dtype is f64, matching
+// the default for every tensor that existed before dtypes.
+func (t *Tensor) DType() DType {
+	if t.dtp == 0 {
+		return DTF64
+	}
+	return DType(t.dtp - 1)
+}
+
+// WithDType stamps a dtype onto the tensor in place and returns it, for the
+// constructors and casts that produce a value of a named dtype. It records only
+// the tag; the caller is responsible for the buffer invariant, that every
+// element is already the f64 widening of a value of dt.
+func (t *Tensor) WithDType(dt DType) *Tensor {
+	t.dtp = uint8(dt) + 1
+	return t
 }
 
 // jetState holds forward-mode (jet) data for one node: the first and second
