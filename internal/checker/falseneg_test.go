@@ -70,6 +70,16 @@ func TestDiffAxisCaught(t *testing.T) {
 	wantNone(t, "let y = diff(zeros(2, 3), 1)")
 }
 
+func TestTransposeRepeatedAxisCaught(t *testing.T) {
+	// A permutation that names an axis twice leaves another unnamed; the runtime
+	// rejects it, and the checker now matches its wording.
+	wantOne(t, "let y = transpose(zeros(2, 3), 0, 0)", "invalid axis permutation [0 0]")
+	wantOne(t, "let y = transpose(zeros(2, 3, 4), 1, 1, 0)", "invalid axis permutation [1 1 0]")
+	// A genuine permutation, and the reversing default, stay clean.
+	wantNone(t, "let y = transpose(zeros(2, 3), 1, 0)")
+	wantNone(t, "let y = transpose(zeros(2, 3, 4), 2, 0, 1)")
+}
+
 func TestTopKBoundsCaught(t *testing.T) {
 	// k larger than the axis, or a non-positive k, both reached the runtime; so
 	// did an out-of-range axis. argtopk shares the same reasoning.

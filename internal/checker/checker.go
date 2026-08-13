@@ -1462,6 +1462,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 			if len(axes) == len(t.dims) {
 				perm := make([]int, len(axes))
+				seen := make([]bool, len(t.dims))
 				for i, ax := range axes {
 					if ax < 0 || ax >= len(t.dims) {
 						// An axis outside the rank is the same mistake every other
@@ -1471,6 +1472,13 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 						c.reportAxis(ex, t)
 						return tUnknown{}
 					}
+					if seen[ax] {
+						// A repeated axis leaves another unnamed, so it is not a
+						// permutation; the runtime rejects it word for word.
+						c.report(ex.Line, "transpose: invalid axis permutation %s", intsBracketed(axes))
+						return tUnknown{}
+					}
+					seen[ax] = true
 					perm[i] = t.dims[ax]
 				}
 				return tTensor{dims: perm}
@@ -2277,6 +2285,22 @@ func constSplitSizes(e ast.Expr) ([]int, bool) {
 		}
 	}
 	return nil, false
+}
+
+// intsBracketed renders a list of integers the way Go prints an []int with %v,
+// space-separated in square brackets, so a diagnostic quoting a permutation
+// matches the runtime's wording exactly.
+func intsBracketed(xs []int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, x := range xs {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%d", x)
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 // constIndexList reads gather's index argument as a constant list of integers:

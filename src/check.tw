@@ -2776,6 +2776,30 @@ fn tensor_builtin_result(arg_types: Arr[Type], dt: I64) -> Type {
   TUnknown
 }
 
+# contains_int reports whether a small integer list already holds a value; used
+# to spot a repeated axis in a permutation, where the lists are a few elements.
+fn contains_int(xs: Arr[I64], v: I64) -> Bool {
+  let i: I64 = 0
+  while i < len(xs) {
+    if xs[i] == v { return true }
+    i = i + 1
+  }
+  false
+}
+
+# ints_bracketed renders a list of integers the way Go prints an []int with %v,
+# space-separated in square brackets, so a diagnostic matches the runtime wording.
+fn ints_bracketed(xs: Arr[I64]) -> Str {
+  let out: Str = "["
+  let i: I64 = 0
+  while i < len(xs) {
+    if i > 0 { out = bytes.concat(out, " ") }
+    out = bytes.concat(out, str(xs[i]))
+    i = i + 1
+  }
+  bytes.concat(out, "]")
+}
+
 fn transpose_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
   match arg_tensor(arg_types, 0) {
     Some(t) => {
@@ -2808,6 +2832,7 @@ fn transpose_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
         return TUnknown
       }
       let perm: Arr[I64] = arr_new()
+      let seen: Arr[I64] = arr_new()
       let k: I64 = 0
       while k < len(axes) {
         let ax: I64 = axes[k]
@@ -2819,6 +2844,13 @@ fn transpose_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
           report_axis(c, ex, t)
           return TUnknown
         }
+        # A repeated axis leaves another unnamed, so it is not a permutation; the
+        # runtime rejects it word for word.
+        if contains_int(seen, ax) {
+          report(c, ex.line, bytes.concat("transpose: invalid axis permutation ", ints_bracketed(axes)))
+          return TUnknown
+        }
+        push(seen, ax)
         push(perm, t.dims[ax])
         k = k + 1
       }
