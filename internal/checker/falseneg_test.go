@@ -62,3 +62,14 @@ func TestTransposeAxisCountCaught(t *testing.T) {
 	wantOne(t, "let y = transpose(zeros(2, 3), 0, 1, 2)", "rank-2 tensor")
 	wantNone(t, "let y = transpose(zeros(2, 3), 1, 0)")
 }
+
+func TestSliceBoundsCaught(t *testing.T) {
+	// end past the first dim, and a reversed slice, both reached the runtime.
+	wantOne(t, "let a = zeros(3)\nlet b = a[1:9]", "out of range for first dim 3")
+	wantOne(t, "let a = zeros(5)\nlet b = a[3:1]", "out of range for first dim 5")
+	// Valid slices, open ends, and negative endpoints stay clean.
+	wantNone(t, "let a = zeros(5)\nlet b = a[2:4]")
+	wantNone(t, "let a = zeros(5)\nlet b = a[1:]")
+	wantNone(t, "let a = zeros(5)\nlet b = a[-2:]")
+	wantNone(t, "let a = zeros(5)\nlet b = a[:3]")
+}
