@@ -117,7 +117,11 @@ func Where(cond, a, b *Tensor) (*Tensor, error) {
 			out[o] = b.Data[idx(o, effB)]
 		}
 	}
-	res := &Tensor{Data: out, Shape: shape}
+	// The result is the promotion of the two branches; the condition's dtype does
+	// not enter it. A branch of a wider dtype than the result is rounded down on
+	// store, so where rounds like an elementwise op rather than carrying a value
+	// through unchanged.
+	res := roundedBinaryResult(out, shape, Promote(a.DType(), b.DType()))
 	return track2(res, a, b, func() {
 		g := res.Grad
 		for o := 0; o < n; o++ {
@@ -658,7 +662,9 @@ func IndexAxis0(t *Tensor, idx int) (*Tensor, error) {
 	off := idx * rowSize
 	data := make([]float64, rowSize)
 	copy(data, t.Data[off:off+rowSize])
-	res := &Tensor{Data: data, Shape: append([]int(nil), t.Shape[1:]...)}
+	// A row selection carries its elements through unchanged, so it keeps the
+	// input dtype (docs/dtypes.md).
+	res := (&Tensor{Data: data, Shape: append([]int(nil), t.Shape[1:]...)}).withDTypeLike(t)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -701,7 +707,8 @@ func SliceAxis0(t *Tensor, start, end int) (*Tensor, error) {
 	outShape := append([]int{end - start}, t.Shape[1:]...)
 	data := make([]float64, (end-start)*rowSize)
 	copy(data, t.Data[start*rowSize:end*rowSize])
-	res := &Tensor{Data: data, Shape: outShape}
+	// A slice carries its rows through unchanged, so it keeps the input dtype.
+	res := (&Tensor{Data: data, Shape: outShape}).withDTypeLike(t)
 	if recordJets && t.RequiresGrad {
 		res.jet = &jetState{}
 		res.jet.jvp = func() {
@@ -1203,7 +1210,8 @@ func Split(t *Tensor, sizes []int, axis int) ([]*Tensor, error) {
 				}
 			}
 		}
-		piece := &Tensor{Data: data, Shape: shape}
+		// Each piece carries its slice of the input through, so it keeps the dtype.
+		piece := (&Tensor{Data: data, Shape: shape}).withDTypeLike(t)
 		// `offset` and `size` are captured per iteration; the closure below runs
 		// long after this loop has moved on.
 		off, sz := offset, size
@@ -1298,7 +1306,8 @@ func SortAxis(t *Tensor, axis int, descending bool) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}
+	// A sort is a permutation of the input, so it keeps the input dtype.
+	res := (&Tensor{Data: out, Shape: append([]int(nil), t.Shape...)}).withDTypeLike(t)
 	// Forward-mode: sort is a permutation, so a tangent rides with its value.
 	// The output at dst took its value from origin[dst], so its tangent is the
 	// input's there. This is the forward twin of the backward scatter below.
@@ -1407,7 +1416,8 @@ func TopKAxis(t *Tensor, k, axis int, largest bool) (*Tensor, error) {
 		}
 	}
 
-	res := &Tensor{Data: out, Shape: shape}
+	// topk selects existing elements, so it keeps the input dtype.
+	res := (&Tensor{Data: out, Shape: shape}).withDTypeLike(t)
 	// Forward-mode: the k that survive carry their tangents through; the ones
 	// dropped contribute nothing, exactly as in the backward pass. origin[dst]
 	// is the input each kept output came from, so its tangent is the input's.
