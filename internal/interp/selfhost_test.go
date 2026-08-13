@@ -193,6 +193,17 @@ func TestSelfHostedDtypeBuiltinMatches(t *testing.T) {
 	}
 }
 
+// Printing a narrow tensor shows the dtype tag and the dtype's shortest decimal,
+// and both interpreters must agree. Positive values only: the self-hosted cast
+// has a NEEDS-2 sign bug, so negatives are not a valid parity reference.
+func TestSelfHostedNarrowPrintMatches(t *testing.T) {
+	src := "print(fill(0.1, 3, bf16))\nprint(fill(3.14159, 2, f16))\nprint(ones(2, i8))\nprint(zeros(2, 2))\n"
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("narrow print differs:\n Go  %q\n self %q", goOut, selfOut)
+	}
+}
+
 // A dtype-carrying constructor tags its tensor, and dtype() reads the tag back;
 // both interpreters must agree on the name for every maker and both arities.
 func TestSelfHostedConstructorDtypeMatches(t *testing.T) {

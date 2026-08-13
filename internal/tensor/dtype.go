@@ -1,6 +1,9 @@
 package tensor
 
-import "math"
+import (
+	"math"
+	"strconv"
+)
 
 // DType is a tensor element type. The numeric codes match src/tensor.tw's DT_*
 // constants exactly, so the two implementations name the same dtype by the same
@@ -217,6 +220,37 @@ func Promote(a, b DType) DType {
 
 // Promote3 folds Promote over three dtypes.
 func Promote3(a, b, c DType) DType { return Promote(Promote(a, b), c) }
+
+// ShortestForDType renders a stored element at its dtype: the shortest decimal
+// that reads back to the same value once rounded to dt. A narrow element is held
+// as the f64 widening of a value that distinguishes only a few digits, so the
+// full f64 spelling would claim a precision it does not have (docs/dtypes.md,
+// NEEDS-114); this cuts the decimal where no other value of the dtype could
+// round-trip from it. Integer-valued elements (bool, i8, i32, and whole floats)
+// print at their natural length. It is a display helper -- f64 is rendered by
+// the value package's FormatNumber and never reaches here.
+func ShortestForDType(dt DType, x float64) string {
+	if math.IsNaN(x) {
+		return "NaN"
+	}
+	if math.IsInf(x, 1) {
+		return "+Inf"
+	}
+	if math.IsInf(x, -1) {
+		return "-Inf"
+	}
+	if x == math.Trunc(x) && math.Abs(x) < 1e15 {
+		return strconv.FormatInt(int64(x), 10)
+	}
+	// The shortest 'g' spelling whose value, rounded back to dt, is x again.
+	for p := 1; p <= 17; p++ {
+		s := strconv.FormatFloat(x, 'g', p, 64)
+		if back, err := strconv.ParseFloat(s, 64); err == nil && RoundToDType(dt, back) == x {
+			return s
+		}
+	}
+	return strconv.FormatFloat(x, 'g', -1, 64)
+}
 
 // Cast rounds every element to dt, once from the source value, and tags the
 // result -- the value each element takes when stored in dt and read back

@@ -1,6 +1,10 @@
 package value
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/martin-k-m/twill/internal/tensor"
+)
 
 // Scopes hold their first few bindings inline and spill to a map after that.
 // These pin the behaviour that has to hold across the boundary.
@@ -52,5 +56,30 @@ func TestEnvAssignReachesInlineAndMapBindings(t *testing.T) {
 	}
 	if e.Assign("missing", TheUnit) {
 		t.Error("Assign invented a binding that was never defined")
+	}
+}
+
+// A narrow-dtype tensor prints its elements at the dtype's shortest decimal and
+// carries a dtype= tag; an f64 tensor is unchanged, so the goldens hold. Values
+// are positive because the self-hosted reference these strings mirror has a
+// NEEDS-2 sign bug on casts, but the Go rounding and rendering are correct.
+func TestFormatNarrowTensor(t *testing.T) {
+	bf := tensor.Cast(tensor.New([]float64{0.1, 3.14159, 1}, []int{3}), tensor.DTBF16)
+	if got := Format(bf); got != "tensor([0.1, 3.14, 1], shape=[3], dtype=bf16)" {
+		t.Errorf("bf16 tensor = %q", got)
+	}
+	i8 := tensor.Cast(tensor.New([]float64{1, 2, 3}, []int{3}), tensor.DTI8)
+	if got := Format(i8); got != "tensor([1, 2, 3], shape=[3], dtype=i8)" {
+		t.Errorf("i8 tensor = %q", got)
+	}
+	// f64 is untouched: no tag, the usual FormatNumber rendering.
+	f64 := tensor.New([]float64{0.5, 1}, []int{2})
+	if got := Format(f64); got != "tensor([0.5, 1], shape=[2])" {
+		t.Errorf("f64 tensor changed: %q", got)
+	}
+	// A narrow scalar prints bare, like a scalar of any dtype.
+	sc := tensor.Cast(tensor.Scalar(1.5), tensor.DTF16)
+	if got := Format(sc); got != "1.5" {
+		t.Errorf("narrow scalar = %q", got)
 	}
 }

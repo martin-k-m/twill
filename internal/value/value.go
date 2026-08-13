@@ -338,10 +338,25 @@ func Format(v Value) string {
 	case Num:
 		return FormatNumber(float64(t))
 	case *tensor.Tensor:
-		if t.IsScalar() {
-			return FormatNumber(t.Data[0])
+		// f64 renders exactly as it always has -- the differential harness compares
+		// this text byte for byte against the bootstrap and every golden depends on
+		// it. A narrow dtype instead prints its elements at the dtype's own shortest
+		// decimal and carries a dtype= tag, so a bf16 1 is told from an i8 1.
+		if t.DType() == tensor.DTF64 {
+			if t.IsScalar() {
+				return FormatNumber(t.Data[0])
+			}
+			return "tensor(" + formatNested(t.ToNested()) + ", shape=[" + joinInts(t.Shape) + "])"
 		}
-		return "tensor(" + formatNested(t.ToNested()) + ", shape=[" + joinInts(t.Shape) + "])"
+		dt := t.DType()
+		render := func(x float64) string { return tensor.ShortestForDType(dt, x) }
+		// A scalar prints as its bare value, matching a scalar of any other dtype;
+		// only a shaped tensor carries the dtype= tag.
+		if t.IsScalar() {
+			return render(t.Data[0])
+		}
+		return "tensor(" + formatNestedWith(t.ToNested(), render) +
+			", shape=[" + joinInts(t.Shape) + "], dtype=" + tensor.DTypeName(dt) + ")"
 	case *tensor.QTensor:
 		return "quantized(i8, shape=[" + joinInts([]int{t.Rows, t.Cols}) + "])"
 	case *tensor.QTensorI4:
@@ -407,6 +422,19 @@ func formatNested(v any) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return FormatNumber(v.(float64))
+}
+
+// formatNestedWith is formatNested with the leaf renderer supplied, so a narrow
+// tensor prints each element at its dtype's shortest decimal.
+func formatNestedWith(v any, render func(float64) string) string {
+	if s, ok := v.([]any); ok {
+		parts := make([]string, len(s))
+		for i, item := range s {
+			parts[i] = formatNestedWith(item, render)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	}
+	return render(v.(float64))
 }
 
 // FormatNumber prints integers without a decimal point and trims noise.
