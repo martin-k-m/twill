@@ -12,9 +12,9 @@
 
 mode systems
 
-import "../term/color.tw" as col
-import "../term/ansi.tw" as ansi
-import "../term/caps.tw" as cp
+import "std/term/color" as col
+import "std/term/ansi" as ansi
+import "std/term/caps" as cp
 
 # ── The ribbon ──────────────────────────────────────────────────────────────
 

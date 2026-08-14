@@ -7,7 +7,7 @@
 
 mode systems
 
-import "caps.tw" as caps
+import "std/term/caps" as caps
 
 struct Rgb { r: I64, g: I64, b: I64 }
 

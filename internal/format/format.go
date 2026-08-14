@@ -361,7 +361,7 @@ func (p *printer) operand(e ast.Expr) string {
 var precedence = map[string]int{
 	"or": 1, "||": 1, "and": 2, "&&": 2,
 	"==": 3, "!=": 3, "<": 4, "<=": 4, ">": 4, ">=": 4,
-	"+": 5, "-": 5, "*": 6, "/": 6, "%": 6, "@": 6, "^": 7,
+	"+": 5, "-": 5, "xor": 5, "bor": 5, "*": 6, "/": 6, "//": 6, "%": 6, "@": 6, "shl": 6, "shr": 6, "band": 6, "^": 7,
 }
 
 // parenChild formats a binary operand, adding parentheses only when needed to

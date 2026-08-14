@@ -122,6 +122,12 @@ type Closure struct {
 	Body   ast.Expr
 	Env    *Env
 	Name   string
+	// The return annotation, kept so that `-> I64` truncates the returned value
+	// the way `let n: I64 = ...` truncates a bound one. Both spellings reach the
+	// annotation the same way the parser records it: a bare `I64` arrives as a
+	// one-factor unit, a qualified or generic name as text.
+	RetUnit *ast.UnitAnno
+	RetType string
 }
 
 // Variant is one case of an enum value: a tag naming the case, and an optional

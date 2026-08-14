@@ -18,10 +18,10 @@
 
 mode systems
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/width.tw" as w
-import "theme.tw" as th
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/width" as w
+import "std/term/theme" as th
 
 # A tensor handed over by the runtime: dimensions, and the elements in row-major
 # order. Read-only, and deliberately not the runtime's own representation, so
@@ -236,7 +236,7 @@ fn matrix_row(c: cp.Caps, t: View, f: Fmt, r: I64, cols: I64) -> Str {
   if cols <= fits {
     out = out + cells(c, t, f, 0, cols, base)
   } else {
-    let half = fits / 2 - 1
+    let half = fits // 2 - 1
     out = out + cells(c, t, f, 0, half, base) + gap(c) + cells(c, t, f, cols - half, cols, base)
   }
   out + " " + ansi.paint(c, th.rule(), "]") + "\n"

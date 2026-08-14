@@ -59,6 +59,16 @@ type RuntimeError struct {
 
 func (e *RuntimeError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Msg) }
 
+// ExitError is what `exit(n)` raises: a request to stop the program with a
+// status, not a failure to report. It unwinds like an error so that every
+// enclosing frame is left the way a return would leave it, and the CLI turns it
+// into the process's exit code without printing anything. A test runner that
+// evaluates several files in one process catches it per file, which a direct
+// os.Exit would not allow.
+type ExitError struct{ Code int }
+
+func (e *ExitError) Error() string { return fmt.Sprintf("exit(%d)", e.Code) }
+
 // returnSignal unwinds the stack for a Twill `return`.
 type returnSignal struct{ value value.Value }
 
@@ -90,6 +100,11 @@ type Interp struct {
 	// model by a handle into this table (a VForeign carrying the I64).
 	gbmModels map[int64]*gbm.Model
 	nextGbm   int64
+	// variantNames is every enum case in scope, so `Opt.Some(x)` can tell a
+	// qualified variant from a field access on a record that happens to share the
+	// name. Variant constructors are ordinary builtins and closures once bound,
+	// which is why the set is tracked rather than inferred from the value.
+	variantNames map[string]bool
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -103,7 +118,8 @@ func New(out func(string)) *Interp {
 		loaded:    map[string]bool{},
 		loading:   map[string]bool{},
 		rng:       rand.New(rand.NewSource(defaultSeed)),
-		gbmModels: map[int64]*gbm.Model{},
+		gbmModels:    map[int64]*gbm.Model{},
+		variantNames: map[string]bool{},
 	}
 	ip.installBuiltins()
 	return ip
@@ -151,6 +167,8 @@ func (ip *Interp) Run(src string) (result value.Value, err error) {
 			switch e := r.(type) {
 			case *RuntimeError:
 				err = e
+			case *ExitError:
+				err = e
 			case returnSignal:
 				result = e.value
 			default:
@@ -192,6 +210,8 @@ func (ip *Interp) RunFileMain(path string, args []string) (result value.Value, r
 			switch e := r.(type) {
 			case *RuntimeError:
 				err = e
+			case *ExitError:
+				err = e
 			case returnSignal:
 				result = e.value
 			default:
@@ -224,10 +244,12 @@ func (ip *Interp) hoistFns(body []ast.Stmt, env *value.Env) {
 	for _, s := range body {
 		if fn, ok := s.(*ast.FnDecl); ok {
 			env.Prebind(fn.Name, &value.Closure{
-				Params: paramNames(fn.Params),
-				Body:   fn.Body,
-				Env:    env,
-				Name:   fn.Name,
+				Params:  paramNames(fn.Params),
+				Body:    fn.Body,
+				Env:     env,
+				Name:    fn.Name,
+				RetUnit: fn.RetUnit,
+				RetType: fn.RetType,
 			})
 		}
 	}
@@ -250,10 +272,44 @@ func isI64Anno(typeName string, u *ast.UnitAnno) bool {
 	return u != nil && len(u.Factors) == 1 && u.Factors[0].Name == "I64" && u.Factors[0].Exp == 1
 }
 
+// annoHead returns the constructor at the head of a type annotation, so that
+// "Arr[Str]" gives "Arr" and "Dict[Str, I64]" gives "Dict".
+func annoHead(typeName string) string {
+	if i := strings.IndexByte(typeName, '['); i >= 0 {
+		return typeName[:i]
+	}
+	return typeName
+}
+
+// emptyContainerFor reads an empty literal at a container annotation as that
+// container. `[]` and `{}` are each ambiguous on their own: a bracket literal
+// with no elements is an empty tensor, and a brace literal with no fields is an
+// empty record, and both are what those spellings mean with nothing else to go
+// on. But `let seen: Dict[Str, I64] = {}` says which one is meant, and reading
+// it as a record left the value unusable -- every later dict_set on it failed,
+// which is what the annotation was there to prevent. Only the empty forms are
+// converted, so no literal that carries data changes meaning.
+func emptyContainerFor(typeName string, v value.Value) (value.Value, bool) {
+	switch annoHead(typeName) {
+	case "Arr", "List":
+		if t, ok := v.(*tensor.Tensor); ok && len(t.Data) == 0 {
+			return &value.List{}, true
+		}
+	case "Dict":
+		if r, ok := v.(*value.Record); ok && len(r.Keys) == 0 {
+			return value.NewDict(), true
+		}
+	}
+	return nil, false
+}
+
 func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	switch st := s.(type) {
 	case *ast.Let:
 		v := ip.evalExpr(st.Value, env)
+		if out, ok := emptyContainerFor(st.TypeName, v); ok {
+			v = out
+		}
 		// A scalar bound at an `I64` annotation truncates toward zero. Numbers run
 		// as float64, so integer division comes back fractional; a systems-mode
 		// kernel like tensor.tw's transpose_origins binds `let coord: I64 = rem /
@@ -275,10 +331,12 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		return value.TheUnit
 	case *ast.FnDecl:
 		env.Define(st.Name, &value.Closure{
-			Params: paramNames(st.Params),
-			Body:   st.Body,
-			Env:    env,
-			Name:   st.Name,
+			Params:  paramNames(st.Params),
+			Body:    st.Body,
+			Env:     env,
+			Name:    st.Name,
+			RetUnit: st.RetUnit,
+			RetType: st.RetType,
 		})
 		return value.TheUnit
 	case *ast.Assign:
@@ -357,6 +415,7 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		// these across modules (see crossModuleVariant); this is the runtime half.
 		for _, v := range st.Variants {
 			name := v.Name
+			ip.variantNames[name] = true
 			var ctor value.Value
 			if v.HasPayload {
 				ctor = &value.Builtin{Name: name, Arity: 1, Fn: func(a []value.Value) (value.Value, error) {
@@ -604,17 +663,25 @@ func loadStd(name string) (module, error) {
 	return mod, nil
 }
 
-// validStdName keeps a module name a plain identifier, so it cannot walk out of
-// the library into the rest of the filesystem via the override directory.
+// validStdName keeps every segment of a module name a plain identifier, so it
+// cannot walk out of the library into the rest of the filesystem via the
+// override directory. The library groups related modules one level deep
+// ("term/caps"), so a name may carry a single separator; each side of it still
+// has to be an identifier, which is what rules out "..", "", and absolute paths.
 func validStdName(name string) bool {
 	if name == "" {
 		return false
 	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-		default:
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" {
 			return false
+		}
+		for _, r := range seg {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			default:
+				return false
+			}
 		}
 	}
 	return true
@@ -672,7 +739,14 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		}
 		return &value.List{Items: items}
 	case *ast.Lambda:
-		return &value.Closure{Params: paramNames(ex.Params), Body: ex.Body, Env: env, Name: ""}
+		return &value.Closure{
+			Params:  paramNames(ex.Params),
+			Body:    ex.Body,
+			Env:     env,
+			Name:    "",
+			RetUnit: ex.RetUnit,
+			RetType: ex.RetType,
+		}
 	case *ast.Unary:
 		return ip.evalUnary(ex, env)
 	case *ast.Binary:
@@ -690,6 +764,9 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		}
 		return rec
 	case *ast.Field:
+		if v, ok := ip.qualifiedVariant(ex.Target, ex.Name, env); ok {
+			return v
+		}
 		return ip.recordField(ip.evalExpr(ex.Target, env), ex.Name, ex.Line)
 	case *ast.IfExpr:
 		if value.Truthy(ip.evalExpr(ex.Cond, env)) {
@@ -803,6 +880,28 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 	switch op {
 	case "==", "!=", "<", "<=", ">", ">=":
 		return value.Bool(ip.compare(op, l, r, ex.Line))
+	// The bitwise words are the same operation infix as they are called: one
+	// definition, in bitwiseInfix, so `x shr 8` and `shr(x, 8)` cannot drift.
+	// `//` divides and truncates toward zero: the integer division every
+	// `(n + k - 1) // k` and midpoint wants. `/` stays exact float division, so
+	// the two intents are written down rather than inferred from the operands --
+	// numbers all run as float64 here and there is nothing to infer from.
+	case "//":
+		ln, lok := rank0Number(l)
+		rn, rok := rank0Number(r)
+		if !lok || !rok {
+			ip.panicf(ex.Line, "operator %q needs numbers", op)
+		}
+		if rn == 0 {
+			ip.panicf(ex.Line, "integer division by zero")
+		}
+		return value.Num(math.Trunc(ln / rn))
+	case "band", "bor", "xor", "shl", "shr":
+		out, err := bitwiseInfix(op, l, r)
+		if err != nil {
+			ip.panicf(ex.Line, "%s", err.Error())
+		}
+		return out
 	}
 
 	// `+` concatenates two strings. The tensor engine has no notion of a string,
@@ -1034,9 +1133,26 @@ func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {
 	// self-hosted eval_cast). Anything else is an ordinary call of a function held
 	// in a record field; the target is evaluated once and reused either way.
 	if fld, ok := ex.Callee.(*ast.Field); ok {
+		// `Opt.Some(x)` names the variant by its enum, the same spelling a match
+		// arm uses. The enum name is not a value, so this is resolved before the
+		// target is evaluated -- evaluating `Opt` would be an undefined variable.
+		if ctor, isVariant := ip.qualifiedVariant(fld.Target, fld.Name, env); isVariant {
+			return ip.Apply(ctor, ip.evalArgs(ex.Args, env), ex.Line)
+		}
 		target := ip.evalExpr(fld.Target, env)
 		if t, isTensor := target.(*tensor.Tensor); isTensor && fld.Name == "to" {
 			return ip.evalCast(t, ex)
+		}
+		// `xs.push(v)` calls push(xs, v). A record field holding a function is
+		// still preferred, so a namespace (`m.f(x)`, an import alias) and a record
+		// of closures keep their meaning; this is the fallback for everything
+		// else, where the field does not exist and the name is a function that
+		// takes the target first. It is the shape every caller already writes for
+		// the container operations, and without it a list had a `len(xs)` and no
+		// `xs.len()` for no reason a reader could see.
+		if fn, ok := ip.uniformCallee(target, fld.Name, env); ok {
+			args := append([]value.Value{target}, ip.evalArgs(ex.Args, env)...)
+			return ip.Apply(fn, args, ex.Line)
 		}
 		callee := ip.recordField(target, fld.Name, ex.Line)
 		return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
@@ -1059,6 +1175,50 @@ func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {
 		}
 	}
 	return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
+}
+
+// qualifiedVariant resolves `Enum.Variant` to the variant itself. The qualifier
+// says which enum the variant belongs to and nothing more -- variants are
+// resolved by name -- so it is accepted wherever the bare name is, and answers
+// only when the qualifier is not a bound value (a record field access on a real
+// variable keeps its meaning) and the name is a variant.
+func (ip *Interp) qualifiedVariant(target ast.Expr, name string, env *value.Env) (value.Value, bool) {
+	id, isIdent := target.(*ast.Ident)
+	if !isIdent {
+		return nil, false
+	}
+	if _, bound := env.Get(id.Name); bound {
+		return nil, false
+	}
+	if !ip.variantNames[name] {
+		return nil, false
+	}
+	v, ok := env.Get(name)
+	if !ok {
+		return nil, false
+	}
+	return v, true
+}
+
+// uniformCallee resolves `target.name(...)` to the function `name` called with
+// target as its first argument. It answers only when the target does not
+// already carry that field, so a record or a module namespace keeps the field
+// call it means, and only when the name is in scope as something callable.
+func (ip *Interp) uniformCallee(target value.Value, name string, env *value.Env) (value.Value, bool) {
+	if rec, isRec := target.(*value.Record); isRec {
+		if _, has := rec.Get(name); has {
+			return nil, false
+		}
+	}
+	fn, ok := env.Get(name)
+	if !ok {
+		return nil, false
+	}
+	switch fn.(type) {
+	case *value.Builtin, *value.Closure:
+		return fn, true
+	}
+	return nil, false
 }
 
 // dtypeMakers are the tensor constructors whose trailing argument may be a dtype
@@ -1158,19 +1318,43 @@ func (ip *Interp) callClosure(c *value.Closure, args []value.Value) (ret value.V
 	for i, p := range c.Params {
 		scope.Define(p, args[i])
 	}
+	// `-> I64` truncates the result toward zero, the same rule `let n: I64 = ...`
+	// applies to a bound value. Numbers run as float64, so the integer idioms --
+	// a ceiling division `(n + k - 1) / k`, a midpoint, an index -- come back
+	// fractional, and a function that promised an I64 was handing one back. The
+	// named return is the only place the promise is written down, so it is the
+	// place to keep it. A real I64 runtime divides as integers and this is a
+	// no-op.
 	defer func() {
 		if r := recover(); r != nil {
-			if rs, ok := r.(returnSignal); ok {
-				ret = rs.value
-				return
+			rs, ok := r.(returnSignal)
+			if !ok {
+				panic(r)
 			}
-			panic(r)
+			ret = coerceReturn(c, rs.value)
+			return
 		}
 	}()
 	if blk, ok := c.Body.(*ast.Block); ok {
-		return ip.execBlockIn(blk, scope)
+		return coerceReturn(c, ip.execBlockIn(blk, scope))
 	}
-	return ip.evalExpr(c.Body, scope)
+	return coerceReturn(c, ip.evalExpr(c.Body, scope))
+}
+
+// coerceReturn applies a closure's return annotation to the value it produced.
+func coerceReturn(c *value.Closure, v value.Value) value.Value {
+	if !isI64Anno(c.RetType, c.RetUnit) {
+		return v
+	}
+	switch t := v.(type) {
+	case value.Num:
+		return value.Num(math.Trunc(float64(t)))
+	case *tensor.Tensor:
+		if t.IsScalar() {
+			return value.Num(math.Trunc(t.Data[0]))
+		}
+	}
+	return v
 }
 
 // assignTo stores v into the location named by target: a variable, a record
@@ -1193,6 +1377,17 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 	case *ast.Index:
 		obj := ip.evalExpr(t.Target, env)
 		idxVal := ip.evalExpr(t.Index, env)
+		// A dictionary is subscripted by its key, `counts[tok] = n`, which is how
+		// every caller writes it and reads the same as the list and tensor cases
+		// just below. dict_set is the same store under a name.
+		if d, isDict := obj.(*value.Dict); isDict {
+			k, isStr := idxVal.(value.Str)
+			if !isStr {
+				ip.panicf(t.Line, "a dictionary key must be a string")
+			}
+			d.Set(string(k), v)
+			return
+		}
 		n, ok := rank0Number(idxVal)
 		if !ok {
 			ip.panicf(t.Line, "index must be a scalar number")
@@ -1224,6 +1419,21 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {
 	target := ip.evalExpr(ex.Target, env)
 	idxVal := ip.evalExpr(ex.Index, env)
+	// A dictionary is subscripted by its key, the read half of the store in
+	// assignTo. A missing key is an error rather than a zero: dict_get returns an
+	// Opt for the caller who wants to ask, and `d[k]` is the form that says the
+	// key is expected to be there.
+	if d, isDict := target.(*value.Dict); isDict {
+		k, isStr := idxVal.(value.Str)
+		if !isStr {
+			ip.panicf(ex.Line, "a dictionary key must be a string")
+		}
+		got, found := d.Get(string(k))
+		if !found {
+			ip.panicf(ex.Line, "no key %q in the dictionary", string(k))
+		}
+		return got
+	}
 	n, ok := rank0Number(idxVal)
 	if !ok {
 		ip.panicf(ex.Line, "index must be a scalar number")

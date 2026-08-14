@@ -19,10 +19,10 @@
 
 mode systems
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/width.tw" as w
-import "theme.tw" as th
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/width" as w
+import "std/term/theme" as th
 import "diagnostic.tw" as dg
 
 struct ShapeOp {

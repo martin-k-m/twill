@@ -21,6 +21,7 @@ package main
 // existing contract means no test file has to change.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -127,6 +128,20 @@ func runOneTestFile(path string) testResult {
 		_, _, err := ip.RunFileMain(path, []string{"twill"})
 		return err
 	})
+	// A suite that ends in exit(n) is reporting its own verdict, not crashing:
+	// zero is a pass and anything else is a failure, and either way the summary
+	// it printed is the thing worth showing. A harness calling exit(1) on a red
+	// suite is the whole point of having exit, so it must not be reported as an
+	// interpreter fault.
+	var ex *interp.ExitError
+	if errors.As(runErr, &ex) {
+		res := testResult{output: out, ok: ex.Code == 0}
+		res.readSummary()
+		if !res.ok && res.errMsg == "" {
+			res.errMsg = fmt.Sprintf("suite exited with status %d", ex.Code)
+		}
+		return res
+	}
 	if runErr != nil {
 		return testResult{ok: false, output: out, errMsg: fmt.Sprintf("%v", runErr)}
 	}

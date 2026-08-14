@@ -54,6 +54,12 @@ struct Closure {
   # The name is carried only for diagnostics. An anonymous function has none and
   # the message says "function" instead, which is what the Go side does.
   name: Str,
+  # The return annotation, kept so that `-> I64` truncates the returned value the
+  # way `let n: I64 = ...` truncates a bound one. A bare `I64` arrives as a
+  # one-factor unit and a qualified or generic name as text, which is how the
+  # parser records each.
+  ret_unit: Opt[ast.UnitAnno],
+  ret_type: Str,
 }
 
 struct ListVal {
@@ -362,6 +368,7 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
       # environment the binding lands in, so the recursion resolves.
       env_define(env, st.name, VClosure(Closure {
         params: st.params, body: st.body, env: env, name: st.name,
+        ret_unit: st.ret_unit, ret_type: st.ret_type,
       }))
       Ok(Normal(VUnit))
     },
@@ -754,6 +761,43 @@ fn coerce_scalar_i64(type_name: Str, u: Opt[ast.UnitAnno], v: Value) -> Value {
       _ => unit,
     }
   }
+  empty_container_for(type_name, v)
+}
+
+# anno_head returns the constructor at the head of a type annotation, so that
+# "Arr[Str]" gives "Arr" and "Dict[Str, I64]" gives "Dict".
+fn anno_head(type_name: Str) -> Str {
+  let i: I64 = 0
+  while i < len(type_name) {
+    if type_name[i] == 91 { return slice(type_name, 0, i) }
+    i = i + 1
+  }
+  type_name
+}
+
+# empty_container_for reads an empty literal at a container annotation as that
+# container. `[]` and `{}` are each ambiguous on their own: a bracket literal
+# with no elements is an empty tensor, and a brace literal with no fields is an
+# empty record, and both are what those spellings mean with nothing else to go
+# on. But `let seen: Dict[Str, I64] = {}` says which one is meant, and reading
+# it as a record left the value unusable -- every later dict_set on it failed,
+# which is what the annotation was there to prevent. Only the empty forms are
+# converted, so no literal that carries data changes meaning.
+fn empty_container_for(type_name: Str, v: Value) -> Value {
+  let head: Str = anno_head(type_name)
+  if bytes.equal(head, "Arr") or bytes.equal(head, "List") {
+    match v {
+      VTensor(t) => {
+        if tensor.numel(t) == 0 { return VList(ListVal { items: arr_new() }) }
+      },
+      _ => unit,
+    }
+  }
+  # The `Dict` half of this rule is the bootstrap's alone. A dictionary is not
+  # one of this evaluator's values -- there is no VDict in the Value enum above
+  # -- so there is nothing here to convert an empty record into, the same
+  # position `quantize` and the gpu_* builtins are in. The annotation is still
+  # honoured where dictionaries actually run, which is the bootstrap.
   v
 }
 
@@ -832,6 +876,8 @@ fn hoist_module_fns(body: Arr[ast.Stmt], env: Env) {
         body: fd.body,
         env: env,
         name: fd.name,
+        ret_unit: fd.ret_unit,
+        ret_type: fd.ret_type,
       })),
       _ => unit,
     }
@@ -874,7 +920,8 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
       }
       Ok(VList(ListVal { items: items }))
     },
-    ELambda(x) => Ok(VClosure(Closure { params: x.params, body: x.body, env: env, name: "" })),
+    ELambda(x) => Ok(VClosure(Closure { params: x.params, body: x.body, env: env, name: "",
+      ret_unit: x.ret_unit, ret_type: x.ret_type })),
     EUnary(x) => eval_unary(x, env),
     EBinary(x) => eval_binary(x, env),
     ECall(x) => eval_call(x, env),
@@ -1068,6 +1115,27 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
   let l: Value = eval_expr(x.left, env)?
   let r: Value = eval_expr(x.right, env)?
 
+  # The bitwise words are the same operation infix as they are called, so both
+  # routes land in bi_bitwise and the two spellings cannot come to mean
+  # different things. `and`/`or` are not here: they short-circuited above, as
+  # the boolean operators, and reach the bitwise meaning only when called.
+  # `//` divides and truncates toward zero: the integer division every
+  # `(n + k - 1) // k` and midpoint wants. `/` stays exact float division, so the
+  # two intents are written down rather than inferred from the operands.
+  if bytes.equal(x.op, "//") {
+    let ln: F64 = scalar_of(l, "//", x.line)?
+    let rn: F64 = scalar_of(r, "//", x.line)?
+    if rn == 0.0 {
+      return Err(runtime_error(x.line, "integer division by zero"))
+    }
+    return Ok(VNum(i64_of_f64(ln / rn)))
+  }
+  if is_bitwise_op(x.op) {
+    let bargs: Arr[Value] = arr_new()
+    push(bargs, l)
+    push(bargs, r)
+    return bi_bitwise(x.op, bargs, x.line)
+  }
   if bytes.equal(x.op, "==") { return Ok(VBool(deep_equal(l, r))) }
   if bytes.equal(x.op, "!=") { return Ok(VBool(not deep_equal(l, r))) }
 
@@ -1419,6 +1487,17 @@ fn apply(callee: Value, args: Arr[Value], line: I64) -> Res[Value, RuntimeError]
   }
 }
 
+# coerce_return applies a closure's return annotation to the value it produced.
+fn coerce_return(c: Closure, v: Value) -> Value {
+  if is_i64_anno(c.ret_type, c.ret_unit) {
+    match v {
+      VNum(x) => return VNum(i64_of_f64(x)),
+      _ => unit,
+    }
+  }
+  v
+}
+
 fn call_closure(c: Closure, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   if len(c.params) != len(args) {
     let who: Str = "function"
@@ -1437,9 +1516,13 @@ fn call_closure(c: Closure, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
     env_define(scope, c.params[i].name, args[i])
     i = i + 1
   }
+  # `-> I64` truncates the result toward zero, the same rule `let n: I64 = ...`
+  # applies to a bound value. Numbers run as F64, so the integer idioms -- a
+  # ceiling division `(n + k - 1) / k`, a midpoint, an index -- come back
+  # fractional, and a function that promised an I64 was handing one back.
   match c.body {
-    EBlock(blk) => Ok(flow_value(exec_block(blk, scope)?)),
-    _ => eval_expr(c.body, scope),
+    EBlock(blk) => Ok(coerce_return(c, flow_value(exec_block(blk, scope)?))),
+    _ => Ok(coerce_return(c, eval_expr(c.body, scope)?)),
   }
 }
 
@@ -1845,6 +1928,8 @@ fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, Runtim
   if in_words(FILE_OPS, name) { return bi_files(name, args, line) }
   if in_words("gbm_fit gbm_predict", name) { return bi_gbm(name, args, line) }
   if bytes.equal(name, "nbytes") { return bi_nbytes(args, line) }
+  if in_words("and or band bor xor shl shr", name) { return bi_bitwise(name, args, line) }
+  if bytes.equal(name, "bnot") { return bi_bnot(args, line) }
   # `quantize` is a Go-bootstrap builtin: it packs a weight into int8/int4, which
   # is a memory layout the reference interpreter has no way to produce (it holds
   # every element as an F64). It is named in the table so a program using it type-
@@ -2334,6 +2419,37 @@ fn bi_linear(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
 # tensor element and per number, and the sum of the parts for a container. A
 # quantised weight would report its packed size, but the reference never holds
 # one, so that case only exists on the Go side.
+# is_bitwise_op reports whether an operator is one of the bitwise words that
+# carries the same meaning infix and called. `and` and `or` are excluded: infix
+# they are the short-circuiting boolean operators, and only the call form
+# `and(x, y)` is the bitwise one.
+fn is_bitwise_op(op: Str) -> Bool =
+  bytes.equal(op, "band") or bytes.equal(op, "bor") or bytes.equal(op, "xor")
+    or bytes.equal(op, "shl") or bytes.equal(op, "shr")
+
+# bi_bitwise applies a bitwise word to two values, truncating each to I64. The
+# host's own bitwise builtins do the work: this evaluator runs on the bootstrap,
+# so `and`/`shr` here are the bootstrap's, and reimplementing them in twill
+# would need the very operators being defined.
+fn bi_bitwise(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let x: F64 = scalar_of(args[0], name, line)?
+  let y: F64 = scalar_of(args[1], name, line)?
+  let a: I64 = i64(x)
+  let b: I64 = i64(y)
+  let out: I64 = 0
+  if bytes.equal(name, "and") or bytes.equal(name, "band") { out = and(a, b) }
+  if bytes.equal(name, "or") or bytes.equal(name, "bor") { out = or(a, b) }
+  if bytes.equal(name, "xor") { out = xor(a, b) }
+  if bytes.equal(name, "shl") { out = shl(a, b) }
+  if bytes.equal(name, "shr") { out = shr(a, b) }
+  Ok(VTensor(tensor.scalar_of(f64(out), tensor.DT_F64)))
+}
+
+fn bi_bnot(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let x: F64 = scalar_of(args[0], "bnot", line)?
+  Ok(VTensor(tensor.scalar_of(f64(bnot(i64(x))), tensor.DT_F64)))
+}
+
 fn bi_nbytes(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   if len(args) != 1 {
     return Err(runtime_error(line, "nbytes expects one argument"))

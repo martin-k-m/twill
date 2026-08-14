@@ -19,14 +19,14 @@ import "../check.tw" as check
 import "../fmt.tw" as fmt
 import "../eval.tw" as eval
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "theme.tw" as th
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/theme" as th
 import "banner.tw" as banner
 import "help.tw" as help
 import "diagnostic.tw" as diag
 
-let VERSION: Str = "1.4.0"
+let VERSION: Str = "1.5.0"
 
 let EXIT_OK: I64 = 0
 let EXIT_ERROR: I64 = 1

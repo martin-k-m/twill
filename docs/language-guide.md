@@ -22,11 +22,25 @@ value is printed; `:help` and `:quit` do the obvious things.
 
 - Comments run from `#` to end of line.
 - Whitespace is insignificant, with one exception: a token that could either
-  continue the previous line or start a new one begins a new statement when it
-  appears at the start of a line. This applies to a leading `+`/`-` (which would
-  otherwise read as subtraction) and to a leading `(`/`[` (which would otherwise
-  read as a call or index). To continue an expression across lines, end the line
-  with the operator, or keep the call/index on the same line as its target.
+  continue the previous line or start a new one is resolved by indentation.
+  A line that opens with `+` or `-` **continues** the previous expression when it
+  is indented past the column the statement began at, and **starts a new
+  statement** when it lines up with that column or sits to its left:
+
+  ```
+  let total = base_rate
+    + adjustment          # continues: indented past `let`
+    - discount
+
+  let x = f(a)
+  -mean(y)                # a new statement: lines up with `let`
+  ```
+
+  The same rule settles a line that opens with a bitwise word followed by `(`,
+  such as `xor(a, b)`, which is a call starting a new statement rather than the
+  previous expression continued by `xor`. A leading `(` or `[` always begins a
+  new expression rather than a call or index on the previous line. Ending a line
+  *with* the operator continues an expression too, and always did.
 - Identifiers match `[A-Za-z_][A-Za-z0-9_]*`.
 - Numbers are floating point: `3`, `3.14`, `1e-3`, `.5`.
 - Strings use double quotes with `\n`, `\t`, `\"`, `\\` escapes.
@@ -156,22 +170,57 @@ combine when, aligned from the right, each pair of dimensions is equal or one of
 them is 1. `@` covers vector·vector (dot), matrix·vector, vector·matrix, and
 matrix·matrix.
 
+### Integer division
+
+`/` is exact division and always gives a float: `7 / 2` is `3.5`. `//` divides
+and truncates toward zero, which is the integer division a count, an index or a
+midpoint wants:
+
+```
+7 // 2        # 3
+-7 // 2       # -3, truncated toward zero, not floored
+(n + k - 1) // k   # the ceiling of n/k
+314 % 100     # 14, the matching remainder
+```
+
+Both intents are written down rather than inferred from the operands, because
+every number runs as an `F64` and there is nothing to infer from. `x // 0` is an
+error, where `x / 0` is an infinity.
+
+An `I64` annotation also truncates, and it does so in both places it can appear
+— a binding and a return:
+
+```
+let mid: I64 = (lo + hi) / 2          # truncated at the binding
+fn ceil_div(n: I64, k: I64) -> I64 {  # truncated at the return
+  (n + k - 1) / k
+}
+```
+
 ### Bitwise operators on `I64`
 
 These belong to `mode systems` and to `I64` only. There is no bitwise operator
-on `F64` and no unsigned integer type. They are spelled as calls rather than as
-infix operators, because `and`, `or` and `not` are already the short-circuiting
-logical operators and giving one spelling two meanings by operand type is worse
-than a name.
+on `F64` and no unsigned integer type. Each is available infix and as a call,
+and the two spellings are the same operation.
 
-| Call | Meaning |
-| --- | --- |
-| `and(a, b)` | bitwise AND |
-| `or(a, b)` | bitwise OR |
-| `xor(a, b)` | bitwise XOR |
-| `not(a)` | bitwise complement, every bit flipped |
-| `shl(a, k)` | left shift, zeros shifted in at the bottom |
-| `shr(a, k)` | **arithmetic** right shift, the sign bit shifted in at the top |
+| Infix | Call | Meaning |
+| --- | --- | --- |
+| `a band b` | `band(a, b)` | bitwise AND |
+| `a bor b` | `bor(a, b)` | bitwise OR |
+| `a xor b` | `xor(a, b)` | bitwise XOR |
+| | `bnot(a)` | bitwise complement, every bit flipped |
+| `a shl k` | `shl(a, k)` | left shift, zeros shifted in at the bottom |
+| `a shr k` | `shr(a, k)` | **arithmetic** right shift, sign bit shifted in |
+
+The shifts bind like `*` and `xor`/`bor` bind like `+`, which is where their
+symbolic equivalents sit in C and Go.
+
+**The bitwise AND and OR are `band` and `bor`, not `and` and `or`.** `and` and
+`or` infix are the short-circuiting *boolean* operators and return an operand,
+so `x and 255` is `255` for any non-zero `x` — a silent wrong answer, not an
+error. The bitwise meaning has its own name for the same reason the bitwise
+complement is `bnot` and not `not`. `and(a, b)` and `or(a, b)` in call form
+remain the bitwise operations, for the code that already wrote them that way.
 
 `I64` is two's complement and exactly 64 bits. `and`, `or`, `xor` and `not` are
 defined bit by bit on that representation and have nothing to say about sign.

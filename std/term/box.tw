@@ -13,10 +13,10 @@ mode systems
 # corners where the terminal draws box characters, plain ASCII where they would
 # come out as tofu, decided once from the capabilities rather than hoped for.
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/color.tw" as col
-import "../term/width.tw" as w
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/color" as col
+import "std/term/width" as w
 
 # The six characters a border is drawn from: four corners, a horizontal run and
 # a vertical one.

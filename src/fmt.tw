@@ -651,10 +651,16 @@ fn precedence_table() -> Dict[Str, I64] {
   dict_set(d, ">=", 4)
   dict_set(d, "+", 5)
   dict_set(d, "-", 5)
+  dict_set(d, "xor", 5)
+  dict_set(d, "bor", 5)
   dict_set(d, "*", 6)
   dict_set(d, "/", 6)
+  dict_set(d, "//", 6)
   dict_set(d, "%", 6)
   dict_set(d, "@", 6)
+  dict_set(d, "shl", 6)
+  dict_set(d, "shr", 6)
+  dict_set(d, "band", 6)
   dict_set(d, "^", 7)
   d
 }
