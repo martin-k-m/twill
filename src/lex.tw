@@ -162,6 +162,11 @@ fn keyword_table() -> Dict[Str, Bool] {
   dict_set(d, "and", true)
   dict_set(d, "or", true)
   dict_set(d, "not", true)
+  dict_set(d, "band", true)
+  dict_set(d, "bor", true)
+  dict_set(d, "xor", true)
+  dict_set(d, "shl", true)
+  dict_set(d, "shr", true)
   dict_set(d, "enum", true)
   dict_set(d, "match", true)
   dict_set(d, "struct", true)
@@ -192,6 +197,7 @@ fn multi_ops() -> Arr[Str] {
   push(a, "=>")
   push(a, "&&")
   push(a, "||")
+  push(a, "//")
   a
 }
 
@@ -526,7 +532,7 @@ fn escape_byte(buf: Bytes, c: I64) {
     return
   }
   bytes.push_text(buf, "\\x")
-  bytes.push(buf, hex_digit(c / 16))
+  bytes.push(buf, hex_digit(c // 16))
   bytes.push(buf, hex_digit(c % 16))
 }
 

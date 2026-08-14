@@ -21,12 +21,12 @@
 
 mode systems
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/color.tw" as col
-import "../term/frame.tw" as fr
-import "../term/width.tw" as w
-import "theme.tw" as th
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/color" as col
+import "std/term/frame" as fr
+import "std/term/width" as w
+import "std/term/theme" as th
 
 let FRAME_MS: I64 = 120
 
@@ -142,6 +142,6 @@ fn non_tty(s: Spinner, line: Str) -> Str = if s.frame.live { "" } else { line + 
 
 fn fmt_ms(ms: I64) -> Str {
   if ms < 1000 { str(ms) + "ms" }
-  else if ms < 60000 { str(ms / 1000) + "." + str(ms % 1000 / 100) + "s" }
-  else { str(ms / 60000) + "m" + str(ms % 60000 / 1000) + "s" }
+  else if ms < 60000 { str(ms // 1000) + "." + str(ms % 1000 // 100) + "s" }
+  else { str(ms // 60000) + "m" + str(ms % 60000 // 1000) + "s" }
 }

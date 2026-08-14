@@ -1,5 +1,98 @@
 # Changelog
 
+## [1.5.0] - 2026-08-14
+
+The release that made the ecosystem run. Every change below came from the same
+place: nine sibling repositories were written against twill, and most of them
+did not work. The failures were not nine problems but about a dozen, each shared
+by several repositories, and each a place where the language asked for something
+no one would naturally write. `docs/needs.md` in each repository had been asking
+for most of them for months.
+
+### Added
+
+- **Leading-operator line continuation**: a line that opens with `+` or `-` now
+  continues the previous expression when it is indented past the statement it
+  continues, and starts a new statement when it lines up with it. Indentation is
+  what a reader already uses to tell the two apart. This one rule was the single
+  largest blocker in the ecosystem: seven of the nine repositories failed to
+  parse without it, because a wrapped string concatenation or a long polynomial
+  is written this way by everyone.
+- **The bitwise operators, spelled and infix**: `band`, `bor`, `xor`, `shl` and
+  `shr` are now infix operators as well as callable builtins, with the shifts
+  binding like `*` and `xor`/`bor` like `+`. `band`/`bor` exist because `and`
+  and `or` are the *boolean* operators infix and the *bitwise* ones when called,
+  which meant `x and 255` silently evaluated to `255`. Four repositories had
+  asked for the spelling to be fixed; every one of them had this bug.
+- **`std/term`, the terminal layer as a standard-library module**: `src/term/`
+  and the palette moved to `std/term/` and are importable as `std/term/caps`,
+  `std/term/ansi`, `std/term/theme`, `std/term/box` and the rest. Four
+  repositories were reaching into a vendored checkout by relative path, which is
+  why eight of their suites could not load at all. The standard library now
+  carries one level of grouping, and `TWILL_STD` still overrides it.
+- **`std/hash`, a SHA-256 that is correct**: promoted from spool's copy, and
+  fixed. Three repositories had hand-written this algorithm and all three
+  produced wrong digests. Two causes: `not(x)` is the boolean negation where the
+  algorithm wants the bitwise one, and the 32-bit rotate overflowed the 53 bits
+  an f64-backed I64 actually holds, so `rotr` now masks before it shifts.
+  Verified against the standard vectors.
+- **Dictionary subscripting**: `d[key]` and `d[key] = value` on a `Dict`, the
+  read and write every caller was already writing.
+- **Uniform call syntax**: `xs.push(v)` calls `push(xs, v)` when the target has
+  no such field, so a container reads the same way whichever spelling is used.
+  Record fields and module namespaces are unaffected.
+- **Qualified variants**: `Opt.Some(x)` and `Opt.None` are accepted where the
+  bare variant is, in expressions and in match patterns alike.
+- **`Fn(T) -> R` as a spelling of the function type**, alongside `fn(T) -> R`.
+  Every other type in the systems dialect is capitalised, so this is what half
+  the ecosystem reached for.
+- **`exit(n)`**: stops the program with a status. Without it a failing test
+  harness printed its failures and returned zero, so CI passed on a red suite.
+  `twill test` reads it as the suite's own verdict rather than as a crash.
+- **`arr_of_tensor`, `read_text_or` and `write_text_or`**: the tensor-to-array
+  copy on heddle's sampling hot path, and file reads and writes for the caller
+  who has already decided what a failure means.
+- **`//`, integer division**: divides and truncates toward zero, where `/` stays
+  exact float division. Every number runs as an `F64`, so a `(n + k - 1) / k`
+  came back fractional and the integer idioms — ceiling divisions, midpoints,
+  digit extraction — were quietly wrong. This was weft printing `3.14.14` for
+  `3.14`, loom counting `3.25` batches, and a `` escape in the compiler's own
+  lexer coming out as a fractional byte.
+- **`f64_bits_hi`, `f64_bits_lo` and `f64_from_halves`**: an f64's 64-bit pattern
+  does not fit in an f64, so `f64_bits(0.1)` came back 102 short and nothing
+  serialised through it reloaded bit for bit. Each 32-bit half is under 2^53 and
+  so is exact, which is what makes a bit-for-bit format expressible at all.
+  selvedge's save format now round-trips every double, subnormals included, and
+  still writes byte-identical output.
+
+### Changed
+
+- **`arr_push` returns the list it appended to**, so it reads as an expression as
+  well as a statement. The ecosystem used it in expression position 53 times and
+  in statement position once.
+- **An empty literal at a container annotation builds that container**:
+  `let seen: Dict[Str, I64] = {}` is a dictionary and `let xs: Arr[Str] = []` is
+  a list. `{}` in expression position is now the empty record rather than an
+  empty block, which had no useful meaning.
+- **A `-> I64` return truncates its value**, the same rule `let n: I64 = ...`
+  already applied to a bound one. The two annotations had disagreed: the binding
+  truncated and the return did not, so a function that promised an `I64` handed
+  back a fraction.
+- **File paths resolve one way**: `read_file`, `write_file` and the `*_or` pair
+  now resolve relative to the running source file, as `save` and `load` already
+  did. A program that saved and then read the same path was reaching two
+  different files.
+
+### Fixed
+
+- **A function declaration now wins over a builtin of the same name.** Builtins
+  are defined into the environment before the file's own declarations are
+  hoisted, so a shadowing function was only honoured for calls written *below*
+  it; calls above it resolved to the builtin and were reported against the
+  builtin's arity. This was a false positive in the shape checker, the language's
+  headline feature, and it was firing on the compiler's own source.
+
+
 ## [Unreleased]
 
 ### Added

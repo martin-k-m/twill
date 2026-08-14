@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"bufio"
 	"fmt"
 	"os"
@@ -15,7 +16,7 @@ import (
 	"github.com/martin-k-m/twill/internal/value"
 )
 
-const version = "1.4.0"
+const version = "1.5.0"
 
 func main() {
 	args := os.Args[1:]
@@ -97,6 +98,12 @@ func runFile(path string, check bool) int {
 	ip := interp.New(nil)
 	result, ranMain, err := ip.RunFileMain(path, scriptArgs(path))
 	if err != nil {
+		// exit(n) is a status, not a fault, so it carries its own code and prints
+		// nothing on the way out.
+		var ex *interp.ExitError
+		if errors.As(err, &ex) {
+			return ex.Code
+		}
 		reportError(path, string(src), err)
 		return 1
 	}

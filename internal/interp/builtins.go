@@ -79,26 +79,14 @@ func (ip *Interp) installBuiltins() {
 	// builtins when called; `not` stays the boolean operator and bitwise
 	// complement is spelled `bnot`. `shr` is arithmetic (sign-extending), so it
 	// is defined on a negative operand.
-	bitOp := func(name string, f func(x, y int64) int64) {
+	bitOp := func(name string) {
 		def(name, 2, false, func(a []value.Value) (value.Value, error) {
-			x, err := scalarOf(a[0], name)
-			if err != nil {
-				return nil, err
-			}
-			y, err := scalarOf(a[1], name)
-			if err != nil {
-				return nil, err
-			}
-			return tensor.Scalar(float64(f(int64(x), int64(y)))), nil
+			return bitwiseInfix(name, a[0], a[1])
 		})
 	}
-	bitOp("and", func(x, y int64) int64 { return x & y })
-	bitOp("or", func(x, y int64) int64 { return x | y })
-	bitOp("xor", func(x, y int64) int64 { return x ^ y })
-	// Shift counts are masked to 0..63, per docs/language-guide.md, so a shift is
-	// always defined rather than depending on the host's out-of-range behaviour.
-	bitOp("shl", func(x, y int64) int64 { return x << uint64(y&63) })
-	bitOp("shr", func(x, y int64) int64 { return x >> uint64(y&63) })
+	for _, name := range []string{"and", "or", "band", "bor", "xor", "shl", "shr"} {
+		bitOp(name)
+	}
 
 	def("bnot", 1, false, func(a []value.Value) (value.Value, error) {
 		x, err := scalarOf(a[0], "bnot")
@@ -112,6 +100,7 @@ func (ip *Interp) installBuiltins() {
 	// scope, so `Ok(x)`, `Err(e)`, `Some(x)` and `None` work without a
 	// declaration, and postfix `?` unwraps `Ok`/`Some` or returns `Err`/`None`.
 	variantCtor := func(name string) {
+		ip.variantNames[name] = true
 		def(name, 1, false, func(a []value.Value) (value.Value, error) {
 			return &value.Variant{Name: name, Payload: a[0], HasPayload: true}, nil
 		})
@@ -119,6 +108,7 @@ func (ip *Interp) installBuiltins() {
 	variantCtor("Ok")
 	variantCtor("Err")
 	variantCtor("Some")
+	ip.variantNames["None"] = true
 	ip.Global.Define("None", &value.Variant{Name: "None"})
 
 	// `unit` names the Unit value, so a systems-mode arm like `None => unit` and
@@ -202,6 +192,42 @@ func (ip *Interp) installBuiltins() {
 		}
 		return tensor.Scalar(float64(int64(math.Float64bits(x)))), nil
 	})
+	// An f64's bit pattern does not fit in an f64. `f64_bits` hands back the
+	// pattern as a number, and a number here is a float64, so the low bits of
+	// anything past 2^53 are gone: `f64_bits(0.1)` comes back 102 short and a
+	// value serialised through it does not reload bit for bit. That is NEEDS-2
+	// and it cannot be fixed on this representation.
+	//
+	// The halves can be exact, though, because each is under 2^32. These three
+	// are what a program writing a binary format actually needs, and together
+	// they round-trip every f64 including the NaN payloads and the signed zero
+	// that a decimal rendering would flatten.
+	def("f64_bits_hi", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_bits_hi")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(float64(math.Float64bits(x) >> 32)), nil
+	})
+	def("f64_bits_lo", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64_bits_lo")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(float64(math.Float64bits(x) & 0xFFFFFFFF)), nil
+	})
+	def("f64_from_halves", 2, false, func(a []value.Value) (value.Value, error) {
+		hi, err := scalarOf(a[0], "f64_from_halves")
+		if err != nil {
+			return nil, err
+		}
+		lo, err := scalarOf(a[1], "f64_from_halves")
+		if err != nil {
+			return nil, err
+		}
+		bits := uint64(uint32(int64(hi)))<<32 | uint64(uint32(int64(lo)))
+		return tensor.Scalar(math.Float64frombits(bits)), nil
+	})
 	def("f64_from_bits", 1, false, func(a []value.Value) (value.Value, error) {
 		x, err := scalarOf(a[0], "f64_from_bits")
 		if err != nil {
@@ -236,13 +262,17 @@ func (ip *Interp) installBuiltins() {
 	// arr_push is push under the name that matches the arr_new/arr_clear family,
 	// which several systems-mode callers reach for. It appends in place and
 	// returns unit, exactly as push does.
+	// arr_push returns the list it appended to, so it reads as an expression,
+	// `out = arr_push(out, x)`, as well as a statement. `push` is the same append
+	// and returns unit; the two names differ only in that, which is why the
+	// expression-shaped one is the one that hands the list back.
 	def("arr_push", 2, false, func(a []value.Value) (value.Value, error) {
 		l, ok := a[0].(*value.List)
 		if !ok {
 			return nil, fmt.Errorf("arr_push expects a list")
 		}
 		l.Items = append(l.Items, a[1])
-		return value.TheUnit, nil
+		return l, nil
 	})
 	def("pop", 1, false, func(a []value.Value) (value.Value, error) {
 		l, ok := a[0].(*value.List)
@@ -559,6 +589,37 @@ func (ip *Interp) installBuiltins() {
 
 	// abort ends the program with a message, for the compiler's unreachable
 	// branches and invariant checks.
+	// exit(n) stops the program with status n. A test harness needs it: without
+	// it a failing suite prints its failures and still returns zero, so CI passes
+	// on a red suite, which is worse than having no CI at all.
+	def("exit", 1, false, func(a []value.Value) (value.Value, error) {
+		code, err := scalarOf(a[0], "exit")
+		if err != nil {
+			return nil, err
+		}
+		panic(&ExitError{Code: int(code)})
+	})
+
+	// arr_of_tensor copies a rank-1 tensor's elements into an Arr[F64], the
+	// inverse of tensor(arr). A sampler that works in plain floats crosses this
+	// boundary twice per gradient evaluation -- heddle's NUTS calls it on the
+	// order of a thousand times per draw -- so it is a straight buffer copy here
+	// rather than an indexing loop written in twill.
+	def("arr_of_tensor", 1, false, func(a []value.Value) (value.Value, error) {
+		t, ok := a[0].(*tensor.Tensor)
+		if !ok {
+			return nil, fmt.Errorf("arr_of_tensor expects a tensor")
+		}
+		if len(t.Shape) > 1 {
+			return nil, fmt.Errorf("arr_of_tensor expects a 1-D tensor, got rank %d", len(t.Shape))
+		}
+		items := make([]value.Value, len(t.Data))
+		for i, x := range t.Data {
+			items[i] = value.Num(x)
+		}
+		return &value.List{Items: items}, nil
+	})
+
 	def("abort", 1, false, func(a []value.Value) (value.Value, error) {
 		return nil, fmt.Errorf("abort: %s", value.Format(a[0]))
 	})
@@ -598,7 +659,7 @@ func (ip *Interp) installBuiltins() {
 		if !ok {
 			return nil, fmt.Errorf("read_file expects a path")
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(ip.resolvePath(path))
 		if err != nil {
 			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
 		}
@@ -615,10 +676,44 @@ func (ip *Interp) installBuiltins() {
 		if !ok {
 			return nil, fmt.Errorf("write_file expects string content")
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(ip.resolvePath(path), []byte(content), 0o644); err != nil {
 			return &value.Variant{Name: "Err", Payload: value.Str(err.Error()), HasPayload: true}, nil
 		}
 		return &value.Variant{Name: "Ok", Payload: value.TheUnit, HasPayload: true}, nil
+	})
+	// read_text_or and write_text_or are read_file and write_file for the caller
+	// who has already decided what a failure means. Most reads of an optional
+	// file -- a registry index that does not exist yet, a lineage log on its
+	// first write -- want the empty string and not a Res to unwrap, and spelling
+	// that out at every call site buried the interesting code in match arms.
+	def("read_text_or", 2, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("read_text_or expects a path")
+		}
+		fallback, ok := asStr(a[1])
+		if !ok {
+			return nil, fmt.Errorf("read_text_or expects a string fallback")
+		}
+		data, err := os.ReadFile(ip.resolvePath(path))
+		if err != nil {
+			return value.Str(fallback), nil
+		}
+		return value.Str(string(data)), nil
+	})
+	// write_text_or reports whether the write happened rather than raising, so a
+	// caller that cannot do anything useful about a failed write can ignore it
+	// and one that can still has the answer.
+	def("write_text_or", 2, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("write_text_or expects a path")
+		}
+		content, ok := asStr(a[1])
+		if !ok {
+			return nil, fmt.Errorf("write_text_or expects string content")
+		}
+		return value.Bool(os.WriteFile(ip.resolvePath(path), []byte(content), 0o644) == nil), nil
 	})
 	def("list_dir", 1, false, func(a []value.Value) (value.Value, error) {
 		path, ok := asStr(a[0])
@@ -2538,6 +2633,40 @@ func sortStringList(l *value.List, rest []value.Value) (value.Value, error) {
 // scalarOf reads a single number. It reads a Num straight out rather than
 // widening it first, because a builtin that wants a scalar wants an axis or a
 // bound and would throw the tensor away again.
+// bitFuncs is the one definition of what each bitwise word computes. The
+// operators are reachable two ways, infix (`x shr 8`) and called (`shr(x, 8)`),
+// and both routes land here so the two spellings cannot come to mean different
+// things.
+var bitFuncs = map[string]func(x, y int64) int64{
+	"and":  func(x, y int64) int64 { return x & y },
+	"or":   func(x, y int64) int64 { return x | y },
+	"band": func(x, y int64) int64 { return x & y },
+	"bor":  func(x, y int64) int64 { return x | y },
+	"xor": func(x, y int64) int64 { return x ^ y },
+	// Shift counts are masked to 0..63, per docs/language-guide.md, so a shift is
+	// always defined rather than depending on the host's out-of-range behaviour.
+	// `shr` is arithmetic (sign-extending), so it is defined on a negative operand.
+	"shl": func(x, y int64) int64 { return x << uint64(y&63) },
+	"shr": func(x, y int64) int64 { return x >> uint64(y&63) },
+}
+
+// bitwiseInfix applies a bitwise word to two values, truncating each to I64.
+func bitwiseInfix(name string, a, b value.Value) (value.Value, error) {
+	f, ok := bitFuncs[name]
+	if !ok {
+		return nil, fmt.Errorf("%s is not a bitwise operator", name)
+	}
+	x, err := scalarOf(a, name)
+	if err != nil {
+		return nil, err
+	}
+	y, err := scalarOf(b, name)
+	if err != nil {
+		return nil, err
+	}
+	return tensor.Scalar(float64(f(int64(x), int64(y)))), nil
+}
+
 func scalarOf(v value.Value, who string) (float64, error) {
 	if n, ok := value.AsNumber(v); ok {
 		return n, nil

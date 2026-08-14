@@ -12,10 +12,10 @@
 
 mode systems
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/width.tw" as w
-import "theme.tw" as th
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/width" as w
+import "std/term/theme" as th
 
 let SEV_ERROR: I64 = 0
 let SEV_WARNING: I64 = 1

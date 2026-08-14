@@ -14,12 +14,12 @@
 
 mode systems
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/color.tw" as col
-import "../term/width.tw" as w
-import "theme.tw" as th
-import "box.tw" as box
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/color" as col
+import "std/term/width" as w
+import "std/term/theme" as th
+import "std/term/box" as box
 
 # Dots, not cells. Braille packs 2 across and 4 down into one cell, so this is a
 # 12-by-2 cell mark: small enough to sit on two lines beside the version, which
@@ -72,7 +72,7 @@ fn dot_bit(c: I64, r: I64) -> I64 {
 # range, so the encoding is a constant lead byte and two computed ones, and
 # doing it here avoids needing a codepoint-to-string builtin for one use.
 fn braille(mask: I64) -> Str =
-  chr(226) + chr(128 + (2048 + mask) / 64 % 64) + chr(128 + mask % 64)
+  chr(226) + chr(128 + (2048 + mask) // 64 % 64) + chr(128 + mask % 64)
 
 # ── Rendering ───────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ fn braille(mask: I64) -> Str =
 # gradient that followed the curve would be more faithful and, at twelve cells
 # wide, completely illegible.
 fn mark_lines(c: cp.Caps) -> Arr[Str] {
-  let cells_w = DOT_W / 2
+  let cells_w = DOT_W // 2
   let rows = DOT_H / 4
   let out: Arr[Str] = arr()
   let cy: I64 = 0

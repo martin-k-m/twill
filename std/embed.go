@@ -7,10 +7,11 @@ package std
 
 import (
 	"embed"
+	"path"
 	"strings"
 )
 
-//go:embed *.tw
+//go:embed *.tw term/*.tw
 var sources embed.FS
 
 // Read returns the source of module name ("nn", "optim", ...), reporting
@@ -23,16 +24,27 @@ func Read(name string) (string, bool) {
 	return string(b), true
 }
 
-// Names lists the modules in the library, for error messages. embed.FS returns
+// Names lists the modules in the library, for error messages. The library is
+// one level deep at most (the `term/` group), and a module in a group is named
+// by its path, "term/caps", which is what an import writes. embed.FS returns
 // directory entries sorted by name, so the order is stable.
 func Names() []string {
-	entries, err := sources.ReadDir(".")
-	if err != nil {
-		return nil
+	var names []string
+	var walk func(dir string)
+	walk = func(dir string) {
+		entries, err := sources.ReadDir(path.Join(".", dir))
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := path.Join(dir, e.Name())
+			if e.IsDir() {
+				walk(name)
+				continue
+			}
+			names = append(names, strings.TrimSuffix(name, ".tw"))
+		}
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, strings.TrimSuffix(e.Name(), ".tw"))
-	}
+	walk("")
 	return names
 }

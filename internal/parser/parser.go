@@ -10,17 +10,30 @@ import (
 	"github.com/martin-k-m/twill/internal/lexer"
 )
 
+// The bitwise operators are spelled as words, and sit where their symbolic
+// equivalents sit in C and Go: the shifts bind like `*`, and `xor` like `+`.
+// `and` and `or` keep the low precedence they have as the boolean operators,
+// which is where every line of twill already written expects them, so a bitwise
+// `x and 255` still needs its parentheses next to arithmetic.
 var precedence = map[string]int{
 	"or": 1, "||": 1,
 	"and": 2, "&&": 2,
 	"==": 3, "!=": 3,
 	"<": 4, "<=": 4, ">": 4, ">=": 4,
-	"+": 5, "-": 5,
-	"*": 6, "/": 6, "%": 6, "@": 6,
+	"+": 5, "-": 5, "xor": 5, "bor": 5,
+	"*": 6, "/": 6, "//": 6, "%": 6, "@": 6, "shl": 6, "shr": 6, "band": 6,
 	"^": 7,
 }
 
 var rightAssoc = map[string]bool{"^": true}
+
+// bitwiseWord is the set of operators spelled as a word rather than a symbol.
+// Each is a keyword, so each is also callable, `xor(a, b)`, and parsePrimary
+// turns a leading one back into an identifier for that form.
+var bitwiseWord = map[string]bool{
+	"and": true, "or": true,
+	"band": true, "bor": true, "xor": true, "shl": true, "shr": true,
+}
 
 // Parse tokenizes and parses src into a Program.
 func Parse(src string) (*ast.Program, error) {
@@ -52,6 +65,12 @@ type parser struct {
 	// grouping there is no statement to end, so `f(a\n  + b)` continues the
 	// expression rather than breaking mid-argument.
 	groupDepth int
+	// stmtCol is the column of the first token of the statement being parsed.
+	// A line that opens with `+`/`-` is a continuation of that statement when it
+	// is indented past this column, and a new statement when it lines up with it
+	// or sits to its left. Indentation is what a reader already uses to tell the
+	// two apart, so the parser reads it the same way.
+	stmtCol int
 }
 
 func (p *parser) peek(o int) lexer.Token {
@@ -137,6 +156,13 @@ func isAssignable(x ast.Expr) bool {
 
 func (p *parser) parseStmt() (ast.Stmt, error) {
 	t := p.peek(0)
+	// Record where this statement begins so the continuation rule in parseBinary
+	// can compare a line-leading operator against it. Statements nest (a block
+	// body inside an `if` inside a statement), so the outer column is restored on
+	// the way out.
+	outerCol := p.stmtCol
+	p.stmtCol = t.Col
+	defer func() { p.stmtCol = outerCol }()
 	if t.Kind == lexer.KEYWORD {
 		switch t.Value {
 		case "let":
@@ -211,7 +237,7 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	var unit *ast.UnitAnno
 	var typeName string
 	if p.match(":") {
-		if p.check("fn") {
+		if p.atFnType() {
 			typeName, err = p.parseFnType()
 			if err != nil {
 				return nil, err
@@ -336,23 +362,39 @@ func (p *parser) parseBinary(minPrec int) (ast.Expr, error) {
 	for {
 		t := p.peek(0)
 		op := t.Value
-		isOp := t.Kind == lexer.OP || (t.Kind == lexer.KEYWORD && (op == "and" || op == "or"))
+		isOp := t.Kind == lexer.OP || (t.Kind == lexer.KEYWORD && bitwiseWord[op])
 		if !isOp {
 			break
 		}
-		// A '+' or '-' that starts a new line begins a new statement rather
-		// than continuing this expression (so a line like `-mean(x)` is not
-		// glued onto the previous line as a subtraction). To continue an
-		// expression across lines, end the line with the operator.
-		if p.groupDepth == 0 && (op == "+" || op == "-") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line {
+		// A '+' or '-' that opens a new line is ambiguous: it either continues
+		// this expression or starts a new statement whose first token happens to
+		// be a unary minus (`-mean(x)`). Indentation decides, the same way a
+		// reader decides. Indented past the column the statement began at, the
+		// operator continues the expression:
+		//
+		//	let a = first_term
+		//	  + second_term        // continues: indented past `let`
+		//
+		// Lined up with it (or further left), it begins a new statement:
+		//
+		//	let a = first_term
+		//	-mean(x)               // a new statement
+		//
+		// Ending the previous line with the operator continues an expression too,
+		// and always did; this rule adds the leading-operator form beside it.
+		if p.groupDepth == 0 && (op == "+" || op == "-") && p.pos > 0 &&
+			t.Line > p.toks[p.pos-1].Line && t.Col <= p.stmtCol {
 			break
 		}
-		// A line that begins `and(` or `or(` is a bitwise call starting a new
-		// statement, not this expression continued by the boolean operator. The
-		// following `(` is what distinguishes the call from a genuine (trailing-
-		// operator) continuation, so only that form breaks. Like the `+`/`-`
-		// rule, only at statement level: inside a grouping it continues.
-		if p.groupDepth == 0 && (op == "and" || op == "or") && p.pos > 0 && t.Line > p.toks[p.pos-1].Line && p.peek(1).Value == "(" {
+		// A line that begins `and(`, `xor(`, `shr(` and so on is a call starting a
+		// new statement, not this expression continued by that operator. Every
+		// bitwise word is both an infix operator and a callable builtin, so the
+		// following `(` is what distinguishes the call from a genuine
+		// continuation, and indentation separates them for the same reason it
+		// does above. Like the `+`/`-` rule, only at statement level: inside a
+		// grouping it continues.
+		if p.groupDepth == 0 && bitwiseWord[op] && p.pos > 0 &&
+			t.Line > p.toks[p.pos-1].Line && p.peek(1).Value == "(" && t.Col <= p.stmtCol {
 			break
 		}
 		prec, ok := precedence[op]
@@ -519,7 +561,7 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 			return p.parseMatch()
 		case "fn":
 			return p.parseLambda()
-		case "and", "or":
+		case "and", "or", "band", "bor", "xor", "shl", "shr":
 			// `and` and `or` are the boolean infix operators, but spelled as a
 			// call, `and(x, y)`, they are the bitwise builtins. Only a following
 			// `(` selects the call; as infix they always have a left operand and
@@ -668,8 +710,18 @@ func (p *parser) parseFnBody() (ast.Expr, error) {
 // looksLikeRecord decides whether a `{` starts a record literal (`{ name: ...`)
 // rather than a block. A block never begins with `ident :`.
 func (p *parser) looksLikeRecord() bool {
-	return p.peek(0).Value == "{" &&
-		p.peek(1).Kind == lexer.IDENT &&
+	if p.peek(0).Value != "{" {
+		return false
+	}
+	// `{}` in expression position is the empty record. Read as a block it would
+	// be a block with no statements, whose value is unit -- nothing a program can
+	// use -- so there is no second meaning being taken away. It matters because
+	// `let seen: Dict[Str, I64] = {}` is how the empty dictionary is written, and
+	// binding unit there left every later dict_set on it failing.
+	if p.peek(1).Value == "}" {
+		return true
+	}
+	return p.peek(1).Kind == lexer.IDENT &&
 		p.peek(2).Kind == lexer.PUNCT && p.peek(2).Value == ":"
 }
 
@@ -719,7 +771,7 @@ func (p *parser) parseSignature() ([]ast.Param, *ast.ShapeAnno, *ast.UnitAnno, s
 			if err != nil {
 				return nil, nil, nil, "", err
 			}
-		} else if p.check("fn") {
+		} else if p.atFnType() {
 			retType, err = p.parseFnType()
 			if err != nil {
 				return nil, nil, nil, "", err
@@ -793,8 +845,22 @@ func (p *parser) parseTypeRef() (string, error) {
 // type reference (a name, a qualified name, or a generic). It is what a type
 // argument or a struct field type is, wherever a `fn(...)` may appear alongside
 // an ordinary name.
-func (p *parser) parseTypeExpr() (string, error) {
+// atFnType reports whether a function type starts here, in either spelling:
+// the `fn` keyword or the capitalised `Fn` that matches every other type name
+// in the systems dialect.
+func (p *parser) atFnType() bool {
 	if p.check("fn") {
+		return true
+	}
+	return p.peek(0).Kind == lexer.IDENT && p.peek(0).Value == "Fn" && p.peek(1).Value == "("
+}
+
+func (p *parser) parseTypeExpr() (string, error) {
+	// `fn(T) -> R` is the function type. `Fn(T) -> R` is the same type: every
+	// other type in the systems dialect is capitalised (I64, Str, Arr[T]), so
+	// that is the spelling half the ecosystem reached for, and a capitalised
+	// name in type position cannot mean anything else.
+	if p.atFnType() {
 		return p.parseFnType()
 	}
 	return p.parseTypeRef()
@@ -807,7 +873,7 @@ func (p *parser) parseTypeExpr() (string, error) {
 // as an unresolved name it does not check, the same as any other systems type.
 // It assumes the current token is `fn`.
 func (p *parser) parseFnType() (string, error) {
-	p.next() // 'fn'
+	p.next() // 'fn' or 'Fn'
 	if _, err := p.expect("("); err != nil {
 		return "", err
 	}
@@ -920,7 +986,7 @@ func (p *parser) parseParam() (ast.Param, error) {
 				return ast.Param{}, err
 			}
 			param.Shape = shape
-		} else if p.check("fn") {
+		} else if p.atFnType() {
 			// A function-typed parameter, e.g. `step: fn(Tree, Tensor) -> Tree`.
 			// Advisory, kept as text like any other systems-mode type name.
 			param.TypeName, err = p.parseFnType()
@@ -1171,6 +1237,18 @@ func (p *parser) parsePattern() (ast.MatchPattern, error) {
 	name, err := p.expectIdent()
 	if err != nil {
 		return ast.MatchPattern{}, err
+	}
+	// A variant may be written with its type in front, `Opt.None`, the same way
+	// it is written where a value is constructed. The qualifier only says which
+	// enum the variant belongs to, and variants are resolved by name, so it is
+	// read and dropped -- `Opt.None` and `None` are the same pattern.
+	if p.check(".") {
+		p.next()
+		variant, err := p.expectIdent()
+		if err != nil {
+			return ast.MatchPattern{}, err
+		}
+		name = variant
 	}
 	pat := ast.MatchPattern{Variant: name, Line: t.Line}
 	if p.check("(") {

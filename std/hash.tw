@@ -1,0 +1,197 @@
+mode systems
+
+# SHA-256, written in twill over I64.
+#
+# A package manager that does not verify what it fetched is a supply-chain hole,
+# and twill's whole proposition is a zero-dependency toolchain, so the digest
+# has to be here rather than borrowed. A non-cryptographic hash such as FNV
+# would have been twenty lines and would have been the wrong twenty lines: it
+# detects corruption and not substitution, and substitution is the threat.
+#
+# The cost is stated plainly. This runs the compression function in the
+# interpreter, one 32-bit word at a time, on a value type that is 64 bits wide.
+# It will be slow, on the order of a megabyte per second rather than hundreds.
+# For hashing a handful of small .tw files at install time that is acceptable;
+# it would not be for hashing a large binary artifact, and if spool ever grows
+# those, this becomes a builtin. See docs/needs.md.
+#
+# All arithmetic is masked back to 32 bits after every step, because I64 wraps
+# at 64 bits and SHA-256 wraps at 32.
+
+
+let MASK32 = 4294967295
+
+let K: Arr[I64] = [
+  1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993,
+  2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987,
+  1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774,
+  264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986,
+  2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711,
+  113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291,
+  1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411,
+  3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344,
+  430227734, 506948616, 659060556, 883997877, 958139571, 1322822218,
+  1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424,
+  2428436474, 2756734187, 3204031479, 3329325298,
+]
+
+fn mask(x: I64) -> I64 {
+  x band MASK32
+}
+
+# rotr rotates a 32-bit word right by n.
+#
+# The low n bits are masked off before they are shifted up, rather than shifting
+# the whole word and masking afterwards. Both are the same rotate in exact
+# arithmetic, but an I64 is carried in an f64 here, so it holds 53 bits and not
+# 64: `x shl 30` on a 32-bit word wants 62 of them and silently loses the
+# bottom ones. Masking first keeps every intermediate under 2^32, where the
+# representation is exact. See NEEDS-2.
+fn rotr(x: I64, n: I64) -> I64 {
+  let lo: I64 = x band ((1 shl n) - 1)
+  mask((mask(x) shr n) bor (lo shl (32 - n)))
+}
+
+fn shr32(x: I64, n: I64) -> I64 {
+  mask(x) shr n
+}
+
+fn ch(x: I64, y: I64, z: I64) -> I64 {
+  (x band y) xor (bnot(x) band z band MASK32)
+}
+
+fn maj(x: I64, y: I64, z: I64) -> I64 {
+  (x band y) xor (x band z) xor (y band z)
+}
+
+fn big_sigma0(x: I64) -> I64 {
+  rotr(x, 2) xor rotr(x, 13) xor rotr(x, 22)
+}
+
+fn big_sigma1(x: I64) -> I64 {
+  rotr(x, 6) xor rotr(x, 11) xor rotr(x, 25)
+}
+
+fn small_sigma0(x: I64) -> I64 {
+  rotr(x, 7) xor rotr(x, 18) xor shr32(x, 3)
+}
+
+fn small_sigma1(x: I64) -> I64 {
+  rotr(x, 17) xor rotr(x, 19) xor shr32(x, 10)
+}
+
+# padded_len is the message length after the 0x80 byte, the zero fill and the
+# 8-byte big-endian bit count.
+fn padded_len(n: I64) -> I64 {
+  let total = n + 9
+  let rem = total % 64
+  if rem == 0 {
+    return total
+  }
+  total + (64 - rem)
+}
+
+# byte_at returns the padded message byte at index i, computed rather than
+# materialised. Building the padded copy would double the memory and, more to
+# the point, would need a Bytes builder the subset does not have.
+fn byte_at(msg: Str, i: I64, total: I64) -> I64 {
+  let n = len(msg)
+  if i < n {
+    return msg[i]
+  }
+  if i == n {
+    return 128
+  }
+  if i < total - 8 {
+    return 0
+  }
+  # The trailing 8 bytes are the bit length, big endian.
+  let shift = (total - 1 - i) * 8
+  let bits = n * 8
+  (bits shr shift) band 255
+}
+
+# hash_str returns the lowercase hex SHA-256 of a string's bytes.
+fn hash_str(msg: Str) -> Str {
+  let h0 = 1779033703
+  let h1 = 3144134277
+  let h2 = 1013904242
+  let h3 = 2773480762
+  let h4 = 1359893119
+  let h5 = 2600822924
+  let h6 = 528734635
+  let h7 = 1541459225
+
+  let total = padded_len(len(msg))
+  let w: Arr[I64] = []
+  let i = 0
+  while i < 64 {
+    push(w, 0)
+    i = i + 1
+  }
+
+  let base = 0
+  while base < total {
+    let t = 0
+    while t < 16 {
+      let o = base + t * 4
+      w[t] = (byte_at(msg, o, total) shl 24)
+        bor (byte_at(msg, o + 1, total) shl 16)
+        bor (byte_at(msg, o + 2, total) shl 8)
+        bor byte_at(msg, o + 3, total)
+      t = t + 1
+    }
+    while t < 64 {
+      w[t] = mask(small_sigma1(w[t - 2]) + w[t - 7] + small_sigma0(w[t - 15]) + w[t - 16])
+      t = t + 1
+    }
+
+    let a = h0
+    let b = h1
+    let c = h2
+    let d = h3
+    let e = h4
+    let f = h5
+    let g = h6
+    let h = h7
+
+    t = 0
+    while t < 64 {
+      let t1 = mask(h + big_sigma1(e) + ch(e, f, g) + K[t] + w[t])
+      let t2 = mask(big_sigma0(a) + maj(a, b, c))
+      h = g
+      g = f
+      f = e
+      e = mask(d + t1)
+      d = c
+      c = b
+      b = a
+      a = mask(t1 + t2)
+      t = t + 1
+    }
+
+    h0 = mask(h0 + a)
+    h1 = mask(h1 + b)
+    h2 = mask(h2 + c)
+    h3 = mask(h3 + d)
+    h4 = mask(h4 + e)
+    h5 = mask(h5 + f)
+    h6 = mask(h6 + g)
+    h7 = mask(h7 + h)
+    base = base + 64
+  }
+
+  hex32(h0) + hex32(h1) + hex32(h2) + hex32(h3) + hex32(h4) + hex32(h5) + hex32(h6) + hex32(h7)
+}
+
+let HEX: Arr[Str] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+
+# hex_byte renders one byte as two lowercase hex digits.
+fn hex_byte(b: I64) -> Str {
+  HEX[int(b / 16) band 15] + HEX[b band 15]
+}
+
+fn hex32(x: I64) -> Str {
+  hex_byte((x shr 24) band 255) + hex_byte((x shr 16) band 255)
+    + hex_byte((x shr 8) band 255) + hex_byte(x band 255)
+}

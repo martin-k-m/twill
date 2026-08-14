@@ -69,9 +69,16 @@ func Check(prog *ast.Program) []Diagnostic {
 	//
 	// The declaration is not typed here, only named: checkFnDef does the real
 	// work when the walk reaches it, and this is about knowing the name exists.
+	// A declaration also wins over a builtin of the same name. Builtins were just
+	// defined into this environment, so a plain "already seen?" guard would let
+	// the builtin beat the file's own function -- but only for calls written
+	// above the declaration, since reaching the declaration rebinds the name.
+	// That made a shadow legal or illegal depending on where in the file it was
+	// called from, and reported the builtin's arity against the user's function.
 	for _, s := range prog.Body {
 		if fn, ok := s.(*ast.FnDecl); ok {
-			if _, seen := env.get(fn.Name); !seen {
+			t, seen := env.get(fn.Name)
+			if _, isBuiltin := t.(tBuiltin); !seen || isBuiltin {
 				env.define(fn.Name, tUnknown{})
 			}
 		}
@@ -483,6 +490,33 @@ func elemType(t Type) Type {
 
 // --- expressions -----------------------------------------------------------
 
+func startsUpper(s string) bool {
+	return s != "" && s[0] >= 'A' && s[0] <= 'Z'
+}
+
+// isQualifiedVariant reports whether `Target.Name` is a variant named by its
+// enum rather than a field read. The qualifier has to be a name the environment
+// does not bind (a real value keeps its field access) and the field has to
+// resolve as a variant.
+func (c *checker) isQualifiedVariant(target ast.Expr, name string, env *checkEnv) bool {
+	id, ok := target.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if _, bound := env.get(id.Name); bound {
+		return false
+	}
+	// Both halves are type-and-variant names, which are capitalised; that is what
+	// separates `Opt.Some` from a field read on a name the checker cannot see.
+	if !startsUpper(id.Name) || !startsUpper(name) {
+		return false
+	}
+	if _, bound := env.get(name); bound {
+		return true
+	}
+	return c.crossModuleVariant(name)
+}
+
 // crossModuleVariant reports whether an unresolved name is plausibly an enum
 // variant constructor borrowed from an aliased import. Variant constructors are
 // registered program-wide at run time and are capitalized by convention, so a
@@ -544,6 +578,12 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		}
 		return tRecord{fields: fields}
 	case *ast.Field:
+		// `Opt.Some` names a variant by its enum. The enum name is not a value, so
+		// inferring the target would report it as unknown; the qualifier is read
+		// and dropped, exactly as the parser does in a pattern.
+		if c.isQualifiedVariant(ex.Target, ex.Name, env) {
+			return tUnknown{}
+		}
 		if rec, ok := c.inferExpr(ex.Target, env).(tRecord); ok {
 			if ft, ok := rec.fields[ex.Name]; ok {
 				return ft
@@ -715,6 +755,21 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 		c.inferExpr(ex.Left, env)
 		c.inferExpr(ex.Right, env)
 		return tUnknown{}
+	}
+	// The bitwise words take two integers and give one back. They are scalar-only
+	// (the builtin form truncates each operand to I64), so the result is a scalar
+	// whatever the operands were inferred as.
+	// `//` is scalar integer division; like the bitwise words it takes two
+	// numbers and gives one back.
+	if op == "//" {
+		c.inferExpr(ex.Left, env)
+		c.inferExpr(ex.Right, env)
+		return tTensor{}
+	}
+	if op == "band" || op == "bor" || op == "xor" || op == "shl" || op == "shr" {
+		c.inferExpr(ex.Left, env)
+		c.inferExpr(ex.Right, env)
+		return tTensor{}
 	}
 	l := c.inferExpr(ex.Left, env)
 	r := c.inferExpr(ex.Right, env)
@@ -2423,7 +2478,11 @@ var builtinNames = map[string]bool{
 	"floor": true, "ceil": true, "round": true, "jacobian": true, "hessian": true,
 	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
 	// that name is the bitwise builtin; `bnot` is bitwise complement.
-	"and": true, "or": true, "xor": true, "shl": true, "shr": true, "bnot": true,
+	"exit": true, "arr_of_tensor": true,
+	"f64_bits_hi": true, "f64_bits_lo": true, "f64_from_halves": true,
+	"read_text_or": true, "write_text_or": true,
+	"and": true, "or": true, "band": true, "bor": true,
+	"xor": true, "shl": true, "shr": true, "bnot": true,
 	// Built-in Res and Opt cases, and `unit`, the Unit value's name.
 	"Ok": true, "Err": true, "Some": true, "None": true, "unit": true,
 	// Scalar f64 math, conversions and IEEE bit access for the systems dialect.
@@ -2483,11 +2542,13 @@ var builtinArity = map[string]int{
 	"permutation": 1, "pop": 1, "read_csv": 1, "read_file": 1, "read_frame": 1,
 	"rng_perm": 1, "rng_seed": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,
 	"str_quote": 1, "str_to_f64": 1, "tensor": 1, "value_and_grad": 1,
-	"write_err": 1, "write_out": 1,
+	"write_err": 1, "write_out": 1, "exit": 1, "arr_of_tensor": 1,
+	"f64_bits_hi": 1, "f64_bits_lo": 1,
 	// binary -- elementwise/tensor pairs (binTensor), bit ops (bitOp), and the rest
 	"matmul": 2, "dot": 2, "conv2d": 2, "maximum": 2, "minimum": 2, "greater": 2,
 	"less": 2, "greater_equal": 2, "less_equal": 2, "equal": 2,
-	"and": 2, "or": 2, "xor": 2, "shl": 2, "shr": 2,
+	"read_text_or": 2, "write_text_or": 2, "f64_from_halves": 2,
+	"and": 2, "or": 2, "band": 2, "bor": 2, "xor": 2, "shl": 2, "shr": 2,
 	"append": 2, "arr_push": 2, "buf_get8": 2, "bytes_push": 2, "concat": 2,
 	"dict_del": 2, "dict_get": 2, "dict_has": 2, "dict_must": 2, "f64_mod": 2,
 	"f64_pow": 2, "field": 2, "gather": 2, "is_same": 2, "linear": 2, "map": 2,

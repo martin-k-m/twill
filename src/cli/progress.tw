@@ -12,11 +12,11 @@
 
 mode systems
 
-import "../term/caps.tw" as cp
-import "../term/ansi.tw" as ansi
-import "../term/frame.tw" as fr
-import "../term/width.tw" as w
-import "theme.tw" as th
+import "std/term/caps" as cp
+import "std/term/ansi" as ansi
+import "std/term/frame" as fr
+import "std/term/width" as w
+import "std/term/theme" as th
 
 struct Progress {
   frame: fr.Frame,
@@ -76,7 +76,7 @@ fn update_rate(p: Progress, n: I64, now_ms: I64) {
   if dt > 0 {
     let inst = n * 1000000 / dt                       # units per second, x1000
     if p.rate_x1000 == 0 { p.rate_x1000 = inst }
-    else { p.rate_x1000 = p.rate_x1000 + (inst - p.rate_x1000) * SMOOTH / 1000 }
+    else { p.rate_x1000 = p.rate_x1000 + (inst - p.rate_x1000) * SMOOTH // 1000 }
     p.last_ms = now_ms
   }
 }
@@ -144,7 +144,7 @@ fn counts(p: Progress) -> Str {
 fn rate_text(p: Progress) -> Str {
   if p.rate_x1000 <= 0 { "" }
   else {
-    let r = p.rate_x1000 / 1000
+    let r = p.rate_x1000 // 1000
     # Below one a second, invert it: "1.4s/epoch" is how a person thinks about a
     # slow training loop, and "0.7 epochs/s" is the same fact made harder.
     if r < 1 { "  " + fmt_thousandths(1000000 / p.rate_x1000) + "s/" + singular(p.unit) }
@@ -166,7 +166,7 @@ fn eta_text(p: Progress, now_ms: I64) -> Str {
 # Leave the completed bar on screen. Unlike a spinner, a finished bar carries
 # the total and the elapsed time, which is worth keeping in the scrollback.
 fn finish(p: Progress, now_ms: I64) -> Str {
-  let took = fmt_secs((now_ms - p.start_ms) / 1000)
+  let took = fmt_secs((now_ms - p.start_ms) // 1000)
   let line = "  " + ansi.paint(p.caps, th.success(), th.mark_ok(p.caps)) + "  " + p.label +
     "  " + ansi.paint(p.caps, th.muted(), str(p.total) + " " + p.unit + " in " + took)
   if !p.frame.live { line + "\n" }
@@ -195,11 +195,11 @@ fn milestone(p: Progress) -> Str {
 
 fn fmt_secs(s: I64) -> Str {
   if s < 60 { str(s) + "s" }
-  else if s < 3600 { str(s / 60) + "m " + str(s % 60) + "s" }
-  else { str(s / 3600) + "h " + str(s % 3600 / 60) + "m" }
+  else if s < 3600 { str(s // 60) + "m " + str(s % 60) + "s" }
+  else { str(s // 3600) + "h " + str(s % 3600 // 60) + "m" }
 }
 
-fn fmt_thousandths(v: I64) -> Str = str(v / 1000) + "." + str(v % 1000 / 100)
+fn fmt_thousandths(v: I64) -> Str = str(v // 1000) + "." + str(v % 1000 // 100)
 
 fn singular(unit: Str) -> Str {
   let n = len(unit)

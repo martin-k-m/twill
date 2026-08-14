@@ -11,8 +11,9 @@ mode systems
 # Two rules in here are subtle enough to be worth finding before reading the
 # code, because both are about a newline and neither is visible in the grammar:
 #
-#   - A `+` or `-` that starts a line begins a new statement, it does not
-#     continue the previous expression. See parse_binary.
+#   - A `+` or `-` that starts a line continues the previous expression when it
+#     is indented past the statement, and begins a new statement when it lines
+#     up with it. See parse_binary.
 #   - A `(` or `[` that starts a line begins a new expression, it is not a call
 #     or an index on the previous line. See parse_postfix.
 #
@@ -44,10 +45,16 @@ fn precedence_table() -> Dict[Str, I64] {
   dict_set(d, ">=", 4)
   dict_set(d, "+", 5)
   dict_set(d, "-", 5)
+  dict_set(d, "xor", 5)
+  dict_set(d, "bor", 5)
   dict_set(d, "*", 6)
   dict_set(d, "/", 6)
+  dict_set(d, "//", 6)
   dict_set(d, "%", 6)
   dict_set(d, "@", 6)
+  dict_set(d, "shl", 6)
+  dict_set(d, "shr", 6)
+  dict_set(d, "band", 6)
   dict_set(d, "^", 7)
   d
 }
@@ -57,6 +64,14 @@ let PRECEDENCE: Dict[Str, I64] = precedence_table()
 fn precedence_of(op: Str) -> Opt[I64] = dict_get(PRECEDENCE, op)
 
 fn is_right_assoc(op: Str) -> Bool = bytes.equal(op, "^")
+
+# The operators spelled as a word rather than a symbol. Each is a keyword, so
+# each is also callable, `xor(a, b)`, and parse_primary turns a leading one
+# back into an identifier for that form.
+fn is_bitwise_word(op: Str) -> Bool =
+  bytes.equal(op, "and") or bytes.equal(op, "or") or bytes.equal(op, "band")
+    or bytes.equal(op, "bor") or bytes.equal(op, "xor") or bytes.equal(op, "shl")
+    or bytes.equal(op, "shr")
 
 # ---- the cursor ------------------------------------------------------------
 
@@ -69,6 +84,12 @@ struct Parser {
   # only at group_depth 0: inside a grouping there is no statement to end, so
   # `f(a\n  + b)` continues the expression rather than breaking mid-argument.
   group_depth: I64,
+  # The column of the first token of the statement being parsed. A line that
+  # opens with `+`/`-` continues that statement when it is indented past this
+  # column, and starts a new one when it lines up with it. Indentation is what a
+  # reader already uses to tell the two apart, so the parser reads it the same
+  # way. See parse_stmt, which sets it, and parse_binary, which consults it.
+  stmt_col: I64,
 }
 
 # Signature is the three-part result of parsing a parameter list and an optional
@@ -84,7 +105,7 @@ struct Signature {
 # parse tokenizes and parses src into a Program.
 fn parse(src: Str) -> Res[ast.Program, lex.SyntaxError] {
   let toks: Arr[lex.Token] = lex.tokenize(src)?
-  let p: Parser = Parser { toks: toks, pos: 0, ids: ast.new_ids(), group_depth: 0 }
+  let p: Parser = Parser { toks: toks, pos: 0, ids: ast.new_ids(), group_depth: 0, stmt_col: 0 }
   parse_program(p)
 }
 
@@ -97,7 +118,7 @@ struct Parsed {
 
 fn parse_with_comments(src: Str) -> Res[Parsed, lex.SyntaxError] {
   let sc: lex.Scan = lex.tokenize_with_comments(src)?
-  let p: Parser = Parser { toks: sc.tokens, pos: 0, ids: ast.new_ids(), group_depth: 0 }
+  let p: Parser = Parser { toks: sc.tokens, pos: 0, ids: ast.new_ids(), group_depth: 0, stmt_col: 0 }
   let prog: ast.Program = parse_program(p)?
   Ok(Parsed { program: prog, comments: sc.comments, ids: p.ids })
 }
@@ -203,7 +224,20 @@ fn parse_program(p: Parser) -> Res[ast.Program, lex.SyntaxError] {
 
 # ---- statements ------------------------------------------------------------
 
+# parse_stmt records the column this statement starts at, for the continuation
+# rule in parse_binary, and restores the enclosing one on the way out. Statements
+# nest, and twill has no `defer`, so the body lives in parse_stmt_body and this
+# wrapper holds the save and the restore around it. The result is passed through
+# rather than unwrapped with `?` so that an error restores the column too.
 fn parse_stmt(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
+  let outer_col: I64 = p.stmt_col
+  p.stmt_col = peek(p, 0).col
+  let r: Res[ast.Stmt, lex.SyntaxError] = parse_stmt_body(p)
+  p.stmt_col = outer_col
+  r
+}
+
+fn parse_stmt_body(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let t: lex.Token = peek(p, 0)
 
   if t.kind == lex.KIND_KEYWORD {
@@ -430,24 +464,39 @@ fn parse_binary(p: Parser, min_prec: I64) -> Res[ast.Expr, lex.SyntaxError] {
     # `and` and `or` are keywords but behave as binary operators; `&&` and `||`
     # arrive as OP and are handled by the same table.
     let is_op: Bool = t.kind == lex.KIND_OP or
-      (t.kind == lex.KIND_KEYWORD and (bytes.equal(op, "and") or bytes.equal(op, "or")))
+      (t.kind == lex.KIND_KEYWORD and is_bitwise_word(op))
     if not is_op {
       break
     }
-    # A '+' or '-' that starts a new line begins a new statement rather than
-    # continuing this expression, so a line like `-mean(x)` is not glued onto
-    # the previous line as a subtraction. To continue an expression across
-    # lines, end the line with the operator.
-    if p.group_depth == 0 and (bytes.equal(op, "+") or bytes.equal(op, "-")) and p.pos > 0 and t.line > p.toks[p.pos - 1].line {
+    # A '+' or '-' that opens a new line is ambiguous: it either continues this
+    # expression or starts a new statement whose first token is a unary minus
+    # (`-mean(x)`). Indentation decides, the same way a reader decides. Indented
+    # past the column the statement began at, the operator continues:
+    #
+    #   let a = first_term
+    #     + second_term        # continues: indented past `let`
+    #
+    # Lined up with it (or further left), it begins a new statement:
+    #
+    #   let a = first_term
+    #   -mean(x)               # a new statement
+    #
+    # Ending the previous line with the operator continues an expression too,
+    # and always did; this rule adds the leading-operator form beside it.
+    let leading_pm: Bool = bytes.equal(op, "+") or bytes.equal(op, "-")
+    let broke_line: Bool = p.pos > 0 and t.line > p.toks[p.pos - 1].line
+    if p.group_depth == 0 and leading_pm and broke_line and t.col <= p.stmt_col {
       break
     }
-    # A line that begins `and(` or `or(` is a bitwise call starting a new
-    # statement, not this expression continued by the boolean operator. The
-    # following `(` distinguishes the call from a genuine trailing-operator
-    # continuation, so only that form breaks. Like the `+`/`-` rule, only at
-    # statement level: inside a grouping it continues.
-    if p.group_depth == 0 and (bytes.equal(op, "and") or bytes.equal(op, "or")) and p.pos > 0
-        and t.line > p.toks[p.pos - 1].line and bytes.equal(peek(p, 1).value, "(") {
+    # A line that begins `and(`, `xor(`, `shr(` and so on is a call starting a
+    # new statement, not this expression continued by that operator. Every
+    # bitwise word is both an infix operator and a callable builtin, so the
+    # following `(` distinguishes the call from a genuine continuation, and
+    # indentation separates them for the same reason it does above. Like the
+    # `+`/`-` rule, only at statement level: inside a grouping it continues.
+    let leading_bool: Bool = is_bitwise_word(op)
+    let call_form: Bool = bytes.equal(peek(p, 1).value, "(")
+    if p.group_depth == 0 and leading_bool and broke_line and call_form and t.col <= p.stmt_col {
       break
     }
     let prec: I64 = 0
@@ -623,8 +672,7 @@ fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
     # the call; as infix they always have a left operand and so never reach
     # parse_primary as a leading token. Emitting an ident lets parse_postfix
     # turn it into the call.
-    if (bytes.equal(t.value, "and") or bytes.equal(t.value, "or"))
-        and bytes.equal(peek(p, 1).value, "(") {
+    if is_bitwise_word(t.value) and bytes.equal(peek(p, 1).value, "(") {
       next_tok(p)
       return Ok(ast.ident(p.ids, t.value, t.line))
     }
@@ -711,6 +759,13 @@ fn parse_pattern(p: Parser) -> Res[ast.MatchPattern, lex.SyntaxError] {
     return Ok(ast.MatchPattern { variant: "", binding: "", wildcard: true, line: t.line })
   }
   let name: Str = expect_ident(p)?
+  # A variant may be written with its type in front, `Opt.None`, the same way it
+  # is written where a value is constructed. The qualifier only says which enum
+  # the variant belongs to, and variants are resolved by name, so it is read and
+  # dropped -- `Opt.None` and `None` are the same pattern.
+  if accept(p, ".") {
+    name = expect_ident(p)?
+  }
   let binding: Str = ""
   if accept(p, "(") {
     let bt: lex.Token = peek(p, 0)
@@ -819,8 +874,18 @@ fn parse_fn_body(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
 # this ambiguity, which is why `match` arms use `=>` and commas rather than
 # braces.
 fn looks_like_record(p: Parser) -> Bool {
-  bytes.equal(peek(p, 0).value, "{") and
-    peek(p, 1).kind == lex.KIND_IDENT and
+  if not bytes.equal(peek(p, 0).value, "{") {
+    return false
+  }
+  # `{}` in expression position is the empty record. Read as a block it would be
+  # a block with no statements, whose value is unit -- nothing a program can use
+  # -- so there is no second meaning being taken away. It matters because
+  # `let seen: Dict[Str, I64] = {}` is how the empty dictionary is written, and
+  # binding unit there left every later dict_set on it failing.
+  if bytes.equal(peek(p, 1).value, "}") {
+    return true
+  }
+  peek(p, 1).kind == lex.KIND_IDENT and
     peek(p, 2).kind == lex.KIND_PUNCT and bytes.equal(peek(p, 2).value, ":")
 }
 
