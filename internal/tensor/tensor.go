@@ -211,7 +211,15 @@ func (t *Tensor) Backward() error {
 	visit(t)
 	t.ensureGrad()[0] = 1
 	for i := len(topo) - 1; i >= 0; i-- {
-		if topo[i].backward != nil {
+		// A node with no gradient buffer received no cotangent, so its own
+		// backward would propagate zeros and there is nothing to do. Skipping it
+		// is not an optimisation: an operator whose backward routes the cotangent
+		// to only some of its parents leaves the others' Grad unallocated, and
+		// their closures read res.Grad without checking. `where` is the one that
+		// does this, because a condition that selects the same branch everywhere
+		// never touches the other branch, and `sum(where([1,1], x*2, x*3))`
+		// differentiated used to panic in exactly this way.
+		if topo[i].backward != nil && topo[i].Grad != nil {
 			topo[i].backward()
 		}
 	}
