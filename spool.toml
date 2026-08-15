@@ -6,7 +6,7 @@
 # real package with a real version rather than a dangling git URL: spool's
 # catalog is keyed by git URL, and a URL with no manifest is a hole in the graph.
 name = "twill"
-version = "1.5.0"
+version = "1.5.1"
 
 # Documentation only. twill has no package entry point, and the language least
 # of all: what an importer reaches for is a std module by name, not a file in

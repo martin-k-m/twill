@@ -2478,7 +2478,7 @@ var builtinNames = map[string]bool{
 	"floor": true, "ceil": true, "round": true, "jacobian": true, "hessian": true,
 	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
 	// that name is the bitwise builtin; `bnot` is bitwise complement.
-	"exit": true, "arr_of_tensor": true,
+	"exit": true, "arr_of_tensor": true, "all_finite": true, "file_size": true, "numel": true,
 	"f64_bits_hi": true, "f64_bits_lo": true, "f64_from_halves": true,
 	"read_text_or": true, "write_text_or": true,
 	"and": true, "or": true, "band": true, "bor": true,
@@ -2542,7 +2542,7 @@ var builtinArity = map[string]int{
 	"permutation": 1, "pop": 1, "read_csv": 1, "read_file": 1, "read_frame": 1,
 	"rng_perm": 1, "rng_seed": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,
 	"str_quote": 1, "str_to_f64": 1, "tensor": 1, "value_and_grad": 1,
-	"write_err": 1, "write_out": 1, "exit": 1, "arr_of_tensor": 1,
+	"write_err": 1, "write_out": 1, "exit": 1, "arr_of_tensor": 1, "all_finite": 1, "file_size": 1, "numel": 1,
 	"f64_bits_hi": 1, "f64_bits_lo": 1,
 	// binary -- elementwise/tensor pairs (binTensor), bit ops (bitOp), and the rest
 	"matmul": 2, "dot": 2, "conv2d": 2, "maximum": 2, "minimum": 2, "greater": 2,

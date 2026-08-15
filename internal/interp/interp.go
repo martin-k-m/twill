@@ -105,6 +105,12 @@ type Interp struct {
 	// name. Variant constructors are ordinary builtins and closures once bound,
 	// which is why the set is tracked rather than inferred from the value.
 	variantNames map[string]bool
+	// structFields is each declared struct's field types, by the struct's bare
+	// name. Structs are erased at run time -- a record carries its own fields --
+	// but a typed literal's declared field types are what say that `{}` in
+	// `Catalog { versions: {} }` is a dictionary, so the declaration is kept for
+	// that one purpose. See emptyContainerFor.
+	structFields map[string]map[string]string
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -113,13 +119,14 @@ func New(out func(string)) *Interp {
 		out = func(s string) { fmt.Println(s) }
 	}
 	ip := &Interp{
-		Global:    value.NewEnv(nil),
-		out:       out,
-		loaded:    map[string]bool{},
-		loading:   map[string]bool{},
-		rng:       rand.New(rand.NewSource(defaultSeed)),
+		Global:       value.NewEnv(nil),
+		out:          out,
+		loaded:       map[string]bool{},
+		loading:      map[string]bool{},
+		rng:          rand.New(rand.NewSource(defaultSeed)),
 		gbmModels:    map[int64]*gbm.Model{},
 		variantNames: map[string]bool{},
+		structFields: map[string]map[string]string{},
 	}
 	ip.installBuiltins()
 	return ip
@@ -272,6 +279,14 @@ func isI64Anno(typeName string, u *ast.UnitAnno) bool {
 	return u != nil && len(u.Factors) == 1 && u.Factors[0].Name == "I64" && u.Factors[0].Exp == 1
 }
 
+// bareTypeName drops a module qualifier, so "resolve.Catalog" gives "Catalog".
+func bareTypeName(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
 // annoHead returns the constructor at the head of a type annotation, so that
 // "Arr[Str]" gives "Arr" and "Dict[Str, I64]" gives "Dict".
 func annoHead(typeName string) string {
@@ -399,6 +414,13 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	case *ast.StructDecl:
 		// A struct is a record type: checked statically, erased at runtime, since
 		// a record carries its own fields and needs no declaration to be built.
+		// The field types are kept anyway, so that a typed literal can read an
+		// empty `{}` or `[]` at a container-typed field as that container.
+		fields := make(map[string]string, len(st.Fields))
+		for _, f := range st.Fields {
+			fields[f.Name] = f.Type
+		}
+		ip.structFields[st.Name] = fields
 		return value.TheUnit
 	case *ast.UnitDecl:
 		// Units are checked statically and erased at runtime.
@@ -759,8 +781,21 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		return ip.evalSlice(ex, env)
 	case *ast.RecordLit:
 		rec := value.NewRecord()
+		// A typed literal reads its declared field types, so `Catalog { versions:
+		// {} }` gets a dictionary at a Dict-typed field, the same rule a `let`
+		// annotation follows. The name is looked up unqualified: `resolve.Catalog`
+		// and `Catalog` name the same declaration, and the only thing a wrong hit
+		// could do is turn an empty literal into an empty container, which is what
+		// the field wanted in every case where it matters.
+		declared := ip.structFields[bareTypeName(ex.TypeName)]
 		for _, f := range ex.Fields {
-			rec.Set(f.Name, ip.evalExpr(f.Value, env))
+			v := ip.evalExpr(f.Value, env)
+			if t, ok := declared[f.Name]; ok {
+				if out, converted := emptyContainerFor(t, v); converted {
+					v = out
+				}
+			}
+			rec.Set(f.Name, v)
 		}
 		return rec
 	case *ast.Field:
@@ -1030,6 +1065,26 @@ func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
 		}
 		return !eq
 	}
+	// Two strings order by their bytes. The ordering already existed -- `sort`
+	// has always accepted an Arr[Str] -- it just had no operator, so every
+	// caller that wanted a sorted list of names wrote its own compare_str
+	// returning -1/0/1 and compared that against zero. Byte order rather than
+	// anything locale-aware is the same choice `sort` makes, and it is the one
+	// that gives the same answer on every machine.
+	if ls, lok := l.(value.Str); lok {
+		if rs, rok := r.(value.Str); rok {
+			switch op {
+			case "<":
+				return string(ls) < string(rs)
+			case "<=":
+				return string(ls) <= string(rs)
+			case ">":
+				return string(ls) > string(rs)
+			case ">=":
+				return string(ls) >= string(rs)
+			}
+		}
+	}
 	ip.panicf(line, "cannot compare these values with %q", op)
 	return false
 }
@@ -1140,8 +1195,19 @@ func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {
 			return ip.Apply(ctor, ip.evalArgs(ex.Args, env), ex.Line)
 		}
 		target := ip.evalExpr(fld.Target, env)
-		if t, isTensor := target.(*tensor.Tensor); isTensor && fld.Name == "to" {
-			return ip.evalCast(t, ex)
+		// A cast applies to a scalar as much as to a tensor. A plain number is
+		// carried as a Num rather than a rank-0 tensor -- an allocation the
+		// evaluator avoids where nothing can be differentiating it -- and that is
+		// an internal distinction a program cannot see, so `x.to(f32)` has to work
+		// on either. A tree of f64 leaves mapped to f32 masters is the case that
+		// found this: whichever leaves happened to be Num failed.
+		if fld.Name == "to" {
+			if t, isTensor := target.(*tensor.Tensor); isTensor {
+				return ip.evalCast(t, ex)
+			}
+			if n, isNum := target.(value.Num); isNum {
+				return ip.evalCast(tensor.Scalar(float64(n)), ex)
+			}
 		}
 		// `xs.push(v)` calls push(xs, v). A record field holding a function is
 		// still preferred, so a namespace (`m.f(x)`, an import alias) and a record

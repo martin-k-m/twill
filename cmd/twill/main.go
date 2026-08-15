@@ -16,7 +16,7 @@ import (
 	"github.com/martin-k-m/twill/internal/value"
 )
 
-const version = "1.5.0"
+const version = "1.5.1"
 
 func main() {
 	args := os.Args[1:]
