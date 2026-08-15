@@ -4,10 +4,13 @@ How fast twill is, measured against PyTorch on the same mathematics, with the
 commands that regenerate every number.
 
 The summary, stated first because it is the point of the document: **twill is
-between 3x and 20x slower than PyTorch on identical f64 work, and between 3x and
-29x slower than the f32 a PyTorch user would actually run.** That is the expected
-result and it is not a defect. Section 6 says where the gap comes from, which is
-more useful than how large it is.
+between 2.4x and 14x slower than PyTorch on identical f64 work, and between 2.5x
+and 20x slower than the f32 a PyTorch user would actually run.** Those are the
+drift-controlled figures of section 7, which are the ones to quote; the
+single-pass sweep in section 4 puts the gap 15% to 40% wider and section 7
+explains why it is wrong to. Being slower is the expected result and it is not a
+defect. Section 6 says where the gap comes from, which is more useful than how
+large it is.
 
 ---
 
@@ -361,9 +364,39 @@ same order as some of the smaller gaps being reported.
 
 `bench/interleave.py` exists to remove it. It alternates twill and PyTorch
 measurements of the same workload within the same few seconds, repeats that for
-several rounds, and takes the median of the per-round ratios, so whatever the
-clocks are doing they are doing it to both sides. The interleaved ratios are
-reported in `bench/results/interleaved.json`.
+five rounds, and takes the median of the per-round ratios, so whatever the clocks
+are doing they are doing it to both sides. Taking the ratio inside the round is
+the point: it cancels the drift rather than averaging over it.
+
+**These are the ratios to quote.** Where they disagree with section 4, they are
+the better number.
+
+| workload | twill ms | torch f64 ms | torch f32 ms | x64 interleaved | x64 from the sweep |
+|---|---|---|---|---|---|
+| `mc_option_fwd` | 2.817 | 0.234 | 0.130 | **12.2** | 20.5 |
+| `mc_option_grad` | 13.004 | 1.532 | 0.994 | **8.2** | 14.3 |
+| `matmul_512` | 14.455 | 1.540 | 0.947 | **9.4** | 10.2 |
+| `matmul_512_grad` | 34.941 | 2.821 | 1.724 | **9.9** | 11.5 |
+| `elementwise_1000000` | 8.688 | 1.469 | 0.666 | **5.1** | 6.7 |
+| `attention_head` | 2.824 | 0.204 | 0.355 | **13.8** | 19.1 |
+| `mlp_train_step` | 5.611 | 0.980 | 1.083 | **5.4** | 4.9 |
+| `verify_deterministic` | 1.295 | 0.552 | 0.525 | **2.4** | 3.0 |
+
+The interleaved ratio is smaller than the sweep's on seven of the eight, by 15%
+to 40%. So the sequential sweep was overstating the gap, and correcting for the
+bias moved the answer in the direction that is worse for the story and better for
+the truth.
+
+**A bug in this script is worth recording, because it produced a plausible wrong
+answer.** The first version selected a workload's row by position rather than by
+name, and the `-only` flag is a substring match, so asking for
+`elementwise_1000000` also ran `elementwise_10000000` and asking for `matmul_512`
+also ran `matmul_512_grad`. The script then reported the wrong workload's time.
+The visible symptom was PyTorch appearing fifteen times slower on
+`elementwise_1000000` than its own sweep said, which is exactly the kind of
+result that would have been flattering to twill and would have been false. It was
+caught by disagreeing with the sweep, which is the argument for running the same
+measurement two ways.
 
 **One early finding was wrong and is recorded here rather than deleted.** An
 earlier sweep showed PyTorch's 16-thread numbers more than an order of magnitude
