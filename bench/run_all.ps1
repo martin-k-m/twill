@@ -47,11 +47,12 @@ go test ./internal/tensor/ -run 'TestGradientCheck' -v -count=1 |
     Tee-Object -FilePath "$OutDir/gradcheck.txt"
 
 Write-Host "`n== PyTorch comparison =="
+# Probe without redirecting stderr. Windows PowerShell wraps a native command's
+# stderr in error records and clears $?, so a redirect here reports "no torch"
+# for a working interpreter that merely printed a warning on import.
 $hasTorch = $false
-try {
-    & $Python -c "import torch" 2>$null
-    if ($LASTEXITCODE -eq 0) { $hasTorch = $true }
-} catch { $hasTorch = $false }
+& $Python -c "import torch"
+if ($LASTEXITCODE -eq 0) { $hasTorch = $true }
 
 if ($hasTorch) {
     & $Python bench/torch_bench.py --threads $Procs --runs $Runs --warmup $Warmup `

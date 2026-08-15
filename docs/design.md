@@ -20,7 +20,7 @@ The rest follows from keeping those two ideas central.
    That keeps autodiff, broadcasting, and printing uniform.
 2. Differentiation is built in. `grad`/`grads` are part of the language. You
    never wire up a tape or call `.backward()`.
-3. Small enough to read. The implementation is a few thousand lines of Go, and
+3. Small enough to read. The implementation is about 16,000 lines of Go, and
    predictability matters more than feature count right now.
 4. No dependencies. The reference implementation is plain Go with no third-party
    packages, so it builds to one binary and can be read end to end.
