@@ -111,6 +111,12 @@ type Interp struct {
 	// `Catalog { versions: {} }` is a dictionary, so the declaration is kept for
 	// that one purpose. See emptyContainerFor.
 	structFields map[string]map[string]string
+	// rngs holds the independent generator streams `rng_open` hands out, by
+	// handle. A twill value cannot carry a native pointer, so a stream is named
+	// by an integer, the same way a fitted gbm model is. This is separate from
+	// `rng` above, which is the single global generator behind randn/rand/seed.
+	rngs          map[int64]*rand.Rand
+	nextRngHandle int64
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -127,6 +133,7 @@ func New(out func(string)) *Interp {
 		gbmModels:    map[int64]*gbm.Model{},
 		variantNames: map[string]bool{},
 		structFields: map[string]map[string]string{},
+		rngs:         map[int64]*rand.Rand{},
 	}
 	ip.installBuiltins()
 	return ip

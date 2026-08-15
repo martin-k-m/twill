@@ -2479,6 +2479,7 @@ var builtinNames = map[string]bool{
 	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
 	// that name is the bitwise builtin; `bnot` is bitwise complement.
 	"exit": true, "arr_of_tensor": true, "all_finite": true, "file_size": true, "numel": true,
+	"rng_open": true, "rng_close": true, "rng_u53": true, "rng_f64": true, "rng_norm": true,
 	"f64_bits_hi": true, "f64_bits_lo": true, "f64_from_halves": true,
 	"read_text_or": true, "write_text_or": true,
 	"and": true, "or": true, "band": true, "bor": true,
@@ -2540,7 +2541,7 @@ var builtinArity = map[string]int{
 	"i64_of_str": 1, "int": 1, "item": 1, "jacobian": 1, "len": 1, "list_dir": 1,
 	"load": 1, "load_value": 1, "module_source": 1, "nbytes": 1, "num_to_text": 1,
 	"permutation": 1, "pop": 1, "read_csv": 1, "read_file": 1, "read_frame": 1,
-	"rng_perm": 1, "rng_seed": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,
+	"rng_perm": 1, "rng_seed": 1, "rng_open": 1, "rng_close": 1, "rng_u53": 1, "rng_f64": 1, "rng_norm": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,
 	"str_quote": 1, "str_to_f64": 1, "tensor": 1, "value_and_grad": 1,
 	"write_err": 1, "write_out": 1, "exit": 1, "arr_of_tensor": 1, "all_finite": 1, "file_size": 1, "numel": 1,
 	"f64_bits_hi": 1, "f64_bits_lo": 1,
