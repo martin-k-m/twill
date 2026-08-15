@@ -109,7 +109,7 @@ type Interp struct {
 	// name. Structs are erased at run time -- a record carries its own fields --
 	// but a typed literal's declared field types are what say that `{}` in
 	// `Catalog { versions: {} }` is a dictionary, so the declaration is kept for
-	// that one purpose. See emptyContainerFor.
+	// that one purpose. See containerForAnnotation.
 	structFields map[string]map[string]string
 	// rngs holds the independent generator streams `rng_open` hands out, by
 	// handle. A twill value cannot carry a native pointer, so a stream is named
@@ -303,20 +303,32 @@ func annoHead(typeName string) string {
 	return typeName
 }
 
-// emptyContainerFor reads an empty literal at a container annotation as that
-// container. `[]` and `{}` are each ambiguous on their own: a bracket literal
-// with no elements is an empty tensor, and a brace literal with no fields is an
-// empty record, and both are what those spellings mean with nothing else to go
-// on. But `let seen: Dict[Str, I64] = {}` says which one is meant, and reading
-// it as a record left the value unusable -- every later dict_set on it failed,
-// which is what the annotation was there to prevent. Only the empty forms are
-// converted, so no literal that carries data changes meaning.
-func emptyContainerFor(typeName string, v value.Value) (value.Value, bool) {
+// containerForAnnotation reads a literal at a container annotation as that
+// container. A bracket literal is a tensor when its elements are numbers and a
+// list otherwise, and a brace literal with no fields is a record: those are the
+// right defaults with nothing else to go on, but an annotation is something
+// else to go on.
+//
+//	let seen: Dict[Str, I64] = {}   // a dictionary, not an empty record
+//	let want: Arr[I64] = [1]        // a list of one, not a 1-element tensor
+//
+// Both spellings were unusable as written -- every later dict_set failed, and
+// every later arr_push failed -- which is exactly what the annotation was there
+// to prevent. Only tensors of rank 0 or 1 convert, since a list is flat; a
+// higher-rank tensor at an Arr annotation is left alone rather than silently
+// flattened.
+func containerForAnnotation(typeName string, v value.Value) (value.Value, bool) {
 	switch annoHead(typeName) {
 	case "Arr", "List":
-		if t, ok := v.(*tensor.Tensor); ok && len(t.Data) == 0 {
-			return &value.List{}, true
+		t, ok := v.(*tensor.Tensor)
+		if !ok || len(t.Shape) > 1 {
+			return nil, false
 		}
+		items := make([]value.Value, len(t.Data))
+		for i, x := range t.Data {
+			items[i] = value.Num(x)
+		}
+		return &value.List{Items: items}, true
 	case "Dict":
 		if r, ok := v.(*value.Record); ok && len(r.Keys) == 0 {
 			return value.NewDict(), true
@@ -329,7 +341,10 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	switch st := s.(type) {
 	case *ast.Let:
 		v := ip.evalExpr(st.Value, env)
-		if out, ok := emptyContainerFor(st.TypeName, v); ok {
+		if out, ok := containerForAnnotation(st.TypeName, v); ok {
+			v = out
+		}
+		if out, ok := tensorForAnnotation(annoName(st.TypeName, st.Unit), v); ok {
 			v = out
 		}
 		// A scalar bound at an `I64` annotation truncates toward zero. Numbers run
@@ -798,7 +813,7 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		for _, f := range ex.Fields {
 			v := ip.evalExpr(f.Value, env)
 			if t, ok := declared[f.Name]; ok {
-				if out, converted := emptyContainerFor(t, v); converted {
+				if out, converted := containerForAnnotation(t, v); converted {
 					v = out
 				}
 			}
@@ -1416,18 +1431,62 @@ func (ip *Interp) callClosure(c *value.Closure, args []value.Value) (ret value.V
 
 // coerceReturn applies a closure's return annotation to the value it produced.
 func coerceReturn(c *value.Closure, v value.Value) value.Value {
-	if !isI64Anno(c.RetType, c.RetUnit) {
+	if isI64Anno(c.RetType, c.RetUnit) {
+		switch t := v.(type) {
+		case value.Num:
+			return value.Num(math.Trunc(float64(t)))
+		case *tensor.Tensor:
+			if t.IsScalar() {
+				return value.Num(math.Trunc(t.Data[0]))
+			}
+		}
 		return v
 	}
-	switch t := v.(type) {
-	case value.Num:
-		return value.Num(math.Trunc(float64(t)))
-	case *tensor.Tensor:
-		if t.IsScalar() {
-			return value.Num(math.Trunc(t.Data[0]))
-		}
+	if out, ok := tensorForAnnotation(annoName(c.RetType, c.RetUnit), v); ok {
+		return out
 	}
 	return v
+}
+
+// annoName is the annotation's name whichever slot the parser put it in: a bare
+// name arrives as a one-factor unit, a qualified or generic one as text.
+func annoName(typeName string, u *ast.UnitAnno) string {
+	if typeName != "" {
+		return typeName
+	}
+	if u != nil && len(u.Factors) == 1 && u.Factors[0].Exp == 1 {
+		return u.Factors[0].Name
+	}
+	return ""
+}
+
+// tensorForAnnotation reads a list of numbers at a `Tensor` annotation as a
+// tensor. A bracket literal is a tensor when its elements are numeric literals
+// and a list otherwise, so `[1.0, 2.0]` is a tensor but `[v, v]` is not, and a
+// function returning the second one had annotated it `-> Tensor` and meant it:
+//
+//	fn row(v: F64) -> Tensor = [v, v, v, v]
+//
+// That returned a list, and every shape() on it downstream failed. Only a flat
+// list of numbers converts; anything holding a string, a record or a nested
+// list is left alone, since that is a list the caller built on purpose.
+func tensorForAnnotation(name string, v value.Value) (value.Value, bool) {
+	if name != "Tensor" {
+		return nil, false
+	}
+	l, ok := v.(*value.List)
+	if !ok {
+		return nil, false
+	}
+	data := make([]float64, len(l.Items))
+	for i, it := range l.Items {
+		n, isNum := rank0Number(it)
+		if !isNum {
+			return nil, false
+		}
+		data[i] = n
+	}
+	return tensor.New(data, []int{len(data)}), true
 }
 
 // assignTo stores v into the location named by target: a variable, a record

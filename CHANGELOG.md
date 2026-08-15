@@ -2,8 +2,27 @@
 
 ## [1.5.1.1] - 2026-08-15
 
-`std/random` draws from the host. This is the one change, and it took the
-ecosystem from 45 of 60 test suites passing to 53.
+`std/random` draws from the host, and an annotation now settles what a bracket
+literal means. Together these took the ecosystem from 45 of 60 test suites
+passing to 57, with seven of the nine repositories fully green.
+
+### Added
+
+- **An annotation chooses the container, in the two cases the literal cannot.**
+  A bracket literal is a tensor when its elements are numeric literals and a
+  list otherwise, which makes `[1.0, 2.0]` a tensor and `[v, v]` a list. That is
+  the right default with nothing else to go on, and wrong wherever the author
+  said what they meant:
+
+      let want: Arr[I64] = [1]           // a list of one, not a 1-element tensor
+      fn row(v: F64) -> Tensor = [v, v]  // a tensor, not a list
+
+  Both were unusable as written -- the first failed on every later `arr_push`,
+  the second on every later `shape` -- which is what the annotation was there to
+  prevent. This extends the rule 1.5.0 introduced for `{}` at a `Dict`
+  annotation and 1.5.1 for a struct field. Only flat lists of numbers convert at
+  a `Tensor` annotation; a list holding a string or a record is one the caller
+  built on purpose.
 
 ### Changed
 
