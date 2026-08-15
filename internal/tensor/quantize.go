@@ -136,5 +136,18 @@ func QLinear(x *Tensor, q *QTensor) (*Tensor, error) {
 	} else {
 		outShape = []int{m, n}
 	}
-	return &Tensor{Data: out, Shape: outShape}, nil
+	res := &Tensor{Data: out, Shape: outShape}
+	// The weight is frozen, but the activation is not, and the gradient with
+	// respect to it is exact rather than approximate: quantisation happened when
+	// the weight was packed, so what this kernel computes is a plain linear map
+	// x @ Wqᵀ whose constants are the dequantised codes. dL/dx = g @ Wq. Without
+	// this the op returned a value with no graph behind it, so grad through a
+	// quantised layer answered zero instead of failing.
+	return track1(res, x, func() {
+		dX := mm(res.Grad, m, n, q.Dequantize().Data, k)
+		gx := x.ensureGrad()
+		for i := range dX {
+			gx[i] += dX[i]
+		}
+	}), nil
 }

@@ -67,3 +67,85 @@ func TestDequantizeRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestQLinearGradientReachesTheActivation is the regression test for the
+// quantised-linear gradient defect: QLinear and QLinear4 returned a tensor with
+// no autodiff graph behind it, so `grad` through a quantised layer answered zero
+// for every upstream parameter instead of the real derivative, and did so
+// silently. The weight is frozen by quantisation, but the activation is not, and
+// the function computed is exactly linear in it, so the gradient is exact.
+func TestQLinearGradientReachesTheActivation(t *testing.T) {
+	w := New([]float64{1, 2, 3, 4, 5, 6}, []int{2, 3})
+	x := []float64{1, 1, 1}
+
+	// The reference: the same product against the dequantised weight, which is
+	// the matrix the quantised kernel actually multiplies by.
+	for _, tc := range []struct {
+		name string
+		grad func(leaf *Tensor) *Tensor
+		deq  *Tensor
+	}{
+		{
+			name: "int8",
+			grad: func(leaf *Tensor) *Tensor {
+				q, err := QuantizeI8(w)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := QLinear(leaf, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return out
+			},
+			deq: func() *Tensor { q, _ := QuantizeI8(w); return q.Dequantize() }(),
+		},
+		{
+			name: "int4",
+			grad: func(leaf *Tensor) *Tensor {
+				q, err := QuantizeI4(w, 32)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := QLinear4(leaf, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return out
+			},
+			deq: func() *Tensor { q, _ := QuantizeI4(w, 32); return q.Dequantize() }(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leaf := Leaf(x, []int{3})
+			if err := Sum(tc.grad(leaf)).Backward(); err != nil {
+				t.Fatal(err)
+			}
+			if leaf.Grad == nil {
+				t.Fatal("no gradient reached the activation")
+			}
+			// d/dx sum(x @ Wqᵀ) is the column sums of Wq.
+			want := make([]float64, 3)
+			for j := 0; j < 2; j++ {
+				for p := 0; p < 3; p++ {
+					want[p] += tc.deq.Data[j*3+p]
+				}
+			}
+			allZero := true
+			for _, g := range leaf.Grad {
+				if g != 0 {
+					allZero = false
+				}
+			}
+			if allZero {
+				t.Fatal("the gradient is all zeros, which is the bug this test exists for")
+			}
+			for p := range want {
+				if math.Abs(leaf.Grad[p]-want[p]) > 1e-12 {
+					t.Errorf("grad[%d] = %v, want %v (column sum of the dequantised weight)",
+						p, leaf.Grad[p], want[p])
+				}
+			}
+		})
+	}
+}
