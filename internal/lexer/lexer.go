@@ -154,6 +154,15 @@ func TokenizeWithComments(src string) ([]Token, []Comment, error) {
 			for i < len(runes) && peek(0) != '"' {
 				c := advance()
 				if c == '\\' {
+					// The backslash may be the last byte in the file, in which
+					// case there is no escaped character to read and advance
+					// would index past the end. The file's problem is the
+					// missing close quote, not the backslash, so report that:
+					// the same diagnosis the self-hosted lexer gives, which is
+					// how this was found (docs/needs.md, NEEDS-33).
+					if i >= len(runes) {
+						return nil, nil, &SyntaxError{"unterminated string", startLine, startCol}
+					}
 					sb.WriteRune(unescape(advance()))
 				} else {
 					sb.WriteRune(c)
