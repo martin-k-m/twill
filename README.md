@@ -320,9 +320,10 @@ Load your own data with `read_csv("data.csv")`, which gives a `[rows, cols]`
 tensor, or `read_frame("data.csv")`, which reads a header CSV as a *frame*: a
 record of named column tensors, so `df.close`, slicing and `grad` all work on it.
 Trained models persist with `save(model, "model.bin")` and `load("model.bin")`.
-Any value round-trips exactly, from a record of network weights to a fitted
-gradient-boosted forest, so you can train once and ship the model with the single
-binary for inference.
+Tensors, scalars, strings, lists and records of them, and fitted
+gradient-boosted forests round-trip bit for bit, so you can train once and ship
+the model with the single binary for inference. Functions and closures do not
+serialise and `save` rejects them.
 
 Randomness is deterministic by default and seeded, so a program reproduces
 exactly. `seed(n)` picks the starting point.
@@ -366,9 +367,12 @@ fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
 The reference implementation is Go. The second one is twill: the lexer, parser,
 checker, evaluator, tensor kernels, formatter and CLI, written in the language
 itself under `src/`. As of v1.5.0 the whole `src/`+`std/` tree type-checks clean
-and runs on the Go bootstrap: `twill check` matches the Go command byte-for-byte
-on all 443 corpus files, `twill fmt` on all 89 (bar a by-design blank-line
-divergence), and the self-hosted evaluator runs the entire example corpus,
+and runs on the Go bootstrap: `twill check` matched the Go command byte-for-byte
+on every corpus file and `twill fmt` on every one it formats, bar a by-design
+blank-line divergence. Those runs were counted at v1.5.0, at 443 and 89 files;
+the corpus has grown since and the counts are a snapshot, not a running total.
+`tools/diff` re-runs the comparison. The self-hosted evaluator runs the entire
+example corpus,
 autodiff, jacobians, hessians, neural-net training, CNNs, attention, gradient
 boosting and Monte Carlo pricing, with output identical to `twill run` save a
 couple of 1-ULP float-accumulation differences. It runs on the bootstrap rather
@@ -391,14 +395,16 @@ same place. Implementing an entry is then a matter of making twill do what Go
 already does there. It is a work queue, ordered by dependency.
 
 **Bugs in the reference implementation.** `src/lex.tw` was run against
-`internal/lexer/lexer.go` over 385 corpus files and 4,000 seeded fuzzer cases,
+`internal/lexer/lexer.go` over the whole corpus, 385 files at the time, and
+4,000 seeded fuzzer cases,
 compared on token kind, literal text, line, column, the comment list, and the
 error message and its position. Zero divergences on the corpus and the fuzzer,
 three on targeted edge cases. One of the three is a bug in the Go lexer: source
 ending in an unterminated string whose last byte is a backslash makes it index
 past the end of its rune slice and panic. The twill lexer checks, and reports
 "unterminated string" at the opening quote, which is the better diagnosis. It is
-recorded as `NEEDS-33`, with the resolution being to fix the Go side.
+recorded as `NEEDS-33` and fixed in the Go lexer, with
+`TestUnterminatedStringEndingInABackslash` covering it.
 
 The design, including why file-level modes are the mechanism and what each
 feature costs the numeric language, is in

@@ -618,7 +618,8 @@ Fix with the `%q` rendering asked for in NEEDS-20, not with a special case here.
 
 ## NEEDS-33: the Go bootstrap panics on a trailing backslash at end of file
 
-**Status:** a bug in `internal/lexer/lexer.go`, not in `src/lex.tw`.
+**Status:** fixed in `internal/lexer/lexer.go`. It was a bug there, not in
+`src/lex.tw`.
 
 Source ending in an unterminated string whose last byte is a backslash, for
 example `x = "ab\`, makes the Go lexer index past the end of its rune slice and
@@ -629,10 +630,11 @@ escaped character without checking that one exists.
 which is the right diagnosis: the file's problem is the missing close quote, not
 the backslash.
 
-This is a divergence the harness will report, and the resolution is to fix the
-Go lexer rather than to reproduce a panic. It is listed here because it is the
-first thing self-hosting found, and finding it is the argument
-`docs/self-hosting.md` section 3 makes for the exercise.
+The Go lexer was fixed rather than the panic reproduced, and
+`TestUnterminatedStringEndingInABackslash` in `internal/lexer/lexer_test.go`
+covers four inputs including `x = "ab\`. It is kept here because it is the first
+thing self-hosting found, which is the argument `docs/self-hosting.md` section 3
+makes for the exercise.
 
 ---
 
@@ -645,7 +647,8 @@ the comment list including each comment's trailing flag, and the error message
 and position on inputs that fail.
 
 - **385 files**: every `.tw` file in `examples/`, `std/`, `testdata/` and
-  `src/`. Zero divergences.
+  `src/` at the time of the run. Zero divergences. The corpus grows, so the
+  count is a snapshot; re-run rather than quote it.
 - **4,000 fuzzer cases**, seeded, mixing random token soup with mutated slices
   of the corpus, over an alphabet that includes non-ASCII text, escape
   sequences, NUL, vertical tab, unterminated strings and every multi-character
