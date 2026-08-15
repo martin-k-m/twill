@@ -1,0 +1,20 @@
+# One gradient step of a 2-layer MLP: 256x512 -> 512x256 -> 256x10, batch 64,
+# softmax cross-entropy. Forward and backward, no optimiser update, so the
+# number is the differentiation cost and not the bookkeeping around it.
+seed(1)
+let X = randn(64, 256)
+let W1 = randn(512, 256) * 0.05
+let W2 = randn(256, 512) * 0.05
+let W3 = randn(10, 256) * 0.05
+let Y = zeros(64, 10) + 0.1
+
+fn loss(w1) {
+  let h1 = relu(linear(X, w1))
+  let h2 = relu(linear(h1, W2))
+  let logits = linear(h2, W3)
+  let lse = reshape(logsumexp(logits, 1), 64, 1)
+  0.0 - mean(sum(Y * (logits - lse)))
+}
+
+fn work() = sum(grad(loss)(W1))
+work

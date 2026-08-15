@@ -1,0 +1,5 @@
+seed(1)
+let A = randn(128, 128)
+let B = randn(128, 128)
+fn work() = sum(A @ B)
+work
