@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.5.1.1] - 2026-08-15
+
+`std/random` draws from the host. This is the one change, and it took the
+ecosystem from 45 of 60 test suites passing to 53.
+
+### Changed
+
+- **`std/random` is backed by host generator streams** rather than implementing
+  xoshiro256**/splitmix64 in twill. Both algorithms are defined on 64-bit
+  wrapping arithmetic and an `I64` here is carried in an `f64`, so it holds 53
+  bits: every multiply overflowed into the rounding, the state saturated, and
+  the generator returned the same value forever. It was deterministic and
+  plausible and completely wrong, which is the worst way for a generator to
+  fail. That is NEEDS-2, and it is not fixable at this representation.
+
+  New builtins `rng_open`, `rng_close`, `rng_u53`, `rng_f64` and `rng_norm`
+  give independent streams named by handle, the same way a fitted gbm model is.
+  `rng_open` is what the existing global `rng_seed`/`rng_uniform` could not
+  provide: a sampler wants several streams alive at once, seeded separately.
+
+  The caller-visible contract is unchanged — `new_rng(seed)` is reproducible run
+  to run and two seeds are independent from the first draw — and the rest of the
+  module is still twill, because the interesting part of a random library is the
+  rejection loop in `below` and the retained Box-Muller spare in `normal`, not
+  the bit mixer. What is gone is the ability to read the algorithm in the source
+  and the guarantee that a stream is identical across implementations.
+
+  **This changes every recorded draw.** A saved result that depended on the old
+  stream will not reproduce — but the old stream was a constant, so there was
+  nothing worth reproducing.
+
+### Fixed
+
+- `std/tests/random_test.tw` now passes, for the first time. It had been a
+  documented known-failure. Its exact-stream assertions were replaced by the
+  properties a caller can actually depend on: that a seed reproduces, that
+  adjacent seeds are independent, that `below` is unbiased across its whole
+  range rather than merely in range, and that `normal` returns the cached
+  partner of its Box-Muller pair. Pinning the host's stream would assert an
+  implementation detail of whatever Go ships.
+
+
 ## [1.5.1] - 2026-08-15
 
 The rest of the ecosystem sweep. 1.5.0 took the nine sibling repositories from

@@ -3,6 +3,7 @@ package interp
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -972,6 +973,71 @@ func (ip *Interp) installBuiltins() {
 
 	// A seeded generator, scalar draws over the interpreter's own rng so a `seed`
 	// is reproducible across both the tensor ops and these.
+	// Independent generator streams, named by handle.
+	//
+	// std/random used to implement xoshiro256**/splitmix64 in twill, which is the
+	// right shape for a reference implementation and cannot work here: those
+	// algorithms are defined on 64-bit wrapping arithmetic and an I64 is carried
+	// in an f64, so it holds 53 bits. Every multiply overflowed into the rounding
+	// and the generator saturated, returning the same value forever. That is
+	// NEEDS-2, and it is not fixable in twill on this representation.
+	//
+	// So the stream lives here instead. `rng_open` is what makes this more than
+	// the global `rng` above: a sampler wants several independent streams alive
+	// at once, seeded separately and reproducible each run, which one global
+	// generator cannot give.
+	rngOf := func(name string, v value.Value) (*rand.Rand, error) {
+		h, err := scalarOf(v, name)
+		if err != nil {
+			return nil, err
+		}
+		r, ok := ip.rngs[int64(h)]
+		if !ok {
+			return nil, fmt.Errorf("%s: %d is not an open generator", name, int64(h))
+		}
+		return r, nil
+	}
+	def("rng_open", 1, false, func(a []value.Value) (value.Value, error) {
+		seed, err := scalarOf(a[0], "rng_open")
+		if err != nil {
+			return nil, err
+		}
+		ip.nextRngHandle++
+		ip.rngs[ip.nextRngHandle] = rand.New(rand.NewSource(int64(seed)))
+		return tensor.Scalar(float64(ip.nextRngHandle)), nil
+	})
+	def("rng_close", 1, false, func(a []value.Value) (value.Value, error) {
+		h, err := scalarOf(a[0], "rng_close")
+		if err != nil {
+			return nil, err
+		}
+		delete(ip.rngs, int64(h))
+		return value.TheUnit, nil
+	})
+	// 53 random bits: the most an f64 holds exactly, so the value that comes back
+	// is the value that was drawn.
+	def("rng_u53", 1, false, func(a []value.Value) (value.Value, error) {
+		r, err := rngOf("rng_u53", a[0])
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(float64(r.Int63() >> 10)), nil
+	})
+	def("rng_f64", 1, false, func(a []value.Value) (value.Value, error) {
+		r, err := rngOf("rng_f64", a[0])
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(r.Float64()), nil
+	})
+	def("rng_norm", 1, false, func(a []value.Value) (value.Value, error) {
+		r, err := rngOf("rng_norm", a[0])
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Scalar(r.NormFloat64()), nil
+	})
+
 	def("rng_seed", 1, false, func(a []value.Value) (value.Value, error) {
 		n, err := scalarOf(a[0], "rng_seed")
 		if err != nil {

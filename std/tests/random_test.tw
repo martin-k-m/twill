@@ -2,21 +2,25 @@ mode systems
 
 # random_test.tw: tests for std/random.tw.
 #
-# WHERE THE EXPECTED STREAM VALUES CAME FROM
+# WHAT IS AND IS NOT PINNED HERE
 #
-# The exact draws below were produced by an independent implementation of
-# splitmix64 and xoshiro256** written in Python with explicit 64-bit masking,
-# following the reference algorithms rather than the twill source. That is the
-# only honest way to test a generator: the values cannot be derived by hand, and
-# taking them from this library's own output would pin whatever it does today
-# rather than what it is supposed to do.
+# These tests used to assert the exact stream: draws produced by an independent
+# splitmix64/xoshiro256** implementation in Python, which was the only honest
+# way to test a generator whose algorithm this library specified.
 #
-# These are therefore the load-bearing tests in this file. The distributional
-# checks further down (the mean of ten thousand draws) would pass for a
-# generator with a completely different stream, so they cannot establish the
-# reproducibility contract; they only catch a draw that is scaled or shifted
-# wrongly. If the exact-value tests fail, the seeding contract in random.tw has
-# been broken and every recorded result anyone has is invalidated.
+# The library no longer specifies the algorithm. std/random draws from the host
+# now, because xoshiro256** needs 64-bit wrapping arithmetic and an I64 here
+# holds 53 bits, so the twill implementation saturated and returned a constant
+# (NEEDS-2, and see random.tw's header). Pinning the host's stream would assert
+# an implementation detail of whatever Go ships, and would break on a Go release
+# for no reason a reader could act on.
+#
+# So what is checked here is everything about the stream that a caller can
+# actually depend on: that a seed reproduces, that different seeds are
+# independent, that each distribution has the right support and moments, that
+# `below` is unbiased over its whole range, and that `normal` returns the cached
+# partner of a Box-Muller pair rather than discarding it. What is no longer
+# checked is which particular numbers come out.
 
 import "std/random" as rnd
 import "systems_harness.tw" as t
@@ -24,51 +28,123 @@ import "systems_harness.tw" as t
 fn main() -> I64 {
   let rp: t.Report = t.new_report()
 
-  # ---- the exact stream ----------------------------------------------------
+  # ---- the reproducibility contract ----------------------------------------
 
-  # Seed 42, the first three uniform draws. Reference implementation as above.
-  # The tolerance is zero: these are exact doubles produced by an exact integer
-  # computation and a division by 2^53, so any difference at all is a different
-  # stream rather than a rounding disagreement.
-  let r: rnd.Rng = rnd.new_rng(42)
-  t.check_close(rp, "the first uniform draw from seed forty two matches the reference stream",
-    rnd.uniform(r), 0.08386297105988216, 0.0)
-  t.check_close(rp, "the second uniform draw from seed forty two matches the reference stream",
-    rnd.uniform(r), 0.3789802506626686, 0.0)
-  t.check_close(rp, "the third uniform draw from seed forty two matches the reference stream",
-    rnd.uniform(r), 0.6800434110281394, 0.0)
+  # A seed reproduces, run to run and generator to generator. This is the
+  # promise the file makes; the particular values are the host's business.
+  let a1: rnd.Rng = rnd.new_rng(42)
+  let a2: rnd.Rng = rnd.new_rng(42)
+  t.check_close(rp, "the same seed gives the same first draw", rnd.uniform(a1) - rnd.uniform(a2), 0.0, 0.0)
+  t.check_close(rp, "and the same second draw", rnd.uniform(a1) - rnd.uniform(a2), 0.0, 0.0)
+  t.check_close(rp, "and the same third draw", rnd.uniform(a1) - rnd.uniform(a2), 0.0, 0.0)
 
-  # Seed 2024, the first two normal draws. The pair comes out of one Box-Muller
-  # call, so this also checks that the cached second value is returned rather
-  # than a fresh pair being drawn: if the cache were dropped, the second value
-  # would be the cosine branch of the next pair instead of the sine branch of
-  # this one.
+  # Adjacent seeds are independent from the first draw, which is the property
+  # splitmix64 seeding used to provide and the host provides now.
+  let b1: rnd.Rng = rnd.new_rng(1)
+  let b2: rnd.Rng = rnd.new_rng(2)
+  t.check(rp, "adjacent seeds differ on the first draw", rnd.uniform(b1) != rnd.uniform(b2))
+
+  # A draw is in [0, 1), at both ends, over enough draws to catch a scale error.
+  let u: rnd.Rng = rnd.new_rng(5)
+  let lo: F64 = 1.0
+  let hi: F64 = 0.0
+  let i: I64 = 0
+  while i < 5000 {
+    let x: F64 = rnd.uniform(u)
+    if x < lo { lo = x }
+    if x > hi { hi = x }
+    i = i + 1
+  }
+  t.check(rp, "no uniform draw is below zero", lo >= 0.0)
+  t.check(rp, "no uniform draw reaches one", hi < 1.0)
+  t.check(rp, "the draws cover the low end", lo < 0.01)
+  t.check(rp, "the draws cover the high end", hi > 0.99)
+
+  # `normal` draws a Box-Muller pair and caches the second. A dropped cache
+  # would still give a correct normal distribution, so this cannot be checked
+  # distributionally: it is checked by observing that the spare is held between
+  # calls and handed back before any new pair is drawn.
   let n: rnd.Rng = rnd.new_rng(2024)
-  t.check_close(rp, "the first normal draw from seed two thousand and twenty four matches the reference",
-    rnd.normal(n), 0.4813468740617639, 0.0000000000001)
+  let first: F64 = rnd.normal(n)
+  t.check(rp, "a pair is cached after the first normal draw", n.has_spare)
+  let partner: F64 = n.spare
   t.check_close(rp, "the second normal draw is the cached partner of the first",
-    rnd.normal(n), -2.3538315345124654, 0.0000000000001)
+    rnd.normal(n), partner, 0.0)
+  t.check(rp, "and the cache is empty again", not n.has_spare)
+  t.check(rp, "the two draws are different values", first != partner)
 
-  # Seed 7, five draws below six. Six is not a power of two, so this is the
-  # rejection path: the mask is 7 and values of 6 and 7 are redrawn.
+  # Six is not a power of two, so `below(_, 6)` is the rejection path: the mask
+  # is 7 and values of 6 and 7 are redrawn. Every residue has to appear and none
+  # may fall outside, which is what a modulo would get wrong -- a `bits % 6`
+  # stays in range and is simply biased, so the range check alone would pass.
   let b: rnd.Rng = rnd.new_rng(7)
-  t.check_eq_i64(rp, "the first bounded draw from seed seven matches the reference", rnd.below(b, 6), 2)
-  t.check_eq_i64(rp, "the second bounded draw from seed seven matches the reference", rnd.below(b, 6), 2)
-  t.check_eq_i64(rp, "the third bounded draw from seed seven matches the reference", rnd.below(b, 6), 0)
-  t.check_eq_i64(rp, "the fourth bounded draw from seed seven matches the reference", rnd.below(b, 6), 0)
-  t.check_eq_i64(rp, "the fifth bounded draw from seed seven matches the reference", rnd.below(b, 6), 1)
+  let counts: Arr[I64] = [0, 0, 0, 0, 0, 0]
+  let outside: I64 = 0
+  let j: I64 = 0
+  while j < 6000 {
+    let v: I64 = rnd.below(b, 6)
+    if v < 0 or v > 5 { outside = outside + 1 } else { counts[v] = counts[v] + 1 }
+    j = j + 1
+  }
+  t.check(rp, "no bounded draw falls outside its range", outside == 0)
+  let k: I64 = 0
+  let thin: I64 = 0
+  while k < 6 {
+    # A thousand expected each; a biased low residue would run well past 1200.
+    if counts[k] < 850 or counts[k] > 1150 { thin = thin + 1 }
+    k = k + 1
+  }
+  t.check(rp, "every residue below six appears about equally often", thin == 0)
 
-  # Seed 7, a permutation of five. [1, 0, 3, 4, 2] from the same reference
-  # implementation of Fisher-Yates walking downwards. This pins the direction of
-  # the walk as well as the stream: the upward variant is the well-known biased
-  # one and would produce a different array here.
+  # A permutation is a permutation: every index once, none missing, none twice.
+  # That is the part a caller depends on, and the part a broken shuffle breaks --
+  # the classic upward Fisher-Yates variant is biased but still returns a valid
+  # permutation, so the bias is checked separately below.
   let p: rnd.Rng = rnd.new_rng(7)
   let perm: Arr[I64] = rnd.permutation(p, 5)
-  t.check_eq_i64(rp, "the permutation of five from seed seven begins with one", perm[0], 1)
-  t.check_eq_i64(rp, "the permutation of five from seed seven has zero second", perm[1], 0)
-  t.check_eq_i64(rp, "the permutation of five from seed seven has three third", perm[2], 3)
-  t.check_eq_i64(rp, "the permutation of five from seed seven has four fourth", perm[3], 4)
-  t.check_eq_i64(rp, "the permutation of five from seed seven ends with two", perm[4], 2)
+  t.check_eq_i64(rp, "a permutation of five has five entries", len(perm), 5)
+  let present: Arr[I64] = [0, 0, 0, 0, 0]
+  let q: I64 = 0
+  let bad: I64 = 0
+  while q < len(perm) {
+    let v: I64 = perm[q]
+    if v < 0 or v > 4 { bad = bad + 1 } else { present[v] = present[v] + 1 }
+    q = q + 1
+  }
+  t.check(rp, "every entry is in range", bad == 0)
+  let missing: I64 = 0
+  let w: I64 = 0
+  while w < 5 {
+    if present[w] != 1 { missing = missing + 1 }
+    w = w + 1
+  }
+  t.check(rp, "every index appears exactly once", missing == 0)
+
+  # And the shuffle is unbiased: over many permutations of three, each of the
+  # six orderings has to come up about a sixth of the time. The upward variant
+  # of Fisher-Yates fails this while still passing every check above -- it
+  # produces n^n equally likely paths over n! outcomes, so some orderings come
+  # up more often than others.
+  let sh: rnd.Rng = rnd.new_rng(99)
+  let orders: Dict[Str, I64] = {}
+  let trial: I64 = 0
+  while trial < 6000 {
+    let t3: Arr[I64] = rnd.permutation(sh, 3)
+    let key: Str = str(t3[0]) + str(t3[1]) + str(t3[2])
+    if dict_has(orders, key) { orders[key] = orders[key] + 1 } else { orders[key] = 1 }
+    trial = trial + 1
+  }
+  t.check_eq_i64(rp, "all six orderings of three appear", len(dict_keys(orders)), 6)
+  let ks: Arr[Str] = dict_keys(orders)
+  let skewed: I64 = 0
+  let z: I64 = 0
+  while z < len(ks) {
+    # A thousand expected each; the biased variant lands some near 1500.
+    let c: I64 = orders[ks[z]]
+    if c < 850 or c > 1150 { skewed = skewed + 1 }
+    z = z + 1
+  }
+  t.check(rp, "and each about equally often", skewed == 0)
 
   # ---- the seeding contract ------------------------------------------------
 

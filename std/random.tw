@@ -41,58 +41,29 @@ mode systems
 #
 # THE ALGORITHM
 #
-# xoshiro256** for the stream, splitmix64 to expand the seed into its state.
-# xoshiro256** is chosen over a linear congruential generator because an LCG's
-# low bits have short periods, and over Mersenne Twister because MT needs 2496
-# bytes of state and fails linear-complexity tests that xoshiro passes. It is
-# not cryptographic and must not be used where that matters: the state is
-# recoverable from 256 bits of output. `choice` on a shuffled deck is fine,
-# a session token is not.
+# The stream is the host's, reached through `rng_open` and `rng_u53`. This file
+# used to implement xoshiro256** with splitmix64 seeding, in twill, and that was
+# the right shape for a reference implementation: it read as the algorithm, and
+# anyone could check the port against the published constants.
 #
-# splitmix64 for seeding is not decoration either. xoshiro's state must not be
-# all zeros (it is a fixed point and the generator dies there), and a user
-# seeding with 0, 1, 2 on three runs would otherwise get three streams that are
-# near-identical for the first few hundred draws, because the state transition
-# only mixes slowly. splitmix64 turns adjacent seeds into unrelated states, so
-# `new_rng(1)` and `new_rng(2)` are independent from the first draw.
-
-# ---- 64-bit helpers --------------------------------------------------------
+# It could not work. Both algorithms are defined on 64-bit wrapping arithmetic,
+# and an I64 here is carried in an f64, so it holds 53 bits and not 64. Every
+# multiply in splitmix64 overflowed into the rounding, the state saturated, and
+# the generator returned the same value forever -- a failure that looks like a
+# working program until someone checks the variance. That is NEEDS-2, and it is
+# not fixable at this representation, only around it.
 #
-# The same constant and the same logical shift as `src/float.tw`, for the same
-# reason: `shr` on I64 is arithmetic, so it smears the sign bit down from the
-# top, and every step below treats the state as unsigned. docs/needs.md
-# NEEDS-85 asks for the unsigned shift that would make these three helpers
-# unnecessary, and NEEDS-86 covers the file-level `let` initialised by the call
-# below.
-
-let SIGN_BIT: I64 = shl(1, 63)
-
-# Logical right shift by 1..63. Clearing the sign bit before the shift and
-# putting it back at its shifted position is the standard fix.
-fn ushr(x: I64, k: I64) -> I64 {
-  if k == 0 { return x }
-  let low: I64 = shr(and(x, bnot(SIGN_BIT)), k)
-  if and(x, SIGN_BIT) == 0 { return low }
-  or(low, shl(1, 63 - k))
-}
-
-# Rotate left. Only called with k in 1..63: at k == 0 the `64 - k` would be a
-# shift of 64, which the subset masks to 0, and the rotation would lose the
-# high half. Nothing here rotates by zero, and this comment is why it stays
-# that way.
-fn rotl(x: I64, k: I64) -> I64 = or(shl(x, k), ushr(x, 64 - k))
-
-# The three splitmix64 constants. Twill integer literals are decimal, and all
-# three exceed 2^63, so each is written as the signed value with the same 64
-# bits. The hex is given because that is how every reference states them and a
-# reader has to be able to check the port.
+# So the generator lives in the host and this file is the surface over it. What
+# a caller sees is unchanged: `new_rng(seed)` is reproducible run to run, and
+# two generators from different seeds are independent from the first draw. What
+# is gone is the ability to read the algorithm here, and the guarantee that a
+# stream is identical across implementations -- it is now whatever the host
+# draws. The functions below are still twill, because the interesting part of a
+# random library is not the bit mixer: it is the rejection loop in `below` that
+# avoids modulo bias, and the retained spare in `normal`.
 #
-#   GOLDEN = 0x9E3779B97F4A7C15
-#   MIX1   = 0xBF58476D1CE4E5B9
-#   MIX2   = 0x94D049BB133111EB
-let GOLDEN: I64 = -7046029254386353131
-let MIX1: I64 = -4658895280553007687
-let MIX2: I64 = -7723592293110705685
+# Not cryptographic, and must not be used where that matters. `choice` on a
+# shuffled deck is fine; a session token is not.
 
 # ---- the generator ---------------------------------------------------------
 
@@ -101,40 +72,17 @@ let MIX2: I64 = -7723592293110705685
 # calls would throw away half of every Box-Muller pair, and the stream would
 # then depend on how the caller batched their draws.
 struct Rng {
-  s0: I64,
-  s1: I64,
-  s2: I64,
-  s3: I64,
+  # A handle naming a stream held by the host, not the state itself. See
+  # `new_rng` for why the state is not here.
+  h: I64,
   spare: F64,
   has_spare: Bool,
 }
 
-# SplitMix64. Also useful on its own: it is how a caller derives independent
-# child seeds from one parent seed.
-struct SplitMix {
-  state: I64,
-}
-
-fn splitmix_next(sm: SplitMix) -> I64 {
-  sm.state = sm.state + GOLDEN
-  let z: I64 = sm.state
-  let a: I64 = xor(z, ushr(z, 30)) * MIX1
-  let b: I64 = xor(a, ushr(a, 27)) * MIX2
-  xor(b, ushr(b, 31))
-}
-
-# A generator from a seed. Any I64 is a valid seed, including 0: splitmix64 has
-# no bad seeds, which is exactly why it is used for this step.
+# A generator from a seed. Any I64 is a valid seed, including 0, and two seeds
+# that differ by one give streams that are independent from the first draw.
 fn new_rng(seed: I64) -> Rng {
-  let sm: SplitMix = SplitMix { state: seed }
-  Rng {
-    s0: splitmix_next(sm),
-    s1: splitmix_next(sm),
-    s2: splitmix_next(sm),
-    s3: splitmix_next(sm),
-    spare: 0.0,
-    has_spare: false,
-  }
+  Rng { h: rng_open(seed), spare: 0.0, has_spare: false }
 }
 
 # Two generators from one, for the case where a caller wants an independent
@@ -146,19 +94,14 @@ fn new_rng(seed: I64) -> Rng {
 # rather than the same one.
 fn split_rng(r: Rng) -> Rng = new_rng(next_bits(r))
 
-# The raw 64 bits. Everything below is a transformation of this, so this is the
-# only place the stream is defined.
-fn next_bits(r: Rng) -> I64 {
-  let result: I64 = rotl(r.s1 * 5, 7) * 9
-  let t: I64 = shl(r.s1, 17)
-  r.s2 = xor(r.s2, r.s0)
-  r.s3 = xor(r.s3, r.s1)
-  r.s1 = xor(r.s1, r.s2)
-  r.s0 = xor(r.s0, r.s3)
-  r.s2 = xor(r.s2, t)
-  r.s3 = rotl(r.s3, 45)
-  result
-}
+# The raw bits. Everything below is a transformation of this, so this is the
+# only place the stream is read.
+#
+# 53 of them, not 64, because 53 is what an I64 holds exactly here and a value
+# that does not survive being returned is not a value. That is enough for every
+# consumer in this file: `uniform` wants exactly 53, and `below` masks to the
+# width of its bound.
+fn next_bits(r: Rng) -> I64 = rng_u53(r.h)
 
 # ---- continuous draws ------------------------------------------------------
 
@@ -175,9 +118,7 @@ let TWO_53: F64 = 9007199254740992.0
 # 64 bits would round, and rounding is what puts a bump at the low end and lets
 # `1.0` appear.
 #
-# The 53 bits are the *top* 53, because xoshiro's lowest bits are the weakest
-# part of its output.
-fn uniform(r: Rng) -> F64 = f64_of_i64(ushr(next_bits(r), 11)) / TWO_53
+fn uniform(r: Rng) -> F64 = f64_of_i64(next_bits(r)) / TWO_53
 
 # A uniform draw in [lo, hi).
 #
@@ -193,7 +134,7 @@ fn uniform_range(r: Rng, lo: F64, hi: F64) -> F64 = lo + (hi - lo) * uniform(r)
 # is exactly zero, which is a bug that appears once in a very long run and is
 # then impossible to reproduce from the outside. Shifting to (0, 1] costs
 # nothing and removes it.
-fn uniform_open(r: Rng) -> F64 = (f64_of_i64(ushr(next_bits(r), 11)) + 1.0) / TWO_53
+fn uniform_open(r: Rng) -> F64 = (f64_of_i64(next_bits(r)) + 1.0) / TWO_53
 
 let TWO_PI: F64 = 6.283185307179586
 
