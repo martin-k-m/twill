@@ -98,7 +98,14 @@ def bench(name, setup, dtype, runs, warmup, target_span=0.020):
 def fmt_result(v):
     if isinstance(v, torch.Tensor):
         v = v.detach()
-        return f"{float(v.sum()):.6f}" if v.numel() > 1 else f"{float(v):.6f}"
+        if v.numel() == 1:
+            return f"{float(v):.6f}"
+        # A short vector is printed elementwise, so a verification workload can
+        # be compared term by term rather than through a sum that could hide a
+        # compensating pair of errors.
+        if v.numel() <= 8:
+            return "[" + ", ".join(f"{float(e):.6f}" for e in v.flatten()) + "]"
+        return f"{float(v.sum()):.6f}"
     return f"{float(v):.6f}"
 
 
@@ -221,7 +228,43 @@ def attention_head(dtype):
     return lambda: (torch.softmax(X @ X.T, dim=1) @ X).sum()
 
 
+
+def verify_deterministic(dtype):
+    """Mirror of bench/workloads/verify_deterministic.tw, with no RNG anywhere.
+
+    Every input is a fixed function of its index, so both sides build bit-
+    identical inputs and the two results are comparable as numbers. This is the
+    workload that shows the two implementations compute the same mathematics;
+    the others show how fast they do it.
+    """
+    n = 4096
+    idx = torch.arange(n, dtype=torch.float64)
+    x0 = (torch.sin(idx * 0.001) * 2.0 + 0.5).to(dtype)
+    A = torch.sin(torch.arange(64 * 64, dtype=torch.float64) * 0.01).reshape(64, 64).to(dtype)
+    B = torch.cos(torch.arange(64 * 64, dtype=torch.float64) * 0.02).reshape(64, 64).to(dtype)
+
+    def loss(v):
+        h = torch.tanh(torch.exp(v / 4.0) * v)
+        m = h[0:4096].reshape(64, 64)
+        p = torch.softmax(A @ (m + B), dim=1)
+        return (
+            h.mean()
+            + (p * m).sum()
+            + torch.logsumexp(m, dim=0).sum()
+            + torch.relu(m - 0.25).mean()
+        )
+
+    def work():
+        v = x0.clone().requires_grad_(True)
+        (g,) = torch.autograd.grad(loss(v), v)
+        with torch.no_grad():
+            return torch.stack([loss(x0), g.sum(), (g * g).sum()])
+
+    return work
+
+
 WORKLOADS = {
+    "verify_deterministic": verify_deterministic,
     "attention_head": attention_head,
     "elementwise_10000": elementwise(10000),
     "elementwise_100000": elementwise(100000),

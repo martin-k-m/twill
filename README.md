@@ -57,12 +57,16 @@ European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths: 200000
 landed on the closed-form Greeks. No tape object, no `requires_grad`, no
 `.backward()`. The full program is [`examples/montecarlo_option.tw`](examples/montecarlo_option.tw).
 
-This is an early prototype; the current release is v1.5.0, in which the twill
-compiler written in twill runs on the Go bootstrap and reproduces the reference
-across every stage (see [twill is being written in
+This is an early prototype; the current release is v1.5.1.1, and as of v1.5.0
+the twill compiler written in twill runs on the Go bootstrap and reproduces the
+reference across every stage (see [twill is being written in
 twill](#twill-is-being-written-in-twill)). The reference implementation is a
-single Go binary with no dependencies, so it is quick to build and short enough
-to read.
+single Go binary with no dependencies, so it is quick to build.
+
+How fast it is, where the time goes and how it compares against PyTorch on the
+same mathematics are measured in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+[docs/CORRECTNESS.md](docs/CORRECTNESS.md) is the evidence for `grad` and for
+the checker.
 
 ## Contents
 
@@ -147,9 +151,10 @@ gradients back, and a model held in a record gets a record.
 **Shapes and units are checked statically.** `[2,3] @ [4]` is an error you see
 before the program runs, not a stack trace forty minutes into training.
 
-The language is deliberately small, and the whole implementation is a few
-thousand lines of Go you can read in a sitting. Large tensor operations run
-across CPU cores, deterministically: parallelism never changes a result.
+The language is deliberately small, and the reference implementation is about
+16,000 lines of Go with no dependencies, of which the differentiable tensor
+engine is 4,500 and the interpreter 5,000. Large tensor operations run across
+CPU cores, deterministically: parallelism never changes a result.
 
 ## Install
 
