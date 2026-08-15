@@ -1,0 +1,8 @@
+# Forward and backward through one square product: the gradient of sum(A@B)
+# with respect to A, which costs a second product of the same size.
+seed(1)
+let B = randn(512, 512)
+let A = randn(512, 512)
+fn loss(a) = sum(a @ B)
+fn work() = sum(grad(loss)(A))
+work

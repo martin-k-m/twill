@@ -1,0 +1,13 @@
+# Monte Carlo European call, forward only. The pricer from the README, with the
+# shocks drawn once so the timed work is the pricing and not the RNG.
+seed(42)
+let Z = randn(200000)
+
+fn call_price(S0, K, r, sigma, T) {
+  let drift = (r - 0.5 * sigma * sigma) * T
+  let ST = S0 * exp(drift + sigma * sqrt(T) * Z)
+  exp(-r * T) * mean(relu(ST - K))
+}
+
+fn work() = call_price(100.0, 100.0, 0.05, 0.2, 1.0)
+work
