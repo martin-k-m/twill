@@ -605,19 +605,81 @@ func (ip *Interp) installBuiltins() {
 	// boundary twice per gradient evaluation -- heddle's NUTS calls it on the
 	// order of a thousand times per draw -- so it is a straight buffer copy here
 	// rather than an indexing loop written in twill.
+	// numel is the total element count, the product of the shape. `shape` gives
+	// the dimensions and `len` gives the first of them; the product is what a
+	// caller sizing a buffer or counting parameters actually wants, and it had to
+	// be written as a loop over shape() every time.
+	def("numel", 1, false, func(a []value.Value) (value.Value, error) {
+		switch t := a[0].(type) {
+		case value.Num:
+			return tensor.Scalar(1), nil
+		case *tensor.Tensor:
+			return tensor.Scalar(float64(len(t.Data))), nil
+		}
+		return nil, fmt.Errorf("numel expects a tensor")
+	})
+
 	def("arr_of_tensor", 1, false, func(a []value.Value) (value.Value, error) {
 		t, ok := a[0].(*tensor.Tensor)
 		if !ok {
 			return nil, fmt.Errorf("arr_of_tensor expects a tensor")
 		}
-		if len(t.Shape) > 1 {
-			return nil, fmt.Errorf("arr_of_tensor expects a 1-D tensor, got rank %d", len(t.Shape))
-		}
+		// Any rank: the elements come out in row-major order, which is the order
+		// they are stored in and the order `tensor(arr)` reads them back. A rank
+		// restriction bought nothing -- the operation is a buffer copy and the
+		// shape is recoverable with `shape(t)` -- and refused a caller flattening
+		// a parameter matrix, which is the main thing anyone wants this for.
 		items := make([]value.Value, len(t.Data))
 		for i, x := range t.Data {
 			items[i] = value.Num(x)
 		}
 		return &value.List{Items: items}, nil
+	})
+
+	// all_finite reports whether every element is a real number: no NaN, no
+	// infinity. Mixed-precision training is the caller that needs it -- a loss
+	// scale is raised until the gradients overflow and the step that overflowed
+	// has to be detected and dropped -- and there is no way to ask from inside
+	// the language, since a NaN compares false against everything including
+	// itself. It takes a tensor, a number, or a list of them, because a gradient
+	// arrives as a tree of leaves rather than as one array.
+	var finite func(v value.Value) (bool, error)
+	finite = func(v value.Value) (bool, error) {
+		switch t := v.(type) {
+		case value.Num:
+			return !math.IsNaN(float64(t)) && !math.IsInf(float64(t), 0), nil
+		case *tensor.Tensor:
+			for _, x := range t.Data {
+				if math.IsNaN(x) || math.IsInf(x, 0) {
+					return false, nil
+				}
+			}
+			return true, nil
+		case *value.List:
+			for _, it := range t.Items {
+				ok, err := finite(it)
+				if err != nil || !ok {
+					return ok, err
+				}
+			}
+			return true, nil
+		case *value.Record:
+			for _, k := range t.Keys {
+				ok, err := finite(t.Fields[k])
+				if err != nil || !ok {
+					return ok, err
+				}
+			}
+			return true, nil
+		}
+		return false, fmt.Errorf("all_finite expects a tensor, a number, or a list or record of them")
+	}
+	def("all_finite", 1, false, func(a []value.Value) (value.Value, error) {
+		ok, err := finite(a[0])
+		if err != nil {
+			return nil, err
+		}
+		return value.Bool(ok), nil
 	})
 
 	def("abort", 1, false, func(a []value.Value) (value.Value, error) {
@@ -714,6 +776,22 @@ func (ip *Interp) installBuiltins() {
 			return nil, fmt.Errorf("write_text_or expects string content")
 		}
 		return value.Bool(os.WriteFile(ip.resolvePath(path), []byte(content), 0o644) == nil), nil
+	})
+	// file_size answers in bytes, or -1 when the path cannot be stat'd. A -1
+	// rather than a Res because the caller comparing a size against the one it
+	// recorded at open -- which is what detects a file being rewritten under a
+	// streaming read -- wants a number it can compare, and a missing file is a
+	// change like any other.
+	def("file_size", 1, false, func(a []value.Value) (value.Value, error) {
+		path, ok := asStr(a[0])
+		if !ok {
+			return nil, fmt.Errorf("file_size expects a path")
+		}
+		info, err := os.Stat(ip.resolvePath(path))
+		if err != nil || info.IsDir() {
+			return tensor.Scalar(-1), nil
+		}
+		return tensor.Scalar(float64(info.Size())), nil
 	})
 	def("list_dir", 1, false, func(a []value.Value) (value.Value, error) {
 		path, ok := asStr(a[0])

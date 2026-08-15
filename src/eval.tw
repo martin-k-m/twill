@@ -1097,6 +1097,32 @@ fn eval_unary(x: ast.Unary, env: Env) -> Res[Value, RuntimeError] {
   Ok(VBool(not truthy(v, x.line)?))
 }
 
+# str_compare orders two strings by byte, returning -1, 0 or 1. A shorter string
+# that is a prefix of a longer one sorts first, which is what comparing the
+# lengths after the shared bytes gives.
+fn str_compare(a: Str, b: Str) -> I64 {
+  let n: I64 = len(a)
+  if len(b) < n { n = len(b) }
+  let i: I64 = 0
+  while i < n {
+    if a[i] < b[i] { return -1 }
+    if a[i] > b[i] { return 1 }
+    i = i + 1
+  }
+  if len(a) < len(b) { return -1 }
+  if len(a) > len(b) { return 1 }
+  0
+}
+
+# str_order applies one of the four ordering operators to two strings, by byte.
+fn str_order(op: Str, a: Str, b: Str) -> Bool {
+  let c: I64 = str_compare(a, b)
+  if bytes.equal(op, "<") { return c < 0 }
+  if bytes.equal(op, "<=") { return c <= 0 }
+  if bytes.equal(op, ">") { return c > 0 }
+  c >= 0
+}
+
 fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
   # `and` and `or` short-circuit, so the right operand is not evaluated unless
   # it is needed. They also return the operand rather than a bool, which is what
@@ -1153,6 +1179,21 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
         }
       },
       None => unit,
+    }
+    # Two strings order by their bytes. The ordering already existed -- `sort`
+    # has always accepted an Arr[Str] -- it just had no operator, so every caller
+    # that wanted a sorted list of names wrote its own compare_str returning
+    # -1/0/1 and compared that against zero. Byte order rather than anything
+    # locale-aware is the same choice `sort` makes, and the one that gives the
+    # same answer on every machine.
+    match l {
+      VStr(ls) => {
+        match r {
+          VStr(rs) => return Ok(VBool(str_order(x.op, ls, rs))),
+          _ => unit,
+        }
+      },
+      _ => unit,
     }
   }
 

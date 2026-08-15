@@ -102,16 +102,38 @@ func TestFunctionEqualityIsIdentity(t *testing.T) {
 }
 
 // Ordering comparisons on structured values are still an error; only equality
-// is defined for them.
+// is defined for them. A list and a record have no order worth picking: two
+// lists of the same length could be ordered element-wise or by length, and
+// neither answer is the obviously right one to bake in.
 func TestOrderingOnStructuredValuesErrors(t *testing.T) {
 	for _, src := range []string{
 		`[1.0, "x"] < [1.0, "y"]`,
 		`{ a: 1.0 } < { a: 2.0 }`,
-		`"a" < "b"`,
 	} {
 		ip := interp.New(func(string) {})
 		if _, err := ip.Run(src); err == nil {
 			t.Errorf("%s: expected an error, got none", src)
 		}
+	}
+}
+
+// Strings do order, by byte. They were grouped with the structured values above
+// until 1.5, which was the odd one out: `sort` had always accepted an Arr[Str],
+// so the ordering existed and only the operator was missing, and three
+// repositories in the ecosystem had each written their own compare_str
+// returning -1/0/1 to work around it.
+func TestStringsOrderByByte(t *testing.T) {
+	cases := map[string]bool{
+		`"apple" < "banana"`:  true,
+		`"banana" < "apple"`:  false,
+		`"b" > "a"`:           true,
+		`"abc" <= "abc"`:      true,
+		`"abc" >= "abc"`:      true,
+		`"Z" < "a"`:           true, // byte order, not case-folded
+		`"ab" < "abc"`:        true, // a prefix sorts first
+		`"apple" >= "banana"`: false,
+	}
+	for src, want := range cases {
+		wantBool(t, src, want)
 	}
 }

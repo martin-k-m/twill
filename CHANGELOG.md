@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.5.1] - 2026-08-15
+
+The rest of the ecosystem sweep. 1.5.0 took the nine sibling repositories from
+8 of 60 test suites passing to 34; this takes them to 45, with six of the nine
+fully green. As before, the changes here are the shared causes rather than
+per-repository patches.
+
+### Added
+
+- **Strings order by byte**, so `<`, `<=`, `>` and `>=` work on them. The
+  ordering already existed — `sort` has always accepted an `Arr[Str]` — and only
+  the operator was missing, so three repositories had each written their own
+  `compare_str` returning -1/0/1 and compared that against zero.
+- **`all_finite(x)`**: whether every element is a real number, reaching into a
+  list or a record because a gradient arrives as a tree. Mixed-precision
+  training needs it and cannot express it — a NaN compares false against
+  everything, including itself — so a loss scale had no way to detect the
+  overflow it exists to find.
+- **`numel(t)`**, the product of the shape, at any rank.
+- **`file_size(path)`**, in bytes, or -1 when the path cannot be read. A
+  streaming reader detecting that its file was rewritten underneath it wants a
+  number to compare, and a missing file is a change like any other.
+
+### Changed
+
+- **A cast applies to a scalar**, not only to a tensor. A plain number is
+  carried as an unboxed value rather than a rank-0 tensor, which is an internal
+  distinction a program cannot see, and `x.to(f32)` failed on whichever leaves
+  of a tree happened to be unboxed.
+- **`arr_of_tensor` accepts any rank**, copying elements in row-major order. The
+  rank-1 restriction bought nothing — the operation is a buffer copy and the
+  shape is recoverable with `shape(t)` — and refused the flattening of a
+  parameter matrix, which is the main use.
+- **An empty literal at a container-typed struct field builds that container**,
+  the same rule a `let` annotation already followed. Struct field types are
+  erased at run time, so the declaration is now kept for this one purpose:
+  `Catalog { versions: {} }` gets a dictionary.
+
+### Fixed
+
+Bugs found in the ecosystem that were the language's fault, or the language's
+to prevent:
+
+- Integer division in nine more places across the libraries, where a float
+  quotient had been silently wrong: a learning-rate schedule that decayed on
+  `epoch / step` applied one drop too many at every epoch, and a canvas
+  computed a fractional cell index and read out of range.
+- `not(x)` where `bnot(x)` was meant, in two more hand-written bit routines.
+
+
 ## [1.5.0] - 2026-08-14
 
 The release that made the ecosystem run. Every change below came from the same

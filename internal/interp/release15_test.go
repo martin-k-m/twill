@@ -337,3 +337,93 @@ fn main() {
 `)
 	expectLines(t, out, "true", "true", "true", "true", "true")
 }
+
+// Strings order by byte, so a list of names can be sorted without each caller
+// writing its own compare_str. Three repositories had done exactly that.
+func TestStringComparisonOperators(t *testing.T) {
+	out := run15(t, `mode systems
+fn main() {
+  print("apple" < "banana")
+  print("b" > "a")
+  print("ab" < "abc")
+  print("Z" < "a")
+}
+`)
+	expectLines(t, out, "true", "true", "true", "true")
+}
+
+// A cast applies to a scalar as much as to a tensor: a plain number is carried
+// as a Num rather than a rank-0 tensor, and that is an internal distinction a
+// program cannot see.
+func TestCastAppliesToAScalar(t *testing.T) {
+	out := run15(t, `mode systems
+fn main() {
+  print(dtype(tensor([1.5, 2.5]).to(bf16)))
+  print(dtype((3.5).to(f32)))
+  print(dtype(tensor([1.5]).to(bf16).to(f64)))
+}
+`)
+	expectLines(t, out, "bf16", "f32", "f64")
+}
+
+// all_finite is the overflow check a loss scale is raised against. It reaches
+// into a list or a record, because a gradient arrives as a tree.
+func TestAllFinite(t *testing.T) {
+	out := run15(t, `mode systems
+fn main() {
+  print(all_finite(tensor([1.0, 2.0])))
+  print(all_finite(tensor([1.0, 0.0 / 0.0])))
+  print(all_finite(tensor([1.0 / 0.0])))
+  let xs: Arr[Tensor] = []
+  push(xs, tensor([1.0]))
+  print(all_finite(xs))
+  push(xs, tensor([0.0 / 0.0]))
+  print(all_finite(xs))
+}
+`)
+	expectLines(t, out, "true", "false", "false", "true", "false")
+}
+
+// numel is the product of the shape, at any rank; arr_of_tensor copies the
+// elements out in row-major order, also at any rank.
+func TestNumelAndArrOfTensorAtAnyRank(t *testing.T) {
+	out := run15(t, `mode systems
+fn main() {
+  let m = tensor([[1.0, 2.0], [3.0, 4.0]])
+  print(numel(m))
+  let xs = arr_of_tensor(m)
+  print(len(xs))
+  print(xs[2])
+}
+`)
+	expectLines(t, out, "4", "4", "3")
+}
+
+// A typed literal reads its struct's declared field types, so an empty literal
+// at a container-typed field builds that container.
+func TestEmptyContainerAtAStructField(t *testing.T) {
+	out := run15(t, `mode systems
+struct Cat { versions: Dict[Str, Str], names: Arr[Str] }
+fn main() {
+  let c = Cat { versions: {}, names: [] }
+  c.versions["a"] = "1.0"
+  print(c.versions["a"])
+  print(len(arr_push(c.names, "x")))
+}
+`)
+	expectLines(t, out, "1.0", "1")
+}
+
+// file_size answers in bytes, and -1 rather than raising when the path is not
+// there, so a caller watching a file for changes can just compare.
+func TestFileSize(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "data", "hello")
+	out := runFile(t, dir, `mode systems
+fn main() {
+  print(file_size("data.tw"))
+  print(file_size("no_such_file.tw"))
+}
+`)
+	expectLines(t, out, "5", "-1")
+}
