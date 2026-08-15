@@ -427,3 +427,71 @@ fn main() {
 `)
 	expectLines(t, out, "5", "-1")
 }
+
+// An annotation says which container is meant, and that now covers the two
+// cases a bracket literal cannot decide for itself.
+func TestAnnotationChoosesTheContainer(t *testing.T) {
+	out := run15(t, `mode systems
+fn row(v: F64) -> Tensor = [v, v, v]
+fn main() {
+  # A bracket of numeric literals is a tensor; a bracket of expressions is a
+  # list. The annotation settles both.
+  let want: Arr[I64] = [1]
+  print(len(arr_push(want, 5)))
+  print(shape(row(2.0))[0])
+  let t: Tensor = [1.0, 2.0]
+  print(numel(t))
+}
+`)
+	expectLines(t, out, "2", "3", "2")
+}
+
+// A list that is not numeric is left alone at a Tensor annotation: it is a list
+// the caller built on purpose.
+func TestNonNumericListIsNotCoercedToATensor(t *testing.T) {
+	out := run15(t, `mode systems
+fn names() -> Tensor = ["a", "b"]
+fn main() { print(len(names())) }
+`)
+	expectLines(t, out, "2")
+}
+
+// Independent generator streams: reproducible from a seed, and independent
+// across seeds. std/random is built on these.
+func TestRngStreamsAreIndependentAndReproducible(t *testing.T) {
+	out := run15(t, `mode systems
+fn main() {
+  let a = rng_open(1)
+  let b = rng_open(1)
+  let c = rng_open(2)
+  print(rng_u53(a) == rng_u53(b))
+  print(rng_u53(a) == rng_u53(c))
+  print(rng_f64(a) < 1.0)
+  rng_close(a)
+}
+`)
+	expectLines(t, out, "true", "false", "true")
+}
+
+// std/random draws from those streams and is statistically sound, which the
+// twill implementation it replaced was not: that one returned a constant.
+func TestStdRandomIsNotConstant(t *testing.T) {
+	out := run15(t, `import "std/random" as rd
+let r = rd.new_rng(42)
+let n = 4000
+let s = 0.0
+let distinct = 0
+let seen = 0.0
+let i = 0
+while i < n {
+  let u = rd.uniform(r)
+  s = s + u
+  if u != seen { distinct = distinct + 1 }
+  seen = u
+  i = i + 1
+}
+print(distinct == n)
+print(s / n > 0.45 and s / n < 0.55)
+`)
+	expectLines(t, out, "true", "true")
+}
