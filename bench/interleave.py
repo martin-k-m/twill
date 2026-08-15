@@ -85,7 +85,15 @@ def run_twill(exe, workload, procs, runs):
             check=True, stdout=subprocess.DEVNULL,
         )
         rows = json.load(open(out))
-        return rows[0]["median_ms"] if rows else None
+        # Select by exact name. The -only flag is a substring match, so asking
+        # for elementwise_1000000 also runs elementwise_10000000 and asking for
+        # matmul_512 also runs matmul_512_grad. Taking rows[0] or the last row
+        # silently reports the wrong workload's time, which is how this script
+        # first claimed PyTorch was fifteen times slower than its own sweep said.
+        for r in rows:
+            if r["workload"] == workload:
+                return r["median_ms"]
+        return None
     finally:
         os.unlink(out)
 
@@ -102,7 +110,11 @@ def run_torch(python, workload, threads, runs):
         rows = json.load(open(out))
         by = {}
         for r in rows:
-            by[r["impl"]] = r["median_ms"]
+            # Exact name, and only the best row of that workload's sweep. See
+            # the note in run_twill: substring matching is what makes this
+            # necessary.
+            if r["workload"] == workload and r.get("best_of_sweep"):
+                by[r["impl"]] = r["median_ms"]
         return by.get("torch-float64"), by.get("torch-float32")
     finally:
         os.unlink(out)
