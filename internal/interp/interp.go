@@ -12,8 +12,10 @@ import (
 
 	"github.com/martin-k-m/twill/internal/ast"
 	"github.com/martin-k-m/twill/internal/gbm"
+	"github.com/martin-k-m/twill/internal/ir"
 	"github.com/martin-k-m/twill/internal/parser"
 	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/martin-k-m/twill/internal/trace"
 	"github.com/martin-k-m/twill/internal/value"
 	"github.com/martin-k-m/twill/std"
 )
@@ -117,6 +119,13 @@ type Interp struct {
 	// `rng` above, which is the single global generator behind randn/rand/seed.
 	rngs          map[int64]*rand.Rand
 	nextRngHandle int64
+	// tr is the tracer: the front end that records tensor operations into an IR
+	// graph instead of running them, and compiles the graph when the value
+	// escapes. See tracing.go for the interpreter's half of it and
+	// internal/trace for the tracer's. Nil is never valid; tracing is switched
+	// off through the tracer itself, so that the escape points stay on the same
+	// code path whether it is on or not.
+	tr *trace.Tracer
 }
 
 // New creates an interpreter. If out is nil, output goes to stdout.
@@ -134,6 +143,7 @@ func New(out func(string)) *Interp {
 		variantNames: map[string]bool{},
 		structFields: map[string]map[string]string{},
 		rngs:         map[int64]*rand.Rand{},
+		tr:           trace.New(nil),
 	}
 	ip.installBuiltins()
 	return ip
@@ -195,6 +205,7 @@ func (ip *Interp) Run(src string) (result value.Value, err error) {
 	for _, s := range prog.Body {
 		result = ip.execStmt(s, ip.Global)
 	}
+	ip.escape()
 	return result, nil
 }
 
@@ -340,7 +351,10 @@ func containerForAnnotation(typeName string, v value.Value) (value.Value, bool) 
 func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	switch st := s.(type) {
 	case *ast.Let:
-		v := ip.evalExpr(st.Value, env)
+		v := ip.tracedStmt(func() value.Value { return ip.evalExpr(st.Value, env) })
+		if st.TypeName != "" || st.Unit != nil {
+			ip.escape()
+		}
 		if out, ok := containerForAnnotation(st.TypeName, v); ok {
 			v = out
 		}
@@ -377,11 +391,11 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		})
 		return value.TheUnit
 	case *ast.Assign:
-		v := ip.evalExpr(st.Value, env)
+		v := ip.tracedStmt(func() value.Value { return ip.evalExpr(st.Value, env) })
 		ip.assignTo(st.Target, v, env, st.Line)
 		return value.TheUnit
 	case *ast.While:
-		for value.Truthy(ip.evalExpr(st.Cond, env)) {
+		for ip.truthy(func() value.Value { return ip.evalExpr(st.Cond, env) }) {
 			if ip.runLoopBody(st.Body, value.NewEnv(env)) {
 				break
 			}
@@ -408,7 +422,7 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 			}
 			return value.TheUnit
 		}
-		items := ip.iterate(ip.evalExpr(st.Iter, env), st.Line)
+		items := ip.iterate(ip.tracedStmt(func() value.Value { return ip.evalExpr(st.Iter, env) }), st.Line)
 		for _, item := range items {
 			scope := value.NewEnv(env)
 			scope.Define(st.Name, item)
@@ -420,7 +434,7 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 	case *ast.Return:
 		var v value.Value = value.TheUnit
 		if st.Value != nil {
-			v = ip.evalExpr(st.Value, env)
+			v = ip.tracedStmt(func() value.Value { return ip.evalExpr(st.Value, env) })
 		}
 		panic(returnSignal{value: v})
 	case *ast.Break:
@@ -475,7 +489,7 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		}
 		return value.TheUnit
 	case *ast.ExprStmt:
-		return ip.evalExpr(st.X, env)
+		return ip.tracedStmt(func() value.Value { return ip.evalExpr(st.X, env) })
 	case *ast.Block:
 		return ip.execBlockIn(st, value.NewEnv(env))
 	default:
@@ -541,7 +555,7 @@ func (ip *Interp) rangeLoop(iter ast.Expr, env *value.Env) (start, end, step int
 
 	bounds := make([]int, len(call.Args))
 	for i, arg := range call.Args {
-		n, isNum := rank0Number(ip.evalExpr(arg, env))
+		n, isNum := rank0Number(ip.forced(ip.evalExpr(arg, env)))
 		if !isNum {
 			return 0, 0, 0, false
 		}
@@ -566,6 +580,7 @@ func (ip *Interp) rangeLoop(iter ast.Expr, env *value.Env) (start, end, step int
 }
 
 func (ip *Interp) iterate(v value.Value, line int) []value.Value {
+	ip.escape()
 	switch t := v.(type) {
 	case value.Num:
 		ip.panicf(line, "can only iterate 1-D tensors")
@@ -826,7 +841,7 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		}
 		return ip.recordField(ip.evalExpr(ex.Target, env), ex.Name, ex.Line)
 	case *ast.IfExpr:
-		if value.Truthy(ip.evalExpr(ex.Cond, env)) {
+		if ip.truthy(func() value.Value { return ip.evalExpr(ex.Cond, env) }) {
 			return ip.execBlockIn(ex.Then, value.NewEnv(env))
 		}
 		switch alt := ex.Else.(type) {
@@ -877,6 +892,7 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 }
 
 func (ip *Interp) tensorNested(elements []ast.Expr, line int) []any {
+	defer ip.escape()
 	out := make([]any, len(elements))
 	for i, e := range elements {
 		switch el := e.(type) {
@@ -908,23 +924,27 @@ func (ip *Interp) evalUnary(ex *ast.Unary, env *value.Env) value.Value {
 		if !ok {
 			ip.panicf(ex.Line, "unary '-' expects a number/tensor")
 		}
+		if out, traced := phv(ip.tr.Unary(ir.OpNeg, t)); traced {
+			return out
+		}
+		ip.escape()
 		return tensor.Neg(t)
 	}
-	return value.Bool(!value.Truthy(v))
+	return value.Bool(!value.Truthy(ip.forced(v)))
 }
 
 func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 	op := ex.Op
 	// Short-circuiting logic.
 	if op == "and" || op == "&&" {
-		l := ip.evalExpr(ex.Left, env)
+		l := ip.forced(ip.evalExpr(ex.Left, env))
 		if !value.Truthy(l) {
 			return l
 		}
 		return ip.evalExpr(ex.Right, env)
 	}
 	if op == "or" || op == "||" {
-		l := ip.evalExpr(ex.Left, env)
+		l := ip.forced(ip.evalExpr(ex.Left, env))
 		if value.Truthy(l) {
 			return l
 		}
@@ -936,6 +956,11 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 
 	switch op {
 	case "==", "!=", "<", "<=", ">", ">=":
+		// A comparison reads the values it compares, so docs/CODEGEN.md section 2
+		// makes it a forcing point. twill's comparison operators produce a Bool
+		// and not a mask tensor, so there is nothing to record here even though
+		// the IR carries the six comparison opcodes; those are reached through
+		// `where` and through the gradient transform.
 		return value.Bool(ip.compare(op, l, r, ex.Line))
 	// The bitwise words are the same operation infix as they are called: one
 	// definition, in bitwiseInfix, so `x shr 8` and `shr(x, 8)` cannot drift.
@@ -944,6 +969,7 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 	// the two intents are written down rather than inferred from the operands --
 	// numbers all run as float64 here and there is nothing to infer from.
 	case "//":
+		ip.escape()
 		ln, lok := rank0Number(l)
 		rn, rok := rank0Number(r)
 		if !lok || !rok {
@@ -954,6 +980,7 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 		}
 		return value.Num(math.Trunc(ln / rn))
 	case "band", "bor", "xor", "shl", "shr":
+		ip.escape()
 		out, err := bitwiseInfix(op, l, r)
 		if err != nil {
 			ip.panicf(ex.Line, "%s", err.Error())
@@ -990,6 +1017,15 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 	if !lok || !rok {
 		ip.panicf(ex.Line, "operator %q expects numbers/tensors", op)
 	}
+
+	// The traced path. A recorded operation appends an IR node and hands back a
+	// placeholder carrying the shape its operands already fix, which is
+	// docs/CODEGEN.md section 2's reason for tracing rather than lowering: the
+	// shape is a fact about the values, not a claim the checker had to prove.
+	if out, traced := ip.traceBinaryOp(op, lt, rt); traced {
+		return out
+	}
+	ip.escape()
 
 	var res *tensor.Tensor
 	var err error
@@ -1060,6 +1096,7 @@ func rank0Number(v value.Value) (float64, bool) {
 }
 
 func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
+	ip.escape()
 	// Scalar comparison covers loop conditions and guards, so it reads the
 	// numbers out directly rather than widening either side to a tensor first.
 	a, aok := rank0Number(l)
@@ -1358,6 +1395,7 @@ func (ip *Interp) recordField(target value.Value, name string, line int) value.V
 // evalCast carries out target.to(dt): the dtype name is read straight from the
 // syntax, since it is contextual and not a value, and the cast rounds once.
 func (ip *Interp) evalCast(t *tensor.Tensor, ex *ast.Call) value.Value {
+	ip.escape()
 	if len(ex.Args) != 1 {
 		ip.panicf(ex.Line, "to expects 1 argument(s), got %d", len(ex.Args))
 	}
@@ -1378,6 +1416,15 @@ func (ip *Interp) Apply(callee value.Value, args []value.Value, line int) value.
 		if !fn.Variadic && fn.Arity >= 0 && fn.Arity != len(args) {
 			ip.panicf(line, "%s expects %d argument(s), got %d", fn.Name, fn.Arity, len(args))
 		}
+		// A builtin either has an opcode, in which case it is recorded, or it has
+		// none, in which case it reads its arguments and the trace forces. This is
+		// the single funnel every builtin in the language goes through, which is
+		// what makes "any builtin with no opcode forces" one line rather than an
+		// audit of builtins.go.
+		if out, traced := ip.traceBuiltin(fn.Name, args); traced {
+			return out
+		}
+		ip.escape()
 		v, err := fn.Fn(args)
 		if err != nil {
 			if re, ok := err.(*RuntimeError); ok {
@@ -1419,18 +1466,23 @@ func (ip *Interp) callClosure(c *value.Closure, args []value.Value) (ret value.V
 			if !ok {
 				panic(r)
 			}
-			ret = coerceReturn(c, rs.value)
+			ret = ip.coerceReturn(c, rs.value)
 			return
 		}
 	}()
 	if blk, ok := c.Body.(*ast.Block); ok {
-		return coerceReturn(c, ip.execBlockIn(blk, scope))
+		return ip.coerceReturn(c, ip.execBlockIn(blk, scope))
 	}
-	return coerceReturn(c, ip.evalExpr(c.Body, scope))
+	return ip.coerceReturn(c, ip.evalExpr(c.Body, scope))
 }
 
 // coerceReturn applies a closure's return annotation to the value it produced.
-func coerceReturn(c *value.Closure, v value.Value) value.Value {
+// A return annotation reads the value, so it forces (docs/CODEGEN.md 2.1).
+func (ip *Interp) coerceReturn(c *value.Closure, v value.Value) value.Value {
+	if c.RetType == "" && c.RetUnit == nil {
+		return v
+	}
+	ip.escape()
 	if isI64Anno(c.RetType, c.RetUnit) {
 		switch t := v.(type) {
 		case value.Num:
@@ -1494,6 +1546,7 @@ func tensorForAnnotation(name string, v value.Value) (value.Value, bool) {
 // reference values, so a field or element write is visible through every
 // binding that shares them, which is what makes `a.d[i] = v` mutate the object.
 func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line int) {
+	ip.escape()
 	switch t := target.(type) {
 	case *ast.Ident:
 		if !env.Assign(t.Name, v) {
@@ -1508,7 +1561,7 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 		rec.Set(t.Name, v)
 	case *ast.Index:
 		obj := ip.evalExpr(t.Target, env)
-		idxVal := ip.evalExpr(t.Index, env)
+		idxVal := ip.forced(ip.evalExpr(t.Index, env))
 		// A dictionary is subscripted by its key, `counts[tok] = n`, which is how
 		// every caller writes it and reads the same as the list and tensor cases
 		// just below. dict_set is the same store under a name.
@@ -1549,8 +1602,12 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 }
 
 func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {
+	// Both the target and the index are read here, so both force. The force is
+	// after they are evaluated and before either is looked at, which is the shape
+	// every escape point in this interpreter has: the tracer reaches the value,
+	// something needs its data, and the trace is replayed to supply it.
 	target := ip.evalExpr(ex.Target, env)
-	idxVal := ip.evalExpr(ex.Index, env)
+	idxVal := ip.forced(ip.evalExpr(ex.Index, env))
 	// A dictionary is subscripted by its key, the read half of the store in
 	// assignTo. A missing key is an error rather than a zero: dict_get returns an
 	// Opt for the caller who wants to ask, and `d[k]` is the form that says the
@@ -1593,7 +1650,7 @@ func (ip *Interp) evalIndex(ex *ast.Index, env *value.Env) value.Value {
 }
 
 func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
-	target := ip.evalExpr(ex.Target, env)
+	target := ip.forced(ip.evalExpr(ex.Target, env))
 
 	dim0 := -1
 	switch t := target.(type) {
@@ -1657,7 +1714,7 @@ func (ip *Interp) evalSlice(ex *ast.Slice, env *value.Env) value.Value {
 }
 
 func (ip *Interp) sliceBound(e ast.Expr, env *value.Env, line int) int {
-	n, ok := rank0Number(ip.evalExpr(e, env))
+	n, ok := rank0Number(ip.forced(ip.evalExpr(e, env)))
 	if !ok {
 		ip.panicf(line, "slice bounds must be scalar numbers")
 	}

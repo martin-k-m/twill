@@ -570,6 +570,9 @@ func TestGradientCheckFullOperatorSet(t *testing.T) {
 // gradient, with the reason. The coverage test below uses this list, so an
 // operator can only be absent from the gradient check by being named here.
 var nonDifferentiable = map[string]string{
+	// Not an operator: it moves a value and its graph node into another Tensor
+	// object, for the tracer. It computes nothing, so there is nothing to check.
+	"Adopt": "moves a value between Tensor objects",
 	// Index-valued: the output is a position, which is integer and locally
 	// constant, so its derivative is zero almost everywhere and undefined at the
 	// ties. twill returns no gradient rather than a meaningless zero.

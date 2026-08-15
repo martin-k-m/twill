@@ -31,7 +31,23 @@ func Eval(g *Graph, args []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	return out, nil
 }
 
+// EvalNodesWith runs the graph and returns the value of every node, calling
+// bind after each one so a caller can substitute its own object for the value.
+//
+// The tracer is the caller and identity is why it needs this. A placeholder the
+// interpreter is still holding has to *be* the tensor that later nodes take as
+// their operand, not a copy of it, or the autodiff parent chain forks and a
+// cotangent reaching one branch never reaches the other. A bind that returns its
+// argument unchanged gives exactly Eval's behaviour.
+func EvalNodesWith(g *Graph, args []*tensor.Tensor, bind func(i int, v *tensor.Tensor) *tensor.Tensor) ([]*tensor.Tensor, error) {
+	return evalNodesBind(g, args, bind)
+}
+
 func evalNodes(g *Graph, args []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	return evalNodesBind(g, args, nil)
+}
+
+func evalNodesBind(g *Graph, args []*tensor.Tensor, bind func(int, *tensor.Tensor) *tensor.Tensor) ([]*tensor.Tensor, error) {
 	if len(args) != len(g.Params) {
 		return nil, fmt.Errorf("graph takes %d params, given %d", len(g.Params), len(args))
 	}
@@ -58,6 +74,9 @@ func evalNodes(g *Graph, args []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		if !shapeEqual(v.Shape, n.Shape) {
 			return nil, fmt.Errorf("%%%d (%s): produced %s, IR says %s",
 				i, n.Op, ShapeString(v.Shape), ShapeString(n.Shape))
+		}
+		if bind != nil {
+			v = bind(i, v)
 		}
 		vals[i] = v
 	}
