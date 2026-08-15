@@ -704,3 +704,76 @@ GPU with 8,151 MiB and driver 610.88. There is no CUDA toolkit: `nvcc` is not on
 PATH and the NVIDIA GPU Computing Toolkit directory under Program Files does not
 exist. So the device is present and the compiler for it is not, and phase 4
 needs a toolkit installed before it can start.
+
+---
+
+## 11. The tracer, measured
+
+Section 10 was written when graphs were built by hand from Go, so nothing said
+how much of a real program reaches the compiler. The tracer closes that, and the
+answer is worse than the kernel numbers in 10.4 suggest.
+
+Measured with `bench/cmd/tracestats`, which runs a program with tracing on and
+prints the counters the tracer keeps. Same machine as section 10: Intel Core
+Ultra 9 285H, 16 cores, 15.4 GB, Windows 11 build 26200, go1.26.5.
+
+### 11.1 How much traces
+
+20 of the 23 examples produce at least one traced node. `einsum.tw`,
+`jacobian.tw` and `units.tw` produce none.
+
+That number flatters it. The counter that matters is compiled against replayed,
+because a replayed scope runs the interpreter's own path and pays the tracing
+cost on top:
+
+| program | nodes | compiled | replayed |
+| --- | --- | --- | --- |
+| `linreg.tw` | 3,625 | 1,200 | 5 |
+| `signal_opt.tw` | 6,591 | 1,002 | 9 |
+| `mlp.tw` | 36,288 | 8,000 | 10,040 |
+| `nn_xor.tw` | 30,316 | 2,000 | 16,060 |
+| `classifier.tw` | 25,954 | 402 | 11,858 |
+| `attention.tw` | 55,165 | 82 | 37,309 |
+| `gpt.tw` | 190,568 | 42 | 124,130 |
+
+The two programs that compile nearly everything are the two smallest optimisation
+loops. The larger a program gets, the more it replays: `gpt.tw` compiles 42
+scopes and replays 124,130.
+
+The `bench/workloads/*.tw` files trace **nothing at all**, which is worth knowing
+before quoting any timing over them. They were written for the harness in 10.4,
+which builds graphs directly, so a wall-clock comparison across them measures
+process startup and nothing else.
+
+### 11.2 Speed, which is currently a loss
+
+Built binary, alternating `TWILL_TRACE=1` and `TWILL_TRACE=0` in one loop, 11
+iterations after 3 warmups, median:
+
+| program | traced | interpreter | ratio |
+| --- | --- | --- | --- |
+| `linreg.tw` | 38.2 ms | 10.0 ms | 0.26x |
+| `mlp.tw` | 129.3 ms | 57.5 ms | 0.45x |
+| `montecarlo_option.tw` | 44.0 ms | 22.7 ms | 0.52x |
+
+Between two and four times slower, end to end, on the programs where the tracer
+engages most. That is not in tension with 10.4's 2.49x and 3.72x: those timed a
+compiled kernel against the interpreter with the graph already built. This times
+everything the tracer costs to get there, and at these sizes the tracing, the
+cache lookup, the C compilation of each new graph and the replays outweigh what
+the kernels win.
+
+Three things account for it, in the order they are worth attacking:
+
+1. **Replay dominates on real programs.** Every replayed scope is interpreter
+   work plus the cost of having traced it.
+2. **Compilation happens per process.** The cache is in memory, so a run that
+   compiles 1,200 graphs pays for all of them and keeps none for next time.
+3. **Nothing has been profiled yet.** The three numbers above say the overhead is
+   real; they do not say which of the three it is.
+
+### 11.3 What this means for the GPU stage
+
+The kernels are fast and the path to them is slow, so a GPU backend would make a
+faster thing that is still reached too rarely to matter. An on-disk kernel cache
+and a look at why large programs replay are both worth more than CUDA right now.
