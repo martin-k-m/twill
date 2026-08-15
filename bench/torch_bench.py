@@ -14,15 +14,22 @@ twill-f64 against torch-f32 would charge twill for a design choice rather than
 for its kernels. Both dtypes are run and both are reported: f64 is the
 like-for-like number, f32 is what a PyTorch user would actually get.
 
-Threads. Fixing both sides at the machine's core count turned out to be the
-unfair option, not the fair one. PyTorch's intra-op pool has a pathological
-regime on this hardware: on a workload whose individual kernels are a fraction
-of a millisecond, the pool's barrier cost swamps the work and sixteen threads
-run more than an order of magnitude slower than one. Reporting that as
-"PyTorch's number" would flatter twill for a reason that has nothing to do with
-twill. So both sides are swept over a range of thread counts and each is
-reported at its own best, with the full sweep kept in the JSON so the pathology
-is visible rather than merely averaged away.
+Threads. Both sides are swept over a range of thread counts and each workload is
+reported at whichever count was fastest for that side, with the whole sweep kept
+in the JSON. Fixing both at the machine's core count would be the obvious choice
+and is the wrong one: the best count is workload-dependent on both sides, and a
+small elementwise kernel is faster on 8 threads than on 16 for twill and for
+PyTorch alike, so pinning either to 16 would report a number neither
+implementation would actually produce.
+
+One measurement note, recorded because it nearly became a false finding. An
+early sweep showed PyTorch's 16-thread numbers more than an order of magnitude
+worse than its single-thread numbers, which looked like a thread-pool pathology
+worth reporting. It was not. It was contention from other work running on the
+same machine, and on a quiet machine PyTorch scales cleanly to 8 threads and
+regresses only slightly at 16. Nothing about a benchmark is trustworthy if the
+machine is doing something else at the time, including a benchmark of the other
+implementation.
 
 Run:
     python bench/torch_bench.py --threads 1,2,4,8,16 --runs 30 --warmup 5

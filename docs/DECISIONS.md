@@ -97,7 +97,7 @@ about 114 ms, so the guarantee is cheap enough to run on save.
 **The cost.** The checker is deliberately incomplete, and this is the compromise
 entry. It reports only mismatches it is certain of and stays silent otherwise, so
 it does not catch everything, and a clean check is not a proof that the program
-runs. `docs/CORRECTNESS.md` gives a three-line program the checker accepts and
+runs. `docs/CORRECTNESS.md` gives a six-line program the checker accepts and
 the runtime rejects. The alternative bias, reporting anything suspicious, was
 rejected on the grounds that a checker which cries wolf gets turned off, and a
 checker that is turned off catches nothing at all.

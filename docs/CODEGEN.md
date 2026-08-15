@@ -18,10 +18,10 @@ from `docs/gpu-feasibility.md`: the round trip costs roughly 80 microseconds per
 operation and does not shrink with problem size. twill's own headline program,
 `examples/montecarlo_option.tw`, is about eight elementwise operations over
 200,000 elements followed by a reduction. Dispatched one at a time that is
-roughly 640 microseconds of pure boundary crossing, against a measured 1.985 ms
+roughly 640 microseconds of pure boundary crossing, against a measured 3.450 ms
 for the whole thing on the CPU today (`docs/BENCHMARKS.md`). A backend that
-launches per operation spends a third of the current runtime on overhead before
-computing anything.
+launches per operation spends a fifth of the current runtime on overhead before
+computing anything, and that is before the transfers.
 
 The way out is to launch once for the whole chain, and launching once for a
 chain means knowing what the chain is before running it. twill does not know
@@ -316,9 +316,12 @@ The design's correctness does not depend on the list being short.
 - **IO, `print`, `save`, `load`, `read_csv`, `read_frame`.** All force.
 - **The gradient-boosted trees in `internal/gbm`.** A separate engine with its
   own data structures and no tensor operations to fuse.
-- **`einsum` with more than two operands**, in the first version. The two-operand
-  case covers attention and every use in `std/`; the general case needs a
-  contraction-order decision that belongs in a later version.
+- **`einsum` with more than two operands**, in the first version. Today's
+  `einsum` takes any number, but one and two operands cover every use in `std/`,
+  including both contractions of multi-head attention in `std/nn.tw`. The
+  general case needs a contraction-order decision, which is a real optimisation
+  problem and belongs in a later version; until then a three-operand `einsum`,
+  as in `examples/einsum.tw`, forces to the interpreter.
 
 ---
 
@@ -426,24 +429,30 @@ From `docs/BENCHMARKS.md`, on the machine described there:
 
 | | twill today, CPU, best of a GOMAXPROCS sweep |
 |---|---|
-| `mc_option_fwd` | 1.985 ms median, 2.599 ms p99 |
-| `mc_option_grad` | 10.280 ms median, 15.605 ms p99 |
+| `mc_option_fwd` | 3.450 ms median, 4.410 ms p99 |
+| `mc_option_grad` | 13.646 ms median, 16.443 ms p99 |
+
+`docs/BENCHMARKS.md` section 7 is the caveat that goes with these: the absolute
+milliseconds carry about 40% of thermal drift on this machine, so the thresholds
+below are stated as ratios against a baseline re-measured in the same session as
+the compiled version, not against these figures read off the page months later.
 
 ### What would count as success
 
 Three thresholds, in increasing order of ambition. They are stated before the
 work rather than after it, which is the only time such a number means anything.
 
-**The floor, below which the project failed.** `mc_option_grad` at or under 10.280
-ms, that is, no slower than the CPU interpreter it replaces, with bit-exact
+**The floor, below which the project failed.** `mc_option_grad` no slower than
+the interpreted baseline re-measured alongside it, with bit-exact
 agreement on the forward value and the gradients agreeing with the interpreter
 under 7.2. A GPU backend that is slower than the CPU is the outcome
 `docs/gpu-feasibility.md` measured for op-at-a-time dispatch at these sizes, and
 avoiding it is the entire justification for building a compiler rather than a
 backend.
 
-**Success: 5x on the differentiated workload.** `mc_option_grad` at or under 2.06
-ms median. This is the threshold to design toward. The reasoning behind the
+**Success: 5x on the differentiated workload.** `mc_option_grad` at or under a
+fifth of the baseline, which against the 13.646 ms measured here is 2.73 ms.
+This is the threshold to design toward. The reasoning behind the
 number, stated so it can be argued with: `docs/gpu-feasibility.md` measured about
 9x for f32 matmul with transfers included and about 15x resident, and the
 elementwise chain here is bandwidth-bound rather than compute-bound, so it should
@@ -451,9 +460,9 @@ do better than the matmul figure once fused; against that, the packed f32 layout
 gives 2x on bytes moved at best and the reduction does not parallelise as freely
 as the elementwise part. 5x is deliberately below the optimistic estimate.
 
-**The result that would justify the dependency.** `mc_option_grad` at or under
-1.03 ms, a 10x, *and* `elementwise_10000000` at or under 6.3 ms, also a 10x
-against the measured 63.136 ms. The second is there because a design that only
+**The result that would justify the dependency.** `mc_option_grad` at a tenth of
+the baseline, 1.36 ms against the 13.646 ms measured here, *and*
+`elementwise_10000000` at a tenth of its own, 8.0 ms against 80.441 ms. The second is there because a design that only
 wins on one hand-picked program has not been shown to generalise, and the large
 elementwise workload is the one whose result the fusion strategy predicts most
 directly.
