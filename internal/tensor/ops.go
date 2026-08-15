@@ -64,6 +64,7 @@ var (
 	GreaterEqual = compareOp("ge", func(x, y float64) bool { return x >= y })
 	LessEqual    = compareOp("le", func(x, y float64) bool { return x <= y })
 	EqualOp      = compareOp("eq", func(x, y float64) bool { return x == y })
+	NotEqual     = compareOp("ne", func(x, y float64) bool { return x != y })
 )
 
 func Square(a *Tensor) *Tensor {

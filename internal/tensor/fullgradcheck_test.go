@@ -354,6 +354,15 @@ func gradCases() []gradCase {
 			}},
 		{name: "broadcast-to", data: []float64{1.4, -0.6, 2.2}, shape: []int{1, 3},
 			build: func(x *Tensor) *Tensor { return mustT(BroadcastTo(x, []int{4, 3})) }},
+		// sum_to is the inverse of a broadcast and the VJP every broadcasting
+		// elementwise op performs inline. Both regimes are checked: a leading
+		// axis that disappears, and an interior axis that collapses to 1.
+		{name: "sum-to/drop-axis", data: []float64{1.4, -0.6, 2.2, 0.3, -1.1, 0.8},
+			shape: []int{2, 3},
+			build: func(x *Tensor) *Tensor { return mustT(SumTo(x, []int{3})) }},
+		{name: "sum-to/keep-axis", data: []float64{1.4, -0.6, 2.2, 0.3, -1.1, 0.8},
+			shape: []int{2, 3},
+			build: func(x *Tensor) *Tensor { return mustT(SumTo(x, []int{2, 1})) }},
 		{name: "flip", data: m23, shape: []int{2, 3}, build: func(x *Tensor) *Tensor {
 			return mustT(FlipAxis(x, 1))
 		}},
@@ -571,7 +580,7 @@ var nonDifferentiable = map[string]string{
 	// Boolean-valued.
 	"Greater": "returns a 0/1 mask", "Less": "returns a 0/1 mask",
 	"GreaterEqual": "returns a 0/1 mask", "LessEqual": "returns a 0/1 mask",
-	"EqualOp": "returns a 0/1 mask",
+	"EqualOp": "returns a 0/1 mask", "NotEqual": "returns a 0/1 mask",
 	// Quantisation itself: it maps a float weight to a fixed-point code, a step
 	// function whose derivative is zero between steps. The gradient through the
 	// quantised product is checked on the activation, in qlinear-*/activation.
@@ -608,7 +617,7 @@ func TestGradientCheckCoversEveryOperator(t *testing.T) {
 		"Softmax", "LogSumExp",
 		"CumSum", "CumProd", "CumMax", "CumMin",
 		"CumsumAxis", "CumprodAxis", "CumMaxAxis", "CumMinAxis",
-		"Reshape", "TransposePerm", "BroadcastTo", "FlipAxis", "RollAxis",
+		"Reshape", "TransposePerm", "BroadcastTo", "SumTo", "FlipAxis", "RollAxis",
 		"DiffAxis", "Concat", "Split", "SplitEqual", "SliceAxis0", "IndexAxis0",
 		"SortAxis", "TopKAxis",
 		"MatMul", "MatMulNT", "Einsum",
