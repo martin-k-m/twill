@@ -1034,3 +1034,34 @@ func MatMul(a, b *Tensor) (*Tensor, error) {
 		}
 	}), nil
 }
+
+// Adopt makes dst carry src's value and src's place in the autodiff graph, and
+// leaves dst as the object the graph refers to.
+//
+// It exists for the tracer (internal/trace). A traced operation hands the
+// interpreter a placeholder before the value exists; when the trace is forced by
+// replay, the real value is computed here in the tensor package and has to be
+// moved into the placeholder the interpreter is already holding, because that
+// placeholder may already be a parent of a later node.
+//
+// A plain struct copy is not enough, and the reason is the closure. A backward
+// closure captures the tensor it was created for and writes through that
+// pointer: `res.Grad` in unary's closure is the original object's field, not the
+// copy's. So the copy takes the parents, the data and the flags, and the
+// backward is wrapped to hand the cotangent back to the object the closure is
+// looking at before running it. Everything else about the graph is already right:
+// the parents recorded in src are the placeholders themselves, because replay
+// feeds each node the placeholder its operand became.
+func Adopt(dst, src *Tensor) {
+	if dst == src || dst == nil || src == nil {
+		return
+	}
+	inner := src.backward
+	*dst = *src
+	if inner != nil {
+		dst.backward = func() {
+			src.Grad = dst.Grad
+			inner()
+		}
+	}
+}
