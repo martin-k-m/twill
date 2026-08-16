@@ -994,11 +994,45 @@ and is then thrown away, because the escape points that end each scope are
 unchanged: escapes rise from 10,040 to 16,040 on the same program. Reverted on
 that basis.
 
-What it establishes is the ordering of the remaining work. Restoring the leaves
-is a prerequisite for the compiled path ever reaching a training loop, and it
-pays nothing until the escapes that follow it are addressed, which is the
-compiled-backward design in 11.2.5. Doing them in the other order, as here,
-measures as a regression.
+What it establishes is where the boundary actually is, and it is not where 11.2.5
+put it.
+
+### 11.2.9 The two are not composable, and the reason is the scope
+
+11.2.5 said the fix was a compiled backward pass for statement scopes, and
+11.2.8 said restoring the leaves had to come after it. Doing both turns out to
+be doing one, because 11.2.6 already showed statement scopes contain no
+gradient-tracking operands at all. The compiled-backward design has nothing to
+apply to.
+
+So the honest experiment is leaves restored on its own, and then asking what is
+still escaping. On `mlp.tw`, with the leaves back, of 16,040 escapes:
+
+| site | count |
+| --- | --- |
+| `forced()`, a value the interpreter needs concretely | 8,016 |
+| a binary operand still refused | 8,000 |
+| everything else, builtins included | 24 |
+
+Eight of those escapes are builtins. The rest are the interpreter asking for a
+number. `let g = grads(loss)(w1, b1, w2, b2)` hands back a list, and the next
+three statements index it, multiply by a learning rate and assign. Every one of
+those forces, because a statement scope closes at the end of the statement and
+the next statement starts a new trace against values that are now concrete.
+
+That is the design boundary, stated in section 2 and reached here empirically: a
+statement is the largest region whose live values are known exactly and for free.
+A training loop's work does not fit in one statement. Compiling it means tracing
+across statements, which needs a real liveness analysis over the interpreter's
+environments and its Go stack, and section 2 declined that on the grounds that
+getting it wrong produces a wrong answer rather than a slow one. Nothing measured
+here argues with that.
+
+The conclusion is therefore not that a piece of work is outstanding. It is that
+the tracer, as scoped, compiles what a statement can hold: `montecarlo_option.tw`
+at 1.65x with a third less memory is what that looks like when it fits, and a
+training loop is what it looks like when it does not. Widening the scope is a
+different project, and it is the one with the liveness analysis in it.
 
 Where that leaves the tracer: correct, off by default, and reached mostly by
 programs that do their work outside a grad scope. Making it pay for a training
