@@ -25,6 +25,16 @@ func runTraced(t *testing.T, file string, tracing bool) string {
 
 func programs(t *testing.T) []string {
 	t.Helper()
+	// -short drops the handful of programs that dominate the runtime. CI uses it
+	// for the race pass, where the point is finding a data race rather than
+	// re-checking every program, and the detector makes those few several minutes
+	// each: gpt traces 190,568 nodes and records 140,328, against a few thousand
+	// for the rest. The ordinary run still covers everything.
+	heavy := map[string]bool{
+		"gpt.tw": true, "records.tw": true, "attention.tw": true,
+		"cnn.tw": true, "minibatch.tw": true, "classifier.tw": true,
+	}
+
 	var files []string
 	for _, dir := range []string{"examples", filepath.Join("bench", "workloads")} {
 		found, err := filepath.Glob(filepath.Join("..", "..", dir, "*.tw"))
@@ -32,6 +42,15 @@ func programs(t *testing.T) []string {
 			t.Fatal(err)
 		}
 		files = append(files, found...)
+	}
+	if testing.Short() {
+		kept := files[:0]
+		for _, f := range files {
+			if !heavy[filepath.Base(f)] {
+				kept = append(kept, f)
+			}
+		}
+		files = kept
 	}
 	if len(files) == 0 {
 		t.Fatal("no programs found")
@@ -98,15 +117,17 @@ func finalSharpe(t *testing.T, out string) float64 {
 }
 
 // A tracer that silently never traces would pass the test above. This fails if
-// the corpus stops exercising it at all.
+// the corpus stops exercising it at all. A handful of programs is enough to say
+// that, and the whole corpus is already run twice by the test above, which is
+// what the race detector has to get through in CI.
 func TestTracingActuallyTracesSomething(t *testing.T) {
 	traced := 0
-	for _, f := range programs(t) {
-		var out strings.Builder
-		ip := interp.New(func(s string) { out.WriteString(s) })
+	names := []string{"linreg.tw", "mlp.tw", "montecarlo_option.tw", "autodiff.tw"}
+	for _, name := range names {
+		ip := interp.New(func(string) {})
 		ip.SetTracing(true)
-		if _, _, err := ip.RunFileMain(f, nil); err != nil {
-			t.Fatalf("%s: %v", f, err)
+		if _, _, err := ip.RunFileMain(filepath.Join("..", "..", "examples", name), nil); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
 		if ip.TraceStats().Nodes > 0 {
 			traced++
@@ -115,7 +136,7 @@ func TestTracingActuallyTracesSomething(t *testing.T) {
 	if traced == 0 {
 		t.Fatal("no program in the corpus produced a single traced node")
 	}
-	t.Logf("%d of %d programs produced traced nodes", traced, len(programs(t)))
+	t.Logf("%d of %d programs produced traced nodes", traced, len(names))
 }
 
 func TestTracingSurvivesAProgramThatForcesConstantly(t *testing.T) {
