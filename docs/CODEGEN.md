@@ -795,12 +795,47 @@ removed rather than kept as a knob the data does not support, and this is writte
 down because a negative result someone else would otherwise retry is worth as
 much as a positive one.
 
-### 11.2.3 What is left
+### 11.2.3 Where the escapes actually come from
 
-1. **Replay dominates on real programs**, and `replayed` equals `escapes`
-   exactly in every program measured, so every replay is a mid-scope escape.
-   That is the number to attack, and it is a design question about liveness
-   rather than a constant to tune.
+`replayed` equals `escapes` exactly in every program measured, so every replay
+is a mid-scope escape rather than a compilation failure. Attributing those
+escapes to their call sites, and then to the check that refused the operand,
+gives one answer and it is not liveness:
+
+| program | refused for RequiresGrad | forcing escapes |
+| --- | --- | --- |
+| `gpt.tw` | 470,040 | 124,130 |
+| `attention.tw` | 307,280 | 37,309 |
+| `mlp.tw` | 112,000 | 10,036 |
+
+`Tracer.operand` refuses any tensor with `RequiresGrad` set, because a compiled
+kernel produces no backward closures and the interpreter's autodiff would
+silently receive a zero. That refusal is correct. The problem is that in a
+training program almost every tensor has it set, so almost every operation
+outside a `grad` scope refuses, the trace breaks, and the scope replays.
+
+This is why the two shapes of program behave so differently. `linreg.tw` and
+`signal_opt.tw` do their work inside `grads(...)`, where the differentiated
+inputs are registered as parameters before the body runs and never reach that
+test, so they compile nearly everything: 1,200 and 1,002 compiled scopes against
+5 and 9 replays. `gpt.tw` holds parameters that require gradients and computes
+with them outside a grad scope, so it compiles 42 scopes and replays 124,130.
+
+The fix is not a constant. It is either tracing a `RequiresGrad` tensor as a
+graph parameter and having the compiled path produce the backward graph
+(`ir.Grad` already exists and the grad scope already does exactly this), or
+deciding that operations on gradient-tracking tensors outside a grad scope stay
+interpreted and not paying the tracing cost for them at all. The first is the
+real answer and it is the next piece of work.
+
+Two smaller contributors, worth recording because they look like the problem and
+are not: builtins with no opcode account for 93,982 of `gpt.tw`'s escapes, of
+which `mean` is 28,990, and `mean` already has an opcode. It refuses for the
+same reason as everything else.
+
+### 11.2.4 What is left
+
+1. **`RequiresGrad` outside a grad scope**, above. Everything else is smaller.
 2. **Compilation is per process for the in-memory cache**, though the shared
    library itself is already cached on disk by `buildShared`.
 3. **The tracer already wins where the graph is worth compiling.** In-process,
