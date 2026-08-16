@@ -20,14 +20,14 @@ func TestRoundToDTypeGolden(t *testing.T) {
 		{DTBF16, 0.3, 0.30078125},
 		{DTBF16, -0.3, -0.30078125}, // sign preserved
 		{DTBF16, 3.14159, 3.140625},
-		{DTBF16, 65505, 65536},   // rounds up past the f16-range value
-		{DTBF16, 100000, 99840},  // still finite: bf16 has f32's range
+		{DTBF16, 65505, 65536},    // rounds up past the f16-range value
+		{DTBF16, 100000, 99840},   // still finite: bf16 has f32's range
 		{DTBF16, 1.0009765625, 1}, // below bf16's resolution near 1
 		{DTF16, 0.1, 0.0999755859375},
 		{DTF16, 3.14159, 3.140625},
-		{DTF16, 65505, 65504},          // the largest finite f16
-		{DTF16, 100000, math.Inf(1)},   // overflow to +Inf
-		{DTF16, -70000, math.Inf(-1)},  // overflow to -Inf, sign kept
+		{DTF16, 65505, 65504},         // the largest finite f16
+		{DTF16, 100000, math.Inf(1)},  // overflow to +Inf
+		{DTF16, -70000, math.Inf(-1)}, // overflow to -Inf, sign kept
 		{DTF16, 1.0009765625, 1.0009765625},
 		{DTF32, 0.1, float64(float32(0.1))},
 		{DTF32, -0.3, float64(float32(-0.3))},
@@ -49,10 +49,10 @@ func TestRoundToDTypeIntegers(t *testing.T) {
 		in   float64
 		want float64
 	}{
-		{DTI8, 3.9, 3},      // toward zero
-		{DTI8, -3.9, -3},    // toward zero, not toward -inf
-		{DTI8, 200, 127},    // clamp high, not wrap to -56
-		{DTI8, -200, -128},  // clamp low
+		{DTI8, 3.9, 3},     // toward zero
+		{DTI8, -3.9, -3},   // toward zero, not toward -inf
+		{DTI8, 200, 127},   // clamp high, not wrap to -56
+		{DTI8, -200, -128}, // clamp low
 		{DTI8, math.NaN(), 0},
 		{DTI32, 3e9, 2147483647},
 		{DTI32, -3e9, -2147483648},
@@ -120,15 +120,15 @@ func TestRoundNarrowSpecials(t *testing.T) {
 
 func TestPromote(t *testing.T) {
 	cases := []struct{ a, b, want DType }{
-		{DTF32, DTF32, DTF32},   // same
-		{DTBool, DTI8, DTI8},    // two ints -> wider; bool is narrowest
-		{DTI8, DTI32, DTI32},    // two ints -> wider
-		{DTBF16, DTI8, DTBF16},  // int with float -> the float, unchanged
-		{DTI32, DTF16, DTF16},   // int with float -> the float
-		{DTF16, DTBF16, DTF32},  // neither contains the other -> f32
-		{DTBF16, DTF16, DTF32},  // symmetric
-		{DTF64, DTF32, DTF64},   // wider float
-		{DTF32, DTBF16, DTF32},  // wider float
+		{DTF32, DTF32, DTF32},  // same
+		{DTBool, DTI8, DTI8},   // two ints -> wider; bool is narrowest
+		{DTI8, DTI32, DTI32},   // two ints -> wider
+		{DTBF16, DTI8, DTBF16}, // int with float -> the float, unchanged
+		{DTI32, DTF16, DTF16},  // int with float -> the float
+		{DTF16, DTBF16, DTF32}, // neither contains the other -> f32
+		{DTBF16, DTF16, DTF32}, // symmetric
+		{DTF64, DTF32, DTF64},  // wider float
+		{DTF32, DTBF16, DTF32}, // wider float
 	}
 	for _, c := range cases {
 		if got := Promote(c.a, c.b); got != c.want {

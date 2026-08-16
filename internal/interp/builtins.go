@@ -2857,7 +2857,7 @@ var bitFuncs = map[string]func(x, y int64) int64{
 	"or":   func(x, y int64) int64 { return x | y },
 	"band": func(x, y int64) int64 { return x & y },
 	"bor":  func(x, y int64) int64 { return x | y },
-	"xor": func(x, y int64) int64 { return x ^ y },
+	"xor":  func(x, y int64) int64 { return x ^ y },
 	// Shift counts are masked to 0..63, per docs/language-guide.md, so a shift is
 	// always defined rather than depending on the host's out-of-range behaviour.
 	// `shr` is arithmetic (sign-extending), so it is defined on a negative operand.

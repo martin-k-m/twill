@@ -57,12 +57,11 @@ func DTypeOfName(s string) (DType, bool) {
 	return 0, false
 }
 
-
 // isFloatDType and isIntDType partition the dtypes the way the promotion rules
 // need. The codes are ordered so that a single comparison decides each: the
 // integers are the three lowest, the floats the four highest.
 func isFloatDType(dt DType) bool { return dt >= DTF16 }
-func isIntDType(dt DType) bool    { return dt <= DTI32 }
+func isIntDType(dt DType) bool   { return dt <= DTI32 }
 
 // truncTowardZero is float-to-integer truncation: toward zero, so that
 // i32(-0.5) is 0 and not -1. It matches Go's, C's, and every array library's
@@ -135,9 +134,9 @@ func roundNarrowFloat(x float64, expBits, mantBits uint) float64 {
 		return x // preserves signed zero
 	}
 
-	bias := (1 << (expBits - 1)) - 1        // the format's exponent bias
-	maxExp := bias                          // unbiased exponent of the largest finite (2^bias * ...)
-	minNormalExp := 1 - bias                // unbiased exponent of the smallest normal
+	bias := (1 << (expBits - 1)) - 1 // the format's exponent bias
+	maxExp := bias                   // unbiased exponent of the largest finite (2^bias * ...)
+	minNormalExp := 1 - bias         // unbiased exponent of the smallest normal
 
 	neg := math.Signbit(x)
 	ax := math.Abs(x)
@@ -202,7 +201,6 @@ func Promote(a, b DType) DType {
 	}
 	return b
 }
-
 
 // ShortestForDType renders a stored element at its dtype: the shortest decimal
 // that reads back to the same value once rounded to dt. A narrow element is held

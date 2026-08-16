@@ -595,8 +595,8 @@ var nonDifferentiable = map[string]string{
 	// Structural, dtype and construction helpers, not operators.
 	"New": "constructor", "Scalar": "constructor", "Leaf": "constructor",
 	"Filled": "constructor", "FromNested": "constructor",
-	"Promote": "dtype arithmetic",
-	"AccDType": "dtype arithmetic",
+	"Promote":   "dtype arithmetic",
+	"AccDType":  "dtype arithmetic",
 	"DTypeName": "dtype arithmetic", "DTypeOfName": "dtype arithmetic",
 	"RoundToDType": "dtype arithmetic", "ShortestForDType": "formatting",
 	// Second-order machinery, checked against finite differences in jet_test.go.
