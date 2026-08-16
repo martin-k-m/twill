@@ -23,3 +23,7 @@ Thumbs.db
 /.gocache/
 rust/
 *.vsix
+
+# Benchmark artefacts. The scripts under bench/ regenerate them, and the numbers
+# that matter are quoted in docs/BENCHMARKS.md, so the raw output is not tracked.
+bench/results/

@@ -1,0 +1,6 @@
+# One self-attention head: scores = X @ Xᵀ, softmax over the row, then the
+# weighted sum of values. Sequence 256, model dimension 64.
+seed(1)
+let X = randn(256, 64)
+fn work() = sum(softmax(X @ transpose(X), 1) @ X)
+work
