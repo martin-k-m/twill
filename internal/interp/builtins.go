@@ -2603,10 +2603,42 @@ func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tens
 		passArgs[i], nodes[i] = traceArg(v)
 	}
 
+	// The differentiated leaves are registered as graph parameters before the
+	// body runs. That is what lets the tracer follow a gradient-tracking value at
+	// all: everywhere else one is refused, because a compiled kernel builds none
+	// of the per-operation closures the interpreter's autodiff is made of and the
+	// gradient would come back silently zero.
+	//
+	// If the body escapes, the trace replays through internal/tensor with the
+	// autodiff graph intact and CloseGrad reports false, so the Backward below is
+	// reached with exactly the tensors the interpreter would have built. Nothing
+	// is re-run and no side effect happens twice.
+	owned := ip.tr.OpenGrad(leavesOf(nodes))
+	closed := false
+	if owned {
+		defer func() {
+			if !closed {
+				ip.tr.AbandonGrad()
+			}
+		}()
+	}
+
 	out := ip.Apply(f, passArgs, 0)
 	ot, ok := value.AsTensor(out)
 	if !ok || !ot.IsScalar() {
 		return nil, nil, nil, fmt.Errorf("grad target must return a scalar")
+	}
+	if owned {
+		v, fast := ip.tr.CloseGrad(ot)
+		closed = true
+		ip.checkTrace(0)
+		if fast {
+			all := make([]value.Value, len(nodes))
+			for i, nd := range nodes {
+				all[i] = gradFromNode(nd)
+			}
+			return tensor.Scalar(v), gradFromNode(nodes[0]), all, nil
+		}
 	}
 	if err := ot.Backward(); err != nil {
 		return nil, nil, nil, err
@@ -2619,10 +2651,42 @@ func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tens
 	return tensor.Scalar(ot.Data[0]), gradFromNode(nodes[0]), all, nil
 }
 
+// leavesOf flattens the gradient-tracking leaves a grad call built for its
+// arguments, in the order the IR's parameters will take them.
+func leavesOf(nodes []*gradNode) []*tensor.Tensor {
+	var out []*tensor.Tensor
+	var walk func(*gradNode)
+	walk = func(n *gradNode) {
+		if n == nil {
+			return
+		}
+		if n.leaf != nil {
+			out = append(out, n.leaf)
+			return
+		}
+		for _, c := range n.list {
+			walk(c)
+		}
+		if n.record != nil {
+			for _, k := range n.record.keys {
+				walk(n.record.nodes[k])
+			}
+		}
+	}
+	for _, n := range nodes {
+		walk(n)
+	}
+	return out
+}
+
 // jacobian computes the Jacobian of f at x by running one reverse-mode pass per
 // output component: row j is the gradient of the j-th output w.r.t. x. The
 // result is an [m, n] tensor for an m-vector output and an n-element input.
 func (ip *Interp) jacobian(f value.Value, x value.Value) (value.Value, error) {
+	// The gradient-free sizing pass reads its result, and every row after it
+	// backpropagates through tensor closures. Neither survives a traced body.
+	ip.tr.Suspend()
+	defer ip.tr.Resume()
 	xt, ok := value.AsTensor(x)
 	if !ok {
 		return nil, fmt.Errorf("jacobian: the input must be a tensor")
@@ -2665,6 +2729,13 @@ func (ip *Interp) jacobian(f value.Value, x value.Value) (value.Value, error) {
 // hessian computes the Hessian of a scalar function f at x by forward-mode
 // second-order autodiff over the graph built from a single input leaf.
 func (ip *Interp) hessian(f value.Value, x value.Value) (value.Value, error) {
+	// docs/CODEGEN.md section 5: hessian does not compile. It runs forward-mode
+	// 2-jets through their own per-node closures, and a traced operation records
+	// no jet at all, so the second derivative would come back as whatever an
+	// unrecorded node contributes, which is nothing. Suspending the tracer here
+	// is that sentence enforced rather than assumed.
+	ip.tr.Suspend()
+	defer ip.tr.Resume()
 	xt, ok := value.AsTensor(x)
 	if !ok {
 		return nil, fmt.Errorf("hessian: the input must be a tensor")

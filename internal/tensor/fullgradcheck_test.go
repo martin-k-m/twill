@@ -354,6 +354,15 @@ func gradCases() []gradCase {
 			}},
 		{name: "broadcast-to", data: []float64{1.4, -0.6, 2.2}, shape: []int{1, 3},
 			build: func(x *Tensor) *Tensor { return mustT(BroadcastTo(x, []int{4, 3})) }},
+		// sum_to is the inverse of a broadcast and the VJP every broadcasting
+		// elementwise op performs inline. Both regimes are checked: a leading
+		// axis that disappears, and an interior axis that collapses to 1.
+		{name: "sum-to/drop-axis", data: []float64{1.4, -0.6, 2.2, 0.3, -1.1, 0.8},
+			shape: []int{2, 3},
+			build: func(x *Tensor) *Tensor { return mustT(SumTo(x, []int{3})) }},
+		{name: "sum-to/keep-axis", data: []float64{1.4, -0.6, 2.2, 0.3, -1.1, 0.8},
+			shape: []int{2, 3},
+			build: func(x *Tensor) *Tensor { return mustT(SumTo(x, []int{2, 1})) }},
 		{name: "flip", data: m23, shape: []int{2, 3}, build: func(x *Tensor) *Tensor {
 			return mustT(FlipAxis(x, 1))
 		}},
@@ -561,6 +570,9 @@ func TestGradientCheckFullOperatorSet(t *testing.T) {
 // gradient, with the reason. The coverage test below uses this list, so an
 // operator can only be absent from the gradient check by being named here.
 var nonDifferentiable = map[string]string{
+	// Not an operator: it moves a value and its graph node into another Tensor
+	// object, for the tracer. It computes nothing, so there is nothing to check.
+	"Adopt": "moves a value between Tensor objects",
 	// Index-valued: the output is a position, which is integer and locally
 	// constant, so its derivative is zero almost everywhere and undefined at the
 	// ties. twill returns no gradient rather than a meaningless zero.
@@ -571,7 +583,7 @@ var nonDifferentiable = map[string]string{
 	// Boolean-valued.
 	"Greater": "returns a 0/1 mask", "Less": "returns a 0/1 mask",
 	"GreaterEqual": "returns a 0/1 mask", "LessEqual": "returns a 0/1 mask",
-	"EqualOp": "returns a 0/1 mask",
+	"EqualOp": "returns a 0/1 mask", "NotEqual": "returns a 0/1 mask",
 	// Quantisation itself: it maps a float weight to a fixed-point code, a step
 	// function whose derivative is zero between steps. The gradient through the
 	// quantised product is checked on the activation, in qlinear-*/activation.
@@ -608,7 +620,7 @@ func TestGradientCheckCoversEveryOperator(t *testing.T) {
 		"Softmax", "LogSumExp",
 		"CumSum", "CumProd", "CumMax", "CumMin",
 		"CumsumAxis", "CumprodAxis", "CumMaxAxis", "CumMinAxis",
-		"Reshape", "TransposePerm", "BroadcastTo", "FlipAxis", "RollAxis",
+		"Reshape", "TransposePerm", "BroadcastTo", "SumTo", "FlipAxis", "RollAxis",
 		"DiffAxis", "Concat", "Split", "SplitEqual", "SliceAxis0", "IndexAxis0",
 		"SortAxis", "TopKAxis",
 		"MatMul", "MatMulNT", "Einsum",

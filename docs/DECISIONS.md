@@ -91,8 +91,9 @@ find out. A runtime shape error in a training loop arrives after the data
 loading, the initialisation and however many steps ran before the code path with
 the bug was reached. That is the failure the language exists to remove, and it
 cannot be removed by a better error message, only by an earlier one. The measured
-price is in `docs/BENCHMARKS.md`: checking the whole 27,000-line corpus costs
-about 114 ms, so the guarantee is cheap enough to run on save.
+price is in `docs/BENCHMARKS.md`, which measures checking the whole corpus in
+tens of milliseconds. Cheap enough to run on save, and quoted there rather than
+here so there are not two numbers to drift apart.
 
 **The cost.** The checker is deliberately incomplete, and this is the compromise
 entry. It reports only mismatches it is certain of and stays silent otherwise, so
