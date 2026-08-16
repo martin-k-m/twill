@@ -860,7 +860,14 @@ are not: builtins with no opcode account for 93,982 of `gpt.tw`'s escapes, of
 which `mean` is 28,990, and `mean` already has an opcode. It refuses for the
 same reason as everything else.
 
-### 11.2.4 What is left
+### 11.2.4 The default
+
+The tracer is off unless `TWILL_TRACE=1` asks for it. It is correct, and on
+every program measured here it is slower, so defaulting it on would cost every
+twill program time to buy a compiled path most of them never reach. It goes on
+when 11.2.3's fix lands and the numbers say it should.
+
+### 11.2.5 What is left
 
 1. **`RequiresGrad` outside a grad scope**, above. Everything else is smaller.
 2. **Compilation is per process for the in-memory cache**, though the shared

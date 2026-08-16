@@ -130,11 +130,17 @@ func (t *Tracer) Enabled() bool { return t != nil && t.on }
 // Active reports whether a trace is open and has nodes in it.
 func (t *Tracer) Active() bool { return t != nil && t.on && t.b != nil && len(t.order) > 0 }
 
-// New builds a tracer. TWILL_TRACE turns it on or off: unset or "1" is on, "0"
-// is off, which is the switch the differential harness flips to get the
-// interpreter's own answer for the same program.
+// New builds a tracer. TWILL_TRACE turns it on or off, and it is off unless
+// asked for.
+//
+// It is correct, and on the programs measured in docs/CODEGEN.md section 11 it
+// is between 1.2 and 2.5 times slower than the interpreter, because almost every
+// operation in a training program touches a tensor that tracks gradients and so
+// refuses to trace. Defaulting to on would make every twill program slower to
+// buy a compiled path most of them never reach. It goes on by default when
+// section 11.2.3's fix lands and the numbers say it should.
 func New(cache *Cache) *Tracer {
-	on := true
+	on := false
 	if v := os.Getenv("TWILL_TRACE"); v != "" {
 		b, err := strconv.ParseBool(v)
 		on = err == nil && b
