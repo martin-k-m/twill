@@ -75,25 +75,7 @@ func (c *Cache) Get(g *ir.Graph, st *Stats) (*codegen.Program, bool) {
 	return p, true
 }
 
-// Size reports how many distinct graphs have been seen.
-func (c *Cache) Size() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.m)
-}
 
-// Compiled reports how many of them compiled.
-func (c *Cache) Compiled() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := 0
-	for _, e := range c.m {
-		if !e.bad {
-			n++
-		}
-	}
-	return n
-}
 
 // Key hashes everything about a graph that changes what the emitted code does,
 // and nothing that does not. Parameter values are not in it; constant values

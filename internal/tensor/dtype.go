@@ -57,21 +57,6 @@ func DTypeOfName(s string) (DType, bool) {
 	return 0, false
 }
 
-// DTypeBits is a dtype's storage width. bool and i8 are eight bits, not one and
-// four, because a sub-byte element needs bit addressing that is not worth it yet
-// (docs/dtypes.md).
-func DTypeBits(dt DType) int {
-	switch dt {
-	case DTBool, DTI8:
-		return 8
-	case DTF16, DTBF16:
-		return 16
-	case DTI32, DTF32:
-		return 32
-	default:
-		return 64
-	}
-}
 
 // isFloatDType and isIntDType partition the dtypes the way the promotion rules
 // need. The codes are ordered so that a single comparison decides each: the
@@ -218,8 +203,6 @@ func Promote(a, b DType) DType {
 	return b
 }
 
-// Promote3 folds Promote over three dtypes.
-func Promote3(a, b, c DType) DType { return Promote(Promote(a, b), c) }
 
 // ShortestForDType renders a stored element at its dtype: the shortest decimal
 // that reads back to the same value once rounded to dt. A narrow element is held

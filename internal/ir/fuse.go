@@ -2,7 +2,6 @@ package ir
 
 import (
 	"fmt"
-	"strings"
 )
 
 // Fusion: grouping the graph into the regions a backend launches one at a time.
@@ -50,22 +49,6 @@ const (
 	// RegionContract is a matmul.
 	RegionContract
 )
-
-func (k RegionKind) String() string {
-	switch k {
-	case RegionBuffer:
-		return "buffer"
-	case RegionMap:
-		return "map"
-	case RegionReduce:
-		return "reduce"
-	case RegionStructural:
-		return "structural"
-	case RegionContract:
-		return "contract"
-	}
-	return "?"
-}
 
 // Region is one kernel launch.
 type Region struct {
@@ -251,25 +234,4 @@ func (p *Plan) Stats() Stats {
 func (s Stats) String() string {
 	return fmt.Sprintf("%d nodes, %d kernels, %d/%d intermediates materialised, %d eliminated, %d B vs %d B unfused",
 		s.Nodes, s.Kernels, s.Materialised, s.Materialised+s.Eliminated, s.Eliminated, s.Bytes, s.BytesUnfused)
-}
-
-// String renders the plan region by region.
-func (p *Plan) String() string {
-	var b strings.Builder
-	for i, r := range p.Regions {
-		if r.Kind == RegionBuffer {
-			continue
-		}
-		fmt.Fprintf(&b, "region %d %s -> %%%d %s\n  body:", i, r.Kind, r.Root, ShapeString(r.Iter))
-		for _, x := range r.Body {
-			fmt.Fprintf(&b, " %%%d(%s)", x, p.Graph.Nodes[x].Op)
-		}
-		fmt.Fprintf(&b, "\n  in:")
-		for _, x := range r.In {
-			fmt.Fprintf(&b, " %%%d", x)
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString(p.Stats().String() + "\n")
-	return b.String()
 }
