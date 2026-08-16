@@ -851,9 +851,39 @@ exactly this for a grad scope, so the missing pieces are narrow and known:
    silently does not learn. That is the shape of the `QLinear` bug in
    docs/BUGS.md, and the reason `TestGradientCheckCoversEveryOperator` exists.
 
-This is specified rather than half-built on purpose. A wrong answer here is
-quiet, and the honest state of the tracer is that it is correct and slower, not
-that it is fast and might be wrong.
+### 11.2.5 It was attempted, and it failed the gate
+
+The above was then built, far enough to run: `tensor.TrackCompiled` to attach a
+caller-supplied backward closure, and a `compileAndRunGrad` that compiles the
+forward graph, compiles `ir.Grad`'s backward graph beside it, and wires each
+output to the graph's parameters with a closure that seeds that output's
+cotangent, runs the backward program, and accumulates into each parameter.
+
+Two things happened, and both are the point.
+
+The operator-coverage test failed within seconds: `TrackCompiled` is exported,
+has no gradient-check case and no entry saying it needs none. It also failed in
+the reverse direction when `EnsureGrad`, a method rather than a package
+function, was declared. That closure is doing exactly what it was written to do.
+
+Then the differential tests failed on `attention.tw`, `classifier.tw`,
+`cnn.tw` and others: programs that previously matched the interpreter byte for
+byte no longer did. These are training programs, so a changed output means
+changed gradients, and unlike `signal_opt.tw` they had matched exactly before,
+which rules out reassociation. The wiring is wrong somewhere. The likeliest
+candidates, in order: a parameter that is itself a placeholder from an earlier
+scope, making the parent chain a cycle that `Backward`'s topological walk does
+not expect; the argument order the backward graph expects against the order it
+is given; and a value that is both an output and a parameter counting twice.
+
+It was reverted. A compiled path that produces plausible numbers and wrong
+gradients is worse than no compiled path, and the whole reason this repo has a
+103-case gradient check and a byte-for-byte differential suite is that the
+`QLinear` bug proved that class of error is invisible without them.
+
+What this pass establishes is that the design is right and the implementation is
+a real piece of work rather than a wiring exercise: the tests that would catch it
+being wrong exist, they are sharp enough to catch it, and they caught it.
 
 Two smaller contributors, worth recording because they look like the problem and
 are not: builtins with no opcode account for 93,982 of `gpt.tw`'s escapes, of
