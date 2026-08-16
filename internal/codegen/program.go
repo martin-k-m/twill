@@ -58,12 +58,7 @@ func Compile(g *ir.Graph, opt Options) (*Program, error) {
 	return p, nil
 }
 
-// Source returns the emitted C. Tests read it, and so should anyone deciding
-// whether to believe the backend.
-func (p *Program) Source() string { return p.src }
 
-// Library returns the path of the compiled shared object.
-func (p *Program) Library() string { return p.lib }
 
 // Plan returns the fusion plan the program was compiled from.
 func (p *Program) Plan() *ir.Plan { return p.plan }

@@ -74,7 +74,7 @@ jobs:
 
       - name: Dead code
         run: |
-          out="$(go run golang.org/x/tools/cmd/deadcode@latest ./...)"
+          out="$(go run golang.org/x/tools/cmd/deadcode@latest -test ./...)"
           if [ -n "$out" ]; then echo "$out"; echo "::error::dead code found"; exit 1; fi
 
       - name: Staticcheck

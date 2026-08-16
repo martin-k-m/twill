@@ -127,8 +127,6 @@ func (t *Tracer) Stats() Stats { return t.stats }
 // Enabled reports whether tracing is on.
 func (t *Tracer) Enabled() bool { return t != nil && t.on }
 
-// Active reports whether a trace is open and has nodes in it.
-func (t *Tracer) Active() bool { return t != nil && t.on && t.b != nil && len(t.order) > 0 }
 
 // New builds a tracer. TWILL_TRACE turns it on or off, and it is off unless
 // asked for.
@@ -293,14 +291,6 @@ func (t *Tracer) place(r ir.Ref) *tensor.Tensor {
 	return ph
 }
 
-// IsPlaceholder reports whether v is an unforced placeholder of this trace.
-func (t *Tracer) IsPlaceholder(x *tensor.Tensor) bool {
-	if t == nil || t.b == nil || x == nil {
-		return false
-	}
-	_, ok := t.refs[x]
-	return ok && x.Data == nil
-}
 
 func (t *Tracer) ready() bool {
 	return t != nil && t.on && t.susp == 0 && t.b != nil && !t.broken && t.err == nil
@@ -510,18 +500,3 @@ func (t *Tracer) Transpose(x *tensor.Tensor, perm []int) (*tensor.Tensor, bool) 
 	return t.place(t.b.Transpose(rx, perm)), !t.broken
 }
 
-// BroadcastTo traces an explicit broadcast.
-func (t *Tracer) BroadcastTo(x *tensor.Tensor, shape []int) (*tensor.Tensor, bool) {
-	if !t.ready() {
-		return nil, false
-	}
-	up, ok := ir.BroadcastShape(x.Shape, shape)
-	if !ok || ir.Numel(up) != ir.Numel(shape) || len(up) != len(shape) {
-		return nil, false
-	}
-	rx, ok := t.operand(x)
-	if !ok {
-		return nil, false
-	}
-	return t.place(t.b.BroadcastTo(rx, shape)), !t.broken
-}
