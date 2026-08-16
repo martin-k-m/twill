@@ -1,0 +1,17 @@
+# The same pricer, differentiated: price plus delta and vega. This is the
+# forward-and-backward number for the README's headline program.
+seed(42)
+let Z = randn(200000)
+
+fn call_price(S0, K, r, sigma, T) {
+  let drift = (r - 0.5 * sigma * sigma) * T
+  let ST = S0 * exp(drift + sigma * sqrt(T) * Z)
+  exp(-r * T) * mean(relu(ST - K))
+}
+
+fn work() {
+  let delta = grad(fn(s) = call_price(s, 100.0, 0.05, 0.2, 1.0))(100.0)
+  let vega = grad(fn(v) = call_price(100.0, 100.0, 0.05, v, 1.0))(0.2)
+  delta + vega
+}
+work

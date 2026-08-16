@@ -182,5 +182,14 @@ func QLinear4(x *Tensor, q *QTensorI4) (*Tensor, error) {
 	} else {
 		outShape = []int{m, n}
 	}
-	return &Tensor{Data: out, Shape: outShape}, nil
+	res := &Tensor{Data: out, Shape: outShape}
+	// Differentiable in the activation, exactly as QLinear is: the packed codes
+	// are constants, so this is a linear map and dL/dx = g @ Wq.
+	return track1(res, x, func() {
+		dX := mm(res.Grad, m, n, q.Dequantize().Data, k)
+		gx := x.ensureGrad()
+		for i := range dX {
+			gx[i] += dX[i]
+		}
+	}), nil
 }

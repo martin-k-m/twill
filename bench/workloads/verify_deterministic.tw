@@ -1,0 +1,22 @@
+# A workload with no RNG in it. Every input is a fixed function of its index, so
+# the PyTorch counterpart builds bit-identical inputs and the two results can be
+# compared as numbers rather than as statistics. This is the workload that shows
+# the two sides compute the same mathematics; the others show how fast they do it.
+let n = 4096
+let idx = tensor(range(n))
+let x = sin(idx * 0.001) * 2.0 + 0.5
+let A = reshape(sin(tensor(range(64 * 64)) * 0.01), 64, 64)
+let B = reshape(cos(tensor(range(64 * 64)) * 0.02), 64, 64)
+
+fn loss(v) {
+  let h = tanh(exp(v / 4.0) * v)
+  let m = reshape(h[0:4096], 64, 64)
+  let p = softmax(A @ (m + B), 1)
+  mean(h) + sum(p * m) + sum(logsumexp(m, 0)) + mean(relu(m - 0.25))
+}
+
+fn work() {
+  let g = grad(loss)(x)
+  [loss(x), sum(g), sum(g * g)]
+}
+work

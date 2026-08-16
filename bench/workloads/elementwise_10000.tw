@@ -1,0 +1,7 @@
+# Elementwise chain at n=10000: tanh(exp(x/4) * x) reduced to a scalar. Three
+# passes over the buffer plus a reduction, so the cost is memory traffic and
+# transcendental throughput rather than any one kernel.
+seed(1)
+let x = randn(10000)
+fn work() = mean(tanh(exp(x / 4.0) * x))
+work

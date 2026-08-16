@@ -1,0 +1,6 @@
+# The same chain, differentiated: forward plus the reverse pass over n=100000.
+seed(1)
+let x = randn(100000)
+fn loss(v) = mean(tanh(exp(v / 4.0) * v))
+fn work() = sum(grad(loss)(x))
+work
