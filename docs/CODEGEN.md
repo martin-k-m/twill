@@ -970,6 +970,36 @@ the leaf set from `t.params` at a point where that slice did not stand for the
 leaves, and it is recorded here as an error rather than quietly dropped, because
 it is the number that made this attempt look worth making.
 
+### 11.2.8 The mechanism of the cascade, and why fixing it alone costs more
+
+Looking at the first refusals inside a grad scope rather than the totals shows
+something the counts hid: they arrive with `params` at zero. A grad scope
+registers its differentiated leaves as parameters when it opens, so that should
+never be zero, and `Escape` is what empties it. It rebuilds the trace after a
+mid-scope force and truncates `t.params` along with everything else.
+
+So the first escape inside a `grads(...)` body drops the leaves, and from that
+point every value descending from them is a gradient-tracking tensor that is not
+a parameter, which `operand` refuses. One escape interprets the entire remainder
+of the differentiated function. That is the cascade, and it is a design flaw
+rather than a tuning question.
+
+Putting the leaves back after an escape is four lines and it works: on
+`mlp.tw` traced nodes go from 36,288 to 72,288 and on `classifier.tw` from
+25,954 to 46,354, with every test still green.
+
+It is also slower. `mlp.tw` traced goes from 112-123 ms to 142-144 ms, memory
+from 197 MB to 261 MB, allocations from 2.17M to 2.84M. The extra work traces
+and is then thrown away, because the escape points that end each scope are
+unchanged: escapes rise from 10,040 to 16,040 on the same program. Reverted on
+that basis.
+
+What it establishes is the ordering of the remaining work. Restoring the leaves
+is a prerequisite for the compiled path ever reaching a training loop, and it
+pays nothing until the escapes that follow it are addressed, which is the
+compiled-backward design in 11.2.5. Doing them in the other order, as here,
+measures as a regression.
+
 Where that leaves the tracer: correct, off by default, and reached mostly by
 programs that do their work outside a grad scope. Making it pay for a training
 loop needs the compiled path to produce a backward pass that the interpreter's
