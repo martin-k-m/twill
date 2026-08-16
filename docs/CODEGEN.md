@@ -821,12 +821,39 @@ test, so they compile nearly everything: 1,200 and 1,002 compiled scopes against
 5 and 9 replays. `gpt.tw` holds parameters that require gradients and computes
 with them outside a grad scope, so it compiles 42 scopes and replays 124,130.
 
-The fix is not a constant. It is either tracing a `RequiresGrad` tensor as a
-graph parameter and having the compiled path produce the backward graph
-(`ir.Grad` already exists and the grad scope already does exactly this), or
-deciding that operations on gradient-tracking tensors outside a grad scope stay
-interpreted and not paying the tracing cost for them at all. The first is the
-real answer and it is the next piece of work.
+The fix is not a constant, and the cheap version of it does not exist. Three
+attempts, all measured and all reverted:
+
+- **A minimum trace size before compiling.** Swept 0 to 32 nodes, no effect
+  beyond the run-to-run spread. Section 11.2.2.
+- **Dropping the escape on a plain variable rebind**, which reads no data and
+  looked needlessly conservative. It moved `classifier.tw` from 11,858 escapes
+  to 11,854, for a change that touches a liveness invariant. Not worth the risk
+  for four escapes.
+- **A cold-statement cache**: after a statement has built a trace and thrown it
+  away twice for this reason, stop tracing that statement. It fired, 38 times in
+  `gpt.tw` and 1,998 in `mlp.tw`, and escapes did not move at all. Skipping an
+  owning statement only hands ownership to the statements inside it, which then
+  open their own traces and escape themselves. The work moves, it does not go.
+
+What is left is the real change: trace a `RequiresGrad` tensor as a graph
+parameter, and have the compiled path produce a backward graph so the value it
+returns participates in autodiff. `ir.Grad` exists and `CloseGrad` already does
+exactly this for a grad scope, so the missing pieces are narrow and known:
+
+1. `internal/tensor` has no exported way to build a tensor with parents and a
+   backward closure. `p0`, `p1`, `pRest` and `backward` are unexported, so
+   `internal/trace` cannot construct one. That hook has to be added first.
+2. A scope can hand out several outputs, so the backward closure has to
+   accumulate cotangents into the right parameters rather than assume one.
+3. It has to be gradient-checked, not just differentially tested. The failure
+   mode is a zero gradient, which produces a plausible number and a model that
+   silently does not learn. That is the shape of the `QLinear` bug in
+   docs/BUGS.md, and the reason `TestGradientCheckCoversEveryOperator` exists.
+
+This is specified rather than half-built on purpose. A wrong answer here is
+quiet, and the honest state of the tracer is that it is correct and slower, not
+that it is fast and might be wrong.
 
 Two smaller contributors, worth recording because they look like the problem and
 are not: builtins with no opcode account for 93,982 of `gpt.tw`'s escapes, of
