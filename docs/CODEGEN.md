@@ -910,11 +910,37 @@ constants, so registering them as parameters is arithmetically right. What it
 breaks is any outer backward pass that needed the cotangent to travel through
 them, which is exactly the nested-`grad` and escaping-value case.
 
-So the work is: decide, per operand, whether a gradient-tracking tensor is a
-constant for this grad call or a path an outer pass still needs, and register it
-as a parameter only in the first case. That is a reachability question over the
-enclosing scopes, not a wiring change, and it is the piece nothing here has
-built.
+The obvious narrow version of that is to accept only autodiff leaves, since a
+leaf's cotangent accumulates and goes no further. Counting says it is not worth
+building on its own:
+
+| program | leaf | intermediate |
+| --- | --- | --- |
+| `gpt.tw` | 25,000 | 445,040 |
+| `attention.tw` | 15,360 | 291,920 |
+| `mlp.tw` | 12,000 | 100,000 |
+| `classifier.tw` | 14,000 | 50,000 |
+
+About one refusal in twenty is a leaf. The rest are intermediates, values with
+parents, whose cotangent has to carry on past them.
+
+That is still tractable, and it says what to build. Register the refused tensor
+as a graph parameter, and in the backward pass accumulate its gradient into that
+tensor's own `Grad` buffer rather than discarding it. `tensor.Backward` walks
+parents from the output, so an intermediate that has received a cotangent will
+have its own closure called and the chain continues on the interpreter's side.
+Both leaves and intermediates work under that rule, because a leaf simply has
+nothing further to call.
+
+The part that needs care is the grad scope itself. `CloseGrad` differentiates the
+whole body with `ir.Grad` and returns gradients for the leaves that were
+pre-registered. Any extra gradient-tracking parameter admitted this way also has
+a gradient in that result, and dropping it is precisely how the first attempt
+produced wrong answers. It has to be accumulated into that tensor's `Grad` too.
+
+So: one rule for admitting the operand, one for accumulating in the ordinary
+backward pass, and one for not discarding the extra gradients in `CloseGrad`.
+Nothing here has built the third.
 
 What these two passes establish is that the tests are sharp enough to run this
 experiment safely: the first attempt was caught by the differential suite in
