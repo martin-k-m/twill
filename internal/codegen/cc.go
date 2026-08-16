@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // ErrNoCompiler is returned when no C compiler can be found. It is a distinct
@@ -38,7 +39,23 @@ var ccFlags = []string{
 }
 
 // FindCompiler returns the C compiler to use, honouring TWILL_CC.
+//
+// The answer is found once per process. On Windows a LookPath miss walks every
+// PATH entry against every executable extension before it fails, and profiling
+// a traced run put this at 79% of it: three compilations, three searches, and
+// the search cost more than the compiler did.
 func FindCompiler() (string, error) {
+	ccOnce.Do(func() { ccPath, ccErr = findCompiler() })
+	return ccPath, ccErr
+}
+
+var (
+	ccOnce sync.Once
+	ccPath string
+	ccErr  error
+)
+
+func findCompiler() (string, error) {
 	if cc := os.Getenv("TWILL_CC"); cc != "" {
 		if p, err := exec.LookPath(cc); err == nil {
 			return p, nil
