@@ -382,6 +382,7 @@ func corpusSize() int {
 }
 
 func TestDifferentialForward(t *testing.T) {
+	requireBackend(t)
 	requireCompiler(t)
 	r := rand.New(rand.NewSource(7))
 	var exactChecked, tolChecked, skipped int
@@ -461,6 +462,7 @@ func TestDifferentialForward(t *testing.T) {
 // The gate for gradients. The compiled backward pass has to agree with
 // tensor.Backward, which is what `grad` in a twill program actually runs.
 func TestDifferentialGradient(t *testing.T) {
+	requireBackend(t)
 	requireCompiler(t)
 	r := rand.New(rand.NewSource(11))
 	var exactChecked, tolChecked, skipped int
@@ -562,6 +564,7 @@ func TestDifferentialGradient(t *testing.T) {
 // number transTol is set to, and it fails only if the machine's libm is far
 // enough off that the bound would be fitted to it rather than chosen above it.
 func TestTranscendentalULP(t *testing.T) {
+	requireBackend(t)
 	requireCompiler(t)
 	type fn struct {
 		name string

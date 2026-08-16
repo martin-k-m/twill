@@ -21,6 +21,13 @@ import (
 // the world and not a defect.
 var ErrNoCompiler = errors.New("codegen: no C compiler found (set TWILL_CC to one)")
 
+// ErrNoLoader is returned where a shared library cannot be dialled into at run
+// time. Only Windows can today, through syscall.LoadDLL; everywhere else needs
+// cgo or an assembly trampoline, and load_other.go says why neither is in scope.
+// Callers treat it exactly like ErrNoCompiler: the compiled path is
+// unavailable, the interpreter runs, nothing is wrong.
+var ErrNoLoader = errors.New("codegen: loading emitted code is implemented for windows only")
+
 // ccFlags are the flags the emitted code's correctness depends on.
 //
 // -ffp-contract=off is the one that matters most. With contraction on, the C

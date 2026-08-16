@@ -171,6 +171,7 @@ func cotangent(n int) []float64 {
 }
 
 func TestCompiledGradientAgainstFiniteDifferences(t *testing.T) {
+	requireBackend(t)
 	requireCompiler(t)
 	cases := fdCases()
 	type result struct {
