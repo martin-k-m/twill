@@ -1,7 +1,10 @@
 # Codegen: from tree walking to emitted GPU kernels
 
-A design, not an implementation. No codegen code exists and none is written in
-this pass.
+This was a design when it was written. Phases 1 through 3 of section 9 are now
+built, and section 10 records what was built, what was measured, and where the
+implementation departed from the design. Sections 1 through 9 are left as they
+were written, before the work, so the design can be read against the outcome
+rather than edited to match it.
 
 ## What this document is, and what it is not
 
@@ -507,3 +510,566 @@ Each phase is independently useful and independently abandonable.
 4. **The device backend**, as designed in `docs/gpu.md`, with the fused regions
    of phase 3 as its unit of dispatch rather than individual operations.
 5. **Measure against section 8, and publish the result whichever way it goes.**
+
+---
+
+## 10. What was built, and what it measured
+
+Phases 1 through 3 of section 9 are implemented. Phase 0 (NEEDS-111, the packed
+buffer layout) is not, and phases 4 and 5 are not. Everything below is a number
+from a command that was run; where a thing was not measured, it says so.
+
+Hardware for every figure in this section: Intel Core Ultra 9 285H, 16 logical
+cores, 15.4 GB, Windows 11, Go 1.26.5, gcc 16.1.0 (MinGW-W64 UCRT).
+
+### 10.1 The IR (`internal/ir`)
+
+A flat single-assignment dataflow graph. Nodes name values, not buffers; whether
+a value gets memory is the fusion pass's decision.
+
+The design in section 2 argues for the IR from the launch-overhead side. The
+implementation is aimed somewhere else, because the previous phase's profile
+says something sharper: the tree-walking interpreter is 0.035% of runtime, about
+18% goes to allocating and zeroing intermediate buffers read once and discarded,
+and 17% to goroutine coordination. On the CPU the intermediates are the target,
+and a region is precisely a set of values that never get a buffer.
+
+`ir.Eval` is the reference evaluator: every node dispatches to the
+`internal/tensor` function the interpreter would have called, so IR semantics
+are the interpreter's semantics by construction rather than by agreement. That
+is what phase 1 was for, and it is bit-identical to calling the tensor package
+directly.
+
+`ir.Grad` is the reverse-mode transform of section 5, over the graph rather than
+over the kernel. Each rule is a transcription of the matching `da`/`db`/`df`
+function in `internal/tensor`, so it inherits that code's gradient check rather
+than needing new mathematics.
+
+`ir.Fuse` is the greedy pass of section 3, with two deliberate restrictions
+noted in 10.5.
+
+### 10.2 The CPU backend (`internal/codegen`)
+
+Emits C99, compiles it with a C compiler found on the machine (`gcc`, `clang`,
+`cc`, or `TWILL_CC`), loads the shared library, and calls in. One C function per
+fused region. Every buffer is a constant offset into one flat f64 arena, because
+the IR's shapes are concrete.
+
+Three things in the emitted code exist for bit-exactness rather than for speed:
+the build passes `-ffp-contract=off` so no multiply-add fuses where Go rounds
+twice; reductions carry `parallelSum`'s fixed 4096-element blocking, so the
+answer does not depend on the emitted code being compiled at all; and
+`twill_max`, `twill_min` and `twill_mod` exist because Go's `math.Max`,
+`math.Min` and `math.Mod` are not C's `fmax`, `fmin` and `fmod` on NaN, on
+signed zeros, and on a negative divisor. Constants are emitted as C99 hex float
+literals so the compiler reads back identical bits.
+
+The dial-in goes through `syscall` rather than cgo, so building twill still
+needs no C compiler; the compiler is a run-time option a machine either has or
+does not. Loading is implemented for Windows only. Elsewhere the emitter runs
+and its output can be compiled and read, and `Compile` reports that the load is
+unavailable rather than pretending.
+
+### 10.3 Verification, with the numbers
+
+Everything here is `go test ./internal/codegen/ -v`.
+
+**Forward, 500 generated programs.** Depth 6 to 15, drawn from the operator set,
+every broadcasting regime including rank 0 and extent 1, compared against
+`ir.Eval` at both fusion settings. 62 programs contained no transcendental and
+matched bit for bit. 438 contained one and matched within 1e-12 relative, worst
+observed 3.15e-15. 0 skipped. Every program, transcendental or not, matched
+fused against unfused **bit for bit**, which is the sharpest assertion in the
+suite: it is the compiler compared against itself with only fusion varying.
+
+**The tolerance is measured, not assumed.** `TestTranscendentalULP` runs each
+function over its range through Go and through the emitted code. On this
+machine, over 20,001 points each: exp 1 ulp worst (2.19e-16 relative), log 1 ulp
+(1.81e-16), sin 1 ulp (2.22e-16), cos 1 ulp (2.22e-16), tanh 1 ulp (2.10e-16),
+sqrt 0 ulp and not one differing value, as IEEE 754 requires. The whole-program
+bound of 1e-12 is four orders above that, and the extra is conditioning rather
+than backend slack: the generator freely writes cos(x) - x, and a subtraction of
+two nearby quantities multiplies its operands' relative error. One such
+expression turned a 1-ulp cos difference into 1.48e-15 on the output.
+
+**Gradients, the same 500 programs.** 1,606 parameter gradients in total. Every
+fused gradient matched its unfused counterpart bit for bit. Against
+`tensor.Backward`, 1,493 of the 1,606 were bit-identical and 113 differed, worst
+3.74e-15, under a 1e-12 bar. The bar is not exact, and the reason is a property
+of reverse mode rather than a defect: when a value feeds two operations its
+cotangent is a sum of two contributions, floating-point addition is not
+associative, and `tensor.Backward` adds them in the order its depth-first walk
+visits consumers while `ir.Grad` adds them in reverse node-index order. The 113
+that differ are exactly the parameters with more than one consumer.
+
+**Gradients against finite differences, 38 curated cases.** The independent
+check that survives the interpreter being wrong, since it consults no autodiff
+at all: the compiled backward pass against a Richardson-extrapolated central
+difference of the compiled forward pass, using the method and the constants of
+`internal/tensor/fullgradcheck_test.go`. All 38 pass at 1e-7 relative; worst
+4.82e-9, on a matmul into tanh into sum chain. Cases are sited away from kinks
+for the same reason the cases in that file are.
+
+**A bug this found.** `sum(where([1, 1], x * 2, x * 3))` differentiated used to
+panic. `where` routes the cotangent to whichever branch its condition selected,
+so a condition that selects the same branch everywhere leaves the other branch's
+gradient buffer unallocated, and that branch's own closure then reads a nil
+`Grad`. It is fixed in `Backward` (a node that received no cotangent has nothing
+to propagate) with a regression test in `gradcheck_test.go`. It is an
+interpreter bug, present before any of this work, found by the differential
+harness rather than by review.
+
+### 10.4 Speed, measured, with the caveats that go with it
+
+`TWILL_SPEED=1 go test ./internal/codegen -run TestSpeed`. Median and p99 over
+30 iterations after 5 warmups, with the two implementations **interleaved inside
+one loop** rather than measured in blocks, because `docs/BENCHMARKS.md` section
+7 measured 74% thermal drift on this class of machine.
+
+| | interpreter path | compiled, fused | ratio |
+|---|---|---|---|
+| Monte Carlo forward, 200,000 paths | 2.612 ms median, 3.438 ms p99 | 1.048 ms median, 1.623 ms p99 | 2.49x |
+| the same, differentiated | 8.240 ms median, 10.669 ms p99 | 2.215 ms median, 2.794 ms p99 | 3.72x |
+
+Four things have to be said about those numbers or they are worth less than they
+look.
+
+They are not the benchmark section 8 specifies. That one runs
+`bench/workloads/mc_option_grad.tw` through the CLI, and it cannot run yet
+because there is no front end that turns a `.tw` file into IR (10.5). What is
+measured is the same mathematics driven from Go, with the interpreter side being
+`ir.Eval`, which calls exactly the `internal/tensor` functions the interpreter
+calls. They are therefore not comparable to the 3.450 ms and 13.646 ms in
+`docs/BENCHMARKS.md`, which include parsing, the CLI, and `randn`.
+
+The compiled side is **single-threaded C** and the interpreter side is
+multi-threaded Go. So the win is entirely from not allocating and not touching
+intermediates, which is what the fusion pass was aimed at, and there is a
+straightforward factor still on the table.
+
+The arena numbers say where it came from. Forward: 17 kernels to 2, and
+9,600,088 bytes of intermediates to 16. Differentiated: 50 kernels to 27, and
+24,000,280 bytes to 9,600,168. The backward pass fuses much less well, because a
+cotangent is frequently read twice and this pass materialises rather than
+recomputes.
+
+It is a CPU result and says nothing about the GPU thresholds in section 8.
+
+### 10.5 What is not built, stated plainly
+
+**There is no front end.** Graphs are built through `ir.Builder` from Go. The
+tracer of section 2, the one that would sit inside the interpreter and record
+operations as they run, is not written, and neither is forcing. So no `.tw` file
+goes through the compiler today, and the question of what fraction of the
+language compiles has to be answered as a ceiling rather than as an achievement.
+
+`ir.CoverProgram` measures that ceiling by classifying AST forms against the
+opcode set. Over `examples/`, `bench/workloads/` and `std/`, 81 files, 7,349 of
+10,841 nodes (67.8%) are inside the subset: 87.6% in `bench/workloads`, 72.0% in
+`examples`, 65.8% in `std`. **Zero files are entirely inside it**, and that is
+the number that matters most. Every example prints, and `print` forces. The
+compilable region is a region *inside* a program, not a program, which is
+precisely the case tracing and forcing exist to handle and precisely why the
+front end is the next thing to build rather than a detail.
+
+The largest things outside the subset, by node count: calls through a
+non-identifier callee (1,152), strings (633), indexing (220), `list` (140),
+`print` (100), field access (77), `len` (74), `for` (62).
+
+**The operator set is a subset.** Elementwise arithmetic, the comparisons,
+`where`, `clip`, `relu`, `square`, the transcendentals, `pow` with a scalar
+exponent; `sum`, `mean`, their axis forms, and `sum_to`; `reshape`, `transpose`,
+`broadcast_to`; `matmul`. Not: `einsum`, `conv2d`, `maxpool2d`, `softmax`,
+`logsumexp`, `sort`, `topk`, `gather`, `concat`, `split`, the cumulative ops,
+`prod`, `median`, the `max` and `min` reductions, quantisation, `hessian`.
+
+**It is f64 only.** Phase 0 is not done, so a narrow dtype is refused rather
+than compiled.
+
+**Two fusion rules from section 3 are not implemented.** Structural ops are
+materialised as their own regions rather than folded into a consumer as an index
+remap, which leaves the 14% `docs/perf-baseline.md` attributes to
+`TransposePerm` on the table. And a contraction takes no elementwise epilogue,
+so `relu(x @ W + b)` is two regions rather than one. Both were left out because
+restricting absorption to elementwise producers is what makes the emitter's
+index arithmetic one `effStrides` read per input and therefore checkable by
+inspection.
+
+**Loading is Windows-only**, and the emitted code is not parallelised.
+
+### 10.6 CUDA, for the stage after this one
+
+Checked, not installed. `nvidia-smi` reports an NVIDIA GeForce RTX 5070 Laptop
+GPU with 8,151 MiB and driver 610.88. There is no CUDA toolkit: `nvcc` is not on
+PATH and the NVIDIA GPU Computing Toolkit directory under Program Files does not
+exist. So the device is present and the compiler for it is not, and phase 4
+needs a toolkit installed before it can start.
+
+---
+
+## 11. The tracer, measured
+
+Section 10 was written when graphs were built by hand from Go, so nothing said
+how much of a real program reaches the compiler. The tracer closes that, and the
+answer is worse than the kernel numbers in 10.4 suggest.
+
+Measured with `bench/cmd/tracestats`, which runs a program with tracing on and
+prints the counters the tracer keeps. Same machine as section 10: Intel Core
+Ultra 9 285H, 16 cores, 15.4 GB, Windows 11 build 26200, go1.26.5.
+
+### 11.1 How much traces
+
+20 of the 23 examples produce at least one traced node. `einsum.tw`,
+`jacobian.tw` and `units.tw` produce none.
+
+That number flatters it. The counter that matters is compiled against replayed,
+because a replayed scope runs the interpreter's own path and pays the tracing
+cost on top:
+
+| program | nodes | compiled | replayed |
+| --- | --- | --- | --- |
+| `linreg.tw` | 3,625 | 1,200 | 5 |
+| `signal_opt.tw` | 6,591 | 1,002 | 9 |
+| `mlp.tw` | 36,288 | 8,000 | 10,040 |
+| `nn_xor.tw` | 30,316 | 2,000 | 16,060 |
+| `classifier.tw` | 25,954 | 402 | 11,858 |
+| `attention.tw` | 55,165 | 82 | 37,309 |
+| `gpt.tw` | 190,568 | 42 | 124,130 |
+
+The two programs that compile nearly everything are the two smallest optimisation
+loops. The larger a program gets, the more it replays: `gpt.tw` compiles 42
+scopes and replays 124,130.
+
+The `bench/workloads/*.tw` files trace **nothing at all**, which is worth knowing
+before quoting any timing over them. They were written for the harness in 10.4,
+which builds graphs directly, so a wall-clock comparison across them measures
+process startup and nothing else.
+
+### 11.2 Speed, which is currently a loss
+
+Built binary, alternating `TWILL_TRACE=1` and `TWILL_TRACE=0` in one loop, 11
+iterations after 3 warmups, median:
+
+| program | traced | interpreter | ratio |
+| --- | --- | --- | --- |
+| `linreg.tw` | 23.9 ms | 9.7 ms | 0.41x |
+| `mlp.tw` | 105.4 ms | 57.2 ms | 0.54x |
+| `montecarlo_option.tw` | 30.2 ms | 23.8 ms | 0.79x |
+| `signal_opt.tw` | 34.9 ms | 24.3 ms | 0.70x |
+| `nn_xor.tw` | 111.1 ms | 64.4 ms | 0.58x |
+| `classifier.tw` | 86.7 ms | 51.9 ms | 0.60x |
+
+Still slower end to end on every one of them, by between a quarter and a
+factor of two and a half. That is not in tension with 10.4's 2.49x and 3.72x: those timed a
+compiled kernel against the interpreter with the graph already built. This times
+everything the tracer costs to get there, and at these sizes the tracing, the
+cache lookup, the C compilation of each new graph and the replays outweigh what
+the kernels win.
+
+### 11.2.1 What the profile said, and what it cost
+
+Profiling the traced `linreg.tw` run put **79% of it in
+`codegen.FindCompiler`**, reached through `buildShared` and almost entirely
+`runtime.cgocall`. Not the C compiler: the *search* for it. `exec.LookPath`
+was called once per compilation, and on Windows a miss walks every `PATH`
+entry against every executable extension. Three compilations meant three
+searches, and the searches cost more than gcc did.
+
+`FindCompiler` now answers once per process. In-process, `linreg.tw` went from
+36.5 ms to 5.7 ms.
+
+The end-to-end numbers above are after that fix. Before it they were 0.26x,
+0.45x and 0.52x.
+
+### 11.2.2 One hypothesis that was wrong
+
+`linreg.tw` opens 3,223 scopes for 3,625 nodes, roughly one node each, so
+compiling a graph that small looked like it could not pay. A threshold below
+which a trace replays instead of compiling was added, and swept over 0, 2, 4, 8,
+16 and 32 nodes.
+
+It made no difference. At 20 iterations and three repeats the two settings
+overlap: 7.3, 9.7 and 7.7 ms with the threshold off against 5.9, 8.0 and 8.0 ms
+with it at 16. The run-to-run spread is larger than the effect. The threshold was
+removed rather than kept as a knob the data does not support, and this is written
+down because a negative result someone else would otherwise retry is worth as
+much as a positive one.
+
+### 11.2.3 Where the escapes actually come from
+
+`replayed` equals `escapes` exactly in every program measured, so every replay
+is a mid-scope escape rather than a compilation failure. Attributing those
+escapes to their call sites, and then to the check that refused the operand,
+gives one answer and it is not liveness:
+
+| program | refused for RequiresGrad | forcing escapes |
+| --- | --- | --- |
+| `gpt.tw` | 470,040 | 124,130 |
+| `attention.tw` | 307,280 | 37,309 |
+| `mlp.tw` | 112,000 | 10,036 |
+
+`Tracer.operand` refuses any tensor with `RequiresGrad` set, because a compiled
+kernel produces no backward closures and the interpreter's autodiff would
+silently receive a zero. That refusal is correct. The problem is that in a
+training program almost every tensor has it set, so almost every operation
+outside a `grad` scope refuses, the trace breaks, and the scope replays.
+
+This is why the two shapes of program behave so differently. `linreg.tw` and
+`signal_opt.tw` do their work inside `grads(...)`, where the differentiated
+inputs are registered as parameters before the body runs and never reach that
+test, so they compile nearly everything: 1,200 and 1,002 compiled scopes against
+5 and 9 replays. `gpt.tw` holds parameters that require gradients and computes
+with them outside a grad scope, so it compiles 42 scopes and replays 124,130.
+
+The fix is not a constant, and the cheap version of it does not exist. Three
+attempts, all measured and all reverted:
+
+- **A minimum trace size before compiling.** Swept 0 to 32 nodes, no effect
+  beyond the run-to-run spread. Section 11.2.2.
+- **Dropping the escape on a plain variable rebind**, which reads no data and
+  looked needlessly conservative. It moved `classifier.tw` from 11,858 escapes
+  to 11,854, for a change that touches a liveness invariant. Not worth the risk
+  for four escapes.
+- **A cold-statement cache**: after a statement has built a trace and thrown it
+  away twice for this reason, stop tracing that statement. It fired, 38 times in
+  `gpt.tw` and 1,998 in `mlp.tw`, and escapes did not move at all. Skipping an
+  owning statement only hands ownership to the statements inside it, which then
+  open their own traces and escape themselves. The work moves, it does not go.
+
+What is left is the real change: trace a `RequiresGrad` tensor as a graph
+parameter, and have the compiled path produce a backward graph so the value it
+returns participates in autodiff. `ir.Grad` exists and `CloseGrad` already does
+exactly this for a grad scope, so the missing pieces are narrow and known:
+
+1. `internal/tensor` has no exported way to build a tensor with parents and a
+   backward closure. `p0`, `p1`, `pRest` and `backward` are unexported, so
+   `internal/trace` cannot construct one. That hook has to be added first.
+2. A scope can hand out several outputs, so the backward closure has to
+   accumulate cotangents into the right parameters rather than assume one.
+3. It has to be gradient-checked, not just differentially tested. The failure
+   mode is a zero gradient, which produces a plausible number and a model that
+   silently does not learn. That is the shape of the `QLinear` bug in
+   docs/BUGS.md, and the reason `TestGradientCheckCoversEveryOperator` exists.
+
+### 11.2.5 It was attempted, and it failed the gate
+
+The above was then built, far enough to run: `tensor.TrackCompiled` to attach a
+caller-supplied backward closure, and a `compileAndRunGrad` that compiles the
+forward graph, compiles `ir.Grad`'s backward graph beside it, and wires each
+output to the graph's parameters with a closure that seeds that output's
+cotangent, runs the backward program, and accumulates into each parameter.
+
+Two things happened, and both are the point.
+
+The operator-coverage test failed within seconds: `TrackCompiled` is exported,
+has no gradient-check case and no entry saying it needs none. It also failed in
+the reverse direction when `EnsureGrad`, a method rather than a package
+function, was declared. That closure is doing exactly what it was written to do.
+
+Then the differential tests failed on `attention.tw`, `classifier.tw`,
+`cnn.tw` and others: programs that previously matched the interpreter byte for
+byte no longer did. These are training programs, so a changed output means
+changed gradients, and unlike `signal_opt.tw` they had matched exactly before,
+which rules out reassociation. The wiring is wrong somewhere. The likeliest
+candidates, in order: a parameter that is itself a placeholder from an earlier
+scope, making the parent chain a cycle that `Backward`'s topological walk does
+not expect; the argument order the backward graph expects against the order it
+is given; and a value that is both an output and a parameter counting twice.
+
+It was reverted. A compiled path that produces plausible numbers and wrong
+gradients is worse than no compiled path, and the whole reason this repo has a
+103-case gradient check and a byte-for-byte differential suite is that the
+`QLinear` bug proved that class of error is invisible without them.
+
+### 11.2.6 Where the refusals actually are, which changes the fix
+
+A second attempt separated the two scope kinds: refuse a `RequiresGrad` operand
+inside a grad scope exactly as before, and wire the backward pass only in a
+statement scope. That version is correct. The full suite passes, gradient checks
+included. It also fires **zero** times:
+
+| program | refused inside a grad scope | refused in a statement scope |
+| --- | --- | --- |
+| `gpt.tw` | 470,040 | 0 |
+| `attention.tw` | 307,280 | 0 |
+| `mlp.tw` | 112,000 | 0 |
+
+Every refusal is inside a `grads(...)` body. None is outside one. So the
+statement-scope path is dead code on this corpus and was reverted, and the first
+attempt's failure is explained: it changed grad-scope behaviour, which is the
+only behaviour these programs exercise, and a grad scope's backward pass is
+produced by `ir.Grad` over the whole body. Registering an extra gradient-tracking
+tensor as a plain graph parameter cuts it out of that.
+
+What that leaves is a narrower question than "support RequiresGrad". Inside a
+grad scope, the differentiated leaves are already registered as parameters before
+the body runs. The tensors being refused are the *other* gradient-tracking values
+that reach the body: weights not being differentiated in this call, and values
+carrying gradient state from an enclosing scope. For the current call they are
+constants, so registering them as parameters is arithmetically right. What it
+breaks is any outer backward pass that needed the cotangent to travel through
+them, which is exactly the nested-`grad` and escaping-value case.
+
+The obvious narrow version of that is to accept only autodiff leaves, since a
+leaf's cotangent accumulates and goes no further. Counting says it is not worth
+building on its own:
+
+| program | leaf | intermediate |
+| --- | --- | --- |
+| `gpt.tw` | 25,000 | 445,040 |
+| `attention.tw` | 15,360 | 291,920 |
+| `mlp.tw` | 12,000 | 100,000 |
+| `classifier.tw` | 14,000 | 50,000 |
+
+About one refusal in twenty is a leaf. The rest are intermediates, values with
+parents, whose cotangent has to carry on past them.
+
+That is still tractable, and it says what to build. Register the refused tensor
+as a graph parameter, and in the backward pass accumulate its gradient into that
+tensor's own `Grad` buffer rather than discarding it. `tensor.Backward` walks
+parents from the output, so an intermediate that has received a cotangent will
+have its own closure called and the chain continues on the interpreter's side.
+Both leaves and intermediates work under that rule, because a leaf simply has
+nothing further to call.
+
+The part that needs care is the grad scope itself. `CloseGrad` differentiates the
+whole body with `ir.Grad` and returns gradients for the leaves that were
+pre-registered. Any extra gradient-tracking parameter admitted this way also has
+a gradient in that result, and dropping it is precisely how the first attempt
+produced wrong answers. It has to be accumulated into that tensor's `Grad` too.
+
+So: one rule for admitting the operand, one for accumulating in the ordinary
+backward pass, and one for not discarding the extra gradients in `CloseGrad`.
+
+### 11.2.7 Two of those three already existed, and the third admits nothing
+
+`CloseGrad` already accumulates into every parameter with `RequiresGrad` set, so
+the rule about not discarding the extras was never missing. That leaves the
+admission rule, and it has an exact form: a gradient-tracking tensor may be
+traced when the differentiated result does not reach it through the leaves being
+differentiated. Independent of those leaves, it is a constant of this
+differentiation and the compiled graph may read it like any other value. Reaching
+them, making it a parameter severs the path and the leaf's gradient comes back
+short.
+
+That was implemented, memoised per scope over the interpreter's autodiff parents,
+and it is correct: the whole suite passes, gradient checks, strict liveness mode
+and fusion-off included. It also admits nothing. On `mlp.tw`, of 96,000
+gradient-tracking operands reaching the test inside a grad scope, 96,000 depend
+on the leaves and none is independent. Node and escape counts come out byte for
+byte identical to not having the rule at all.
+
+In hindsight that is what a training loop is. Inside `grads(loss)(w, b)` almost
+every tensor is downstream of `w` or `b`, because that is what the function
+computes. The gradient-tracking values that are genuinely constant there are
+rare.
+
+A measurement earlier in this section said the opposite, that 85 to 95% of them
+were independent. That number was wrong. It came from instrumentation that built
+the leaf set from `t.params` at a point where that slice did not stand for the
+leaves, and it is recorded here as an error rather than quietly dropped, because
+it is the number that made this attempt look worth making.
+
+### 11.2.8 The mechanism of the cascade, and why fixing it alone costs more
+
+Looking at the first refusals inside a grad scope rather than the totals shows
+something the counts hid: they arrive with `params` at zero. A grad scope
+registers its differentiated leaves as parameters when it opens, so that should
+never be zero, and `Escape` is what empties it. It rebuilds the trace after a
+mid-scope force and truncates `t.params` along with everything else.
+
+So the first escape inside a `grads(...)` body drops the leaves, and from that
+point every value descending from them is a gradient-tracking tensor that is not
+a parameter, which `operand` refuses. One escape interprets the entire remainder
+of the differentiated function. That is the cascade, and it is a design flaw
+rather than a tuning question.
+
+Putting the leaves back after an escape is four lines and it works: on
+`mlp.tw` traced nodes go from 36,288 to 72,288 and on `classifier.tw` from
+25,954 to 46,354, with every test still green.
+
+It is also slower. `mlp.tw` traced goes from 112-123 ms to 142-144 ms, memory
+from 197 MB to 261 MB, allocations from 2.17M to 2.84M. The extra work traces
+and is then thrown away, because the escape points that end each scope are
+unchanged: escapes rise from 10,040 to 16,040 on the same program. Reverted on
+that basis.
+
+What it establishes is where the boundary actually is, and it is not where 11.2.5
+put it.
+
+### 11.2.9 The two are not composable, and the reason is the scope
+
+11.2.5 said the fix was a compiled backward pass for statement scopes, and
+11.2.8 said restoring the leaves had to come after it. Doing both turns out to
+be doing one, because 11.2.6 already showed statement scopes contain no
+gradient-tracking operands at all. The compiled-backward design has nothing to
+apply to.
+
+So the honest experiment is leaves restored on its own, and then asking what is
+still escaping. On `mlp.tw`, with the leaves back, of 16,040 escapes:
+
+| site | count |
+| --- | --- |
+| `forced()`, a value the interpreter needs concretely | 8,016 |
+| a binary operand still refused | 8,000 |
+| everything else, builtins included | 24 |
+
+Eight of those escapes are builtins. The rest are the interpreter asking for a
+number. `let g = grads(loss)(w1, b1, w2, b2)` hands back a list, and the next
+three statements index it, multiply by a learning rate and assign. Every one of
+those forces, because a statement scope closes at the end of the statement and
+the next statement starts a new trace against values that are now concrete.
+
+That is the design boundary, stated in section 2 and reached here empirically: a
+statement is the largest region whose live values are known exactly and for free.
+A training loop's work does not fit in one statement. Compiling it means tracing
+across statements, which needs a real liveness analysis over the interpreter's
+environments and its Go stack, and section 2 declined that on the grounds that
+getting it wrong produces a wrong answer rather than a slow one. Nothing measured
+here argues with that.
+
+The conclusion is therefore not that a piece of work is outstanding. It is that
+the tracer, as scoped, compiles what a statement can hold: `montecarlo_option.tw`
+at 1.65x with a third less memory is what that looks like when it fits, and a
+training loop is what it looks like when it does not. Widening the scope is a
+different project, and it is the one with the liveness analysis in it.
+
+Where that leaves the tracer: correct, off by default, and reached mostly by
+programs that do their work outside a grad scope. Making it pay for a training
+loop needs the compiled path to produce a backward pass that the interpreter's
+autodiff can continue from, which is the first attempt's design and is still
+unbuilt. Three attempts have narrowed what it has to do; none has done it.
+
+What these two passes establish is that the tests are sharp enough to run this
+experiment safely: the first attempt was caught by the differential suite in
+minutes, the second was shown to be inert by counting rather than by assuming it
+worked.
+
+Two smaller contributors, worth recording because they look like the problem and
+are not: builtins with no opcode account for 93,982 of `gpt.tw`'s escapes, of
+which `mean` is 28,990, and `mean` already has an opcode. It refuses for the
+same reason as everything else.
+
+### 11.2.4 The default
+
+The tracer is off unless `TWILL_TRACE=1` asks for it. It is correct, and on
+every program measured here it is slower, so defaulting it on would cost every
+twill program time to buy a compiled path most of them never reach. It goes on
+when 11.2.3's fix lands and the numbers say it should.
+
+### 11.2.5 What is left
+
+1. **`RequiresGrad` outside a grad scope**, above. Everything else is smaller.
+2. **Compilation is per process for the in-memory cache**, though the shared
+   library itself is already cached on disk by `buildShared`.
+3. **The tracer already wins where the graph is worth compiling.** In-process,
+   `montecarlo_option.tw` is 9.1 ms traced against 15.3 ms interpreted, 1.65x,
+   with a third less memory. It has 37 nodes in 3 scopes. `linreg.tw` has 3,625
+   nodes in 3,223. The difference between winning and losing is graph size per
+   scope, not total work.
+
+### 11.3 What this means for the GPU stage
+
+The kernels are fast and the path to them is slow, so a GPU backend would make a
+faster thing that is still reached too rarely to matter. An on-disk kernel cache
+and a look at why large programs replay are both worth more than CUDA right now.

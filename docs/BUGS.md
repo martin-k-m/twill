@@ -317,6 +317,62 @@ harness confirms no valid constructor is over-flagged.
 
 ---
 
+## 10. `where` with a uniform condition panicked on the backward pass
+
+**Symptom.** This program crashes:
+
+```
+let f = fn(x) = sum(where([1.0, 1.0], x * 2.0, x * 3.0))
+print(grad(f)([0.2, 0.9]))
+```
+
+with `index out of range [0] with length 0` inside `broadcastBinary`'s backward
+closure. Changing the condition to `[1.0, 0.0]` makes it run. The crash needs the
+condition to select the *same* branch at every element, which is why it had
+survived: a mask that varies, which is what a mask usually does, never reaches it.
+
+**Root cause.** `Where`'s backward closure routes the cotangent element by
+element:
+
+```go
+if cond.Data[idx(o, effC)] != 0 {
+    if a.RequiresGrad { a.ensureGrad()[idx(o, effA)] += g[o] }
+} else if b.RequiresGrad {
+    b.ensureGrad()[idx(o, effB)] += g[o]
+}
+```
+
+`ensureGrad` is what allocates a tensor's gradient buffer, and it is called only
+on the branch a given element selected. A condition that is true everywhere
+therefore never allocates `b`'s buffer. `b` is still a parent, so `Backward`
+reaches it in the topological order and calls its closure, and that closure opens
+with `g := res.Grad` and then indexes `g[i]`. `res.Grad` is nil.
+
+The general shape of the mistake is worth naming, because it is not specific to
+`where`: an operator whose backward routes the cotangent to only *some* of its
+parents leaves the others' gradient unallocated, and every closure in the package
+reads its own `res.Grad` without checking. `where` is the only operator that does
+this today, but nothing stopped the next one.
+
+**How it was caught.** The codegen differential harness,
+`internal/codegen/differential_test.go`. It generates random programs and
+differentiates them through both the interpreter and the compiler, and one of the
+500 contained `where(x > y, x, y)` over operands where the comparison came out
+uniform. The panic was in the *interpreter* side of the comparison, so the
+compiler found a bug in its own reference. Nothing about the compiler is
+implicated; what the harness supplied was a program nobody would have written by
+hand.
+
+**Fix.** In `Backward`, skip a node whose `Grad` is nil. It received no cotangent,
+so its backward would propagate zeros and there is nothing to do. That fixes the
+general shape rather than the `where` instance.
+
+**Regression test.** `TestWhereUniformConditionBackward` in
+`internal/tensor/gradcheck_test.go`, both directions of the uniform condition,
+asserting the surviving branch's gradient rather than only that it does not crash.
+
+---
+
 ## Open
 
 **`einsum` refuses a label repeated within one operand.** `einsum("ii->", A)`,

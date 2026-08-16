@@ -987,3 +987,41 @@ func TestGradCheckDiff(t *testing.T) {
 		return Sum(p)
 	})
 }
+
+// TestWhereUniformConditionBackward is a regression test for a panic found by
+// the codegen differential harness rather than by review.
+//
+// `where` routes the cotangent to whichever branch its condition selected. When
+// the condition selects the same branch at every element, the other branch's
+// gradient buffer is never allocated, and if that branch is a computed node its
+// own backward closure then reads a nil Grad and indexes past the end. The fix
+// is in Backward: a node that received no cotangent has nothing to propagate.
+func TestWhereUniformConditionBackward(t *testing.T) {
+	for _, cond := range [][]float64{{1, 1}, {0, 0}} {
+		x := Leaf([]float64{0.2, 0.9}, []int{2})
+		a, err := Mul(x, Scalar(2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := Mul(x, Scalar(3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := Where(New(cond, []int{2}), a, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Sum(out).Backward(); err != nil {
+			t.Fatalf("cond %v: %v", cond, err)
+		}
+		want := 2.0
+		if cond[0] == 0 {
+			want = 3.0
+		}
+		for i, g := range x.Grad {
+			if g != want {
+				t.Fatalf("cond %v: d/dx[%d] = %v, want %v", cond, i, g, want)
+			}
+		}
+	}
+}
