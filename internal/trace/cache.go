@@ -75,8 +75,6 @@ func (c *Cache) Get(g *ir.Graph, st *Stats) (*codegen.Program, bool) {
 	return p, true
 }
 
-
-
 // Key hashes everything about a graph that changes what the emitted code does,
 // and nothing that does not. Parameter values are not in it; constant values
 // are, because a constant is baked into the C.

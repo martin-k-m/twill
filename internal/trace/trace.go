@@ -127,7 +127,6 @@ func (t *Tracer) Stats() Stats { return t.stats }
 // Enabled reports whether tracing is on.
 func (t *Tracer) Enabled() bool { return t != nil && t.on }
 
-
 // New builds a tracer. TWILL_TRACE turns it on or off, and it is off unless
 // asked for.
 //
@@ -219,12 +218,7 @@ func (t *Tracer) reset() {
 }
 
 // closeScope ends a nested marker, or reports that this is the owning close.
-func (t *Tracer) closing() bool {
-	if t.b == nil {
-		return false
-	}
-	return true
-}
+func (t *Tracer) closing() bool { return t.b != nil }
 
 // Close ends the owning scope. live names the placeholders that escape it, in
 // the order the caller wants them; everything else in the trace is dead and the
@@ -290,7 +284,6 @@ func (t *Tracer) place(r ir.Ref) *tensor.Tensor {
 	t.stats.Nodes++
 	return ph
 }
-
 
 func (t *Tracer) ready() bool {
 	return t != nil && t.on && t.susp == 0 && t.b != nil && !t.broken && t.err == nil
@@ -499,4 +492,3 @@ func (t *Tracer) Transpose(x *tensor.Tensor, perm []int) (*tensor.Tensor, bool) 
 	}
 	return t.place(t.b.Transpose(rx, perm)), !t.broken
 }
-

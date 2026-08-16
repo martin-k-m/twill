@@ -2,8 +2,8 @@
 package main
 
 import (
-	"errors"
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strings"

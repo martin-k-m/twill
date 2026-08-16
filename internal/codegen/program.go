@@ -58,8 +58,6 @@ func Compile(g *ir.Graph, opt Options) (*Program, error) {
 	return p, nil
 }
 
-
-
 // Plan returns the fusion plan the program was compiled from.
 func (p *Program) Plan() *ir.Plan { return p.plan }
 
