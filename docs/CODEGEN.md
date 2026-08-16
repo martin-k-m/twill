@@ -881,9 +881,45 @@ gradients is worse than no compiled path, and the whole reason this repo has a
 103-case gradient check and a byte-for-byte differential suite is that the
 `QLinear` bug proved that class of error is invisible without them.
 
-What this pass establishes is that the design is right and the implementation is
-a real piece of work rather than a wiring exercise: the tests that would catch it
-being wrong exist, they are sharp enough to catch it, and they caught it.
+### 11.2.6 Where the refusals actually are, which changes the fix
+
+A second attempt separated the two scope kinds: refuse a `RequiresGrad` operand
+inside a grad scope exactly as before, and wire the backward pass only in a
+statement scope. That version is correct. The full suite passes, gradient checks
+included. It also fires **zero** times:
+
+| program | refused inside a grad scope | refused in a statement scope |
+| --- | --- | --- |
+| `gpt.tw` | 470,040 | 0 |
+| `attention.tw` | 307,280 | 0 |
+| `mlp.tw` | 112,000 | 0 |
+
+Every refusal is inside a `grads(...)` body. None is outside one. So the
+statement-scope path is dead code on this corpus and was reverted, and the first
+attempt's failure is explained: it changed grad-scope behaviour, which is the
+only behaviour these programs exercise, and a grad scope's backward pass is
+produced by `ir.Grad` over the whole body. Registering an extra gradient-tracking
+tensor as a plain graph parameter cuts it out of that.
+
+What that leaves is a narrower question than "support RequiresGrad". Inside a
+grad scope, the differentiated leaves are already registered as parameters before
+the body runs. The tensors being refused are the *other* gradient-tracking values
+that reach the body: weights not being differentiated in this call, and values
+carrying gradient state from an enclosing scope. For the current call they are
+constants, so registering them as parameters is arithmetically right. What it
+breaks is any outer backward pass that needed the cotangent to travel through
+them, which is exactly the nested-`grad` and escaping-value case.
+
+So the work is: decide, per operand, whether a gradient-tracking tensor is a
+constant for this grad call or a path an outer pass still needs, and register it
+as a parameter only in the first case. That is a reachability question over the
+enclosing scopes, not a wiring change, and it is the piece nothing here has
+built.
+
+What these two passes establish is that the tests are sharp enough to run this
+experiment safely: the first attempt was caught by the differential suite in
+minutes, the second was shown to be inert by counting rather than by assuming it
+worked.
 
 Two smaller contributors, worth recording because they look like the problem and
 are not: builtins with no opcode account for 93,982 of `gpt.tw`'s escapes, of
