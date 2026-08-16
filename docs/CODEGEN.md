@@ -752,25 +752,62 @@ iterations after 3 warmups, median:
 
 | program | traced | interpreter | ratio |
 | --- | --- | --- | --- |
-| `linreg.tw` | 38.2 ms | 10.0 ms | 0.26x |
-| `mlp.tw` | 129.3 ms | 57.5 ms | 0.45x |
-| `montecarlo_option.tw` | 44.0 ms | 22.7 ms | 0.52x |
+| `linreg.tw` | 23.9 ms | 9.7 ms | 0.41x |
+| `mlp.tw` | 105.4 ms | 57.2 ms | 0.54x |
+| `montecarlo_option.tw` | 30.2 ms | 23.8 ms | 0.79x |
+| `signal_opt.tw` | 34.9 ms | 24.3 ms | 0.70x |
+| `nn_xor.tw` | 111.1 ms | 64.4 ms | 0.58x |
+| `classifier.tw` | 86.7 ms | 51.9 ms | 0.60x |
 
-Between two and four times slower, end to end, on the programs where the tracer
-engages most. That is not in tension with 10.4's 2.49x and 3.72x: those timed a
+Still slower end to end on every one of them, by between a quarter and a
+factor of two and a half. That is not in tension with 10.4's 2.49x and 3.72x: those timed a
 compiled kernel against the interpreter with the graph already built. This times
 everything the tracer costs to get there, and at these sizes the tracing, the
 cache lookup, the C compilation of each new graph and the replays outweigh what
 the kernels win.
 
-Three things account for it, in the order they are worth attacking:
+### 11.2.1 What the profile said, and what it cost
 
-1. **Replay dominates on real programs.** Every replayed scope is interpreter
-   work plus the cost of having traced it.
-2. **Compilation happens per process.** The cache is in memory, so a run that
-   compiles 1,200 graphs pays for all of them and keeps none for next time.
-3. **Nothing has been profiled yet.** The three numbers above say the overhead is
-   real; they do not say which of the three it is.
+Profiling the traced `linreg.tw` run put **79% of it in
+`codegen.FindCompiler`**, reached through `buildShared` and almost entirely
+`runtime.cgocall`. Not the C compiler: the *search* for it. `exec.LookPath`
+was called once per compilation, and on Windows a miss walks every `PATH`
+entry against every executable extension. Three compilations meant three
+searches, and the searches cost more than gcc did.
+
+`FindCompiler` now answers once per process. In-process, `linreg.tw` went from
+36.5 ms to 5.7 ms.
+
+The end-to-end numbers above are after that fix. Before it they were 0.26x,
+0.45x and 0.52x.
+
+### 11.2.2 One hypothesis that was wrong
+
+`linreg.tw` opens 3,223 scopes for 3,625 nodes, roughly one node each, so
+compiling a graph that small looked like it could not pay. A threshold below
+which a trace replays instead of compiling was added, and swept over 0, 2, 4, 8,
+16 and 32 nodes.
+
+It made no difference. At 20 iterations and three repeats the two settings
+overlap: 7.3, 9.7 and 7.7 ms with the threshold off against 5.9, 8.0 and 8.0 ms
+with it at 16. The run-to-run spread is larger than the effect. The threshold was
+removed rather than kept as a knob the data does not support, and this is written
+down because a negative result someone else would otherwise retry is worth as
+much as a positive one.
+
+### 11.2.3 What is left
+
+1. **Replay dominates on real programs**, and `replayed` equals `escapes`
+   exactly in every program measured, so every replay is a mid-scope escape.
+   That is the number to attack, and it is a design question about liveness
+   rather than a constant to tune.
+2. **Compilation is per process for the in-memory cache**, though the shared
+   library itself is already cached on disk by `buildShared`.
+3. **The tracer already wins where the graph is worth compiling.** In-process,
+   `montecarlo_option.tw` is 9.1 ms traced against 15.3 ms interpreted, 1.65x,
+   with a third less memory. It has 37 nodes in 3 scopes. `linreg.tw` has 3,625
+   nodes in 3,223. The difference between winning and losing is graph size per
+   scope, not total work.
 
 ### 11.3 What this means for the GPU stage
 

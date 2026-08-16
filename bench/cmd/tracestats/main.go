@@ -17,8 +17,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	fmt.Printf("%-34s %7s %7s %8s %8s %7s %7s %8s %8s\n",
-		"program", "nodes", "scopes", "compiled", "replayed", "hit", "miss", "gradfast", "gradslow")
+	fmt.Printf("%-30s %8s %8s %8s %8s %8s %8s %7s\n",
+		"program", "nodes", "scopes", "traced", "compiled", "replayed", "escapes", "miss")
 
 	var traced, total int
 	for _, f := range files {
@@ -33,9 +33,9 @@ func main() {
 		if s.Nodes > 0 {
 			traced++
 		}
-		fmt.Printf("%-34s %7d %7d %8d %8d %7d %7d %8d %8d\n",
-			filepath.Base(f), s.Nodes, s.Scopes, s.Compiled, s.Replayed,
-			s.CacheHit, s.CacheMiss, s.GradFast, s.GradSlow)
+		fmt.Printf("%-30s %8d %8d %8d %8d %8d %8d %7d\n",
+			filepath.Base(f), s.Nodes, s.Scopes, s.Traced, s.Compiled, s.Replayed,
+			s.Escapes, s.CacheMiss)
 	}
 	fmt.Printf("\n%d of %d programs produced traced nodes\n", traced, total)
 }
