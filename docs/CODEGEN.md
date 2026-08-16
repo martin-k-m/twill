@@ -940,7 +940,41 @@ produced wrong answers. It has to be accumulated into that tensor's `Grad` too.
 
 So: one rule for admitting the operand, one for accumulating in the ordinary
 backward pass, and one for not discarding the extra gradients in `CloseGrad`.
-Nothing here has built the third.
+
+### 11.2.7 Two of those three already existed, and the third admits nothing
+
+`CloseGrad` already accumulates into every parameter with `RequiresGrad` set, so
+the rule about not discarding the extras was never missing. That leaves the
+admission rule, and it has an exact form: a gradient-tracking tensor may be
+traced when the differentiated result does not reach it through the leaves being
+differentiated. Independent of those leaves, it is a constant of this
+differentiation and the compiled graph may read it like any other value. Reaching
+them, making it a parameter severs the path and the leaf's gradient comes back
+short.
+
+That was implemented, memoised per scope over the interpreter's autodiff parents,
+and it is correct: the whole suite passes, gradient checks, strict liveness mode
+and fusion-off included. It also admits nothing. On `mlp.tw`, of 96,000
+gradient-tracking operands reaching the test inside a grad scope, 96,000 depend
+on the leaves and none is independent. Node and escape counts come out byte for
+byte identical to not having the rule at all.
+
+In hindsight that is what a training loop is. Inside `grads(loss)(w, b)` almost
+every tensor is downstream of `w` or `b`, because that is what the function
+computes. The gradient-tracking values that are genuinely constant there are
+rare.
+
+A measurement earlier in this section said the opposite, that 85 to 95% of them
+were independent. That number was wrong. It came from instrumentation that built
+the leaf set from `t.params` at a point where that slice did not stand for the
+leaves, and it is recorded here as an error rather than quietly dropped, because
+it is the number that made this attempt look worth making.
+
+Where that leaves the tracer: correct, off by default, and reached mostly by
+programs that do their work outside a grad scope. Making it pay for a training
+loop needs the compiled path to produce a backward pass that the interpreter's
+autodiff can continue from, which is the first attempt's design and is still
+unbuilt. Three attempts have narrowed what it has to do; none has done it.
 
 What these two passes establish is that the tests are sharp enough to run this
 experiment safely: the first attempt was caught by the differential suite in
