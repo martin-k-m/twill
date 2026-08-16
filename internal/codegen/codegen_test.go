@@ -17,11 +17,34 @@ func requireCompiler(t *testing.T) {
 	}
 }
 
+// requireBackend skips a test that cannot reach the compiled path at all, which
+// is a machine without a C compiler or any platform but Windows, where dialling
+// into a shared library needs cgo. The tests below assert on what the backend
+// computes, so there is nothing to assert when there is no backend.
+func requireBackend(t *testing.T) {
+	t.Helper()
+	b := ir.NewBuilder()
+	x := b.Param("x", []int{1})
+	b.Output(b.Unary(ir.OpNeg, x))
+	g, err := b.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := codegen.Compile(g, codegen.Options{})
+	if err != nil {
+		if errors.Is(err, codegen.ErrNoCompiler) || errors.Is(err, codegen.ErrNoLoader) {
+			t.Skip(err)
+		}
+		t.Fatal(err)
+	}
+	p.Close()
+}
+
 func compile(t *testing.T, g *ir.Graph, fuse bool) *codegen.Program {
 	t.Helper()
 	p, err := codegen.Compile(g, codegen.Options{Fuse: fuse})
 	if err != nil {
-		if errors.Is(err, codegen.ErrNoCompiler) {
+		if errors.Is(err, codegen.ErrNoCompiler) || errors.Is(err, codegen.ErrNoLoader) {
 			t.Skip(err)
 		}
 		t.Fatal(err)
