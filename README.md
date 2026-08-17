@@ -422,6 +422,19 @@ This is a prototype, and some of it is deliberately left for later.
   backend. The interpreter is the reference for the semantics.
   [docs/gpu-feasibility.md](docs/gpu-feasibility.md) measures what a GPU backend
   would actually buy and recommends against it for now.
+- **There is a compiler, and it is off.** `TWILL_TRACE=1` turns on a tracer that
+  records tensor operations as the interpreter runs them, compiles the graph to
+  C and calls it. It is correct, and on every program measured it is *slower*
+  end to end, between a quarter and a factor of two and a half
+  ([docs/CODEGEN.md](docs/CODEGEN.md) §11.2). That is a scope boundary rather
+  than a bug: a statement is the largest region whose live values are known
+  exactly and for free, and a training loop does not fit in one statement, so a
+  loop traces and then escapes on the next statement instead of compiling. Where
+  the work does fit in a statement it wins, `montecarlo_option.tw` at 1.65x with
+  a third less memory. Widening it means tracing across statements, which needs a
+  real liveness analysis over the interpreter's environments and its Go stack.
+  That is a different project and it is not started. Five attempts and three
+  reverts are written up in §11 rather than summarized here.
 - Autodiff is reverse-mode and first-order. `grad(grad(f))` is refused rather
   than silently answered with zero; use `hessian` for second derivatives.
 - The shape checker is best-effort, not a full type system. It catches
