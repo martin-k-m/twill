@@ -2608,7 +2608,7 @@ primitives `buf.tw` names and nothing else implements yet: `buf_new`,
 those land, the packed buffer is written but cannot run.
 
 The dtype semantics landed without it: a bf16 tensor holds bf16 values, rounded
-correctly, and `martin-k-m/shuttle` can now measure the error that quantisation
+correctly, and `twill-lang/shuttle` can now measure the error that quantisation
 introduces. What it still cannot measure is a saving, because `Tensor.data` is
 `Arr[F64]` and a bf16 element occupies 64 bits like everything else. Until this
 lands, shuttle's report that quantisation shrinks nothing stands.
@@ -2646,7 +2646,7 @@ packed host buffer is the same bytes the device wants.
 **Status:** done in twill (commit `edb4637`). `src/tensor.tw` `backward_scaled`
 and `grads_finite`, written over the existing `backward`, no new primitive. See
 `docs/dtypes.md`, "Loss scaling, and the f16 story". The skip-not-clip loop
-that consumes them is `src/precision.tw` in `martin-k-m/loom`.
+that consumes them is `src/precision.tw` in `twill-lang/loom`.
 
 f16 has five exponent bits, so its smallest normal is 2^-14 and real gradients
 go under it. bf16 does not have the problem and needs nothing here. f16 is

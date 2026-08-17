@@ -29,9 +29,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 // runTests is the entry point for `twill test`. paths are the files and

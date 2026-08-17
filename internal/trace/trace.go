@@ -66,8 +66,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Kind distinguishes the two scope shapes the interpreter opens.

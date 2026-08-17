@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Program is a compiled graph: emitted C, built into a shared library, loaded,

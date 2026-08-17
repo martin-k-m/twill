@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-wordmark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-wordmark.svg">
-    <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-wordmark.svg" width="340">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-wordmark.svg">
+    <img alt="twill" src="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-wordmark.svg" width="340">
   </picture>
 </p>
 
@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/martin-k-m/twill/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/martin-k-m/twill/ci.yml?branch=main&style=flat-square&label=CI&labelColor=12332C&color=7FE3C4"></a>
-  <a href="https://github.com/martin-k-m/twill/releases"><img alt="release" src="https://img.shields.io/github/v/release/martin-k-m/twill?sort=semver&style=flat-square&labelColor=12332C&color=4FB79B"></a>
+  <a href="https://github.com/twill-lang/twill/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/twill-lang/twill/ci.yml?branch=main&style=flat-square&label=CI&labelColor=12332C&color=7FE3C4"></a>
+  <a href="https://github.com/twill-lang/twill/releases"><img alt="release" src="https://img.shields.io/github/v/release/twill-lang/twill?sort=semver&style=flat-square&labelColor=12332C&color=4FB79B"></a>
   <a href="go.mod"><img alt="go 1.23+" src="https://img.shields.io/badge/go-1.23%2B-D2F0E4?style=flat-square&labelColor=12332C"></a>
   <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-A8DCCB?style=flat-square&labelColor=12332C">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7FE3C4?style=flat-square&labelColor=12332C"></a>
@@ -159,17 +159,17 @@ CPU cores, deterministically: parallelism never changes a result.
 ## Install
 
 Download a prebuilt binary for your platform from the
-[releases page](https://github.com/martin-k-m/twill/releases) and put it on your
+[releases page](https://github.com/twill-lang/twill/releases) and put it on your
 `PATH`. With a Go toolchain (1.23 or newer) you can also:
 
 ```bash
-go install github.com/martin-k-m/twill/cmd/twill@latest
+go install github.com/twill-lang/twill/cmd/twill@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/martin-k-m/twill.git
+git clone https://github.com/twill-lang/twill.git
 cd twill
 go build -o twill ./cmd/twill
 ```
@@ -410,7 +410,7 @@ The design, including why file-level modes are the mechanism and what each
 feature costs the numeric language, is in
 [`docs/self-hosting.md`](docs/self-hosting.md).
 
-[spool](https://github.com/martin-k-m/spool), the package manager, is the same
+[spool](https://github.com/twill-lang/spool), the package manager, is the same
 experiment run a second time: a real program written against the subset, with its
 own list of what is missing.
 

@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/martin-k-m/twill/internal/codegen"
-	"github.com/martin-k-m/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/codegen"
+	"github.com/twill-lang/twill/internal/ir"
 )
 
 // Cache maps a graph's structure to the program compiled from it.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 // How much of twill is inside the compilable subset, measured over the corpus

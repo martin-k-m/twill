@@ -10,7 +10,7 @@ that three separate efforts are all blocked on the same fact:
   f64 runs at 341.7 GFLOP/s against 18,010 for f32, a 52.7:1 penalty.
   `docs/gpu-feasibility.md` records the measurement and its recommendation
   already names f32 as the larger win.
-- **Quantisation buys nothing.** `martin-k-m/shuttle` implements int8 and f16
+- **Quantisation buys nothing.** `twill-lang/shuttle` implements int8 and f16
   quantisation and correctly reports that it shrinks nothing, because the
   storage is f64 either way.
 - **Bandwidth is the real limit.** Tensor work is memory-bound far more often

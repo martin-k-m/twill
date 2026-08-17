@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 // run executes f with tracing on or off and returns everything it printed.

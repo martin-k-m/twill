@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 func hessResult(t *testing.T, src string) *tensor.Tensor {

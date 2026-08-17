@@ -619,7 +619,7 @@ unchanged and fully backward compatible.
 ### Renamed
 
 - **The language is now Twill, and its source extension is now `.tw`**
-  (2026-08-07). The Go module path is `github.com/martin-k-m/twill`, the binary
+  (2026-08-07). The Go module path is `github.com/twill-lang/twill`, the binary
   and every CLI message is `twill`, the standard library override environment
   variable is `TWILL_STD`, and `examples/`, `std/` and the whole fixture corpus
   carry `.tw`.
@@ -1331,7 +1331,7 @@ Usability and distribution.
 - The REPL handles multi-line input: it keeps reading until brackets balance,
   so you can define block-body functions interactively.
 - Prebuilt binaries for Linux, macOS, and Windows are attached to each release;
-  `go install github.com/martin-k-m/raster/cmd/raster@latest` also works.
+  `go install github.com/twill-lang/raster/cmd/raster@latest` also works.
 - A release workflow builds and publishes the binaries on a version tag.
 - Added a getting-started tutorial (`docs/tutorial.md`).
 

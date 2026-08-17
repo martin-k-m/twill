@@ -3,7 +3,7 @@ package ir
 import (
 	"fmt"
 
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Eval runs a graph by dispatching every node to the internal/tensor function

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // The self-hosted compiler is twill written in twill (src/main.tw and the

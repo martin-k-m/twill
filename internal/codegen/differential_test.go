@@ -7,9 +7,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/codegen"
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/codegen"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Differential testing of the compiler against the interpreter.

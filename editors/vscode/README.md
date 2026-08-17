@@ -1,6 +1,6 @@
 # Twill for VS Code
 
-Language support for [Twill](https://github.com/martin-k-m/twill), a tensor-first
+Language support for [Twill](https://github.com/twill-lang/twill), a tensor-first
 differentiable language where automatic differentiation and physical units are
 built into the language rather than a library.
 

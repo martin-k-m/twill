@@ -1,10 +1,10 @@
 package interp
 
 import (
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/trace"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/trace"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // This file is the interpreter's half of the tracer. The other half is

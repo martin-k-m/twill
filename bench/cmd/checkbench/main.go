@@ -24,9 +24,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/lexer"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/lexer"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 type row struct {

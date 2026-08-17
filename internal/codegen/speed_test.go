@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // A speed comparison, run only when asked for, and interleaved.

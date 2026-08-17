@@ -5,9 +5,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/codegen"
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/codegen"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Gradient checking the *compiled* backward pass against finite differences.

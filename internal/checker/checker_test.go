@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 func diagnostics(t *testing.T, src string) []checker.Diagnostic {

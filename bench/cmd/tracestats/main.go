@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 func main() {

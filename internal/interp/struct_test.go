@@ -3,7 +3,7 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/format"
+	"github.com/twill-lang/twill/internal/format"
 )
 
 // `struct Name { field: Type, ... }` declares a record type. Records are

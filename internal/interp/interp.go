@@ -10,14 +10,14 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/martin-k-m/twill/internal/ast"
-	"github.com/martin-k-m/twill/internal/gbm"
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/parser"
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/trace"
-	"github.com/martin-k-m/twill/internal/value"
-	"github.com/martin-k-m/twill/std"
+	"github.com/twill-lang/twill/internal/ast"
+	"github.com/twill-lang/twill/internal/gbm"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/trace"
+	"github.com/twill-lang/twill/internal/value"
+	"github.com/twill-lang/twill/std"
 )
 
 // defaultSeed makes randomness reproducible by default — a run gives the same

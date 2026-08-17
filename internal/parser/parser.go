@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/martin-k-m/twill/internal/ast"
-	"github.com/martin-k-m/twill/internal/lexer"
+	"github.com/twill-lang/twill/internal/ast"
+	"github.com/twill-lang/twill/internal/lexer"
 )
 
 // The bitwise operators are spelled as words, and sit where their symbolic

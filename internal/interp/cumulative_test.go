@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 func TestCumulativeOps(t *testing.T) {

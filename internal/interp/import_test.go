@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // writeModule writes src to dir/name.tw and returns the path.

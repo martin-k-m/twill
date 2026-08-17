@@ -19,11 +19,11 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/parser"
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // canonicalDumpFlag is spelled as one token so that adding it cannot change how

@@ -3,7 +3,7 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/format"
+	"github.com/twill-lang/twill/internal/format"
 )
 
 // A typed record literal, `Point { x: 1.0 }`, builds the same structural record

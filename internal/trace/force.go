@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // strict makes every placeholder a graph output rather than only the ones the

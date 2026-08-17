@@ -1,3 +1,3 @@
-module github.com/martin-k-m/twill
+module github.com/twill-lang/twill
 
 go 1.23
