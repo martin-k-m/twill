@@ -3,8 +3,8 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // wantBool runs src and asserts the result is the expected Bool.

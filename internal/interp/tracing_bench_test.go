@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 // The pair to run when changing the tracer. In-process, so it measures the

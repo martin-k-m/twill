@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	rparser "github.com/martin-k-m/twill/internal/parser"
+	rparser "github.com/twill-lang/twill/internal/parser"
 )
 
 // unportable lists fixtures whose recorded output is not a fact about Twill.

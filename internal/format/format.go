@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/martin-k-m/twill/internal/ast"
-	"github.com/martin-k-m/twill/internal/lexer"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/ast"
+	"github.com/twill-lang/twill/internal/lexer"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 // Source parses src and returns the canonically formatted text. It refuses

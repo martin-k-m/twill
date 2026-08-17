@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martin-k-m/twill/internal/gbm"
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/gbm"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 func (ip *Interp) installBuiltins() {

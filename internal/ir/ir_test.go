@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/ir"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/ir"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // The IR's first claim is that it does not change any arithmetic: evaluating a

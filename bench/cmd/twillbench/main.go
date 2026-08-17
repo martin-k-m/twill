@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/parser"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 type record struct {

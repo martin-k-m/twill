@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 // runOut runs a program capturing everything it prints, joined by newlines.

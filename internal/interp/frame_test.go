@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 func runFileCapture(t *testing.T, dir, name, src string) []string {

@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/gbm"
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/gbm"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // roundTrip saves v to a temp file via the language's save/load builtins and

@@ -652,11 +652,11 @@ below, the executed decision is marked.
 ### What was done
 
 **Module and packages**
-- [x] `go mod edit -module github.com/martin-k-m/twill`, and every import path
+- [x] `go mod edit -module github.com/twill-lang/twill`, and every import path
       rewritten. Go treats this as a new module, not a version bump, so no `/v2`
       suffix. `go build ./... && go test ./...` was the gate.
       **Overruled:** this section originally proposed
-      `github.com/fabric-ml/twill`. The owner kept the `martin-k-m` path, so the
+      `github.com/fabric-ml/twill`. The owner kept the `twill-lang` path, so the
       rename is a rename and not also an ownership transfer.
 - [x] `cmd/raster/` to `cmd/twill/`. Binary name `twill`. `Makefile`,
       `.github/workflows/ci.yml`, `.github/workflows/release.yml` (five target
@@ -760,7 +760,7 @@ lexer's over every `.tw` file in the tree. Eight to ten weeks.**
 Scope, exactly:
 
 1. Stage S1 in full. The tree is `twill`, `.tw`, the module path is
-   `github.com/martin-k-m/twill`, both `.bin` fixtures still load, all 279 tests
+   `github.com/twill-lang/twill`, both `.bin` fixtures still load, all 279 tests
    green, `testdata/` canonical dumps unchanged.
 2. `mode systems` as a file-level declaration, with the mandatory-typing policy
    in the checker.

@@ -5,9 +5,9 @@
 Six codebases were written in twill by six agents who could not see each other's
 work. Each one hit walls and wrote them down: `docs/needs.md` in this repository
 for the self-hosted compiler, the CLI and the standard library, and the same
-file in `martin-k-m/spool` (package manager), `martin-k-m/loom` (training
-framework), `martin-k-m/bobbin` (benchmarking), `martin-k-m/weft` (plotting) and
-`martin-k-m/warp` (data pipelines).
+file in `twill-lang/spool` (package manager), `twill-lang/loom` (training
+framework), `twill-lang/bobbin` (benchmarking), `twill-lang/weft` (plotting) and
+`twill-lang/warp` (data pipelines).
 
 That independence is the only thing that makes this document worth more than a
 wish list. A feature one agent asked for once is one program's taste. A feature

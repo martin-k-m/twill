@@ -8,12 +8,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/format"
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/lexer"
-	"github.com/martin-k-m/twill/internal/parser"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/format"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/lexer"
+	"github.com/twill-lang/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 const version = "1.5.1.1"

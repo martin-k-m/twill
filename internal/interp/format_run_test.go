@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/format"
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/format"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 // TestFormattedExamplesMatch formats each example and checks that running the

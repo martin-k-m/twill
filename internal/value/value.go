@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/martin-k-m/twill/internal/ast"
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/ast"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Value is any runtime value. Concrete types: Num, *tensor.Tensor, Bool, Str,

@@ -3,7 +3,7 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/format"
+	"github.com/twill-lang/twill/internal/format"
 )
 
 // enum declares a sum type; each case is a value in scope (a constructor when it

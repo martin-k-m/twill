@@ -3,7 +3,7 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/format"
+	"github.com/twill-lang/twill/internal/format"
 )
 
 // Postfix `?` unwraps the success case of a Res/Opt (the payload of `Ok`/`Some`)

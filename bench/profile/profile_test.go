@@ -16,8 +16,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // iterations is small enough that the test is not a burden in a normal `go

@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 func listScalars(t *testing.T, v value.Value) []float64 {

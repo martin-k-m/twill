@@ -17,13 +17,13 @@
     "differentiable",
     "machine learning"
   ],
-  "homepage": "https://github.com/martin-k-m/twill",
+  "homepage": "https://github.com/twill-lang/twill",
   "repository": {
     "type": "git",
-    "url": "https://github.com/martin-k-m/twill.git"
+    "url": "https://github.com/twill-lang/twill.git"
   },
   "bugs": {
-    "url": "https://github.com/martin-k-m/twill/issues"
+    "url": "https://github.com/twill-lang/twill/issues"
   },
   "engines": {
     "vscode": "^1.75.0"

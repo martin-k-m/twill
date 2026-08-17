@@ -3,7 +3,7 @@ package value
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/tensor"
 )
 
 // Scopes hold their first few bindings inline and spill to a map after that.

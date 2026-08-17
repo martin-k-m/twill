@@ -116,7 +116,7 @@ import "buf.tw" as buf
 # layout*: `data` is the packed byte buffer from src/buf.tw, element i in
 # elem_bytes(dtype) bytes at offset i times that, little-endian. A bf16 element
 # occupies sixteen bits, so the memory drop docs/dtypes.md promises is real now
-# and `martin-k-m/shuttle` stops being right that quantisation shrinks nothing.
+# and `twill-lang/shuttle` stops being right that quantisation shrinks nothing.
 #
 # The invariant that let the semantics land before the layout is unchanged, and
 # the layout now enforces it rather than trusting it: every element read out of

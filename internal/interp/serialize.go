@@ -7,9 +7,9 @@ import (
 	"io"
 	"os"
 
-	"github.com/martin-k-m/twill/internal/gbm"
-	"github.com/martin-k-m/twill/internal/tensor"
-	"github.com/martin-k-m/twill/internal/value"
+	"github.com/twill-lang/twill/internal/gbm"
+	"github.com/twill-lang/twill/internal/tensor"
+	"github.com/twill-lang/twill/internal/value"
 )
 
 // A saved file is: the 4-byte magic "RSTR", a version byte, then one tagged

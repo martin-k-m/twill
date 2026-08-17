@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/interp"
 )
 
 // The language changes that went into 1.5. Each one came from a repository in

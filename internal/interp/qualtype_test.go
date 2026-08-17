@@ -3,9 +3,9 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/ast"
-	"github.com/martin-k-m/twill/internal/format"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/ast"
+	"github.com/twill-lang/twill/internal/format"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 // A module-qualified type name (`cp.Caps`) is the pervasive systems-mode

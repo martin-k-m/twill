@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/martin-k-m/twill/internal/checker"
-	"github.com/martin-k-m/twill/internal/interp"
-	"github.com/martin-k-m/twill/internal/parser"
+	"github.com/twill-lang/twill/internal/checker"
+	"github.com/twill-lang/twill/internal/interp"
+	"github.com/twill-lang/twill/internal/parser"
 )
 
 // TestExamplesRunClean shape-checks and runs every example program in-process,

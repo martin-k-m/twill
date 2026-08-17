@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/martin-k-m/twill/internal/ast"
+	"github.com/twill-lang/twill/internal/ast"
 )
 
 // Coverage answers one question, and it is the question a compiler that only
