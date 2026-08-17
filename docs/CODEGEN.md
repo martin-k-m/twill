@@ -657,11 +657,15 @@ It is a CPU result and says nothing about the GPU thresholds in section 8.
 
 ### 10.5 What is not built, stated plainly
 
-**There is no front end.** Graphs are built through `ir.Builder` from Go. The
-tracer of section 2, the one that would sit inside the interpreter and record
-operations as they run, is not written, and neither is forcing. So no `.tw` file
-goes through the compiler today, and the question of what fraction of the
+**There is no front end.** Graphs are built through `ir.Builder` from Go, and no
+`.tw` file is compiled ahead of time, so the question of what fraction of the
 language compiles has to be answered as a ceiling rather than as an achievement.
+
+(Written before section 11. The tracer and forcing described here as unwritten
+were built afterwards and are measured in §11, so `.tw` programs do now reach the
+compiler at run time, one statement scope at a time. The ceiling below is still
+the right way to read the coverage number, and §11.2.9 is where that scope turns
+out to be the binding constraint.)
 
 `ir.CoverProgram` measures that ceiling by classifying AST forms against the
 opcode set. Over `examples/`, `bench/workloads/` and `std/`, 81 files, 7,349 of
