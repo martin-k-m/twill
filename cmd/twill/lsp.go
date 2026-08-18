@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -284,7 +286,10 @@ func (s *lspServer) publish(uri string) {
 			"message":  strings.TrimPrefix(err.Error(), fmt.Sprintf("line %d:%d: ", line+1, col+1)),
 		})
 	} else {
-		for _, d := range checker.Check(prog) {
+		// CheckFile rather than Check: an editor knows where the file is, and
+		// that is what lets a match on an enum from another module be checked
+		// for exhaustiveness.
+		for _, d := range checker.CheckFile(prog, pathOfURI(uri)) {
 			diags = append(diags, map[string]any{
 				"range":    lineRange(src, d.Line-1, 0),
 				"severity": 1,
@@ -395,6 +400,28 @@ func wholeDocumentRange(src string) map[string]any {
 		"start": map[string]any{"line": 0, "character": 0},
 		"end":   map[string]any{"line": len(lines), "character": 0},
 	}
+}
+
+// pathOfURI turns a file:// URI into a path, so an import written relative to
+// the file being edited resolves against the right directory. A URI that is not
+// a file (an untitled buffer) has no path, and an import in it resolves against
+// the working directory instead.
+func pathOfURI(uri string) string {
+	rest, ok := strings.CutPrefix(uri, "file://")
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimPrefix(rest, "/")
+	if unescaped, err := url.PathUnescape(rest); err == nil {
+		rest = unescaped
+	}
+	// A Windows URI carries the drive as the first segment (file:///c:/x), and a
+	// POSIX one does not, so the leading slash goes back on when it is not a
+	// drive.
+	if len(rest) < 2 || rest[1] != ':' {
+		rest = "/" + rest
+	}
+	return filepath.FromSlash(rest)
 }
 
 func rawJSON(v any) json.RawMessage {

@@ -119,20 +119,13 @@ func (c *checker) prelude(prog *ast.Program) *checkEnv {
 	// Enum cases are names too: `Some`/`None`/`Ok`/`Err` and every user variant
 	// must resolve wherever they are constructed, so they are defined before any
 	// body is checked. The type they belong to is left advisory.
+	// This file's own enums. An imported one may already be registered (see
+	// loadImportedEnums); a file's own declaration wins, so it is registered
+	// first and registerEnum leaves an existing entry alone.
 	for _, s := range prog.Body {
 		if ed, ok := s.(*ast.EnumDecl); ok {
-			names := make([]string, 0, len(ed.Variants))
-			for _, v := range ed.Variants {
-				names = append(names, v.Name)
-				// A variant name shared by two enums is ambiguous as a bare
-				// name; owner is left unset so a match on it is not judged.
-				if owner, dup := c.variantOwner[v.Name]; dup && owner != ed.Name {
-					c.variantOwner[v.Name] = ""
-				} else {
-					c.variantOwner[v.Name] = ed.Name
-				}
-			}
-			c.enums[ed.Name] = names
+			delete(c.enums, ed.Name)
+			c.registerEnum(ed)
 		}
 	}
 	// With every enum and struct named, their payload and field types can be
