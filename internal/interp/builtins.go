@@ -902,6 +902,18 @@ func (ip *Interp) installBuiltins() {
 	def("clock_now_ms", 0, false, func(a []value.Value) (value.Value, error) {
 		return tensor.Scalar(float64(time.Now().UnixMilli())), nil
 	})
+	// mono_ns is a monotonic clock in nanoseconds: it only ever goes forward,
+	// where clock_now_ms is the wall clock and can step backwards when the
+	// system's time is corrected. A duration measured across a wall-clock
+	// correction is wrong by the correction, which for a benchmark is the
+	// difference between a number and a fiction, so timing reads this one.
+	//
+	// The zero point is arbitrary and unrelated to any calendar. Only
+	// differences between two readings mean anything, which is the whole
+	// contract. docs/needs.md NEEDS-39.
+	def("mono_ns", 0, false, func(a []value.Value) (value.Value, error) {
+		return value.Int(int64(time.Since(processStart))), nil
+	})
 
 	// emit_line writes a string and a newline, the diagnostic printer's unit.
 	def("emit_line", 1, false, func(a []value.Value) (value.Value, error) {
@@ -2897,6 +2909,11 @@ func sortStringList(l *value.List, rest []value.Value) (value.Value, error) {
 // scalarOf reads a single number. It reads a Num straight out rather than
 // widening it first, because a builtin that wants a scalar wants an axis or a
 // bound and would throw the tensor away again.
+// processStart is mono_ns's zero point. Go's time.Since reads the monotonic
+// clock a Time carries, so a duration from a Time taken once at startup is a
+// monotonic reading and not a wall-clock subtraction.
+var processStart = time.Now()
+
 // bitFuncs is the one definition of what each bitwise word computes. The
 // operators are reachable two ways, infix (`x shr 8`) and called (`shr(x, 8)`),
 // and both routes land here so the two spellings cannot come to mean different

@@ -23,17 +23,19 @@ fn main() {
   print(path_exists(f), path_is_dir(f), file_size(f))
   match read_file(f) { Ok(s) => print(s), Err(e) => print(e) }
   let g: Str = path_join(sub, "moved.txt")
-  match rename_path(f, g) { Ok(_) => print("moved"), Err(e) => print(e) }
+  match rename(f, g) { Ok(_) => print("moved"), Err(e) => print(e) }
   print(path_exists(f), path_exists(g))
   match remove_file(sub) { Ok(_) => print("BAD: removed a directory"), Err(_) => print("refused") }
   match remove_file(g) { Ok(_) => print("removed"), Err(e) => print(e) }
   match remove_dir(base) { Ok(_) => print("cleaned"), Err(e) => print(e) }
   print(path_exists(base))
+  # remove_all takes either, and succeeds on a path that is already gone.
+  match remove_all(base) { Ok(_) => print("gone"), Err(e) => print(e) }
 }
 `)
 	expectLines(t, out,
 		"true true", "made", "true", "wrote", "true false 5", "hello",
-		"moved", "false true", "refused", "removed", "cleaned", "false")
+		"moved", "false true", "refused", "removed", "cleaned", "false", "gone")
 }
 
 // A failure is a value, not a crash: every one of these reports an Err naming
@@ -48,11 +50,31 @@ fn describe(r: Res[Unit, Str]) -> Str {
 fn main() {
   print(describe(remove_file("`+missing+`")))
   print(describe(remove_dir("`+missing+`")))
-  print(describe(rename_path("`+missing+`", "`+missing+`2")))
+  print(describe(rename("`+missing+`", "`+missing+`2")))
+  print(describe(remove_all("`+missing+`")))
   print(path_exists("`+missing+`"), path_is_dir("`+missing+`"))
 }
 `)
-	expectLines(t, out, "err", "err", "err", "false false")
+	expectLines(t, out, "err", "err", "err", "ok", "false false")
+}
+
+// mtime and mono_ns: when a file last changed, and a clock that only goes
+// forward. mono_ns's zero point is arbitrary, so only a difference is asserted.
+func TestTimestamps(t *testing.T) {
+	out := runFile(t, t.TempDir(), `mode systems
+fn main() {
+  let a: I64 = mono_ns()
+  let b: I64 = mono_ns()
+  print(b >= a)
+  print(mtime("no-such-file-anywhere") == -1)
+  let d: Str = match temp_dir("twillmt") { Ok(p) => p, Err(e) => abort(e) }
+  let f: Str = path_join(d, "x.txt")
+  match write_file(f, "hi") { Ok(_) => unit, Err(e) => print(e) }
+  print(mtime(f) > 1700000000)
+  match remove_all(d) { Ok(_) => print("gone"), Err(e) => print(e) }
+}
+`)
+	expectLines(t, out, "true", "true", "true", "gone")
 }
 
 // The path operations are string handling: they never touch the filesystem,
