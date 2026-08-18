@@ -93,7 +93,7 @@ func runFile(path string, check bool) int {
 			reportError(path, string(src), perr)
 			return 1
 		}
-		diags := checker.Check(prog)
+		diags := checker.CheckFile(prog, path)
 		if len(diags) > 0 {
 			for _, d := range diags {
 				fmt.Fprintf(os.Stderr, "%s:%d: shape error: %s\n", path, d.Line, d.Msg)
@@ -156,7 +156,7 @@ func checkOnly(path string) int {
 		reportError(path, string(src), perr)
 		return 1
 	}
-	diags := checker.Check(prog)
+	diags := checker.CheckFile(prog, path)
 	if len(diags) == 0 {
 		fmt.Printf("%s: no shape problems found\n", path)
 		return 0

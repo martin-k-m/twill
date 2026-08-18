@@ -128,7 +128,7 @@ func runOneTestFile(path string) testResult {
 	if perr != nil {
 		return testResult{ok: false, errMsg: fmt.Sprintf("parse error: %v", perr)}
 	}
-	if diags := checker.Check(prog); len(diags) > 0 {
+	if diags := checker.CheckFile(prog, path); len(diags) > 0 {
 		var b strings.Builder
 		for _, d := range diags {
 			fmt.Fprintf(&b, "%s:%d: shape error: %s\n", path, d.Line, d.Msg)
