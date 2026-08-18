@@ -146,9 +146,11 @@ struct Tensor {
 # rule, which is the one that decides whether a bf16 matmul is a number or a
 # rumour.
 #
-# Codes are I64 rather than an enum because an enum with no payload still cannot
-# be compared with `==` (NEEDS-70), and `is_same_op` above shows what that costs:
-# a string comparison per dispatch. A dtype is compared on every store.
+# Codes are I64 rather than an enum. That was forced when a payload-free enum
+# case could not be compared with `==` (NEEDS-70, closed in 1.6, which is why
+# the dispatches below compare Op values directly instead of their names); it
+# stays an I64 because the order is load-bearing -- see the paragraph below --
+# and an enum has no order.
 #
 # The order is deliberate and two of the comparisons below depend on it: the
 # integer kinds are below the float kinds, and within the floats the order is by
@@ -1025,8 +1027,8 @@ fn d_unary(op: Op, x: F64, o: F64, p0: F64, p1: F64) -> F64 {
 # a reader expects.
 fn unary_result_dtype(op: Op, dt: I64) -> I64 {
   if is_float_dtype(dt) { return dt }
-  if is_same_op(op, OpNeg) or is_same_op(op, OpRelu) { return dt }
-  if is_same_op(op, OpSquare) or is_same_op(op, OpClip) { return dt }
+  if op == OpNeg or op == OpRelu { return dt }
+  if op == OpSquare or op == OpClip { return dt }
   DT_F32
 }
 
@@ -1418,19 +1420,15 @@ fn reduce_axis_keep(t: Tensor, axis_in: I64, op: Op) -> Res[Tensor, Str] {
 # One name for "reduce this axis with this op", so that keepdims, and the
 # gradient dispatch further down, do not each need their own seven-way branch.
 fn reduce_axis_by(t: Tensor, axis: I64, op: Op) -> Res[Tensor, Str] {
-  if is_same_op(op, OpSum) { return sum_axis(t, axis) }
-  if is_same_op(op, OpMean) { return mean_axis(t, axis) }
-  if is_same_op(op, OpMax) { return max_axis(t, axis) }
-  if is_same_op(op, OpMin) { return min_axis(t, axis) }
-  if is_same_op(op, OpProd) { return prod_axis(t, axis) }
-  if is_same_op(op, OpMedian) { return median_axis(t, axis) }
-  if is_same_op(op, OpLogSumExp) { return logsumexp_axis(t, axis) }
+  if op == OpSum { return sum_axis(t, axis) }
+  if op == OpMean { return mean_axis(t, axis) }
+  if op == OpMax { return max_axis(t, axis) }
+  if op == OpMin { return min_axis(t, axis) }
+  if op == OpProd { return prod_axis(t, axis) }
+  if op == OpMedian { return median_axis(t, axis) }
+  if op == OpLogSumExp { return logsumexp_axis(t, axis) }
   Err(bytes.concat("reduce_axis_by: not a reduction: ", op_name(op)))
 }
-
-# Payload-free enum cases compare by name here rather than by a `match` per
-# call site. NEEDS-70 would make `==` work on them directly.
-fn is_same_op(a: Op, b: Op) -> Bool = op_name(a) == op_name(b)
 
 # max or min along an axis, dropping it.
 #
@@ -3025,12 +3023,12 @@ fn t_reduce_all(tp: Tape, op: Op, a: I64) -> Res[I64, Str] {
 }
 
 fn reduce_all_by(v: Tensor, op: Op) -> Res[Tensor, Str] {
-  if is_same_op(op, OpSum) { return Ok(sum_all(v)) }
-  if is_same_op(op, OpMean) { return Ok(mean_all(v)) }
-  if is_same_op(op, OpMax) { return Ok(max_all(v)) }
-  if is_same_op(op, OpMin) { return Ok(min_all(v)) }
-  if is_same_op(op, OpProd) { return Ok(prod_all(v)) }
-  if is_same_op(op, OpMedian) { return Ok(median_all(v)) }
+  if op == OpSum { return Ok(sum_all(v)) }
+  if op == OpMean { return Ok(mean_all(v)) }
+  if op == OpMax { return Ok(max_all(v)) }
+  if op == OpMin { return Ok(min_all(v)) }
+  if op == OpProd { return Ok(prod_all(v)) }
+  if op == OpMedian { return Ok(median_all(v)) }
   Err(bytes.concat("reduce_all_by: not a reduction: ", op_name(op)))
 }
 
@@ -3301,29 +3299,29 @@ fn vjp(tp: Tape, i: I64, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] 
   # zero derivative wherever it has one at all.
   if len(e.inputs) == 0 { return Ok(0) }
   if is_comparison(e.op) { return Ok(0) }
-  if is_same_op(e.op, OpArgmax) or is_same_op(e.op, OpArgmin) { return Ok(0) }
+  if e.op == OpArgmax or e.op == OpArgmin { return Ok(0) }
 
   if is_binary_op(e.op) { return vjp_binary(tp, e, g, cot, touched) }
   if is_unary_op(e.op) { return vjp_unary(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpWhere) { return vjp_where(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpMatMul) { return vjp_matmul(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpEinsum) { return vjp_einsum(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpSum) or is_same_op(e.op, OpMean) {
+  if e.op == OpWhere { return vjp_where(tp, e, g, cot, touched) }
+  if e.op == OpMatMul { return vjp_matmul(tp, e, g, cot, touched) }
+  if e.op == OpEinsum { return vjp_einsum(tp, e, g, cot, touched) }
+  if e.op == OpSum or e.op == OpMean {
     return vjp_sum_mean(tp, e, g, cot, touched)
   }
-  if is_same_op(e.op, OpMax) or is_same_op(e.op, OpMin) {
+  if e.op == OpMax or e.op == OpMin {
     return vjp_extreme(tp, e, g, cot, touched)
   }
-  if is_same_op(e.op, OpProd) { return vjp_prod(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpMedian) { return vjp_median(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpLogSumExp) { return vjp_logsumexp(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpSoftmax) { return vjp_softmax(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpReshape) {
+  if e.op == OpProd { return vjp_prod(tp, e, g, cot, touched) }
+  if e.op == OpMedian { return vjp_median(tp, e, g, cot, touched) }
+  if e.op == OpLogSumExp { return vjp_logsumexp(tp, e, g, cot, touched) }
+  if e.op == OpSoftmax { return vjp_softmax(tp, e, g, cot, touched) }
+  if e.op == OpReshape {
     # The identity on the buffer, which is why it has no helper.
     accumulate(cot, touched, e.inputs[0], data_arr(g))
     return Ok(0)
   }
-  if is_same_op(e.op, OpCast) {
+  if e.op == OpCast {
     # The straight-through estimator: the forward rounds to dt, and the
     # gradient of a rounding is taken to be one. So the cotangent passes to the
     # input unchanged, exactly as reshape does, and accumulate stores it at the
@@ -3335,47 +3333,47 @@ fn vjp(tp: Tape, i: I64, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] 
     accumulate(cot, touched, e.inputs[0], data_arr(g))
     return Ok(0)
   }
-  if is_same_op(e.op, OpTranspose) { return vjp_permutation(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpFlip) { return vjp_flip(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpSort) or is_same_op(e.op, OpTopK) {
+  if e.op == OpTranspose { return vjp_permutation(tp, e, g, cot, touched) }
+  if e.op == OpFlip { return vjp_flip(tp, e, g, cot, touched) }
+  if e.op == OpSort or e.op == OpTopK {
     return vjp_selection(tp, e, g, cot, touched)
   }
-  if is_same_op(e.op, OpBroadcastTo) { return vjp_broadcast_to(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpConcat) { return vjp_concat(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpSplit) { return vjp_split(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpIndex0) or is_same_op(e.op, OpSlice0) {
+  if e.op == OpBroadcastTo { return vjp_broadcast_to(tp, e, g, cot, touched) }
+  if e.op == OpConcat { return vjp_concat(tp, e, g, cot, touched) }
+  if e.op == OpSplit { return vjp_split(tp, e, g, cot, touched) }
+  if e.op == OpIndex0 or e.op == OpSlice0 {
     return vjp_rows(tp, e, g, cot, touched)
   }
-  if is_same_op(e.op, OpGather) { return vjp_gather(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpConv2D) { return vjp_conv2d(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpMaxPool2D) { return vjp_maxpool2d(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpCumSum) { return vjp_cumsum(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpCumProd) { return vjp_cumprod(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpCumMax) or is_same_op(e.op, OpCumMin) {
+  if e.op == OpGather { return vjp_gather(tp, e, g, cot, touched) }
+  if e.op == OpConv2D { return vjp_conv2d(tp, e, g, cot, touched) }
+  if e.op == OpMaxPool2D { return vjp_maxpool2d(tp, e, g, cot, touched) }
+  if e.op == OpCumSum { return vjp_cumsum(tp, e, g, cot, touched) }
+  if e.op == OpCumProd { return vjp_cumprod(tp, e, g, cot, touched) }
+  if e.op == OpCumMax or e.op == OpCumMin {
     return vjp_cumextreme(tp, e, g, cot, touched)
   }
-  if is_same_op(e.op, OpDiff) { return vjp_diff(tp, e, g, cot, touched) }
-  if is_same_op(e.op, OpRoll) { return vjp_roll(tp, e, g, cot, touched) }
+  if e.op == OpDiff { return vjp_diff(tp, e, g, cot, touched) }
+  if e.op == OpRoll { return vjp_roll(tp, e, g, cot, touched) }
 
   Err(bytes.concat("backward: no gradient rule for ", op_name(e.op)))
 }
 
 fn is_binary_op(op: Op) -> Bool {
   if is_comparison(op) { return true }
-  if is_same_op(op, OpAdd) or is_same_op(op, OpSub) { return true }
-  if is_same_op(op, OpMul) or is_same_op(op, OpDiv) { return true }
-  if is_same_op(op, OpMod) { return true }
-  if is_same_op(op, OpMaximum) or is_same_op(op, OpMinimum) { return true }
+  if op == OpAdd or op == OpSub { return true }
+  if op == OpMul or op == OpDiv { return true }
+  if op == OpMod { return true }
+  if op == OpMaximum or op == OpMinimum { return true }
   false
 }
 
 fn is_unary_op(op: Op) -> Bool {
-  if is_same_op(op, OpNeg) or is_same_op(op, OpRelu) { return true }
-  if is_same_op(op, OpExp) or is_same_op(op, OpLog) { return true }
-  if is_same_op(op, OpSin) or is_same_op(op, OpCos) { return true }
-  if is_same_op(op, OpSqrt) or is_same_op(op, OpTanh) { return true }
-  if is_same_op(op, OpSigmoid) or is_same_op(op, OpSquare) { return true }
-  if is_same_op(op, OpPow) or is_same_op(op, OpClip) { return true }
+  if op == OpNeg or op == OpRelu { return true }
+  if op == OpExp or op == OpLog { return true }
+  if op == OpSin or op == OpCos { return true }
+  if op == OpSqrt or op == OpTanh { return true }
+  if op == OpSigmoid or op == OpSquare { return true }
+  if op == OpPow or op == OpClip { return true }
   false
 }
 
@@ -3551,7 +3549,7 @@ fn vjp_sum_mean(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Ar
   let a: Tensor = value_of(tp, e.inputs[0])
   let sp: Spans = spans_for(a, e.iattr[0])
   let scale: F64 = 1.0
-  if is_same_op(e.op, OpMean) { scale = 1.0 / f64_of_i64(sp.length) }
+  if e.op == OpMean { scale = 1.0 / f64_of_i64(sp.length) }
   let ga: Arr[F64] = alloc(element_count(a.shape))
   let i: I64 = 0
   while i < sp.before {
@@ -3577,7 +3575,7 @@ fn vjp_sum_mean(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Ar
 # exact because the forward kernel is deterministic and its input is on the tape.
 fn vjp_extreme(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: Arr[Bool]) -> Res[I64, Str] {
   let a: Tensor = value_of(tp, e.inputs[0])
-  let want_max: Bool = is_same_op(e.op, OpMax)
+  let want_max: Bool = e.op == OpMax
   let ga: Arr[F64] = alloc(element_count(a.shape))
   if e.iattr[0] < 0 {
     let idx: I64 = extreme_all_origin(a, want_max)
@@ -3782,7 +3780,7 @@ fn vjp_selection(tp: Tape, e: TapeEntry, g: Tensor, cot: Arr[Tensor], touched: A
   let axis: I64 = e.iattr[0]
   let keep: I64 = a.shape[axis]
   let direction: Bool = int_to_bool(e.iattr[1])
-  if is_same_op(e.op, OpTopK) {
+  if e.op == OpTopK {
     keep = e.iattr[1]
     direction = int_to_bool(e.iattr[2])
   }
@@ -4115,8 +4113,8 @@ fn alloc_ints(n: I64) -> Arr[I64] {
 }
 
 fn is_scan_op(op: Op) -> Bool {
-  if is_same_op(op, OpCumSum) or is_same_op(op, OpCumProd) { return true }
-  is_same_op(op, OpCumMax) or is_same_op(op, OpCumMin)
+  if op == OpCumSum or op == OpCumProd { return true }
+  op == OpCumMax or op == OpCumMin
 }
 
 # The running sum, product, max or min over each run of `sp`. `arg` is filled
@@ -4130,23 +4128,23 @@ fn is_scan_op(op: Op) -> Bool {
 # forward instead would compound the store rounding over the length of the run,
 # which is the same failure a narrow reduction accumulator has, spread out.
 fn scan_run(op: Op, t: Tensor, sp: Spans, out: Arr[F64], arg: Arr[I64], acc: I64) {
-  let want_extreme: Bool = is_same_op(op, OpCumMax) or is_same_op(op, OpCumMin)
-  let want_max: Bool = is_same_op(op, OpCumMax)
+  let want_extreme: Bool = op == OpCumMax or op == OpCumMin
+  let want_max: Bool = op == OpCumMax
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0
     while j < sp.after {
       let base: I64 = i * sp.length * sp.after + j
       let run: F64 = 0.0
-      if is_same_op(op, OpCumProd) { run = 1.0 }
+      if op == OpCumProd { run = 1.0 }
       let k: I64 = 0
       while k < sp.length {
         let p: I64 = base + k * sp.after
-        if is_same_op(op, OpCumSum) {
+        if op == OpCumSum {
           run = acc_add(acc, run, buf.get(t.data, t.dtype, p))
           out[p] = run
         }
-        if is_same_op(op, OpCumProd) {
+        if op == OpCumProd {
           run = acc_mul(acc, run, buf.get(t.data, t.dtype, p))
           out[p] = run
         }
@@ -4860,57 +4858,57 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
   # A comparison, an argmax and the ordering ops are piecewise constant in the
   # values they select on, so their tangent is zero rather than unsupported.
   if is_comparison(e.op) { return Ok(0) }
-  if is_same_op(e.op, OpArgmax) or is_same_op(e.op, OpArgmin) { return Ok(0) }
+  if e.op == OpArgmax or e.op == OpArgmin { return Ok(0) }
 
   if is_binary_op(e.op) { return jet_binary(tp, n, e, js) }
   if is_unary_op(e.op) { return jet_unary(tp, n, e, js) }
-  if is_same_op(e.op, OpSum) or is_same_op(e.op, OpMean) { return jet_sum_mean(tp, n, e, js) }
-  if is_same_op(e.op, OpMatMul) { return jet_matmul(tp, n, e, js) }
-  if is_same_op(e.op, OpCumSum) { return jet_cumsum(tp, n, e, js) }
-  if is_same_op(e.op, OpCumProd) { return jet_cumprod(tp, n, e, js) }
-  if is_same_op(e.op, OpCumMax) or is_same_op(e.op, OpCumMin) {
+  if e.op == OpSum or e.op == OpMean { return jet_sum_mean(tp, n, e, js) }
+  if e.op == OpMatMul { return jet_matmul(tp, n, e, js) }
+  if e.op == OpCumSum { return jet_cumsum(tp, n, e, js) }
+  if e.op == OpCumProd { return jet_cumprod(tp, n, e, js) }
+  if e.op == OpCumMax or e.op == OpCumMin {
     return jet_select_by_value(tp, n, e, js)
   }
-  if is_same_op(e.op, OpWhere) { return jet_where(tp, n, e, js) }
+  if e.op == OpWhere { return jet_where(tp, n, e, js) }
   # Concat is linear and n-ary: the tangent of a concat is the concat of the
   # tangents. It is not in is_rearrangement because that path replays a unary
   # kernel on one tangent buffer, and concat has several; jet_concat is the same
   # idea for many inputs. internal/tensor/ops.go's Concat carries this jvp, so
   # adding it here matches the bootstrap rather than diverging from it (NEEDS-83).
-  if is_same_op(e.op, OpConcat) { return jet_concat(tp, n, e, js) }
+  if e.op == OpConcat { return jet_concat(tp, n, e, js) }
   # Sort and topk are permutations chosen by value: the output at o took its
   # value from input origin[o], so its tangent is the input's tangent there.
   # That is the forward twin of vjp_selection's scatter, and the bootstrap grew
   # the same jvp in the same change, so the two agree (NEEDS-83).
-  if is_same_op(e.op, OpSort) or is_same_op(e.op, OpTopK) {
+  if e.op == OpSort or e.op == OpTopK {
     return jet_selection(tp, n, e, js)
   }
   # Softmax has a real second derivative, not a permutation. Its jacobian is
   # y_i(delta_ij - y_j), so jet_softmax carries the tangents through it and its
   # derivative; the bootstrap grew the same jvp in the same change (NEEDS-83).
-  if is_same_op(e.op, OpSoftmax) { return jet_softmax(tp, n, e, js) }
+  if e.op == OpSoftmax { return jet_softmax(tp, n, e, js) }
   # The gradient of logsumexp is softmax, so its first output tangent is the
   # y-weighted mean of the input tangents and its second is that derivative.
   # Both sides recompute y as exp(x - out) to stay bit-identical (NEEDS-83).
-  if is_same_op(e.op, OpLogSumExp) { return jet_logsumexp(tp, n, e, js) }
+  if e.op == OpLogSumExp { return jet_logsumexp(tp, n, e, js) }
   # Median is a selection, locally linear, so its jet gathers the tangent of the
   # element it selects, or averages the two for an even length, with no
   # second-order term of its own. It is the forward twin of vjp_median (NEEDS-83).
-  if is_same_op(e.op, OpMedian) { return jet_median(tp, n, e, js) }
+  if e.op == OpMedian { return jet_median(tp, n, e, js) }
   # maxpool2d is a selection, locally linear: its jet gathers the tangent of the
   # value that won each window, with no second-order term. The forward twin of
   # vjp_maxpool2d, reading the same winners from iattr (NEEDS-83).
-  if is_same_op(e.op, OpMaxPool2D) { return jet_maxpool2d(tp, n, e, js) }
+  if e.op == OpMaxPool2D { return jet_maxpool2d(tp, n, e, js) }
   # prod has a genuine second-order term. The first tangent is p * sum(d_k/x_k),
   # the second follows by differentiating it, and zeros split it into cases the
   # same way vjp_prod's backward does: one zero leaves only that factor, two
   # leave only their cross term, three or more leave nothing (NEEDS-83).
-  if is_same_op(e.op, OpProd) { return jet_prod(tp, n, e, js) }
+  if e.op == OpProd { return jet_prod(tp, n, e, js) }
   # conv2d is bilinear in (input, weight): each output is a sum of products over
   # the receptive field, so the first tangent is the sum of xd*w + x*wd and the
   # second is the bilinear product rule xdd*w + 2*xd*wd + x*wdd. A constant
   # operand has zero tangents, which drops its term (NEEDS-83).
-  if is_same_op(e.op, OpConv2D) { return jet_conv2d(tp, n, e, js) }
+  if e.op == OpConv2D { return jet_conv2d(tp, n, e, js) }
   # Reshape, broadcast, transpose, flip, gather, index, slice and split move
   # numbers without changing them, so their jet is the same rearrangement
   # applied to the tangents. That is one rule, and it is expressed by replaying
@@ -4928,10 +4926,10 @@ fn jet_node(tp: Tape, n: I64, js: Jets) -> Res[I64, Str] {
 # a zero tangent, so a hessian over one of them says so instead of returning a
 # plausible matrix of zeros.
 fn is_rearrangement(op: Op) -> Bool {
-  if is_same_op(op, OpReshape) or is_same_op(op, OpBroadcastTo) { return true }
-  if is_same_op(op, OpTranspose) or is_same_op(op, OpFlip) { return true }
-  if is_same_op(op, OpGather) or is_same_op(op, OpIndex0) { return true }
-  if is_same_op(op, OpSlice0) or is_same_op(op, OpSplit) { return true }
+  if op == OpReshape or op == OpBroadcastTo { return true }
+  if op == OpTranspose or op == OpFlip { return true }
+  if op == OpGather or op == OpIndex0 { return true }
+  if op == OpSlice0 or op == OpSplit { return true }
   false
 }
 
@@ -5004,7 +5002,7 @@ fn jet_selection(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let axis: I64 = e.iattr[0]
   let keep: I64 = x.shape[axis]
   let direction: Bool = int_to_bool(e.iattr[1])
-  if is_same_op(e.op, OpTopK) {
+  if e.op == OpTopK {
     keep = e.iattr[1]
     direction = int_to_bool(e.iattr[2])
   }
@@ -5294,14 +5292,14 @@ fn jet_conv2d(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
 # value. Every case reads its parameters from the tape entry rather than
 # recomputing them, so a normalized axis stays normalized.
 fn replay_rearrangement(tp: Tape, e: TapeEntry, src: Tensor) -> Res[Tensor, Str] {
-  if is_same_op(e.op, OpReshape) { return reshape(src, copy_shape(e.out.shape)) }
-  if is_same_op(e.op, OpBroadcastTo) { return broadcast_to(src, copy_shape(e.out.shape)) }
-  if is_same_op(e.op, OpTranspose) { return transpose(src, e.iattr) }
-  if is_same_op(e.op, OpFlip) { return flip_axis(src, e.iattr[0]) }
-  if is_same_op(e.op, OpGather) { return gather(src, e.iattr) }
-  if is_same_op(e.op, OpIndex0) { return index_axis0(src, e.iattr[0]) }
-  if is_same_op(e.op, OpSlice0) { return slice_axis0(src, e.iattr[0], e.iattr[1]) }
-  if is_same_op(e.op, OpSplit) {
+  if e.op == OpReshape { return reshape(src, copy_shape(e.out.shape)) }
+  if e.op == OpBroadcastTo { return broadcast_to(src, copy_shape(e.out.shape)) }
+  if e.op == OpTranspose { return transpose(src, e.iattr) }
+  if e.op == OpFlip { return flip_axis(src, e.iattr[0]) }
+  if e.op == OpGather { return gather(src, e.iattr) }
+  if e.op == OpIndex0 { return index_axis0(src, e.iattr[0]) }
+  if e.op == OpSlice0 { return slice_axis0(src, e.iattr[0], e.iattr[1]) }
+  if e.op == OpSplit {
     return split_piece(src, e.iattr[0], e.iattr[1], e.iattr[2])
   }
   Err(jet_unsupported(e.op))
@@ -5422,7 +5420,7 @@ fn jet_sum_mean(tp: Tape, n: I64, e: TapeEntry, js: Jets) -> Res[I64, Str] {
   let x: Tensor = value_of(tp, a)
   let sp: Spans = spans_for(x, e.iattr[0])
   let scale: F64 = 1.0
-  if is_same_op(e.op, OpMean) { scale = 1.0 / f64_of_i64(sp.length) }
+  if e.op == OpMean { scale = 1.0 / f64_of_i64(sp.length) }
   let i: I64 = 0
   while i < sp.before {
     let j: I64 = 0

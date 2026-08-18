@@ -1567,7 +1567,25 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 		c.checkReturnUnit(ex.Line, "", fn.retUnit, bodyType)
 		return tTensor{dims: []int{}, unit: unitFromAnno(fn.retUnit)}
 	}
+	// A declared return type is what the call produces, whatever walking the
+	// body concluded. That matters for a block body ending in `return`, which
+	// evaluates to Unit as an expression: the body of
+	//
+	//	fn read(p: Str) -> Res[Str, Str] { return read_file(p) }
+	//
+	// infers Unit, and taking that as the call's type made `read(p)?` report
+	// that `?` needs a Res -- on the commonest shape the feature has. The
+	// signature is the contract; the body is checked against it separately in
+	// checkBodyReturnType and at each `return`.
+	if declared := c.parseType(retTypeName(fn.retType, fn.retUnit)); !isUnknownType(declared) {
+		return declared
+	}
 	return bodyType
+}
+
+func isUnknownType(t Type) bool {
+	_, ok := t.(tUnknown)
+	return ok
 }
 
 // checkArgUnit reports if a scalar argument's unit disagrees with a unit

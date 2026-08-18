@@ -73,6 +73,32 @@ func TestTryInResAndOptFunctionsIsFine(t *testing.T) {
 	wantNone(t, "mode systems\nfn p() -> Res[I64, Str] { Ok(1) }\nfn good() -> Res[I64, Str] { let v: I64 = p()?\n Ok(v) }\nfn o() -> Opt[I64] { let v: I64 = i64_of_str(\"3\")?\n Some(v) }")
 }
 
+// A declared return type is what a call produces, whatever walking the body
+// concluded. A block body ending in `return` evaluates to Unit as an
+// expression, and taking that as the call's type made `g(n)?` report that `?`
+// needs a Res -- on the commonest shape the feature has.
+func TestABlockBodiedFunctionsReturnTypeReachesItsCallSites(t *testing.T) {
+	wantNone(t, `mode systems
+fn g(n: I64) -> Res[I64, Str] { return Ok(n) }
+fn s(n: I64) -> Str { return "x" }
+fn h(n: I64) -> Res[I64, Str] {
+  let v: I64 = g(n)?
+  Ok(v)
+}
+fn k(n: I64) -> Str {
+  let c: Str = s(n)
+  c
+}`)
+	// And the declared type is still checked at the call: a Str return does not
+	// satisfy an I64 binding.
+	wantOne(t, `mode systems
+fn s(n: I64) -> Str { return "x" }
+fn k(n: I64) -> I64 {
+  let c: I64 = s(n)
+  c
+}`, `"c" is declared I64 but the value is Str`)
+}
+
 func TestTryInAnUnannotatedFunctionIsNotJudged(t *testing.T) {
 	wantNone(t, "mode systems\nfn p() -> Res[I64, Str] { Ok(1) }\nfn f() { p()? }")
 }

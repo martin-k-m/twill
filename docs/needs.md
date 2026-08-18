@@ -304,21 +304,22 @@ type. At the top level of a file a failing `?` is now a diagnostic instead of a
 silent exit 0, which is the change most likely to break someone's script and the
 one most worth having.
 
-**The gap, found 2026-08 by probe.** The checker does not propagate a
-*block-bodied* function's declared return type to its call sites: it types the
-call `Unit`. So
+**A gap found by probe while auditing this file, and closed before the release.**
+The checker was not propagating a *block-bodied* function's declared return type
+to its call sites: it typed the call `Unit`, because a block ending in `return`
+evaluates to `Unit` as an expression and the call took the body's type rather
+than the signature's. So
 
     fn g(n: I64) -> Res[I64, Str] { return Ok(n) }
     fn h(n: I64) -> Res[I64, Str] { let v = g(n)?
       return Ok(v) }
 
-is rejected with ``` `?` needs a Res or an Opt, but the value is Unit ```, and
-runs correctly under `--no-check`. An expression-bodied `fn g(n: I64) ->
-Res[I64, Str] = Ok(n)` is accepted. The same gap makes `let c: Str = s(...)`
-a false error for any block-bodied `s`. It is a checker bug rather than a
-language question, it is not confined to `?` (see NEEDS-49 and NEEDS-82), and it
-is the first thing to fix in 1.7: `?` on a user-defined function is the most
-common shape this feature has and it is precisely the shape that is refused.
+was rejected with ``` `?` needs a Res or an Opt, but the value is Unit ``` while
+running correctly under `--no-check`, and `let c: Str = s(...)` was a false
+error for any block-bodied `s` (NEEDS-49, NEEDS-82). A declared return type is
+the contract and is now what the call produces, with the body checked against it
+separately. It was worth catching: `?` on a user-defined function is the most
+common shape this feature has and it was precisely the shape refused.
 
 `src/lex.tw:294` (`tokenize`) is `Res[Arr[Token], SyntaxError]` and uses `?` to
 propagate. Without it every call site of every scanner function grows an
@@ -639,7 +640,12 @@ functions in `internal/tensor`.
 
 ## NEEDS-26: closures capturing a mutable environment
 
-**Status:** blocking. `src/eval.tw` function values.
+**Status:** answered, and the answer is by handle (2026-08). A closure over a
+file-level `let` assigns to the binding it captured: two calls to a counter
+lambda give 1 then 2, and the outer `let` reads 2 afterwards. That is
+`interp.Env`'s parent-walking assignment, which is what the entry says the
+evaluator needs to reproduce, and it now has a running implementation to
+reproduce rather than a description.
 
 `internal/interp` closes over a `*Env` with a parent pointer and assignment
 walks up to the defining scope. Twill closures exist; what is unspecified is
@@ -652,7 +658,11 @@ evaluator needs by handle to reproduce the bootstrap's behaviour for
 
 ## NEEDS-27: deep equality with the "different types are never equal" rule
 
-**Status:** blocking. `src/eval.tw` `==`.
+**Status:** done (2026-08, 1.6). The different-types-are-never-equal rule
+holds, `I64` compares by bits, and 1.6 fixed the case that was quietly wrong:
+enum values compare structurally, so `Some(1) == Some(1)` is `true` where it had
+been `false`. A payload-free case compares by case (NEEDS-70), so `Red == Red`
+is `true` and `Red == Green` is `false`.
 
 The bootstrap's rule, tested in `internal/interp/equality_test.go`: values of
 different types compare unequal rather than raising. The twill version must
@@ -663,7 +673,16 @@ tensor).
 
 ## NEEDS-28: `read_file`, `write_file`, `args`, `exit`, `write_out`
 
-**Status:** blocking. `src/main.tw`.
+**Status:** done for the file and process surface (2026-08). `read_file`,
+`write_file`, `args`, `exit`, `write_out` and `write_err` are all builtins and
+all work, and 1.6 added the rest of the filesystem around them (NEEDS-91,
+NEEDS-92). `src/main.tw` is a CLI and can exist.
+
+Two things this entry lists that are still missing, so that "done" is not read
+wider than it is: there is no `stdin_all` and no `read_line` (NEEDS-47), and
+there is no way to start another process. The warning below, that this is the
+only entry which widens what an arbitrary `.tw` file can do, was landed on
+knowingly and is now a property of the language rather than a proposal.
 
 `read_file(path) -> Res[Bytes, Str]` and the rest of the process interface from
 `docs/self-hosting.md` section 1.2. `src/main.tw` is a CLI and cannot exist
@@ -702,7 +721,12 @@ lose a month.
 
 ## NEEDS-30: recursion depth, and a guard on it
 
-**Status:** not blocking; an operational risk.
+**Status:** not blocking; still an operational risk, and now a measured one
+(2026-08). A file whose single expression is 10,000 nested parentheses parses and
+runs, and a 20,000-deep recursive call in twill returns rather than crashing. So
+the exposure below has not bitten at the depths a hostile input would plausibly
+reach, and there is still no depth counter and no diagnostic: what happens past
+whatever the real limit is remains undefined rather than reported.
 
 The parser and the checker are recursive descent over user input and the
 bootstrap has the same exposure. The Go side survives on the goroutine stack;
@@ -826,7 +850,10 @@ does in the same place.
 
 ## NEEDS-34 - `chr(n)` for a single byte
 
-**Status:** blocking. Nothing in `src/term/` emits an escape sequence without it.
+**Status:** done (2026-08). `chr(n)` is a builtin and is a byte rather than a
+codepoint, which is the half of the request that mattered for the braille
+packing: `chr(65)` is `A`. The `\x1b` string escape listed below as the
+alternative was not added, and on the argument given below it should not be.
 
 Twill string literals recognise `\n`, `\t`, `\"` and `\\` and nothing else
 (`docs/language-guide.md`), so ESC (27) and BEL (7) cannot be written. Needed:
@@ -846,8 +873,12 @@ byte anyway.
 
 ## NEEDS-35 - `Str` concatenation with `+`
 
-**Status:** specified; the implementation is still blocking. Every renderer
-builds its output by concatenation. **The normative text is
+**Status:** done (2026-08). `"a" + "b"` is `"ab"`, `Str + non-Str` is an error
+with no coercion, and the quadratic cost of building in a loop is unchanged and
+is what `src/bytes.tw` (NEEDS-7, also done) is for. The note at the end of this
+entry still stands as work: `src/term/` and `src/cli/` should be moved onto the
+builder now that both halves exist, which deletes the private `join` and the
+private `repeat`. **The normative text is
 `docs/language-guide.md`, Strings → Concatenation.** `Str + Str` exists and
 produces a new `Str`; `+` between a `Str` and a non-`Str` is an error with no
 coercion; and the quadratic cost of building in a loop is stated there along
@@ -878,7 +909,8 @@ built before that file existed.
 
 ## NEEDS-36 - `arr(...)` as a literal constructor
 
-**Status:** blocking.
+**Status:** done (2026-08). `arr()` is the empty array and `arr(a, b, c)` the
+populated one, alongside `arr_new`, `arr_push`, `arr_clear` and `pop`.
 
 `docs/self-hosting.md` specifies `Arr[T]` with `push`, `pop`, index and `slice`,
 but no way to write one down. `arr()` for empty and `arr(a, b, c)` for a
@@ -892,7 +924,9 @@ heterogeneous `value.List`.
 
 ## NEEDS-37 - `Opt[T]` and `match`, for `env`
 
-**Status:** blocking for `src/term/caps.tw`.
+**Status:** done (2026-08). `env(name)` returns `Opt[Str]` and the `match` on
+it works, so `caps.tw` `env_or` and `has_env` have what they need and the whole
+capability layer is unblocked.
 
 `env(name) -> Opt[Str]` from `docs/self-hosting.md` section 1.2 needs the enum
 and the `match` that reads it. `caps.tw` `env_or` and `has_env` are the only
@@ -903,7 +937,13 @@ capability layer is behind this.
 
 ## NEEDS-38 - `is_tty_stdout()` and `window_size()`
 
-**Status:** blocking for anything that decides to animate.
+**Status:** done for both, with one half of one of them missing (2026-08).
+`is_tty_stdout()` returns a `Bool` and `window_size()` returns
+`{cols: ..., rows: ...}`, zero for unknown as asked. What is not there is the
+separate question this entry raises in its own second sentence: there is no
+`is_tty_stderr`, so a program cannot ask about the two streams independently and
+must assume they agree. That is exactly the case the entry warned about, one a
+pipe and the other not, so it is recorded rather than counted as closed.
 
 Two runtime queries not in `docs/self-hosting.md` section 1.2, which lists only
 `read_file`, `write_file`, `stdin_all`, `write_out`, `write_err`, `args`, `env`
@@ -930,7 +970,14 @@ interface in the language.
 
 ## NEEDS-39 - a monotonic millisecond clock
 
-**Status:** blocking for the spinner and the progress bar.
+**Status:** done (2026-08, 1.6), under the name `mono_ns` rather than
+`now_ms`: nanoseconds from a monotonic source. `clock_now_ms` remains and is the
+**wall** clock, and keeping both is the point of the entry rather than an
+accident. An NTP step backwards moves `clock_now_ms` and cannot move `mono_ns`,
+so a rate or an estimate computed from the wall clock can go negative on a long
+run and one computed from `mono_ns` cannot. Anything that measures an interval
+wants `mono_ns`; anything that prints a time of day wants `clock_now_ms`; using
+either for the other's job is a bug that only appears on long runs.
 
 `now_ms() -> I64`, monotonic, unaffected by wall-clock adjustment. Every
 animated thing in `src/cli/` is driven by it: the frame rate limit in
@@ -951,8 +998,13 @@ only needed by whatever drives the loop.
 
 ## NEEDS-40 - `F64` in systems mode, with `cos` and the conversions
 
-**Status:** the type question is answered; `cos` and `sin` on it are still
-blocking for `src/cli/banner.tw` and `src/cli/tensor.tw`. **The normative text
+**Status:** done (2026-08). The type question was answered first and is
+unchanged below: a systems-mode scalar is not a rank-0 tensor. 1.6 supplied the
+rest. `cos` and `sin` work on an `F64`, `f64()` and `i64()` convert, and the
+wider float set the tensor kernels wanted landed with them (`f64_exp`,
+`f64_log`, `f64_sin`, `f64_cos`, `f64_sqrt`, `f64_tanh`, `f64_pow`, `f64_mod`,
+`f64_trunc`, `f64_floor`, `f64_ceil`, `f64_round`, `f64_signbit`), which is
+NEEDS-68, NEEDS-65 and NEEDS-69 all at once. **The normative text
 is `docs/language-guide.md`, Systems-mode types → `F64`, and what a
 systems-mode scalar is.**
 
@@ -979,7 +1031,10 @@ tensor and the distinction does not arise.
 
 ## NEEDS-41 - a read-only tensor view for the formatter
 
-**Status:** blocking for `src/cli/tensor.tw` and the REPL.
+**Status:** done (2026-08), by the second of the two spellings the entry
+offers. `shape(t)` gives the dimensions and `arr_of_tensor(t)` gives the
+row-major elements, read-only and by copy, which is the `shape_of`/`elements_of`
+pair rather than `view_of`. The copy is the point and the copy is what happens.
 
 The REPL's job is printing tensors, and systems mode has none. `tensor.tw`
 declares a `View` of dimensions plus row-major elements and formats that, so
@@ -996,9 +1051,11 @@ slice, so this is an exposure rather than an implementation.
 
 ## NEEDS-42 - struct field mutation through a handle
 
-**Status:** specified; the implementation is still blocking for
-`src/term/frame.tw`, `src/cli/spinner.tw`, `src/cli/progress.tw`,
-`src/cli/repl.tw`. **The normative text is `docs/language-guide.md`, `struct`,
+**Status:** done (2026-08), including the case this entry added and a lexer
+never exercises: mutation through a field of another struct. An `Outer` holding
+an `Inner`, mutated as `o.i.n = o.i.n + 1` through a parameter, is visible to
+the caller. So `frame.paint`, `progress.advance` and `repl.feed` all work as
+written. **The normative text is `docs/language-guide.md`, `struct`,
 and what a parameter is**, and it covers the case this entry adds: mutation is
 visible through a field of another struct, to any depth.
 
@@ -1015,7 +1072,10 @@ visible through a field of another struct (a `Spinner` holds a `Frame`, and
 
 ## NEEDS-43 - `Arr[T]` element assignment
 
-**Status:** blocking for `src/term/width.tw` `indent_after_first`.
+**Status:** done (2026-08). `xs[i] = v` assigns an element of an `Arr` and of a
+list, so `width.tw` can rewrite wrapped lines in place. This is the same landing
+as NEEDS-17's `set` half and NEEDS-97's, recorded three times because three
+callers asked for it separately.
 
 `docs/self-hosting.md` gives `Arr[T]` an index and a `push`, and its feature
 list says "indexed assignment" while the summary table does not repeat it.
@@ -1024,8 +1084,11 @@ place to add the continuation indent.
 
 ## NEEDS-44 - integer division and modulo on `I64`
 
-**Status:** the semantics question is answered; the implementation is still
-blocking. **The normative text is `docs/language-guide.md`, Operators → Integer
+**Status:** done (2026-08, 1.6). See NEEDS-24, which is this entry under an
+earlier number and carries the verification: truncation toward zero, `%` taking
+the sign of the dividend, and division or modulo by zero as a named runtime
+error. The two entries were the same request filed twice and are now closed
+together. **The normative text is `docs/language-guide.md`, Operators → Integer
 division and modulo on `I64`.** It records the answer this entry asked for,
 truncation toward zero with `%` taking the sign of the dividend, and adds the
 two things this entry did not ask about and that a caller needs: numeric mode's
@@ -1044,7 +1107,11 @@ which section 1.2 already specifies.
 
 ## NEEDS-45 - `str()` on `I64`
 
-**Status:** specified; the implementation is still blocking. **The normative
+**Status:** done (2026-08). `str` on an `I64` produces the digits with no
+decimal point and no exponent (`str(i64(-5))` is `-5`), so the hazard the entry
+names, a trailing `.0` in every line number, does not arise. The measurement
+below, that the bootstrap never emitted it either, is unchanged and is why this
+entry was prospective rather than a bug. **The normative
 text is `docs/language-guide.md`, Standard library → `str` on a number.**
 
 `str(n)` for an `I64` must produce the digits with no decimal point and no
@@ -1068,7 +1135,11 @@ line, the column and the gutter width.
 
 ## NEEDS-46 - `Str` equality must survive the `Str` rewrite
 
-**Status:** specified, and still a constraint rather than a feature. **The
+**Status:** the constraint held (2026-08). `Str` became a distinct indexable
+value, which `docs/self-hosting.md` flagged as the medium-risk change in the
+whole subset, and `==` and `!=` on `Str` still compare bytes with no case
+folding and no normalization. `<` and friends are still undefined on `Str`.
+Nothing to do; recorded as verified rather than as assumed. **The
 normative text is `docs/language-guide.md`, Strings → Equality**, which states
 it as bytes with no case folding, no normalization and no locale, and Strings →
 Ordering, which says that `<` and friends stay undefined on `Str` and pins the
@@ -1082,7 +1153,12 @@ exists to say that the CLI is a second consumer of that rule holding.
 
 ## NEEDS-47 - a line reader for the REPL
 
-**Status:** not blocking. `src/cli/repl.tw` is written around not having it.
+**Status:** open, and still not blocking (2026-08). Neither `stdin_all` nor
+`read_line` exists, so the one thing this entry says the language needs is the
+one thing missing. `src/cli/repl.tw` is written around not having it and the
+seam below is unchanged, which is why this is open rather than blocking: a host
+that reads a line can hand it to `repl.feed` today, and only a twill-hosted REPL
+is stuck.
 
 `repl.tw` owns the prompt and the framing and does not own the read loop,
 because line editing, history and completion are a terminal-raw-mode problem
@@ -1096,7 +1172,8 @@ reader must do for its own raw mode.
 
 ## NEEDS-48 - `write_out` and `write_err` taking a `Str`
 
-**Status:** blocking for `src/cli/main.tw`.
+**Status:** done (2026-08). `write_out` and `write_err` take a `Str` directly,
+so the per-call-site conversion the entry was written to avoid never appeared.
 
 Section 1.2 specifies `write_out(Bytes)`. The CLI produces `Str` everywhere and
 would otherwise convert at every call site. Either overload accepts a `Str`, or
@@ -1129,17 +1206,49 @@ separately because they are cheap individually and easy to lose track of.
 
 ## NEEDS-49: the systems-mode checker policy
 
-**Status:** open, and it is the design decision, not a coding task.
+**Status:** answered and implemented (2026-08, 1.6). The decision was the design
+decision this entry said it was, and it went the other way from
+`docs/self-hosting.md` section 1.3.
 
-`docs/self-hosting.md` section 1.3: in systems mode a `TUnknown` surviving to
-the end of inference is a diagnostic rather than silence. `src/check.tw`
-implements the numeric policy, because that is what `testdata/` was generated
-against and what the diagnostics are compared to. The systems policy is a second
-policy over the same lattice and it is what would let the checker check `src/`
-itself.
+**What was chosen.** The shape checker's existing policy, *report only what is
+certain*. In systems mode `I64`, `F64`, `Bool`, `Str`, `Bytes`, `Unit`,
+`Arr[T]`, `Dict[K, V]`, `Opt[T]`, `Res[T, E]`, a declared `struct`, a declared
+`enum` and a function type are real types, and a mismatch is reported at the
+five places a type is written down: a binding with an annotation, an argument
+against a parameter, a `return` against a declared return type, a struct literal
+field, and an enum payload. Each has its own message, and each was verified:
 
-Until it exists, the self-hosted compiler is not type-checked by its own
-checker, which is an uncomfortable place to be and worth naming.
+    "x" is declared I64 but the value is Str
+    argument 1 ("a") is declared I64 but the value is Str
+    return gives I64 but the function declares Bool
+    field "a" of S is declared I64 but the value is Str
+    the payload of V is declared I64 but the value is Str
+
+**What was not chosen, and why.** `docs/self-hosting.md` section 1.3 asks for
+the stricter rule: an unknown surviving to the end of inference is itself a
+diagnostic. That was rejected. The reason is the same one that makes the shape
+checker useful rather than tiresome: this checker infers over a language with
+untyped numeric mode underneath it, with builtins whose result type depends on
+their arguments, and with generic annotations that are not yet declarations
+(NEEDS-4). Under the strict rule every one of those produces an error that says
+nothing except that the checker could not work something out, and the reader
+learns to ignore the whole class. Under "report only what is certain" every
+diagnostic that appears is a real disagreement between two things the programmer
+wrote. The cost is stated plainly rather than hidden: an unannotated systems-mode
+program is checked hardly at all, and the checker's coverage is a function of how
+much of the file is annotated. That is a worse guarantee and a better tool, and
+if the strict rule is ever wanted it wants NEEDS-4 finished first.
+
+**The consequence for the original complaint.** `twill check` now passes on
+every file in `src/`, so the self-hosted compiler *is* checked by the checker,
+which is the uncomfortable place the entry ends by naming.
+
+**One hole in it, found by probe while auditing this file and closed before the
+release.** A block-bodied function's declared return type was not reaching its
+call sites, so `let c: Str = s(...)` was a false "declared Str but the value is
+Unit" whenever `s` had a `{ ... }` body. That was not the strict-versus-
+permissive question but a hole in the permissive one, and it is what NEEDS-10
+and NEEDS-82 both ran into. A declared return type is now what a call produces.
 
 ## NEEDS-50: an out-of-range axis in `transpose`
 
@@ -1154,7 +1263,13 @@ byte-identical diagnostics; tests in `internal/checker/checker_test.go` and
 
 ## NEEDS-51: the import resolver
 
-**Status:** blocking for `src/eval.tw`. `exec_import`.
+**Status:** done (2026-08). Both things this entry says are missing landed:
+file reading is NEEDS-28, and the embedded standard library is reachable from
+twill through the `module_source(path)` builtin, which resolves a `std/...` path
+to the embedded source and anything else to a file relative to the importer. The
+policy in the comment holds against the running binary: an unaliased
+`import "std/text"` lands unqualified, an aliased one lands in a record, and a
+`.ra` import is refused by name (`uses the retired .ra extension`).
 
 The policy is written out in the comment there: relative to the importing file,
 `std/` resolves to the embedded library unless `TWILL_STD` overrides, `.ra` is
@@ -1338,7 +1453,12 @@ that reaches the message.
 
 ## NEEDS-55: a seeded random number generator
 
-**Status:** blocking for `src/eval.tw`. `randn`, `rand`, `seed`, `permutation`.
+**Status:** done (2026-08), and wider than asked. The four primitives are
+there as `rng_seed`, `rng_uniform`, `rng_normal` and `rng_perm`, over the one
+global stream. On top of them there is now a first-class generator as well,
+`rng_open(seed)`, `rng_f64`, `rng_u53` and `rng_close`, which is what NEEDS-95
+wanted and did not expect to get. Reproducibility was verified rather than
+assumed: `seed(7)` twice gives the same `randn` both times.
 
 `rng_seed(I64)`, `rng_uniform() -> F64`, `rng_normal() -> F64`,
 `rng_perm(n) -> Arr[I64]`. Native: it is one generator's state for the whole
@@ -1354,7 +1474,11 @@ bit for bit, not merely be seeded.
 
 ## NEEDS-56: the output sink for `print`
 
-**Status:** blocking for `src/eval.tw`. `bi_print`.
+**Status:** done (2026-08). `emit_line(Str)` is a builtin and is the sink, so
+`print` joins with spaces and adds nothing and the line ending belongs to
+whoever supplies the sink. The argument below, that an evaluator writing to a
+file descriptor could not be differentially tested at all, is why it is this
+and not `write_out`.
 
 `emit_line(Str)`. Not `write_out`: `interp.New` takes an `out func(string)` and
 every caller supplies a different one. The test harness captures into a buffer,
@@ -1397,8 +1521,11 @@ it.
 
 ## NEEDS-58: paths resolved against the running source file
 
-**Status:** blocking for `src/eval.tw`. `read_csv`, `read_frame`, `write_frame`,
-`save`, `load`.
+**Status:** done (2026-08). `resolve_path(Str)` is a builtin and resolves
+against the directory of the source file currently executing rather than the
+process's working directory, which is the distinction the whole entry is about.
+The observation that NEEDS-51's import resolver wants the same stack still
+stands and they are still two things.
 
 `resolve_path(Str) -> Str`: an absolute path unchanged, a relative one joined to
 the directory of the source file currently executing, *not* the process's
@@ -1410,7 +1537,17 @@ thing rather than two.
 
 ## NEEDS-59: reading and writing whole files
 
-**Status:** blocking for `src/eval.tw`. The frame builtins.
+**Status:** done, with one shape not as requested (2026-08). `read_file` takes
+a path and returns `Res[Str, Str]`, and `write_file(path, Str)` returns
+`Res[Unit, Str]`. So the `Str`-rather-than-`Bytes` widening this entry argues
+for is what landed, on both, and the second copy of the whole file that the
+entry warns `read_csv` would otherwise allocate does not happen.
+
+Where it differs from the request: the read is a `Res` and not the `Opt[Str]`
+argued for here, so a caller like `read_csv` that reports
+`read_csv: cannot read "..."` and discards the OS error does discard a message
+it was handed. That is the cost the entry predicted, paid in the direction it
+did not choose. `read_text_or` exists for callers that want a default instead.
 
 NEEDS-28 has both, as `read_file(path) -> Res[Bytes, Str]` and `write_file`.
 The shapes the frame builtins want differ, and the difference is not cosmetic:
@@ -1428,7 +1565,19 @@ site and `read_csv` allocates a second copy of the whole file.
 
 ## NEEDS-60: parsing a float the way Go does
 
-**Status:** blocking for `src/eval.tw`. `read_csv`, `read_frame`.
+**Status:** done (2026-08), as `str_to_f64(Str) -> Opt[F64]`. It is the same
+primitive NEEDS-18 asks for, with the option return this entry needs, and it
+calls `strconv.ParseFloat`, so Go's acceptance set comes with it: leading sign,
+`inf`/`infinity`/`nan` case-insensitively, and hex float literals all parse.
+
+The one difference from Go, and it is the one this entry cares about most,
+because it is the difference between a corrupt column and silent numbers:
+underscores are **stripped** before the parse rather than refused, so
+`str_to_f64("1_0.5")` succeeds where Go's function fails. That is deliberate and
+documented at the definition (it matches twill's own numeric literals), and it
+means the acceptance set is a strict superset of Go's by exactly that one rule.
+A CSV field containing an underscore therefore becomes a number here and an
+error on the Go side.
 
 `f64_parse(Str) -> Opt[F64]`. The runtime primitive table already lists
 `f64_of_str` for the lexer, but the lexer only ever hands it text its own scanner
@@ -1440,7 +1589,10 @@ numbers; one that accepts a subset rejects files the bootstrap reads.
 
 ## NEEDS-61: `trim_space` over Unicode, not ASCII
 
-**Status:** open, low priority. `src/eval.tw` `trim_space`.
+**Status:** open, low priority, unchanged (re-checked 2026-08). There is no
+`trim_space` primitive and no `unicode.IsSpace` predicate; `std/text.trim` is
+the ASCII version. A CSV field with a non-breaking space around a number still
+parses on the Go side and fails here.
 
 `strings.TrimSpace` strips every Unicode space, including U+00A0 and the
 ideographic space. The twill version strips the six ASCII ones, which is every
@@ -1466,7 +1618,9 @@ not become permanent by default.
 
 ## NEEDS-63: opaque values from the native core
 
-**Status:** blocking for `src/eval.tw`. `gbm_fit`, `gbm_predict`.
+**Status:** done (2026-08). `gbm_fit`, `gbm_predict` and `gbm_describe` are
+builtins, so the opaque-handle design below is what the runtime implements and
+`internal/gbm` stays native as argued.
 
 A fitted model is a value twill holds and cannot look inside. `src/eval.tw` adds
 `VForeign(ForeignVal { kind, handle })` for it: a string naming the kind and an
@@ -1490,7 +1644,11 @@ someone reading a twill program.
 
 ## NEEDS-64: `save` and `load`
 
-**Status:** blocking for `src/eval.tw`.
+**Status:** done (2026-08). `save_value` and `load_value` are builtins and
+round-trip: a saved `arr(1, 2)` loads back as `Ok([1, 2])`. `save` and `load`
+are the tensor-shaped pair beside them. The format is still the contract, which
+is the sentence in this entry with teeth, and it is now a contract with a
+running implementation on one side of it rather than none.
 
 `save_value(Value, Str) -> Res[Unit, Str]` and
 `load_value(Str) -> Res[Value, Str]`, from `internal/interp/serialize.go`.
@@ -1506,8 +1664,11 @@ seam is the same one either way, and it is recorded as native for that reason.
 
 ## NEEDS-65: `f64_trunc`, `f64_floor`, `f64_ceil`, `f64_round`
 
-**Status:** blocking for `src/eval.tw`. `int`, `floor`, `ceil`, `round`, and
-every `int_of` coercion.
+**Status:** done (2026-08). `f64_trunc`, `f64_floor`, `f64_ceil` and
+`f64_round` are builtins alongside `f64_mod` and `f64_pow`. The warning below is
+the part worth keeping: `f64_round` is half away from zero, matching
+`math.Round` and not the round-half-to-even a reader coming from Python or IEEE
+would assume.
 
 Alongside the `f64_mod` and `f64_pow` already in the runtime primitive table.
 `f64_round` is half away from zero, matching `math.Round` and not the
@@ -1516,8 +1677,11 @@ the difference shows on exactly the inputs a test would use.
 
 ## NEEDS-66: three builtins the checker's table does not know
 
-**Status:** open, and it is a bug on the checker's side rather than a language
-gap. `src/check.tw` `builtin_names`.
+**Status:** done (2026-08). `argsort`, `argtopk` and `split` are all in the Go
+checker's `builtinNames` and all three call and run, so the failure mode this
+entry describes, reported as an undefined variable by the checker and then
+working when run, is gone. It was a bug on the checker's side, and it was fixed
+on both sides at once as the entry required.
 
 `argsort`, `argtopk` and `split` are defined in
 `internal/interp/builtins.go` and ported in `src/eval.tw`, and they are absent
@@ -1560,8 +1724,11 @@ in `src/tensor.tw` needs a foreign call any more.
 
 ## NEEDS-68: the transcendental float primitives
 
-**Status:** blocking for `src/tensor.tw`. `apply_unary`, `d_unary`, `softmax`,
-`logsumexp_axis`, `vjp_logsumexp`.
+**Status:** done (2026-08). `f64_exp`, `f64_log`, `f64_sin`, `f64_cos`,
+`f64_sqrt` and `f64_tanh` are all builtins, implemented natively rather than as
+foreign calls, which is what the entry argues for below. Agreement in the last
+bits comes from their being Go's `math` rather than from a series expansion, so
+the requirement is met by construction.
 
 `f64_exp`, `f64_log`, `f64_sin`, `f64_cos`, `f64_sqrt`, `f64_tanh`. These have
 to be native primitives, not twill: under the no-Go rule there is no bootstrap
@@ -1581,7 +1748,10 @@ neither is repeated here.
 
 ## NEEDS-69: `f64_signbit`
 
-**Status:** open, low priority. `src/tensor.tw` `f64_max`, `f64_min`.
+**Status:** done (2026-08). `f64_signbit` is a builtin and
+`f64_signbit(-0.0)` is `true`, so `f64_max` and `f64_min` can tell the two zeros
+apart. The reason it was recorded rather than skipped, that the symptom is an
+infinity of the wrong sign in a gradient, is why it is worth having closed.
 
 `math.Max(-0, +0)` is `+0`, and a comparison chain cannot tell the two zeros
 apart. The only way to reproduce it is to ask which zero it is.
@@ -1595,8 +1765,12 @@ gradient rather than in `max`.
 
 ## NEEDS-70: equality on a payload-free enum case
 
-**Status:** blocking for `src/tensor.tw`. `is_same_op`, and every dispatch in
-`vjp`.
+**Status:** done (2026-08, 1.6). `==` on two values of the same payload-free
+enum compares the case: `Red == Red` is `true`, `Red == Green` is `false`. The
+same change made payloads compare structurally (`Some(1) == Some(1)`, NEEDS-27),
+so it went further than this entry deliberately asked for, and the question the
+entry sidesteps, what a payload comparison means, was answered as deep equality
+rather than left open. `is_same_op`'s string compare can go.
 
 `Op` has forty-odd cases and none carries a payload. Asking whether a value is
 `OpAdd` currently means a `match` with forty arms, or `is_same_op`, which
@@ -1616,9 +1790,13 @@ lookup is one hash.
 
 ## NEEDS-71: an `Arr` parameter aliases the caller's array
 
-**Status:** answered; the implementation is still blocking for `src/tensor.tw`.
-`accumulate`, `odo_step`, `sort_offsets`, and every kernel that fills a buffer
-it was handed. **The normative text is `docs/language-guide.md`, `struct`, and
+**Status:** done (2026-08). An `Arr` parameter aliases the caller's array,
+verified both ways at once: a function that does `buf[0] = 42` and `push(buf, 7)`
+through its parameter leaves the caller holding `[42, 2, 7]`. So `accumulate`,
+`odo_step` and every kernel that fills a buffer it was handed work as written,
+and the failure this entry names, a backward pass that silently returns zeros,
+does not happen. The answer agrees with NEEDS-67's for structs, which it had
+to. **The normative text is `docs/language-guide.md`, `struct`, and
 what a parameter is**, which states the `Arr` rule and the `struct` rule in one
 place precisely because `Odometer` is mutated through both at once. An `Arr`
 parameter aliases; the backward pass does not return zeros.
@@ -1639,9 +1817,10 @@ storage, so that is the answer `src/` is written against.
 
 ## NEEDS-72: nested containers
 
-**Status:** blocking for `src/tensor.tw`. `Arr[Arr[I64]]` in `Odometer.contrib`
-and `einsum_plan`, `Arr[Tensor]` in `concat`, `split` and `backward`,
-`Arr[Bool]` in `resolve_perm` and `backward`.
+**Status:** done (2026-08). All three shapes verified: `Arr[Arr[I64]]` indexes
+two deep, `Arr[Bool]` holds and prints, and a list of tensors indexes to a
+tensor. No variance and no covariant assignment was added, which is what the
+entry asked for: the element type is any type the subset has.
 
 `docs/self-hosting.md` section 1.2 lists `Arr[T]` without saying whether `T` may
 itself be a container or a struct. Every entry above needs it to be.
@@ -1656,7 +1835,10 @@ uses above, which is five chances to get an index wrong.
 
 ## NEEDS-73: `abort` in value position
 
-**Status:** open, small. `src/tensor.tw` `apply_binary`, `apply_unary`.
+**Status:** done (2026-08). `abort` is usable as an expression, so a `_ =>
+abort("bad")` arm sits beside arms of type `F64` and the match checks. The
+alternative the entry rejects, a sentinel float that a wrong op silently
+computes with, did not have to be taken.
 
 Both end in a `_ =>` arm that calls `abort` because the op passed was not of the
 kind the function handles. The arm has to have the same type as the others,
@@ -1672,7 +1854,9 @@ expression-bodied.
 
 ## NEEDS-74: rendering an `Arr[I64]` the way Go's `%v` does
 
-**Status:** open, diagnostics only. `src/tensor.tw` `resolve_perm`.
+**Status:** open, diagnostics only, unchanged (re-checked 2026-08). One
+message, and the decision below (either the Go side switches to the shape
+rendering or a second renderer exists) has not been made.
 
 The invalid-permutation message renders the axes with `shape_string`, which
 produces `[1, 0]`. `internal/tensor/ops.go` uses `%v` on a `[]int`, which
@@ -1737,7 +1921,12 @@ the choice is visible rather than assumed.
 
 ## NEEDS-76: `f64_shortest`, Go's `%g` for the source formatter
 
-**Status:** blocking for `src/fmt.tw`. `format_number`.
+**Status:** done (2026-08), as the `f64_to_str` builtin, which is literally
+`strconv.FormatFloat(x, 'g', -1, 64)`, and `std/float.f64_shortest` delegates to
+it on the bootstrap. So the four bullets below hold by construction rather than
+by transcription, and the exponent threshold of 6 that the differential run
+caught cannot drift. Checked anyway against the binary: `1234567.5` gives
+`1.2345675e+06`.
 
 `f64_shortest(F64) -> Str`, which must equal Go's
 `strconv.FormatFloat(x, 'g', -1, 64)` exactly. This is not NEEDS-57's
@@ -1766,8 +1955,12 @@ threshold of 6 is invisible until a value has a fractional part.
 
 ## NEEDS-77: the formatter drops `unit USD`
 
-**Status:** open, and it is a bug on the Go side first. `src/fmt.tw` `stmt`,
-`internal/format/format.go` `(*printer).stmt`.
+**Status:** done (2026-08, 1.6), and fixed in both implementations in one
+change, which is what this entry was waiting for and the reason it stayed open
+so long. `internal/format/format.go`'s statement switch has a `*ast.UnitDecl`
+case, `src/fmt.tw` has the matching one, and `twill fmt` on a file beginning
+`unit USD` now prints `unit USD` instead of deleting it. A file that declares a
+base unit survives a format.
 
 `internal/format/format.go`'s statement switch has no case for `*ast.UnitDecl`,
 so a `unit` declaration formats to nothing and a file that declares a base unit
@@ -1814,8 +2007,14 @@ as NEEDS-77.
 
 ## NEEDS-79: a `Dict` keyed by `I64`
 
-**Status:** open, a workaround is in place. `src/fmt.tw` `Printer.trailing`,
-`line_key`.
+**Status:** the workaround moved into the runtime (2026-08); the type is still
+a lie. `dict_set(d, i64(3), "x")` and `dict_get(d, i64(3))` both work now, so
+`src/fmt.tw` no longer has to call `str()` at every set and every get. What the
+runtime does underneath is the same decimal conversion: `i64(3)` and `"3"` are
+the **same key**, verified, so a `Dict` that mixes them silently collides. That
+is fine for `Printer.trailing`, whose keys are all line numbers, and it is not
+the "`Dict` takes any equatable key" this entry asks for. The same relaxation is
+what NEEDS-81 wants for identity keys, and neither has it.
 
 The formatter maps a source line to the trailing comment on it. The natural type
 is `Dict[I64, Str]`; `docs/self-hosting.md` only specifies `Str` keys, so the
@@ -1845,7 +2044,11 @@ command line, it has to be added to the Go binary first.
 
 ## NEEDS-81: a map keyed by value identity
 
-**Status:** open, a workaround is in place and it is quadratic.
+**Status:** open, a workaround is in place and it is quadratic, unchanged
+(re-checked 2026-08). `is_same` exists as a builtin (NEEDS-21) so the comparison
+is available, and there is still no way to *key* a `Dict` on it: `Dict` accepts
+a `Str` or an `I64`, and the `I64` is a decimal string underneath (NEEDS-79).
+So the backwards linear scan stands and the O(n^2) stands with it.
 `src/eval.tw` `tape_node_of_tensor`.
 
 The tape seam has to answer "which node did this tensor come from", and the
@@ -1868,8 +2071,18 @@ does not exist there at all, which is why this cost is new rather than ported.
 
 ## NEEDS-82: file-level state that is mutated in place
 
-**Status:** half answered, and still blocking for `src/eval.tw`. `TAPES`, and
-the three functions around it: `tape_push`, `tape_pop`, `tape_current`.
+**Status:** answered, both halves (2026-08). The aliasing half was already
+settled and is below. The other half is now measured rather than assumed: a
+file-level `let` **may** be initialised by a call, the initialiser runs **once**
+at module load, and the array it returns is **shared**, so pushing to it from
+anywhere lengthens the one array and a function reading it sees the push. That
+is the same measurement NEEDS-86 wanted from the immutable side, and it answers
+both.
+
+One caveat held briefly and does not any more: `let TAB: Arr[I64] = mk()` drew a
+false "declared Arr[I64] but the value is Unit" when `mk` had a block body,
+because the call was typed from the body rather than from the signature. Fixed
+before 1.6 shipped; see NEEDS-49.
 
 The aliasing half is settled: **`docs/language-guide.md`, `struct`, and what a
 parameter is** says an `Arr` is a handle and copying is always explicit, so
@@ -1911,7 +2124,13 @@ differences cannot reach checked against exact derivatives.
 
 ## NEEDS-84: `f64_bits` and `f64_from_bits`
 
-**Status:** blocking for `src/float.tw`. Every function in it.
+**Status:** done (2026-08, 1.6). `f64_bits` and `f64_from_bits` are builtins
+and are exact now that `I64` is a real int64 (NEEDS-2): `f64_bits(1.0)` is
+`4607182418800017408` and `f64_from_bits` of that is `1`. Before 1.6 the pattern
+came back through a float64 and the round trip lost the low bits, which is what
+made this blocking rather than merely missing. `f64_bits_hi`, `f64_bits_lo` and
+`f64_from_halves` are still there beside them, and are the compensation that is
+no longer needed.
 
 `f64_bits(F64) -> I64` and `f64_from_bits(I64) -> F64`, the IEEE 754 bit
 pattern of a double and its inverse. Go's `math.Float64bits` and
@@ -1931,9 +2150,16 @@ representation. Everywhere else it is a number.
 
 ## NEEDS-85: `shr` on `I64` is arithmetic, and there is no unsigned anything
 
-**Status:** the semantics are now decided and written down; the `U64` half is
-still open, and a workaround is in place. `src/float.tw` `ushr`, `udiv10`,
-`unonzero`. **The normative text is `docs/language-guide.md`, Operators →
+**Status:** the semantics are decided, written down and now verified against a
+real `I64` (2026-08, 1.6); the `U64` half is still open and the workaround is
+still in place and still correct. `shr` is arithmetic (`shr(i64(-8), 1)` is
+`-4`), `shl` shifts zeros in, and 1.6's exact 64-bit integers mean the sign bit
+is now reachable: `shl(i64(1), 63)` is `-9223372036854775808` and round-trips,
+where before it was lossy above 2^53. So the intermediate values this entry is
+about, `10 * 2^60 + 9` and the rest, are now representable, and `ushr`, `udiv10`
+and `unonzero` are compensating for the absence of an unsigned type rather than
+for the absence of exact integers. They still work and they are still the named
+idiom. **The normative text is `docs/language-guide.md`, Operators →
 Bitwise operators on `I64`.** Read it there, not here.
 
 The decision: `shr` is an **arithmetic** shift, `shl` shifts zeros in, and shift
@@ -1981,8 +2207,15 @@ rather than inherited.
 
 ## NEEDS-86: a file-level `let` initialised by a call
 
-**Status:** open, assumed to work. `src/float.tw` `LC_CUTOFF`, `LC_DELTA`,
-`POWTAB`.
+**Status:** answered, and it works (2026-08). Measured rather than assumed: a
+file-level `let` bound to a call runs its initialiser once at module load, before
+any function that reads it, and the array it returns is shared rather than
+rebuilt per read. So `left_shift` does not reconstruct a 61-entry table on every
+call and the formatter's cost stays linear. What is still luck rather than design
+is the ordering question this entry raises in its last sentence: nothing here
+reads another of the three, and initialiser order between file-level bindings has
+not been specified. The next file will not be so lucky.
+`src/float.tw` `LC_CUTOFF`, `LC_DELTA`, `POWTAB`.
 
 Three constant tables are built by a function and bound at file level:
 
@@ -2128,7 +2361,12 @@ probably right and is a layering decision rather than a coding task.
 
 ## NEEDS-90: an enum whose variant payload contains the enum
 
-**Status:** blocking for `std/json.tw`. `Json`, cases `JArray` and `JObject`.
+**Status:** done (2026-08). A type may appear inside its own payload through a
+container: `enum J { JNum(F64), JArr(Arr[J]) }` declares, constructs, prints and
+matches. The termination worry below did not materialise, because the
+annotations are checked rather than monomorphized (NEEDS-4), so there is no
+worklist to run forever yet. When user-defined generics land, the memo this
+entry asks for is the thing to remember.
 
 ```
 enum Json {
@@ -2160,8 +2398,24 @@ through it never had to be decided.
 
 ## NEEDS-91: asking whether a path exists, without reading it
 
-**Status:** open, a workaround is in place and it is absurd. `std/io.tw`
-`exists`, `is_dir`.
+**Status:** done (2026-08, 1.6). `path_exists(Str) -> Bool` and
+`path_is_dir(Str) -> Bool` are builtins, and `std/io.tw` `exists` and `is_dir`
+are now one-line delegations to them. The absurd workaround described below,
+reading a whole file to answer a yes-or-no question about it and listing a whole
+directory to answer one about a directory, is gone from the tree.
+
+The entry asked for "or better a `stat` returning existence, kind and size in one
+call", and that is the half not taken: existence, kind, size and modification
+time are four calls (`path_exists`, `path_is_dir`, `file_size`, `mtime`), so a
+program that wants all four asks four times and can see the file change between
+them. The invisible half the entry names, a file that exists but cannot be read
+reporting differently depending on which branch answers, is improved rather than
+collapsed: `path_exists` gives one answer, and permission is still not
+distinguished from absence.
+
+1.6 also added the path *string* operations the same callers wanted, which are
+pure text and touch no disk: `path_join`, `path_base`, `path_dir`, `path_ext`,
+`path_stem`, `path_normalize` and `path_is_abs`.
 
 `path_exists(Str) -> Bool`, or better a `stat` returning existence, kind and
 size in one call.
@@ -2182,10 +2436,21 @@ of that into one answer.
 
 ## NEEDS-92: removing a file, and a temporary directory to put one in
 
-**Status:** open, low priority, and it is why `std/tests/io_test.tw` does not
-test reading and writing.
+**Status:** done (2026-08, 1.6), and wider than the two functions asked for.
+`temp_dir(prefix)` creates a temporary directory and returns `Res[Str, Str]`
+(note the argument: it is a prefix, not the nullary `temp_dir()` below), and
+removal is three functions rather than one, because a caller that means to
+delete a tree and a caller that means to delete a file should not be spelled the
+same: `remove_file`, `remove_dir` and `remove_all`. Alongside them `mkdir_all`,
+`rename` and `mtime`. All verified end to end: make a temp dir, write a file
+into it, read it back, stat it, rename it, remove it, make a nested directory,
+remove the tree.
 
-`remove(Str) -> Res[Unit, Str]` and `temp_dir() -> Str`.
+So the gap this entry records is closed and `std/tests/io_test.tw` can now write
+a fixture without leaving it behind. Actually doing that is a test-suite change
+this entry does not cover.
+
+*(Original request: `remove(Str) -> Res[Unit, Str]` and `temp_dir() -> Str`.)*
 
 `docs/self-hosting.md` deliberately excludes directory operations, and for the
 compiler that is right: it reads files, writes files and reports. A test suite
@@ -2201,9 +2466,16 @@ writes into the source tree and hopes.
 
 ## NEEDS-93: removing the last element of an `Arr`
 
-**Status:** open, small, a workaround is in place. `std/io.tw` `normalize`.
+**Status:** done (2026-08). `pop(a)` is a builtin: it shortens the array in
+place and returns the element removed (the element, not an `Opt`, so a caller
+must check `len` first). The consequence for `std/io.tw` `normalize` is that its
+rebuild-one-element-shorter loop, and the comment there citing this entry, are
+now unnecessary and should be deleted; they are still in the tree and are still
+correct, just quadratic for no reason. The prediction below, that a stack is the
+natural shape for half a dozen things in a compiler, is why this was worth
+closing rather than tolerating.
 
-`pop(a) -> Opt[T]`, or `truncate(a, n)`.
+*(Original request: `pop(a) -> Opt[T]`, or `truncate(a, n)`.)*
 
 The primitive table has `arr_new`, `push`, indexed get and set, and `len`. There
 is no way to make an array shorter, so `normalize` resolving a `..` component
@@ -2219,7 +2491,26 @@ of `push`.
 
 ## NEEDS-94: a way to fail
 
-**Status:** blocking, and worked around badly. `std/nn.tw` `init`,
+**Status:** answered (2026-08), and the answer was already in the language:
+`abort(msg)` (NEEDS-11) works in numeric mode as well as systems mode, stops the
+program, and prints `runtime error: abort: <msg>` with the source line. So
+`nn.init` can name the strategy and the caller and stop, and `std/frame.tw`,
+`std/batch.tw` and `std/loss.tw` can all say the things this entry lists that
+they cannot say.
+
+The advice below is therefore now wrong in one direction and right in the other.
+Wrong: "there is nothing in the language that stops a program" is false. Right:
+the workaround it describes is still what `std/nn.tw:72` does, print followed by
+a tensor of NaNs, and every criticism of it below still holds. The fix is a
+standard-library change rather than a language one, and it has not been made.
+
+What `abort` is not is the mechanism the last paragraph asks for, a failure that
+reaches the top with a source position and that a caller could catch. `abort`
+means a bug and is not catchable; `Res` and `?` (NEEDS-10) are the catchable
+half, and a library deciding between them is a design question this entry does
+not settle.
+
+*(Original status: blocking, and worked around badly.)* `std/nn.tw` `init`,
 `conv_init_as`.
 
 `nn.init(strategy, nout, nin)` takes the initialisation strategy by name, so
@@ -2269,23 +2560,40 @@ state in `std/optim.tw`. The second is the better answer and the larger change;
 the first would remove the surprise today.
 
 The first-class generator already exists: `std/random`'s `Rng`, with `new_rng`
-and `permutation(r, n)`. What blocks `std/batch` from using it is not that it is
-unwritten but the mode boundary. `std/random` is `mode systems` and `Rng` holds
-`I64` state; `std/batch` is numeric mode, where the only number is `float64` and
-an `I64`-carrying value cannot be held. Verified 2026-08: `std/random` is
-imported only by systems-mode modules (`std/stats` and its test), and no
-numeric-mode file holds an `Rng`. So the real choice is narrower than it looks:
-add the seeded builtins (a bootstrap change, both sides at once), or move
-`std/batch` itself into systems mode so it can hold an `Rng`. There is no
+and `permutation(r, n)`.
+
+**The mode-boundary argument below is now wrong (2026-08, 1.6).** It said that
+`std/batch`, being numeric mode, could not hold an `Rng`, because `Rng` carries
+`I64` state and numeric mode's only number is float64. Since 1.6 `I64` is a real
+value rather than a float in disguise (NEEDS-2), and a numeric-mode file
+importing `std/random`, calling `new_rng(7)` and holding the result works;
+verified against the binary. The runtime also grew its own generator handles
+(`rng_open`, `rng_f64`, `rng_u53`, `rng_close`) beside the global stream.
+
+So the choice this entry frames as narrow is now easy, and it is a
+standard-library change rather than a language one: `std/batch` threads an `Rng`
+the way `std/optim.tw` threads optimizer state, and stops calling the global
+`seed`. That is the second and better of the two answers offered above, and
+nothing blocks it. Until it is done the side effect described here is real:
+`train_test_split` still moves the one global stream, and `stratified_indices`
+still reseeds it once per class.
+
+*(The original paragraph, now superseded: "What blocks `std/batch` from using it
+is not that it is unwritten but the mode boundary ... There is no
 numeric-mode-only fix, because the only seeding a numeric program has is the
-global `seed`, which is the side effect in the first place.
+global `seed`, which is the side effect in the first place.")*
 
 *Go bootstrap:* `internal/interp` holds a package-level `*rand.Rand`. A
 per-call seed is a second `rand.New(rand.NewSource(seed))` that is not stored.
 
 ## NEEDS-96: iteration that does not materialise
 
-**Status:** open, and a real limit on dataset size. `std/batch.tw`
+**Status:** open, and a real limit on dataset size, unchanged (re-checked
+2026-08). There is no generator, no `yield`, and no lazy sequence with a `next`,
+so `epoch_batches` still materialises the whole epoch and `std/io` still has no
+way to stream a file that does not fit in memory. This is the largest open
+*language* request left that is not generics: everything else on the open list is
+a primitive or a library change. `std/batch.tw`
 `epoch_batches`, `eval_batches`.
 
 `epoch_batches` returns the whole epoch as a list of `[Xb, yb]` pairs. Every
@@ -2307,7 +2615,16 @@ that ends in reading one batch past the end.
 
 ## NEEDS-97: assigning to an element of a list
 
-**Status:** open, worked around. `std/batch.tw` `stratified_kfold_indices`.
+**Status:** done (2026-08). `xs[i] = v` assigns an element of a list, in
+numeric mode as well as systems mode. So `stratified_kfold_indices` can be
+written the natural way, one pass dealing into k buckets, instead of k passes
+each deciding whether an element belongs to the fold being built; the rewritten
+loop this entry complains about is still in the tree and is now k times the work
+for no reason.
+
+Tensors still have the gap and still have the better excuse below.
+
+*(Original status: open, worked around. Original text follows.)*
 
 `xs[i] = v` is a syntax error. `append` is the only way to grow a list and there
 is no way to replace an element of one, so an algorithm that fills k buckets by
@@ -2326,9 +2643,20 @@ restriction is the language's, not the runtime's.
 
 ## NEEDS-98: an empty record, and removing a field
 
-**Status:** blocking. `std/frame.tw` has no `select`, `drop`, `rename` or
-`from_columns` because of it, and `group_agg` cannot name its own output
-columns.
+**Status:** done, by the primitive the entry itself calls the smaller and more
+general of the two (2026-08). `{}` is the empty record, not a block evaluating to
+unit, and `with_field({}, "a", 1)` builds `{a: 1}`, so a record whose field names
+come from a list can be constructed. That is the `record()` half, and the entry
+says outright that it alone would do: given it, `without_field` is a fold over
+`columns` skipping one name, and `columns` and `field` are both builtins.
+
+`without_field` itself was not added, so a narrowing that wants to preserve field
+order pays a rebuild.
+
+What has *not* happened is the consequence: `std/frame.tw` still has no `select`,
+`drop`, `rename` or `from_columns`, and `group_agg` still returns its answer
+under the fixed names `key` and `value`. The language stopped being the reason in
+1.6; the library has not caught up.
 
 `with_field(rec, name, value)` builds a record with a name known at run time,
 which is exactly the right primitive, and it is unusable on its own because
@@ -2358,8 +2686,16 @@ lines each and neither has a design question in it.
 
 ## NEEDS-99: string concatenation
 
-**Status:** specified; the implementation is still open, and until it lands this
-pushes work onto callers. `std/frame.tw` `one_hot`. **The normative text is
+**Status:** done (2026-08). `"colour" + "_" + str(0)` is `colour_0`: `+`
+concatenates (NEEDS-35) and `str` on a number renders it without a trailing
+`.0` (NEEDS-45), which is both halves of what this entry asks for. So `one_hot`
+can build its own column names and stop taking them as an argument, `std/metrics.tw`
+can label the rows of `describe`, and the multi-argument `print` diagnostics in
+these modules can become one built string.
+
+None of that has been done. The language gap closed in 1.6; the thirty string
+literals at the call site are now the library's choice rather than its
+constraint. `std/frame.tw` `one_hot`. **The normative text is
 `docs/language-guide.md`, Strings → Concatenation** for `+`, and Standard
 library → `str` on a number for the round-tripping rendering this entry pairs
 with it. Once both exist, `one_hot` builds `colour_0` itself and stops taking
@@ -2387,10 +2723,22 @@ formats numbers for `print`.
 
 ## NEEDS-100: enumerating and opening a GPU device
 
-**Status:** open, and blocking for `src/gpu/` in its entirety. `src/gpu/device.tw`
-`available`, `device_count`, `open`, `close`.
+**Status:** deferred, and the deferral is now visible from twill (2026-08).
+Read NEEDS-108 first: it says none of NEEDS-100 through NEEDS-107 can be
+implemented under the current rules, and that remains true, because NEEDS-107 is
+still nothing.
 
-Read NEEDS-108 first. It says that none of NEEDS-100 through NEEDS-107 can be
+What 1.6 did add is the *names*. Every signature in NEEDS-100 through NEEDS-106
+is on the builtin table, and every one of them except `gpu_available` fails at
+run time with `no GPU backend in this build`. `gpu_available()` returns `false`
+and `gpu_device_count()` returns `0`, which is exactly the contract this entry
+insists on: a machine with no GPU is the normal case, `available()` is false,
+every tensor stays on the host, and every answer is unchanged. So the
+graceful-degradation path is real and testable today, and the path behind it is
+a stub. That is worth saying plainly, because a reader who greps the builtin
+list will find fifteen GPU functions and conclude there is a backend.
+
+`src/gpu/device.tw` `available`, `device_count`, `open`, `close`. It says that none of NEEDS-100 through NEEDS-107 can be
 implemented at all under the current rules, and that the entries exist so that
 the requirement is a named list rather than an open question. Every entry in
 this block is a signature, not a plan.
@@ -2428,7 +2776,7 @@ concept of a device.
 
 ## NEEDS-101: allocating and freeing device memory
 
-**Status:** open. `src/gpu/device.tw` `alloc`, `free`; `src/gpu/buffer.tw`
+**Status:** deferred; the name exists and the implementation does not (2026-08). See NEEDS-100: these builtins are on the table and return `no GPU backend in this build`. The signature below is what they will have, and the reasoning is what it is for. `src/gpu/device.tw` `alloc`, `free`; `src/gpu/buffer.tw`
 `alloc_with_eviction`.
 
     gpu_alloc(dev: I64, elements: I64) -> Res[I64, Str]
@@ -2456,7 +2804,7 @@ Against OpenCL: `clCreateBuffer` with `CL_MEM_READ_WRITE`, and
 
 ## NEEDS-102: moving numbers to and from a device
 
-**Status:** open. `src/gpu/device.tw` `write`, `read`, `copy`.
+**Status:** deferred; the name exists and the implementation does not (2026-08). See NEEDS-100: these builtins are on the table and return `no GPU backend in this build`. The signature below is what they will have, and the reasoning is what it is for. `src/gpu/device.tw` `write`, `read`, `copy`.
 
     gpu_write(buf: I64, dst_off: I64, src: Arr[F64]) -> Res[Unit, Str]
     gpu_read(buf: I64, src_off: I64, n: I64)         -> Res[Arr[F64], Str]
@@ -2492,7 +2840,7 @@ Against OpenCL: `clEnqueueWriteBuffer` and `clEnqueueReadBuffer` with
 
 ## NEEDS-103: compiling a kernel from source at run time
 
-**Status:** open. `src/gpu/device.tw` `build`, `kernel`.
+**Status:** deferred; the name exists and the implementation does not (2026-08). See NEEDS-100: these builtins are on the table and return `no GPU backend in this build`. The signature below is what they will have, and the reasoning is what it is for. `src/gpu/device.tw` `build`, `kernel`.
 
     gpu_program_build(dev: I64, source: Str, options: Str) -> Res[I64, Str]
     gpu_kernel(program: I64, name: Str)                    -> Res[I64, Str]
@@ -2523,7 +2871,7 @@ Against OpenCL: `clCreateProgramWithSource`, `clBuildProgram`,
 
 ## NEEDS-104: binding kernel arguments
 
-**Status:** open. `src/gpu/device.tw` `arg_buffer`, `arg_i64`, `arg_f64`,
+**Status:** deferred; the name exists and the implementation does not (2026-08). See NEEDS-100: these builtins are on the table and return `no GPU backend in this build`. The signature below is what they will have, and the reasoning is what it is for. `src/gpu/device.tw` `arg_buffer`, `arg_i64`, `arg_f64`,
 `arg_local`.
 
     gpu_set_arg_buffer(kernel: I64, index: I64, buf: I64)  -> Res[Unit, Str]
@@ -2550,7 +2898,7 @@ size and a null pointer.
 
 ## NEEDS-105: launching a kernel
 
-**Status:** open. `src/gpu/device.tw` `launch`.
+**Status:** deferred; the name exists and the implementation does not (2026-08). See NEEDS-100: these builtins are on the table and return `no GPU backend in this build`. The signature below is what they will have, and the reasoning is what it is for. `src/gpu/device.tw` `launch`.
 
     gpu_launch(dev: I64, kernel: I64, global: Arr[I64], local: Arr[I64])
         -> Res[Unit, Str]
@@ -2574,7 +2922,7 @@ The shape of the idea is the same and nothing else about it is.
 
 ## NEEDS-106: synchronising with a device
 
-**Status:** open. `src/gpu/device.tw` `finish`.
+**Status:** deferred; the name exists and the implementation does not (2026-08). See NEEDS-100: these builtins are on the table and return `no GPU backend in this build`. The signature below is what they will have, and the reasoning is what it is for. `src/gpu/device.tw` `finish`.
 
     gpu_finish(dev: I64) -> Res[Unit, Str]
 
@@ -2595,6 +2943,11 @@ Against OpenCL: `clFinish`.
 ## NEEDS-107: loading a shared library and resolving a symbol at run time
 
 **Status:** open, and the mechanism NEEDS-100 through NEEDS-106 all rest on.
+Nothing landed (re-checked 2026-08): there is no `dlopen`, no `GetProcAddress`
+equivalent, and no calling convention, so the fifteen names 1.6 put on the
+builtin table have nothing behind them and cannot get anything behind them this
+way. Deliberately not done rather than not got to: an FFI is a much larger
+decision than a GPU backend, which is the argument in NEEDS-108 option 1.
 
 The six entries above are signatures. This one is the thing that makes any of
 them reachable: a way to open a shared library by name at run time and look up a
@@ -2627,8 +2980,15 @@ side. That is exactly the property the GPU backend does not have.
 
 ## NEEDS-108: there is nowhere for a native layer to live
 
-**Status:** open, and it is not a language feature. It is the reason NEEDS-100
-through NEEDS-107 cannot be started.
+**Status:** open, and it is not a language feature; unchanged in substance
+(2026-08). It is still the reason NEEDS-100 through NEEDS-107 cannot be started,
+and the project is still on option 3, which is what `docs/gpu-feasibility.md`
+recommends on independent grounds. 1.6 moved one inch toward option 2 by putting
+the fifteen names on the primitive table with stub bodies, which is the framing
+that paragraph argues for: the question is now "what is on the primitive table",
+and the answer is "these, unimplemented". Nothing has been measured since, so the
+precondition the last option names, a real twill program that is matmul-bound at
+256x256 or larger, is still not shown to exist.
 
 Stated plainly, because the rest of `src/gpu/` and `docs/gpu.md` are written as
 though it were solved and a reader should not have to infer this from their
@@ -2717,11 +3077,18 @@ failure, not a curiosity.
 
 ## NEEDS-110: dtype names in the surface language
 
-**Status:** done in twill (commit `65ebdb0`). `src/eval.tw` reads the seven
-names contextually, constructors take a trailing dtype, and `.to` casts. No
-new bootstrap primitive: it is all reachable from what `src/tensor.tw` already
-exposes. The Go bootstrap does not implement it, and gains nothing until it too
-carries a dtype, so this is one of the divergences the triple build will show.
+**Status:** done on both sides (2026-08). `src/eval.tw` reads the seven names
+contextually, constructors take a trailing dtype, and `.to` casts (commit
+`65ebdb0`), and the Go bootstrap now does the same: `zeros(2, 2, bf16)` builds a
+bf16 tensor, `dtype(x)` is `bf16`, and `x.to(f32)` casts. The last sentence of
+the original status said the bootstrap does not implement it and that this would
+be one of the divergences the triple build shows. That is no longer true and the
+divergence is gone.
+
+Note the shape of the contextual reading: a dtype name is only a dtype in the
+dtype argument of a constructor or of `.to`, so a bare `bf16` in any other
+expression position is an unknown name. That is the design below working as
+intended and it surprises anyone who tries to pass one around.
 
 `docs/dtypes.md` is the design. What is missing is the syntax. Three things,
 none of them large on its own:
@@ -2747,13 +3114,16 @@ shape.
 
 ## NEEDS-111: a packed, byte-addressable buffer
 
-**Status:** twill side done (commit `edb4637`); one native dependency remains.
-`src/buf.tw` packs the layout and `Tensor.data` is now a `Buf`, so the dtype
-work saves the bytes docs/dtypes.md promised: 2x for f32 and i32, 4x for bf16
-and f16, 8x for i8 and bool. What the runtime still owes is the four byte
-primitives `buf.tw` names and nothing else implements yet: `buf_new`,
-`buf_len`, `buf_get8`, `buf_set8`. Everything above a byte is twill. Until
-those land, the packed buffer is written but cannot run.
+**Status:** done (2026-08). The twill side landed in commit `edb4637`:
+`src/buf.tw` packs the layout and `Tensor.data` is a `Buf`, so the dtype work
+saves the bytes `docs/dtypes.md` promised, 2x for f32 and i32, 4x for bf16 and
+f16, 8x for i8 and bool. The four byte primitives it was waiting on are now
+builtins and work: `buf_new`, `buf_len`, `buf_get8`, `buf_set8`. Everything
+above a byte is twill, as designed. The packed buffer runs.
+
+The aliasing question raised at the end of this entry is still unanswered and
+still does not need to be: the primitives offer no slicing view, so two tensors
+cannot share a byte range, and nothing in `src/tensor.tw` wants to.
 
 The dtype semantics landed without it: a bf16 tensor holds bf16 values, rounded
 correctly, and `twill-lang/shuttle` can now measure the error that quantisation
@@ -2825,10 +3195,17 @@ underflow in a way float64 would notice.
 
 ## NEEDS-113: dtype in the static checker
 
-**Status:** done in twill (commit `79bc6ac`). `src/check.tw` carries a dtype on
-its tensor type, applies `tensor.promote` at binary nodes, and emits the one
-widening warning. Unknown is the default, so a dtype-free program draws no new
-diagnostic. No new primitive.
+**Status:** done in twill (commit `79bc6ac`); the Go checker has not followed.
+`src/check.tw` carries a dtype on its tensor type, applies `tensor.promote` at
+binary nodes, and emits the one widening warning. Unknown is the default, so a
+dtype-free program draws no new diagnostic. No new primitive.
+
+The bootstrap's *runtime* promotes correctly (verified 2026-08: an f16 tensor
+plus a bf16 tensor is f32, which is the first of the three cases below), and
+`internal/checker` still has one numeric type, so the third case, the silent
+widening of narrow weights by a wide bias, is caught by the twill checker and
+not by `twill check`. That is a divergence between the two checkers rather than
+a gap in either, and it is the kind the triple build is meant to surface.
 
 The checker already approximates `broadcast_shape` statically, so a shape
 mismatch is a compile error. It has no equivalent for `promote`, so nothing is
@@ -2853,8 +3230,18 @@ promote.
 
 ## NEEDS-114: dtype-aware printing and parsing
 
-**Status:** the numerics are done (commits `29c8f86`, `edb4637`); the print
-path in `src/eval.tw` is not yet wired. `src/float.tw` now renders and parses at
+**Status:** done (2026-08). The numerics landed in commits `29c8f86` and
+`edb4637` and the print path is wired: a bf16 tensor holding one third prints
+`tensor([0.334], shape=[1], dtype=bf16)`, which is the shortest decimal that
+round-trips through bf16 rather than seventeen digits of a number that
+distinguishes three, and the dtype prints alongside the shape as the last
+paragraph of this entry asks. `format_value` exists (NEEDS-88), which is the
+dependency the paragraph below says had to come first, and it does route each
+element through `tensor.dt_shortest`. The original status follows because its
+sequencing argument is the reason this landed in the order it did.
+
+*(Original status: the numerics are done (commits `29c8f86`, `edb4637`); the
+print path in `src/eval.tw` is not yet wired. `src/float.tw` now renders and parses at
 a `FloatFmt`, and `src/tensor.tw` `dt_shortest`/`dt_of_str` dispatch it on the
 dtype. What is left is not mechanical, because the thing it plugs into is itself a
 hole: `src/eval.tw` calls `format_value` in four places and no version of it is
@@ -2863,7 +3250,7 @@ when `format_value` renders a tensor it routes each element through
 `tensor.dt_shortest(t.dtype, x)` rather than `format_number`, and narrow
 literals parse through `tensor.dt_of_str(dt, s)` rather than `f64_of_str`. The
 dispatch both of those need is in place; the renderer that calls it is not. No
-new primitive.
+new primitive.)*
 
 `print(x)` renders the F64 in the buffer. For a bf16 tensor that F64 is the
 exact widening of a bf16 value, so it prints seventeen digits of a number that
@@ -2888,3 +3275,159 @@ distinguishes them.
 *Go bootstrap:* `internal/value.FormatNumber` is float64-only. `strconv`'s
 `FormatFloat` and `ParseFloat` both take a bit size already, which is the same
 generalisation this asks for.
+
+---
+
+## What 1.6 closed
+
+One line each, in id order. Every one was re-verified against `twill16.exe`
+rather than taken from a commit message.
+
+- **NEEDS-1** `mode systems` now selects real semantics (types, exhaustiveness,
+  `?`) rather than one advisory rule.
+- **NEEDS-2** `I64` is a real int64. This is the entry the rest of the release
+  rests on.
+- **NEEDS-3** `enum` with payloads, and `match` checked for missing variants,
+  duplicate arms, arms after `_`, a useless `_`, and arms mixing two enums.
+- **NEEDS-5**, **NEEDS-42**, **NEEDS-67** structs are nominal, mutable and
+  passed by handle, including through a field of another struct.
+- **NEEDS-6** `Str` indexes, slices, measures and concatenates.
+- **NEEDS-7** `Bytes` as a growable buffer.
+- **NEEDS-8** `Dict` with insertion-ordered iteration.
+- **NEEDS-10** `Res`/`Opt` and `?`, checked, with a failing top-level `?` now an
+  error instead of a silent exit 0. One gap remains; see below.
+- **NEEDS-11** `abort`.
+- **NEEDS-13** `unit` as a literal. **NEEDS-14** `Bool` as a type name.
+- **NEEDS-16**, **NEEDS-72**, **NEEDS-90** recursive payloads, nested
+  containers, and a type inside its own payload through a container.
+- **NEEDS-17**, **NEEDS-43**, **NEEDS-93**, **NEEDS-97** `Arr` and list get
+  `pop`, in-place `push` and element assignment.
+- **NEEDS-18**, **NEEDS-60**, **NEEDS-76** float text conversion in both
+  directions, as `str_to_f64` and `f64_to_str`, calling Go's own `strconv`.
+- **NEEDS-19** `i64_of_str` exact. **NEEDS-45** `str` on an `I64`.
+- **NEEDS-20** the `%d`/`%s`/`%q` equivalents, as `str`, `str_quote` and `+`.
+- **NEEDS-21** `is_same`. **NEEDS-22** `Opt` from a `Dict` lookup, matched.
+- **NEEDS-24** and **NEEDS-44**, which were the same entry twice: integer `/`
+  and `%`, truncating toward zero, `%` signed by the dividend, zero divisor a
+  named error.
+- **NEEDS-26** closures capture by handle. **NEEDS-71** an `Arr` parameter
+  aliases.
+- **NEEDS-27**, **NEEDS-70** equality: different types never equal, enums
+  structural, payload-free cases by case. `Some(1) == Some(1)` used to be false.
+- **NEEDS-28**, **NEEDS-48**, **NEEDS-56**, **NEEDS-58** the process surface:
+  `read_file`, `write_file`, `args`, `exit`, `write_out`/`write_err` on `Str`,
+  `emit_line`, `resolve_path`.
+- **NEEDS-34** `chr`. **NEEDS-35**, **NEEDS-99** `Str + Str`.
+- **NEEDS-36** `arr(...)`. **NEEDS-37** `env` returning `Opt`.
+- **NEEDS-38** `is_tty_stdout` and `window_size` (no `is_tty_stderr`).
+- **NEEDS-39** `mono_ns`, a monotonic clock distinct from `clock_now_ms`.
+- **NEEDS-40**, **NEEDS-65**, **NEEDS-68**, **NEEDS-69** `F64` as a systems
+  scalar and the float primitives over it, transcendentals included.
+- **NEEDS-41** the read-only tensor view, as `shape` plus `arr_of_tensor`.
+- **NEEDS-49** the systems-mode checker policy, decided and implemented. See
+  its entry for which of the two candidate policies was taken and why.
+- **NEEDS-51** the import resolver, on `module_source`.
+- **NEEDS-55** the seeded generator, global and first-class.
+- **NEEDS-59** whole-file read and write. **NEEDS-63** the opaque gbm handle.
+- **NEEDS-64** `save_value`/`load_value`. **NEEDS-66** the three builtins the
+  checker did not know.
+- **NEEDS-73** `abort` in value position.
+- **NEEDS-77** the formatter no longer deletes `unit USD`, fixed in the Go
+  printer and the self-hosted one in one change, which is what it was waiting
+  for.
+- **NEEDS-79** a `Dict` takes an `I64` key, by decimal rendering underneath.
+- **NEEDS-82**, **NEEDS-86** a file-level `let` may be initialised by a call; it
+  runs once and the value is shared.
+- **NEEDS-84** `f64_bits`/`f64_from_bits`, exact now that `I64` is.
+- **NEEDS-85** `shl(1, 63)` round-trips, so `src/float.tw`'s `ushr` helpers are
+  compensating only for the missing unsigned type. They still work.
+- **NEEDS-91**, **NEEDS-92** the filesystem: `path_exists`, `path_is_dir`,
+  `mkdir_all`, `remove_file`, `remove_dir`, `remove_all`, `rename`, `temp_dir`,
+  `cwd`, `mtime`, and the path string operations `path_join`, `path_base`,
+  `path_dir`, `path_ext`, `path_stem`, `path_normalize`, `path_is_abs`.
+- **NEEDS-94** answered rather than closed: `abort` stops a numeric-mode program,
+  so `std/nn`'s NaN workaround is now a library debt and not a language gap.
+- **NEEDS-95** answered the same way: a numeric-mode file can hold an `Rng` now,
+  so the mode-boundary argument in that entry is wrong.
+- **NEEDS-98** `{}` is the empty record, so `with_field` has something to build
+  from.
+- **NEEDS-110** dtype names, in the bootstrap as well as in twill.
+- **NEEDS-111** the four byte primitives, so the packed buffer runs.
+- **NEEDS-114** dtype-aware printing: a bf16 tensor prints `0.334` and its
+  dtype.
+
+Two things landed that no entry had asked for, and they belong here because they
+were silent wrong answers rather than missing features. A gradient taken inside a
+gradient is now refused wherever it is written rather than only as a literal
+`grad(grad(f))`, and `tensor(list(...))` over gradient-tracking values is
+differentiable rather than returning a zero gradient. `std/gradcheck.tw` is the
+finite-difference checker that makes both testable from twill.
+
+## What is still open after 1.6
+
+### Language
+
+- **User-defined generics (NEEDS-4).** The largest one. `Arr`, `Dict`, `Opt` and
+  `Res` are generic and checked; `struct Box[T]` and `enum MyOpt[T]` are a
+  syntax error at the `[`. No monomorphization exists, which is also why
+  NEEDS-90's termination worry has not had to be answered.
+- **The pattern language (NEEDS-3).** A pattern is a variant name and binders.
+  Literal patterns (`3 => ...`), nested patterns (`Ok(Some(v))`) and guards are
+  all syntax errors. A compiler written in twill wants all three.
+- **Lazy iteration (NEEDS-96).** No generator, no `yield`, no lazy sequence.
+  `epoch_batches` materialises every batch of an epoch, and `std/io` cannot
+  stream a file larger than memory. This is a real limit on dataset size rather
+  than an inconvenience.
+- **Keys are not general (NEEDS-79, NEEDS-81).** A `Dict` key is a `Str`, or an
+  `I64` that becomes one, so `i64(3)` and `"3"` collide, and there is no way to
+  key on the identity `is_same` compares. The tape's node lookup stays a
+  quadratic scan because of the second.
+- **`trim_space` over Unicode (NEEDS-61).** ASCII only, so a non-breaking space
+  around a CSV number parses on the Go side and fails here.
+
+### Runtime
+
+- **No process interface.** `read_file` and `write_file` exist; there is no way
+  to start another process, and no `stdin_all` or `read_line` (NEEDS-47), so a
+  twill-hosted REPL still cannot read its own input.
+- **No ranged file read.** Reading is whole-file only (NEEDS-59): there is no
+  offset-and-length read and no line-at-a-time reader, which is the same
+  limitation NEEDS-96 hits from the iteration side.
+- **No memory counters.** Nothing reports allocation, live bytes or peak, so
+  NEEDS-111's 2x-to-8x saving is a property of the layout that no twill program
+  can measure. `nbytes` reports a tensor's own size and nothing aggregates it.
+- **No `stat` (NEEDS-91).** Existence, kind, size and modification time are four
+  calls, so a program asking all four can see the file change between them.
+- **No `is_tty_stderr` (NEEDS-38).** The two streams cannot be asked about
+  separately, which is the case that entry warned about.
+- **No FFI (NEEDS-107).** Deliberate. It is a much larger decision than anything
+  that currently wants it.
+
+### Tooling and libraries
+
+- **`std/frame.tw` has not caught up (NEEDS-98, NEEDS-99).** `select`, `drop`,
+  `rename` and `from_columns` are still unwritten and `group_agg` still returns
+  `key` and `value`, though `{}` and `+` both exist now. The same is true of
+  `std/nn`'s NaN workaround (NEEDS-94), `std/batch`'s global reseeding
+  (NEEDS-95), and `std/io` `normalize`'s rebuild loop (NEEDS-93): four library
+  workarounds whose reason for existing was removed and which are still there.
+- **Blank lines between comments (NEEDS-78).** One case left in the formatter.
+- **`%v` on an axis list (NEEDS-74).** One diagnostic, one decision unmade.
+- **Recursion depth (NEEDS-30).** 10,000-deep nesting parses and 20,000-deep
+  recursion returns; there is still no depth counter and no diagnostic, so what
+  happens past the real limit is undefined rather than reported.
+- **Initialiser order between file-level bindings (NEEDS-86).** Runs once and is
+  shared, both verified. Order is unspecified and currently does not matter.
+
+### GPU
+
+Deferred, on the project's own measurements rather than by neglect
+(NEEDS-100 through NEEDS-108). The fifteen signatures are now names on the
+builtin table that return `no GPU backend in this build`; `gpu_available()` is
+`false` and `gpu_device_count()` is `0`, which is the graceful-degradation
+contract NEEDS-100 asks for and is the only part that works. Nothing can be
+implemented behind them without NEEDS-107 or native code in the runtime, which
+is NEEDS-108, and `docs/gpu-feasibility.md`'s own recommendation is to settle
+f32 and find a twill program that is matmul-bound at 256x256 or larger first.
+Neither has been done, so the deferral is still the right one and is recorded
+here so it is read as a decision rather than as an oversight.
