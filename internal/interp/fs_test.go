@@ -77,6 +77,49 @@ fn main() {
 	expectLines(t, out, "true", "true", "true", "gone")
 }
 
+// read_file_at is what a streaming reader needs: a window into a file rather
+// than the whole of it. A short read at the end is not an error, because that
+// is what "the file ended" looks like to a reader that will poll again.
+func TestReadFileAt(t *testing.T) {
+	out := runFile(t, t.TempDir(), `mode systems
+fn main() {
+  let d: Str = match temp_dir("twillrange") { Ok(p) => p, Err(e) => abort(e) }
+  let f: Str = path_join(d, "log.txt")
+  match write_file(f, "hello world, and then some more") { Ok(_) => unit, Err(e) => print(e) }
+  match read_file_at(f, 0, 5) { Ok(s) => print(s), Err(e) => print(e) }
+  match read_file_at(f, 6, 5) { Ok(s) => print(s), Err(e) => print(e) }
+  match read_file_at(f, 25, 100) { Ok(s) => print(s, len(s)), Err(e) => print(e) }
+  match read_file_at(f, 999, 10) { Ok(s) => print("past the end:", len(s)), Err(e) => print(e) }
+  match read_file_at(path_join(d, "nope"), 0, 5) { Ok(s) => print(s), Err(_) => print("err") }
+  match read_file_at(f, 0 - 1, 5) { Ok(s) => print(s), Err(_) => print("err") }
+  match remove_all(d) { Ok(_) => print("cleaned"), Err(e) => print(e) }
+}
+`)
+	expectLines(t, out, "hello", "world", "e more 6", "past the end: 0", "err", "err", "cleaned")
+}
+
+// The memory counters, for a benchmark reporting bytes beside nanoseconds.
+// Three are measured; mem_tensors is -1, meaning not counted, which is the
+// convention for a quantity that is unmeasured rather than zero.
+func TestMemoryCounters(t *testing.T) {
+	out := runFile(t, t.TempDir(), `mode systems
+fn main() {
+  print(mem_counters_available())
+  let a0: I64 = mem_allocs()
+  let b0: I64 = mem_bytes()
+  let junk: Arr[Str] = arr_new()
+  let i: I64 = 0
+  while i < 20000 {
+    push(junk, "x")
+    i = i + 1
+  }
+  print(mem_allocs() > a0, mem_bytes() > b0, mem_live_bytes() > 0)
+  print(mem_tensors())
+}
+`)
+	expectLines(t, out, "true", "true true true", "-1")
+}
+
 // The path operations are string handling: they never touch the filesystem,
 // they emit a forward slash on every platform, and they read a backslash as a
 // separator so a path handed over by the operating system still splits.

@@ -1,9 +1,12 @@
 package interp
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/twill-lang/twill/internal/value"
@@ -169,6 +172,85 @@ func (ip *Interp) registerFS(def func(string, int, bool, func([]value.Value) (va
 			return fsErr(err), nil
 		}
 		return fsOk(value.Str(dir)), nil
+	})
+
+	// read_file_at reads at most `count` bytes starting at `offset`. It is what a
+	// streaming reader needs and could not have: read_file returns the whole
+	// file, so a reader following a growing log had to read all of it again on
+	// every poll, and one processing a file larger than memory could not run at
+	// all (warp's docs/needs.md entry 5).
+	//
+	// A short read at the end of the file is not an error: fewer bytes than
+	// asked for, or none at all, is what "the file ended" looks like, and a
+	// caller polling for more will ask again.
+	def("read_file_at", 3, false, func(a []value.Value) (value.Value, error) {
+		p, err := pathArg(a, 0, "read_file_at")
+		if err != nil {
+			return nil, err
+		}
+		offset, ok := value.AsInt(a[1])
+		if !ok {
+			return nil, fmt.Errorf("read_file_at expects an integer offset")
+		}
+		count, ok := value.AsInt(a[2])
+		if !ok {
+			return nil, fmt.Errorf("read_file_at expects an integer count")
+		}
+		if offset < 0 || count < 0 {
+			return fsErr(fmt.Errorf("read_file_at: offset and count must not be negative")), nil
+		}
+		f, openErr := os.Open(p)
+		if openErr != nil {
+			return fsErr(openErr), nil
+		}
+		defer f.Close()
+		buf := make([]byte, count)
+		n, readErr := f.ReadAt(buf, offset)
+		if n == 0 && readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fsErr(readErr), nil
+		}
+		return fsOk(value.Str(string(buf[:n]))), nil
+	})
+
+	// --- memory ---------------------------------------------------------------
+	//
+	// What the runtime has allocated, for a benchmark that wants to report
+	// bytes alongside nanoseconds. The discipline is the same as timing's: read
+	// before, read after, subtract. Never read a "current usage" and call it a
+	// measurement, because the collector may have run between the two reads.
+
+	def("mem_counters_available", 0, false, func(a []value.Value) (value.Value, error) {
+		return value.Bool(true), nil
+	})
+	def("mem_allocs", 0, false, func(a []value.Value) (value.Value, error) {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return value.Int(int64(m.Mallocs)), nil
+	})
+	def("mem_bytes", 0, false, func(a []value.Value) (value.Value, error) {
+		// Cumulative and monotonic, so a difference is what was allocated
+		// between two reads whether or not anything was freed in between.
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return value.Int(int64(m.TotalAlloc)), nil
+	})
+	def("mem_live_bytes", 0, false, func(a []value.Value) (value.Value, error) {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return value.Int(int64(m.HeapAlloc)), nil
+	})
+	// mem_tensors is -1, meaning not counted, and it is the one of the four that
+	// is not measured rather than the one that is zero.
+	//
+	// Counting tensors means an atomic increment at every construction site, of
+	// which there are forty-odd, on the hot path of every numeric program. That
+	// is a tax on everyone who is not benchmarking, to serve a number a
+	// benchmark can get another way: allocations and bytes already move when
+	// tensors are made. -1 is the convention bobbin's own clock uses for a
+	// quantity it cannot measure, and saying so is better than a plausible
+	// wrong number.
+	def("mem_tensors", 0, false, func(a []value.Value) (value.Value, error) {
+		return value.Int(-1), nil
 	})
 
 	// --- paths --------------------------------------------------------------

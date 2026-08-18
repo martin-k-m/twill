@@ -2868,7 +2868,9 @@ var builtinNames = map[string]bool{
 	"Ok": true, "Err": true, "Some": true, "None": true, "unit": true,
 	// Filesystem and paths (internal/interp/fs.go).
 	"path_exists": true, "path_is_dir": true, "mkdir_all": true, "remove_file": true,
-	"remove_dir": true, "rename": true, "remove_all": true, "mtime": true, "mono_ns": true, "temp_dir": true, "cwd": true,
+	"remove_dir": true, "rename": true, "remove_all": true, "mtime": true, "mono_ns": true,
+	"read_file_at": true, "mem_counters_available": true, "mem_allocs": true,
+	"mem_bytes": true, "mem_live_bytes": true, "mem_tensors": true, "temp_dir": true, "cwd": true,
 	"path_join": true, "path_base": true, "path_dir": true, "path_ext": true,
 	"path_stem": true, "path_normalize": true, "path_is_abs": true,
 	// Scalar f64 math, conversions and IEEE bit access for the systems dialect.
@@ -2914,6 +2916,8 @@ var builtinArity = map[string]int{
 	// nullary
 	"args": 0, "arr_new": 0, "bytes_new": 0, "clock_now_ms": 0, "dict_new": 0,
 	"gpu_available": 0, "gpu_device_count": 0, "is_tty_stdout": 0, "rng_normal": 0, "mono_ns": 0,
+	"mem_counters_available": 0, "mem_allocs": 0, "mem_bytes": 0,
+	"mem_live_bytes": 0, "mem_tensors": 0,
 	"rng_uniform": 0, "window_size": 0, "cwd": 0,
 	// unary -- elementwise math (unaryOp / elemOp) and the rest
 	"relu": 1, "exp": 1, "log": 1, "sin": 1, "cos": 1, "tanh": 1, "sigmoid": 1,
@@ -2944,6 +2948,6 @@ var builtinArity = map[string]int{
 	"map_leaves": 2, "maxpool2d": 2, "pow": 2, "push": 2, "save": 2,
 	"save_value": 2, "write_file": 2, "write_frame": 2, "zip_leaves": 2,
 	// ternary
-	"arange": 3, "buf_set8": 3, "clip": 3, "dict_or": 3, "dict_set": 3, "fold": 3,
+	"arange": 3, "buf_set8": 3, "read_file_at": 3, "clip": 3, "dict_or": 3, "dict_set": 3, "fold": 3,
 	"linspace": 3, "slice": 3, "where": 3, "with_field": 3,
 }

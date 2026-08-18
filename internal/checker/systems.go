@@ -554,7 +554,8 @@ func systemsBuiltinResult(name string, args []Type) (Type, bool) {
 		return nil
 	}
 	switch name {
-	case "i64", "i64_of_f64", "clock_now_ms", "mono_ns", "mtime", "file_size", "buf_len", "buf_get8", "rng_open":
+	case "i64", "i64_of_f64", "clock_now_ms", "mono_ns", "mtime", "file_size", "buf_len", "buf_get8", "rng_open",
+		"mem_allocs", "mem_bytes", "mem_live_bytes", "mem_tensors":
 		return tInt{}, true
 	case "f64", "f64_of_i64":
 		return scalar(), true
@@ -586,13 +587,13 @@ func systemsBuiltinResult(name string, args []Type) (Type, bool) {
 			return tEnum{name: "Opt", args: []Type{d.val}}, true
 		}
 		return tEnum{name: "Opt", args: []Type{nil}}, true
-	case "dict_has", "is_same", "is_tty_stdout", "all_finite", "path_exists", "path_is_dir", "path_is_abs":
+	case "dict_has", "is_same", "is_tty_stdout", "all_finite", "path_exists", "path_is_dir", "path_is_abs", "mem_counters_available":
 		return tBool{}, true
 	case "path_join", "path_base", "path_dir", "path_ext", "path_stem", "path_normalize":
 		return tStr{}, true
 	case "mkdir_all", "remove_file", "remove_dir", "remove_all", "rename":
 		return tEnum{name: "Res", args: []Type{tUnit{}, tStr{}}}, true
-	case "temp_dir", "cwd":
+	case "temp_dir", "cwd", "read_file_at":
 		return tEnum{name: "Res", args: []Type{tStr{}, tStr{}}}, true
 	case "bytes_new":
 		return tBytes{}, true
