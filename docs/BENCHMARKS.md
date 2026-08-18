@@ -417,7 +417,39 @@ that twill in f64 cannot hold one.
 
 ---
 
-## 8. Related
+## 8. What 1.6 cost, measured
+
+1.6 added an exact `I64` on the arithmetic path and a real type system to the
+checker, and both are on the hot path of something. What they cost was measured
+before the release rather than assumed, against the binary built from the commit
+1.6 branched from, on the machine described in section 1, best of five with
+nothing else running.
+
+| | 1.5.1.1 | 1.6.0-rc1 |
+| --- | --- | --- |
+| scalar loop, 3M iterations | 806 ms | 772 ms |
+| `matmul_512` | 69 ms | 59 ms |
+| `mlp_train_step` | 52 ms | 56 ms |
+| `attention_head` | 50 ms | 47 ms |
+| `examples/mlp.tw`, run only | 137 ms | 135 ms |
+| `twill check src/tensor.tw` (5,600 lines) | 66 ms | 76 ms |
+
+**Execution is unchanged.** The scalar loop was the one to watch, because
+arithmetic now asks whether its operands are integers before it adds them, and
+the answer is two failed type assertions on the float path; it does not show
+above the run-to-run spread. The tensor workloads are unchanged for the reason
+`docs/DECISIONS.md` entry 4 gives: the interpreter is not where their time goes.
+
+**`twill check` is about 15% slower**, and that is the honest cost of the
+release. It is doing work it did not do before -- parsing every annotation into
+a type, checking every binding, argument, return, field and payload against one,
+and walking every `match` against its enum -- on the largest systems-mode file
+there is. Ten milliseconds to be told that a `Str` is being bound to an `I64` is
+a trade this document is happy to record.
+
+---
+
+## 9. Related
 
 - `docs/CORRECTNESS.md`, the evidence that the numbers being computed are right,
   which is the prerequisite for caring how fast they are computed.
