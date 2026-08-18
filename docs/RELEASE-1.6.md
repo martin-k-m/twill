@@ -1,4 +1,4 @@
-# Twill 1.6.0-rc1 — the completeness release
+# Twill 1.6.0 -- the completeness release
 
 1.5 made the ecosystem run. 1.6 makes the language stop having pieces missing
 from the middle of it.
@@ -58,13 +58,34 @@ the REPL, and a formatter that no longer deletes `unit` declarations.
 
 `CHANGELOG.md` has the complete list.
 
+## The candidates
+
+1.6.0 is 1.6.0-rc2 with nothing added, and the two candidates are worth keeping
+apart rather than merging.
+
+rc1 was the release: the language work, the checker, the tooling, the
+documentation, verified against the nine ecosystem repositories without any of
+them having to change.
+
+rc2 is what happened when those nine repositories were then *moved onto* rc1 --
+their integer tags rewritten as enums, their `-1` sentinels as `Opt`, their
+error-swallowing reads as `Res`. Code that is trying to use a feature finds
+things that code merely passing its tests does not. It found four: a match arm
+that could not continue onto the next line, ordering that was not type-checked,
+an `I64` that could not be saved, and a cross-module `match` that was never
+checked at all. None was reachable from twill's own sources.
+
+Between rc2 and this tag the compiler did not change. What changed is where the
+evidence comes from: the nine repositories run their suites against it in CI now,
+rather than on one developer's machine.
+
 ## Evidence
 
 | | |
 | --- | --- |
 | Go test suite | green, including the Go-versus-self-hosted differential harness |
 | Standard library suites | 15 of 15, including the gradient checker's own 19 checks |
-| Ecosystem suites | 60 of 60, across all nine repositories, unchanged |
+| Ecosystem suites | 60 of 60, across all nine repositories, run by their own CI |
 | `twill check` over the ecosystem | 10 unresolved names, all primitives that do not exist yet, down from 31 |
 | Formatter corpus | 461 files: parses, idempotent, every comment kept, every statement kept |
 | Checker false positives on working code | none measured across ten repositories |

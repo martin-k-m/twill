@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.6.0] - 2026-08-19
+
+The completeness release. Four things were true of twill before it and are not
+now: an `I64` was a float, a systems-mode annotation was a comment, a `match`
+could silently fail to cover its cases, and two different mistakes in autodiff
+answered with a zero instead of an error.
+
+1.6.0 is 1.6.0-rc2 with nothing added. The two candidates below are what it is
+made of, kept as they were written rather than merged, because they record
+something worth keeping: rc1 was the release, and rc2 is what nine
+repositories found when they were moved onto rc1 and used it. Every one of
+those findings came from code that was trying to do its job, and none of them
+was reachable from twill's own sources.
+
+Between rc2 and this tag the compiler did not change. What changed is that the
+nine repositories now run their suites against it in CI rather than on one
+developer's machine: 60 suites, nine repositories, green.
+
 ## [1.6.0-rc2] - 2026-08-18
 
 Everything here came out of putting 1.6 to work: the nine ecosystem
