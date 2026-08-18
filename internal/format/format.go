@@ -149,6 +149,12 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 		} else {
 			p.lineC(indent, "import "+strconv.Quote(st.Path), st.Line)
 		}
+	case *ast.UnitDecl:
+		// A `unit` declaration had no case here at all, so the formatter printed
+		// every other statement and dropped this one: `twill fmt --write` on a
+		// file declaring USD deleted the declaration, and every annotation that
+		// named it then failed to check. docs/needs.md NEEDS-77.
+		p.lineC(indent, "unit "+st.Name, st.Line)
 	case *ast.TypeDecl:
 		fields := make([]string, len(st.Fields))
 		for i, f := range st.Fields {

@@ -37,7 +37,7 @@ import (
 // runTests is the entry point for `twill test`. paths are the files and
 // directories to search; when empty it searches the working directory. verbose
 // prints every file's captured output, not only a failing one's.
-func runTests(paths []string, verbose bool) int {
+func runTests(paths []string, verbose bool, filter string) int {
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
@@ -49,6 +49,23 @@ func runTests(paths []string, verbose bool) int {
 	if len(files) == 0 {
 		fmt.Fprintln(os.Stderr, "twill: no *_test.tw files found")
 		return 2
+	}
+	// --filter keeps the suites whose path contains the substring. Matching on
+	// the path rather than on a test name inside a file is what the runner can
+	// honestly promise: a file is the unit it runs, and a name inside one is the
+	// harness's business.
+	if filter != "" {
+		kept := files[:0:0]
+		for _, f := range files {
+			if strings.Contains(filepath.ToSlash(f), filter) {
+				kept = append(kept, f)
+			}
+		}
+		if len(kept) == 0 {
+			fmt.Fprintf(os.Stderr, "twill: no test file matches %q (of %d found)\n", filter, len(files))
+			return 2
+		}
+		files = kept
 	}
 
 	passed, failed := 0, 0

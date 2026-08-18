@@ -357,13 +357,13 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
         i = i + 1
       }
     },
-    # `unit USD` prints as nothing, because internal/format/format.go has no
-    # case for *ast.UnitDecl and its statement switch falls through silently.
-    # This is a bug on the Go side and it is reproduced here on purpose: the
-    # cross-agreement check compares bytes, so fixing it in one implementation
-    # alone would turn a dropped declaration into a reported divergence and
-    # bury it. NEEDS-55 is the entry to fix both together.
-    SUnitDecl(_) => unit,
+    # `unit USD` printed as nothing in both implementations until 1.6: the Go
+    # printer had no case for it and this one reproduced the bug on purpose,
+    # because the cross-agreement check compares bytes and fixing one side
+    # alone would have turned a dropped declaration into a reported divergence.
+    # Both are fixed together, which is what that note was waiting for.
+    # NEEDS-77.
+    SUnitDecl(st) => line_c(p, indent, "unit " + st.name, st.line),
     SBreak(st) => line_c(p, indent, "break", st.line),
     SContinue(st) => line_c(p, indent, "continue", st.line),
   }
