@@ -512,3 +512,71 @@ func TestSelfHostedCheckRejectsScalarMatmul(t *testing.T) {
 		t.Fatalf("check of a scalar matmul exited %d, want 1", code)
 	}
 }
+
+// I64 semantics -- exact values above 2^53, wrapping arithmetic, truncating
+// division, dividend-signed modulo, and bitwise words on the sign bit -- must
+// print identically on the bootstrap and the self-hosted evaluator.
+func TestSelfHostedI64Matches(t *testing.T) {
+	src := `mode systems
+let big: I64 = 9007199254740993
+print(big)
+print(9223372036854775807)
+print(-9223372036854775808)
+print(9223372036854775807 + 1)
+print(-9223372036854775808 - 1)
+let neg: I64 = -7
+print(neg / 2)
+print(neg % 2)
+print(7 % neg)
+print(neg // 2)
+let m: I64 = -9223372036854775808
+print(m / (0 - 1))
+print(i64(2.9))
+print(f64(big))
+print(str(big))
+print(big == 9007199254740992)
+print(big > 9007199254740992)
+print(big + 1)
+print(big + 0.5)
+print(1 shl 63)
+print((1 shl 63) shr 1)
+print(bnot(0))
+print(band(m, -1))
+fn half(x: I64) -> I64 { x / 2 }
+print(half(-9))
+`
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("I64 output diverged:\n  go:   %q\n  self: %q", goOut, selfOut)
+	}
+}
+
+// The exhaustiveness check on match: the self-hosted checker reports a missing
+// variant and accepts a covered enum, matching the Go checker's verdicts.
+func TestSelfHostedCheckCatchesNonExhaustiveMatch(t *testing.T) {
+	bad := "mode systems\nenum V { A, B, C }\nfn f(v: V) -> I64 {\n  match v { A => 1, B => 2 }\n}\n"
+	if code := runSelfHostedCheck(t, bad); code != 1 {
+		t.Fatalf("check of a non-exhaustive match exited %d, want 1", code)
+	}
+	good := "mode systems\nenum V { A, B, C }\nfn f(v: V) -> I64 {\n  match v { A => 1, B => 2, C => 3 }\n}\n"
+	if code := runSelfHostedCheck(t, good); code != 0 {
+		t.Fatalf("check of an exhaustive match exited %d, want 0", code)
+	}
+}
+
+// The `?` context rule: a top-level `?`, or one in a function whose return
+// type is not Res or Opt, is a diagnostic in the self-hosted checker too.
+func TestSelfHostedCheckCatchesTryContext(t *testing.T) {
+	top := "mode systems\nfn p() -> Res[I64, Str] { Ok(1) }\nlet v = p()?\n"
+	if code := runSelfHostedCheck(t, top); code != 1 {
+		t.Fatalf("check of a top-level `?` exited %d, want 1", code)
+	}
+	wrong := "mode systems\nfn p() -> Res[I64, Str] { Ok(1) }\nfn bad() -> I64 { p()? }\n"
+	if code := runSelfHostedCheck(t, wrong); code != 1 {
+		t.Fatalf("check of `?` in an I64-returning function exited %d, want 1", code)
+	}
+	good := "mode systems\nfn p() -> Res[I64, Str] { Ok(1) }\nfn ok() -> Res[I64, Str] {\n  let v: I64 = p()?\n  Ok(v)\n}\n"
+	if code := runSelfHostedCheck(t, good); code != 0 {
+		t.Fatalf("check of `?` in a Res-returning function exited %d, want 0", code)
+	}
+}

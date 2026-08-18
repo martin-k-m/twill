@@ -586,8 +586,14 @@ func systemsBuiltinResult(name string, args []Type) (Type, bool) {
 			return tEnum{name: "Opt", args: []Type{d.val}}, true
 		}
 		return tEnum{name: "Opt", args: []Type{nil}}, true
-	case "dict_has", "is_same", "is_tty_stdout", "all_finite":
+	case "dict_has", "is_same", "is_tty_stdout", "all_finite", "path_exists", "path_is_dir", "path_is_abs":
 		return tBool{}, true
+	case "path_join", "path_base", "path_dir", "path_ext", "path_stem", "path_normalize":
+		return tStr{}, true
+	case "mkdir_all", "remove_file", "remove_dir", "rename_path":
+		return tEnum{name: "Res", args: []Type{tUnit{}, tStr{}}}, true
+	case "temp_dir", "cwd":
+		return tEnum{name: "Res", args: []Type{tStr{}, tStr{}}}, true
 	case "bytes_new":
 		return tBytes{}, true
 	case "read_file":

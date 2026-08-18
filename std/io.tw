@@ -7,20 +7,19 @@ mode systems
 # The runtime surface named in `docs/self-hosting.md` section 1.2 and recorded
 # in `docs/needs.md` NEEDS-28, and nothing else:
 #
-#   read_file(path) -> Res[Bytes, Str]
-#   write_file(path, Bytes) -> Res[Unit, Str]
+#   read_file(path) -> Res[Str, Str]
+#   write_file(path, Str) -> Res[Unit, Str]
 #   list_dir(path) -> Res[Arr[Str], Str]
 #   env(name) -> Opt[Str]
 #   args() -> Arr[Str]
-#   write_out(Bytes), write_err(Bytes), exit(I64)
+#   write_out(Str), write_err(Str), exit(I64)
 #
-# "Nothing else" is the constraint that shapes this file. There is no `stat`, no
-# `open`, no seek, no append mode, no streaming read, and no way to create or
-# remove a directory. Everything below is those primitives plus string handling,
-# and where that costs something the cost is stated at the function rather than
-# hidden. The alternative would have been to invent the primitives I wanted and
-# leave a file that cannot be implemented; the primitives that are genuinely
-# missing are recorded in `docs/needs.md` instead, and named where they bite.
+# As of 1.6 there is more: `path_exists`, `is_dir`, `mkdir_all`, `remove_file`,
+# `remove_dir`, `rename_path`, `temp_dir` and `cwd` (docs/needs.md NEEDS-91 and
+# NEEDS-92), which is why `exists` below is one call rather than a whole-file
+# read. There is still no `open`, no seek, no append mode and no streaming read,
+# so everything here is whole files plus string handling, and where that costs
+# something the cost is stated at the function rather than hidden.
 #
 # WHOLE FILES ONLY
 #
@@ -48,10 +47,7 @@ import "std/text" as text
 #
 # No encoding is assumed or validated. The bytes are handed back as a `Str`,
 # which is what a `Str` is. Call `text.char_valid` if the file has to be UTF-8.
-fn read_text(path: Str) -> Res[Str, Str] {
-  let b: Bytes = read_file(path)?
-  Ok(bytes_to_str(b))
-}
+fn read_text(path: Str) -> Res[Str, Str] = read_file(path)
 
 # The file's contents, or `dflt` if it cannot be read for any reason.
 #
@@ -60,7 +56,7 @@ fn read_text(path: Str) -> Res[Str, Str] {
 # unreadable one into a default is right there and wrong nearly everywhere else.
 fn read_text_or(path: Str, dflt: Str) -> Str {
   match read_file(path) {
-    Ok(b) => bytes_to_str(b),
+    Ok(s) => s,
     Err(_) => dflt,
   }
 }
@@ -132,56 +128,22 @@ fn append_text(path: Str, extra: Str) -> Res[Unit, Str] {
 
 # Whether the path names something that exists.
 #
-# There is no `stat` in the runtime surface, so this is assembled from the two
-# primitives that are there, and both halves are needed:
+# Until 1.6 there was no `stat`, so this read the entire file to answer a
+# yes-or-no question and then listed the parent directory to cover the cases a
+# read cannot see -- a directory, and a file whose permissions deny the read.
+# `path_exists` is that question asked directly (NEEDS-91).
 #
-#   - `read_file` succeeding proves a readable file exists. It fails for a
-#     directory and for a file whose permissions deny the read, both of which
-#     exist.
-#   - `list_dir` on the parent, looking for the base name, covers those two
-#     cases and directories generally.
-#
-# The cost is the honest part: the first branch reads the entire file to answer
-# a yes-or-no question, and the second lists a whole directory. On a large file
-# or a directory with a hundred thousand entries that is absurd, and it is what
-# the available primitives allow. `docs/needs.md` NEEDS-91 asks for the `stat`
-# that would make this one call.
-#
-# It is also inherently racy, as every existence check is in every language: the
-# file can be gone by the time the caller acts on the answer. Prefer attempting
-# the operation and handling its error to asking first.
-fn exists(path: Str) -> Bool {
-  match read_file(path) {
-    Ok(_) => return true,
-    Err(_) => unit,
-  }
-  let parent: Str = dir_name(path)
-  let base: Str = base_name(path)
-  if base == "" { return false }
-  match list_dir(if parent == "" { "." } else { parent }) {
-    Ok(entries) => {
-      let i: I64 = 0
-      while i < len(entries) {
-        if text.equal(entries[i], base) { return true }
-        i = i + 1
-      }
-      false
-    },
-    Err(_) => false,
-  }
-}
+# It is still inherently racy, as every existence check is in every language:
+# the file can be gone by the time the caller acts on the answer. Prefer
+# attempting the operation and handling its error to asking first.
+fn exists(path: Str) -> Bool = path_exists(path)
 
 # Whether the path names a directory.
 #
-# `list_dir` succeeding is the test, since it is the one primitive that
-# distinguishes the two. A directory that exists but cannot be listed reports
-# false, which is a wrong answer this cannot avoid without a `stat`.
-fn is_dir(path: Str) -> Bool {
-  match list_dir(path) {
-    Ok(_) => true,
-    Err(_) => false,
-  }
-}
+# A directory that exists but cannot be listed used to report false, because
+# `list_dir` succeeding was the only test available. The primitive answers it
+# now.
+fn is_dir(path: Str) -> Bool = path_is_dir(path)
 
 # ---- paths -----------------------------------------------------------------
 #
