@@ -826,6 +826,9 @@ func (ip *Interp) installBuiltins() {
 		}
 		return &value.Variant{Name: "Ok", Payload: names, HasPayload: true}, nil
 	})
+	// The rest of the filesystem, and the path operations, live in fs.go.
+	ip.registerFS(def, asStr)
+
 	// resolve_path makes a path absolute. With two arguments it resolves the
 	// second relative to the first's directory. With one it resolves against the
 	// running program's directory -- the form the self-hosted evaluator's file
