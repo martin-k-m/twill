@@ -60,6 +60,8 @@ func main() {
 			flagValue(args, "--filter")))
 	case "doctor":
 		os.Exit(doctor())
+	case "lsp":
+		os.Exit(runLSP())
 	case "repl":
 		repl()
 	default:
@@ -387,6 +389,7 @@ Usage:
   twill test <paths> -v      Show each suite's output, not only failures'
   twill test --filter <sub>  Run only the suites whose path contains <sub>
   twill doctor               Report what is installed, and what looks wrong
+  twill lsp                  Language server on stdin/stdout, for an editor
   twill                      Start the REPL
   twill --version            Print the version
   twill --version --verbose  ...with the build and library it came from
