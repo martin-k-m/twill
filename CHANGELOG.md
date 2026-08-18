@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0-rc2] - 2026-08-18
 
 Everything here came out of putting 1.6 to work: the nine ecosystem
 repositories were moved onto the release, and what they hit is what is below.
