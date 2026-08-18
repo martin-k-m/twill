@@ -1210,7 +1210,28 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 		}
 		// The arm body is a statement, so `Ok(v) => v`, `_ => return x`,
 		// `Ok(b) => acc = b` and `None => { ... }` are all arms.
+		//
+		// A body that is not a block is parsed as if inside a grouping. The
+		// rules that end a statement at a line starting with `+`/`-` read
+		// indentation against the column the statement began at, and an arm
+		// body's own first token sets that column, so
+		//
+		//	Some(v) => "got "
+		//	  + str(v),
+		//
+		// looked like a new statement starting at `+` and was a syntax error --
+		// on a continuation that is legal in every other position. Inside an arm
+		// there is no statement for one to begin: what follows the body is a
+		// comma or the closing brace. A block body is left alone, because the
+		// statements inside it do have boundaries and want the ordinary rule.
+		grouped := !p.check("{")
+		if grouped {
+			p.groupDepth++
+		}
 		body, err := p.parseStmt()
+		if grouped {
+			p.groupDepth--
+		}
 		if err != nil {
 			return nil, err
 		}

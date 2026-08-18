@@ -43,3 +43,36 @@ func TestTryOutsideAFunctionIsAnError(t *testing.T) {
 		t.Fatalf("err = %v, want the top-level ? error naming Err(boom)", err)
 	}
 }
+
+// A match arm's expression continues onto the next line, the way an expression
+// does everywhere else. The arm body's own first token used to set the column
+// the continuation rule measures against, so a leading `+` looked like the
+// start of a new statement and was a syntax error -- on a continuation that is
+// legal in every other position. Two ecosystem repositories hit it on the same
+// day and each extracted a helper function to work around it.
+func TestAMatchArmContinuesOntoTheNextLine(t *testing.T) {
+	out := runFile(t, t.TempDir(), `mode systems
+fn f(o: Opt[I64]) -> Str {
+  match o {
+    Some(v) => "got "
+      + str(v),
+    None => "none",
+  }
+}
+fn g(o: Opt[I64]) -> I64 {
+  match o {
+    Some(v) => {
+      let a: I64 = v
+        + 1
+      a
+    },
+    None => 0,
+  }
+}
+fn main() {
+  print(f(Some(3)), f(None))
+  print(g(Some(41)), g(None))
+}
+`)
+	expectLines(t, out, "got 3 none", "42 0")
+}

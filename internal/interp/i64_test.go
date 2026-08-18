@@ -217,3 +217,29 @@ func runSrcErr(t *testing.T, src string) ([]string, error) {
 	_, err := ip.Run(src)
 	return out, err
 }
+
+// An I64 saves and loads exactly, including the values that are the only reason
+// the type exists. It was not in the save format at all when the type landed,
+// so `save` on anything holding one -- loom's whole checkpoint-to-disk path --
+// failed with "cannot save a value of this kind". Saving it through an f64
+// would have been worse: it would have worked, and corrupted exactly the values
+// above 2^53 that an I64 is for.
+func TestI64SavesAndLoadsExactly(t *testing.T) {
+	dir := t.TempDir()
+	out := runFile(t, dir, `mode systems
+struct S { a: I64, b: Str, c: Arr[F64], d: F64 }
+fn main() {
+  let xs: Arr[F64] = []
+  let big: I64 = 9007199254740993
+  save(S { a: big, b: "z", c: xs, d: 0.5 }, "s.bin")
+  let back = load("s.bin")
+  print(back.a, back.a == big, back.b, back.d)
+  save(big, "n.bin")
+  print(load("n.bin") == big)
+  let mn: I64 = -9223372036854775808
+  save(mn, "m.bin")
+  print(load("m.bin") == mn)
+}
+`)
+	expectLines(t, out, "9007199254740993 true z 0.5", "true", "true")
+}
