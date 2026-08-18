@@ -36,8 +36,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A tag carrying a suffix -- v1.6.0-rc1, -beta2 -- is a candidate and
+          # must not become the repository's Latest release: that is the download
+          # anyone landing on the page is offered, and offering them a candidate
+          # ahead of the stable version is the one thing this step must not do.
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease="--prerelease" ;;
+          esac
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --title "Twill ${GITHUB_REF_NAME}"
+            gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes               --title "Twill ${GITHUB_REF_NAME}" $prerelease
           fi
