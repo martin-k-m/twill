@@ -1,5 +1,172 @@
 # Changelog
 
+## [1.6.0-rc1] - 2026-08-18
+
+The completeness release. 1.5 made the ecosystem run; this one makes the
+language stop having pieces missing from the middle of it. Four things were
+true of twill before this release and are not now: an `I64` was a float, a
+systems-mode annotation was a comment, a `match` could silently not cover its
+cases, and two different mistakes in autodiff answered with a zero instead of an
+error.
+
+Nothing in numeric mode changes. A program with no `mode systems` line and no
+type annotations behaves exactly as it did, which is what the mode gate is for.
+
+### Added
+
+- **`I64` is a real 64-bit integer.** It was an `f64` that happened to hold an
+  integer, so it held 53 bits: `9007199254740993` printed as
+  `9007199254740992`, `MAX_I64 + 1` did not wrap, `shl(1, 63)` could not be
+  represented, and every hash mixer and 64-bit generator anyone wrote in twill
+  was quietly wrong. That is `docs/needs.md` NEEDS-2, the oldest open entry in
+  the file, and it is closed.
+
+  An exact `Int` arises where the program said `I64` -- an annotation on a
+  binding, a parameter, a return, a struct field or an enum payload, the `i64()`
+  conversion, an integer literal too large for an `f64` to hold, and any
+  arithmetic between two of them -- and never from a bare small literal, which
+  is what leaves numeric mode alone. Arithmetic wraps; `/` and `//` truncate
+  toward zero and `%` takes the sign of the dividend, per the guide; division
+  and modulo by zero are errors rather than an infinity and a NaN; the bitwise
+  words are exact on all 64 bits including the sign; and comparisons and
+  dictionary keys are exact above 2^53. A property test runs 300 random pairs
+  through every operator against Go's `int64`.
+
+  `docs/language-guide.md` specified all of this in 1.5 and the implementation
+  did not have it. The specification did not move.
+
+- **`match` must cover its cases.** The checker knows each enum's cases and
+  names the ones with no arm:
+
+      model.tw:14: shape error: match on Verdict is not exhaustive: missing Noisy, New
+
+  With four related mistakes reported the same way: an arm that repeats a case,
+  an arm after `_`, a `_` when every case is already handled, and arms naming
+  cases of two different enums. This is the reason to have an enum: adding a
+  case now makes every `match` that has not been updated say so, at check time.
+  NEEDS-3.
+
+- **The systems-mode types are checked** (NEEDS-49). `I64`, `F64`, `Bool`,
+  `Str`, `Bytes`, `Unit`, `Arr[T]`, `Dict[K, V]`, `Opt[T]`, `Res[T, E]`, a
+  struct by name, an enum by name and a declared function type are types the
+  checker knows, and a definite mismatch is reported at a binding, an argument,
+  a return, a struct field at construction and at assignment, and an enum
+  payload. `let x: I64 = "hello"` used to pass.
+
+  The policy is the shape checker's: report only what is certain, and judge
+  nothing where a type is unresolved. `docs/self-hosting.md` section 1.3 asks
+  for the stricter one, where an unknown surviving inference is itself an error;
+  that is not this, and the reason is written down in the guide.
+
+- **`?` is checked** (NEEDS-10). `?` outside a function, in a function that does
+  not return a `Res` or an `Opt`, or on a value that is neither, is a
+  diagnostic; and what it yields is typed, so `let n: I64 = read_file(p)?`
+  reports rather than waits. A failing `?` at the top level of a file used to
+  end the program with status 0 and no message, which is the one thing a failed
+  read must not do.
+
+- **The rest of the filesystem** (NEEDS-91, NEEDS-92). `path_exists`,
+  `path_is_dir`, `mtime`, `mkdir_all`, `remove_file`, `remove_dir`,
+  `remove_all`, `rename`, `temp_dir` and `cwd`, each returning a `Res` where it
+  can fail for a reason a caller may handle and a `Bool` where "it is not there"
+  is the answer. A program could read a file and write one and that was all: it
+  could not make a directory to write into, remove what it wrote, or ask whether
+  a path existed without reading the whole file to find out. selvedge has seven
+  leftover `tmp_` files committed to its repository because a test had no way to
+  clean up after itself.
+
+  And the path operations, which are string handling and touch nothing:
+  `path_join`, `path_base`, `path_dir`, `path_ext`, `path_stem`,
+  `path_normalize`, `path_is_abs`. They emit a forward slash on every platform,
+  because a program's paths are written in its source and one that renders them
+  differently on Windows writes a different manifest there.
+
+- **`mono_ns()`**, a clock that only goes forward (NEEDS-39). `clock_now_ms` is
+  the wall clock and steps when the system's time is corrected, so a duration
+  measured across a correction is wrong by the correction -- for a benchmark,
+  the difference between a number and a fiction.
+
+- **`std/gradcheck`**, a gradient checker. `grad(f)` gives an answer very
+  quickly and there is nothing about a wrong one that looks wrong: a model with
+  a bad gradient does not crash, it trains to a worse loss than it should have,
+  and the search for why starts at the learning rate. `check_at(f, x)` and
+  `check_tree(f, params)` compare the gradient against a central difference
+  quotient -- the same derivative reached by a different route, which is why it
+  is deliberately not built out of `grad` -- and report the relative error they
+  were reached from, because 1e-3 and 1e+0 mean different things.
+
+- **`twill doctor`**, which answers the question a bug report starts with, and
+  checks the things that are wrong quietly: a stale binary earlier on `PATH`
+  than the new one, a `TWILL_STD` left pointing at last month's working copy, a
+  standard library that does not load. **`twill test --filter <sub>`** runs the
+  suites whose path contains a substring. **`twill --version --verbose`** prints
+  the build. In the REPL, **`:type`** and **`:shape`** answer from the checker
+  without running anything, which for a tensor-first language is the most useful
+  question there is: `:shape randn(4096, 4096) @ w` costs nothing here and a
+  gigabyte there.
+
+### Fixed
+
+- **A gradient taken inside a gradient is refused wherever it is written.**
+  `grad(grad(f))` was already refused, by inspecting the argument, so the same
+  mistake with a function between the two gradients passed the check and
+  returned zeros. Reverse mode is first-order and the value it hands back has no
+  history; differentiating it again differentiates a constant. `hessian` and
+  `jacobian` nest legitimately and are unaffected.
+
+- **`tensor(list(...))` no longer drops a gradient.** It copied the numbers out
+  into a fresh buffer, which has no gradient rule, so `jacobian` of a function
+  that built its output that way returned a matrix of zeros -- silently. A list
+  holding a value under differentiation is assembled through `concat` now. A
+  list of plain numbers takes the old path unchanged.
+
+- **`twill fmt` no longer deletes `unit` declarations.** The printer had no case
+  for one, so its statement switch fell through silently and `--write` removed
+  the declaration from the file; every annotation naming that unit then failed
+  to check. Fixed in both the Go printer and the self-hosted one at once, which
+  is what NEEDS-77's note was waiting for. A corpus test over 461 files now
+  holds the formatter to parsing, idempotence, keeping every comment, and
+  keeping every statement.
+
+- **`std/io.read_text` and `read_lines` failed on every call.** They were
+  written against a `read_file` returning `Bytes` and it returns a `Str`. The
+  checker found it: `?` yields the success payload's type now, so the mismatch
+  is a diagnostic rather than a runtime error attributed to the caller's file.
+
+- **Enum values compare structurally.** `Some(1) == Some(1)` was `false`, and
+  two separately built `Ok(3)` were not equal, because a payload-carrying
+  variant fell through to pointer identity. Dictionaries and byte buffers
+  compare by contents for the same reason.
+
+- **`i64_of_str` returns an exact integer.** It handed its answer back as an
+  `f64`, rounding above 2^53 -- the values that are the only reason to parse an
+  `I64` from text.
+
+### Changed
+
+- `rename_path` is spelled **`rename`**, matching the group it belongs to and
+  the name the ecosystem had already written. It was introduced in this release
+  and nothing outside it can depend on the old spelling.
+
+- `std/io.exists` asks the filesystem instead of reading the whole file, and
+  `std/io.is_dir` asks instead of listing the directory.
+
+### Compatibility
+
+Numeric mode is untouched: `%` is still floored there, `/` is still exact
+division, and no annotation is required or checked, so a numeric-mode program
+runs as it did. The 60 ecosystem test suites across the nine repositories pass
+unchanged, and `twill check` over all nine reports 10 unresolved names, all of
+them primitives that genuinely do not exist yet, down from 31 before this
+release.
+
+Systems-mode code can newly fail to check, which is the point of the release,
+and every diagnostic names what it found and what was declared. Three behaviours
+change at run time for a program that was relying on them: an `I64` division or
+modulo by zero is an error rather than an infinity or a NaN, `%` on two `I64`s
+takes the sign of the dividend rather than the divisor, and a failing `?` at the
+top level of a file stops with a message rather than exiting 0.
+
 ## [1.5.1.1] - 2026-08-15
 
 `std/random` draws from the host, and an annotation now settles what a bracket

@@ -1,6 +1,6 @@
 # Twill language guide
 
-This is the reference for Twill v1.2. The language is small, so this is short.
+This is the reference for Twill v1.6. The language is small, so this is short.
 
 ## Running programs
 
@@ -91,6 +91,43 @@ have a name that can be written. This is the complete list of those names.
 and section 1.3 makes annotation mandatory, which is a contradiction rather than
 an omission: a `Bool` field cannot be declared and a `F64` cannot be declared,
 so no file that has either can be written at all. Both are named here.
+
+A parameter or a field may also be annotated with a **function type**,
+`fn(I64) -> F64`, which is what a callback is declared as.
+
+### The annotations are checked
+
+Until 1.6 these names were advisory: the checker knew `I64` was a type rather
+than a unit and nothing further, so `let x: I64 = "hello"` passed the check and
+whatever happened next happened at run time. They are real now, and a definite
+mismatch is a diagnostic:
+
+```
+lexer.tw:14: shape error: "kind" is declared I64 but the value is Str
+lexer.tw:22: shape error: field "src" of Lexer is declared Str but the value is F64
+lexer.tw:31: shape error: argument 2 ("n") is declared I64 but the value is Bool
+lexer.tw:38: shape error: function "peek" returns Opt[I64] but its signature declares I64
+```
+
+It is checked at a binding, an argument, a return, a struct field both at
+construction and at every later assignment, and an enum payload.
+
+**The policy is the shape checker's, not a stricter one.** A mismatch is
+reported only when both sides are known and cannot be the same value; anything
+the checker cannot resolve -- a type from another module, an unbound type
+parameter, a value whose type is unknown -- judges nothing rather than
+guessing. `docs/self-hosting.md` section 1.3 asks for the opposite policy, where
+a type that is still unknown at the end of inference is itself an error, and
+that is deliberately not what this is: it would make every unannotated
+expression in a mostly-annotated file an error, and a checker that is wrong
+often gets turned off. The stricter policy stays open as `docs/needs.md`
+NEEDS-49.
+
+**`I64` and `F64` stand for each other, and one case does not.** An `I64`
+annotation converts the value, so `let mid: I64 = (lo + hi) / 2` truncates and
+is meant to; a scalar of either kind is therefore accepted where the other is
+declared. The exception is a written fraction: `let n: I64 = 2.5` is reported,
+because truncating a literal somebody typed produces a number nobody typed.
 
 ### `Bool`
 
@@ -276,9 +313,23 @@ this is specified here rather than left to the eventual implementation).
 ### Integer division and modulo on `I64`
 
 When both operands are `I64`, `/` is integer division and `%` is its remainder.
-Neither promotes to `F64` and neither yields a fraction: `7 / 2` is `3`, not
-`3.5`. Mixing an `I64` and an `F64` is a checker error, not an implicit widening,
-so `f64()` or `i64()` has to be written at the seam.
+Neither promotes to `F64` and neither yields a fraction.
+
+**A bare literal is not an `I64`.** An `I64` is a value the program said was
+one -- through an annotation, `i64()`, arithmetic on one, or a literal too large
+for an `f64` to hold -- so `7 / 2` written out is `3.5` in either mode, and
+`a / b` is `3` when `a` and `b` are bound at `I64`. That is what keeps numeric
+mode's arithmetic exactly as it was, and it means the two ways to ask for
+integer division are an annotation, which converts at the binding, and `//`,
+which truncates whatever it is given:
+
+```
+let mid: I64 = (lo + hi) / 2    # truncated at the binding
+let half = 7 // 2               # 3, said at the operator
+```
+
+Mixing an `I64` and an `F64` with a fractional value gives an `F64`, which is
+what the same expression computed before `I64` was a distinct type.
 
 **Rounding.** `/` truncates toward zero and `%` takes the sign of the
 **dividend**. That is Go's rule, C99's rule and Rust's rule, and the identity it
@@ -390,14 +441,13 @@ error: `"1" == 1` is false. `!=` is exactly the negation.
 
 ### Ordering
 
-**`<`, `<=`, `>` and `>=` are not defined on `Str`.** They remain scalar-only,
-in both modes, and applying one to a string is an error. That is what the
-bootstrap already does and what the existing code already assumes: `src/check.tw`
-and `src/fmt.tw` both hand-write a byte-by-byte comparison rather than reaching
-for `<`, as do spool's four sorts.
+**`<`, `<=`, `>` and `>=` order two `Str` values by their bytes**, as of 1.5.1.
+They were scalar-only before that, and every codebase that wanted a sorted list
+of names had written its own `compare_str` returning -1, 0 or 1 and compared
+that against zero -- three of them, independently.
 
-The ordering those hand-written comparisons implement is the one to keep, and it
-is written down here so that eleven copies of it in six repositories agree:
+The ordering is the one those hand-written comparisons implemented, written down
+here so that eleven copies of it in six repositories agree:
 
 > Compare byte by byte from index 0. At the first index where the two differ,
 > the string with the smaller byte value is smaller. If one string runs out
@@ -418,9 +468,11 @@ function is a place to put that sentence.
 
 `sort` applies this order directly to a list of strings: `sort(["b", "a"])` is
 `["a", "b"]`, and a truthy second argument sorts descending. It returns a new
-list and leaves its argument untouched. This is the one place the ordering is
-reachable without hand-writing the byte comparison; `<` on the strings
-themselves stays an error.
+list and leaves its argument untouched.
+
+A comparison between a `Str` and a value of another type is still an error. The
+ordering is defined on bytes, and there is no byte order between a string and a
+number to appeal to.
 
 ### Concatenation
 
@@ -632,10 +684,22 @@ for Newton's method). It supports functions built from arithmetic, the unary
 math functions, `matmul`, `sum`, `mean`, and the structural ops indexing
 (`x[i]`), slicing (`x[a:b]`), `reshape`, `transpose`, `concat`, and `gather`; a
 function using an op outside this set raises a clear error. The reverse-mode `grad` remains
-first-order, so the general nested form `grad(grad(f))` is not supported: it is
-refused with an error naming `hessian`, rather than returning the zero it would
-otherwise compute. The gradient `grad` hands back is a plain value with no
-history, so differentiating it again differentiates a constant.
+first-order, so a nested gradient is not supported: it is refused with an error
+naming `hessian`, rather than returning the zero it would otherwise compute. The
+gradient `grad` hands back is a plain value with no history, so differentiating
+it again differentiates a constant.
+
+The refusal covers the nesting wherever it is written, not only the literal
+`grad(grad(f))`. Putting a function between the two --
+
+```rust
+let g = grad(f)
+grad(fn(x) = sum(g(x)) * 2.0)   # refused
+```
+
+-- is the same mistake and used to return zeros silently, which is the worst way
+for a derivative to be wrong. The nesting `hessian` and `jacobian` do themselves
+is a different thing and still works.
 
 ## Shape checking
 
@@ -813,6 +877,145 @@ one.
 `Record` in numeric mode keeps its own rule and is unaffected: fields are not
 mutable in place, and you rebuild the record.
 
+## `enum`, and `match`
+
+An `enum` is a type with a fixed set of cases, each of which may carry one
+value. It is how a systems-mode program says "one of these, and nothing else",
+which is the thing an integer tag cannot say.
+
+```rust
+enum Verdict { Faster, Slower, Same, Noisy }
+
+enum Tok { Ident(Str), Num(F64), Punct(Str), Eof }
+```
+
+**A case carries zero payloads or one. Not two.** Twill has no tuple type, and
+adding positional payloads would introduce `v.0` as a second field syntax beside
+`.name`. A case that needs several values carries a struct:
+
+```rust
+struct BinOp { op: Str, lhs: Expr, rhs: Expr }
+enum Expr { ENum(F64), EBinary(BinOp) }
+```
+
+The payload may be the enum being declared, directly or through a container, so
+a tree is an ordinary declaration and needs no explicit indirection:
+
+```rust
+enum Json {
+  JNull,
+  JBool(Bool),
+  JNum(F64),
+  JStr(Str),
+  JArray(Arr[Json]),
+  JObject(Dict[Str, Json]),
+}
+```
+
+A case is written bare (`Eof`) or qualified by its enum (`Tok.Eof`), and the two
+are the same thing. The qualifier is read and dropped; it is there for the reader
+and for the case where two enums in scope share a case name, which is otherwise
+ambiguous.
+
+`Opt[T]` and `Res[T, E]` are ordinary enums that happen to be built in:
+
+```rust
+enum Opt[T] { Some(T), None }
+enum Res[T, E] { Ok(T), Err(E) }
+```
+
+### `match`
+
+```rust
+fn describe(t: Tok) -> Str {
+  match t {
+    Ident(name) => "identifier " + name,
+    Num(v) => "number " + str(v),
+    Punct(p) => p,
+    Eof => "end of input",
+  }
+}
+```
+
+Arms are `pattern => expression`, comma separated, with no braces around each
+arm -- braces would re-enter the block-versus-record ambiguity a `{` already
+carries. A pattern is a case name, a case name with one binding (`Some(v)`, and
+`Some(_)` to discard the payload), or `_` for everything else. `match` is an
+expression, so it has a value, and it is a keyword only at expression position
+in a systems-mode file: a numeric-mode file that writes `let match = 3` keeps
+working.
+
+**A `match` must cover every case.** The checker knows the enum's cases and
+reports the ones with no arm, by name:
+
+```
+model.tw:14: match on Verdict is not exhaustive: missing Noisy
+```
+
+That is an error and not a warning, and it is the reason to have an enum at all:
+adding a case to a declaration makes every `match` that has not been updated say
+so, at check time, instead of one of them falling through at run time in a month.
+Four related mistakes are reported the same way: an arm that repeats a case, an
+arm after `_` (which already matched everything), a `_` when every case is
+already handled, and arms that name cases of two different enums.
+
+A `_` is right when every unlisted case maps to the same answer for a reason. It
+is wrong when the match is dispatch, because then it is the thing that stops the
+compiler telling you about the case you have not written yet.
+
+What patterns do **not** do, in 1.6: they do not match literals (`3 => ...`),
+they do not nest (`Ok(Some(v))`), and they have no guards. Each is a real
+convenience and none is a hole -- an inner value is matched by a second `match`
+-- so they wait until the cost of not having them is measured rather than
+assumed.
+
+## `Opt`, `Res`, and `?`
+
+An operation that can fail returns a `Res`, and one that may have nothing to
+return gives an `Opt`. Neither is special to the compiler; what is special is
+one piece of syntax for the thing every caller does with them.
+
+**Postfix `?` unwraps a success and returns a failure from the enclosing
+function.**
+
+```rust
+fn load(path: Str) -> Res[Config, Str] {
+  let text: Str = read_file(path)?
+  let doc: Doc = parse(text)?
+  Ok(build(doc))
+}
+```
+
+Without it that function is three `match` statements deep and the interesting
+line is at the bottom of them. With it the failure path is a character wide and
+the success path reads straight down.
+
+The rules, all checked:
+
+- The enclosing function must return a `Res` or an `Opt` for the failure to be
+  returned in. `?` in a function returning `I64` is an error naming the return
+  type, and `?` at the top level of a file, where there is no function at all,
+  is an error too. It used to end the program quietly with status 0, which is
+  the one thing a failed read must not do.
+- `?` on something that is neither a `Res` nor an `Opt` is an error.
+- The error types must match. There is no automatic conversion between them,
+  because that needs a trait system and twill does not have one; convert at the
+  seam instead.
+- What `?` yields is the success payload, and it is typed: `let n: I64 =
+  read_file(p)?` is a diagnostic, because `read_file` gives back a `Str`.
+
+`abort(msg)` is the other way to fail, and it means something different. A `Res`
+is for what a caller may reasonably handle: a missing file, a malformed line, a
+number that does not parse. `abort` is for what no caller can handle because it
+should not be possible -- an invariant broken inside the implementation. Every
+`abort` in the self-hosted compiler should be unreachable by any input; a `Res`
+is what a user's mistake produces.
+
+Making arithmetic fallible was considered and rejected. `a / 0` on an `I64`
+aborts naming the operation and its position, rather than returning
+`Res[I64, Str]`, because a language where `i + 1` needs a `?` is a worse
+language than one where a zero divisor is a bug that stops.
+
 ## Imports
 
 There are two kinds of import path, and the spelling tells you which is which.
@@ -985,6 +1188,34 @@ Trees (tensors nested in lists/records): `map_leaves(f, tree)` applies `f` to
 every tensor leaf; `zip_leaves(f, trees)` walks a list of same-shaped trees in
 parallel, calling `f` with the list of leaves at each position. Optimizers use
 these, so they work on any model structure.
+
+Files and paths: `read_file(path)` and `write_file(path, text)` return a `Res`;
+`path_exists`, `path_is_dir` and `mtime` ask about a path without reading it
+(`mtime` is whole seconds, or -1 when the path cannot be read, the convention
+`file_size` follows); `mkdir_all`, `remove_file`, `remove_dir`, `remove_all`,
+`rename` and `temp_dir` change what is there, each returning a `Res`; `cwd()`
+and `list_dir(path)` report. `remove_file` and `remove_dir` each refuse the
+other's argument, because the recursive one is the dangerous one and a caller
+should have to name it; `remove_all` is that name, and it succeeds on a path
+that was already gone.
+
+`path_join`, `path_base`, `path_dir`, `path_ext`, `path_stem`,
+`path_normalize` and `path_is_abs` are string handling and touch nothing. They
+emit a forward slash on every platform -- a program's paths are written in its
+source, and one that renders them differently on Windows writes a different
+manifest there -- and they read a backslash as a separator, so a path handed
+over by the operating system still splits.
+
+Time: `mono_ns()` is a monotonic clock in nanoseconds, whose zero point is
+arbitrary and whose differences are the only thing that means anything.
+`clock_now_ms()` is the wall clock, which is what to print in a log and what
+not to measure a duration with, since it steps when the system's time is
+corrected.
+
+Gradient checking: `std/gradcheck` compares `grad(f)` against a difference
+quotient, for a tensor argument (`check_at`) or a whole parameter tree
+(`check_tree`). It is a development tool, costing two evaluations of `f` per
+element, and it is what to reach for when a model trains worse than it should.
 
 Inspection: `shape(t)`, `item(t)`, `dtype(t)`, `str(x)`, `print(...)`. `dtype(t)`
 returns the name of a tensor's dtype as a string, one of `"f64"`, `"f32"`,

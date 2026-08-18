@@ -129,22 +129,34 @@ wrong in whichever half did not get it. The related edge is that `shr` is
 `floor(a / 2^k)` while `/` truncates, so replacing a division by a power of two
 with a shift is valid only for a non-negative dividend.
 
-## Known limitations (v0.8)
+## Known limitations (v1.6)
 
 Deliberate, for a prototype:
 
-- Interpreted, not compiled. Tensor ops loop in Go; forward-only math skips the
-  backward closure and the hot path avoids per-element division, but each
-  differentiable op still allocates its output and tape node. Real speedups from
-  here need a bigger change (tensor/closure pooling or a bytecode VM). The
-  interpreter is the reference semantics.
-- Reverse-mode, first-order autodiff. No `grad(grad(f))`.
-- Shape checking is stronger than it was (shape variables, declared record
-  types, and annotated bodies checked at definition), but it is still best-effort:
-  it can't infer shapes for unannotated parameters, so mismatches that depend on
-  them are only caught at call sites (or not at all).
-- Record fields aren't mutable in place; you rebuild the record.
+- Interpreted by default. There is a tracing compiler under `internal/trace`
+  and `internal/codegen` which emits C and is bit-exact against the interpreter,
+  and it is off, because it is slower end to end on every program measured: a
+  statement is the largest region whose live values are known for free, and a
+  training loop's work does not fit in one. `docs/CODEGEN.md` section 11 has the
+  measurements and the five attempts that did not close the gap.
+- Reverse-mode, first-order autodiff. A nested gradient is refused rather than
+  answered; `hessian` is the second derivative and is exact.
+- Shape checking is best-effort by design: it reports only mismatches it can
+  prove and cannot infer shapes for unannotated parameters, so a mismatch that
+  depends on one is caught at the call site or not at all.
+- The systems-mode types are checked as of 1.6, under the same policy: a
+  definite mismatch is reported and an unresolved type judges nothing. The
+  stricter policy `docs/self-hosting.md` section 1.3 asks for, where a type
+  still unknown at the end of inference is itself an error, is open as NEEDS-49.
+- Record fields aren't mutable in place; you rebuild the record. A `struct`, in
+  systems mode, is the mutable one.
+- No user-defined generics: `Arr[T]`, `Dict[K, V]`, `Opt[T]` and `Res[T, E]`
+  are the generic types, and `struct Box[T]` does not parse (NEEDS-4).
+- Match patterns are a case name, one binding, or `_`. No literal patterns, no
+  nesting, no guards.
 - No named axes; broadcasting and reductions work on positional axes.
+- Every float is an `f64`. A narrow dtype is a tag and a rounding rule rather
+  than a layout, so quantisation shrinks nothing in memory (NEEDS-111).
 
 ## Roadmap
 
