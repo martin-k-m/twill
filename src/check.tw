@@ -86,6 +86,9 @@ struct FnType {
   params: Arr[ast.Param],
   ret: Opt[ast.ShapeAnno],
   ret_unit: Opt[ast.UnitAnno],
+  # The named return type as text (`-> Res[Str]`, `-> I64`), or "". Read by the
+  # `?` rule, which needs the annotation as written.
+  ret_type: Str,
   body: ast.Expr,
   env: CheckEnv,
 }
@@ -498,6 +501,16 @@ struct Checker {
   # diagnostic when this is zero: outside any loop, or inside a function nested
   # in one, which the language forbids crossing.
   loop_depth: I64,
+  # fn_ret is the return annotation of each function whose body is being
+  # inferred, innermost last: "" for none. A `?` reads the top to know what it
+  # returns the failure from. Empty at the top of a file, which is what makes a
+  # top-level `?` an error.
+  fn_ret: Arr[Str],
+  # enums is each declared enum's variant names in declaration order;
+  # variant_owner maps a variant back to its enum, or "" when two enums declare
+  # the same name and a bare match on it cannot be judged.
+  enums: Dict[Str, Arr[Str]],
+  variant_owner: Dict[Str, Str],
 }
 
 fn report(c: Checker, line: I64, msg: Str) {
@@ -533,7 +546,16 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     aliased_import: false,
     systems: bytes.equal(prog.mode, "systems"),
     loop_depth: 0,
+    fn_ret: arr_new(),
+    enums: dict_new(),
+    variant_owner: dict_new(),
   }
+  dict_set(c.enums, "Opt", ["Some", "None"])
+  dict_set(c.enums, "Res", ["Ok", "Err"])
+  dict_set(c.variant_owner, "Some", "Opt")
+  dict_set(c.variant_owner, "None", "Opt")
+  dict_set(c.variant_owner, "Ok", "Res")
+  dict_set(c.variant_owner, "Err", "Res")
 
   # Register declared record types and units first so forward references
   # resolve. A file that declares `type Model` at the bottom and uses it at the
@@ -609,15 +631,30 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
   for s in prog.body {
     match s {
       SEnum(ed) => {
+        let names: Arr[Str] = arr_new()
         let i: I64 = 0
         while i < len(ed.variants) {
           let v: ast.EnumVariant = ed.variants[i]
+          push(names, v.name)
           match env_get(env, v.name) {
             Some(_) => unit,
             None => env_define(env, v.name, TUnknown),
           }
+          # A variant name shared by two enums is ambiguous as a bare name;
+          # owner is left unset so a match on it is not judged.
+          match dict_get(c.variant_owner, v.name) {
+            Some(owner) => {
+              if not bytes.equal(owner, ed.name) {
+                dict_set(c.variant_owner, v.name, "")
+              } else {
+                dict_set(c.variant_owner, v.name, ed.name)
+              }
+            },
+            None => dict_set(c.variant_owner, v.name, ed.name),
+          }
           i = i + 1
         }
+        dict_set(c.enums, ed.name, names)
       },
       _ => unit,
     }
@@ -751,7 +788,7 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     SFn(st) => {
       env_define(env, st.name, TFn(FnType {
         node_id: st.id, params: st.params, ret: st.ret, ret_unit: st.ret_unit,
-        body: st.body, env: env,
+        ret_type: st.ret_type, body: st.body, env: env,
       }))
       # Check the body once at definition using the parameter annotations, so
       # mistakes are caught even if the function is never called. Unannotated
@@ -901,7 +938,7 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
     },
     ELambda(ex) => TFn(FnType {
       node_id: ex.id, params: ex.params, ret: ex.ret, ret_unit: ex.ret_unit,
-      body: ex.body, env: env,
+      ret_type: ex.ret_type, body: ex.body, env: env,
     }),
     EUnary(ex) => infer_unary(c, ex, env),
     EBinary(ex) => infer_binary(c, ex, env),
@@ -940,6 +977,7 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
     # unwrapped value is left unknown; the subject is still checked.
     ETry(ex) => {
       infer_expr(c, ex.expr, env)
+      check_try_context(c, ex.line)
       TUnknown
     },
     EBlock(b) => infer_block(c, b, new_env(Some(env))),
@@ -952,6 +990,7 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
 # unified across arms, which keeps the dialect's records-and-enums permissive.
 fn infer_match(c: Checker, ex: ast.Match, env: CheckEnv) -> Type {
   infer_expr(c, ex.subject, env)
+  check_match_arms(c, ex)
   let i: I64 = 0
   while i < len(ex.arms) {
     let arm: ast.MatchArm = ex.arms[i]
@@ -963,6 +1002,116 @@ fn infer_match(c: Checker, ex: ast.Match, env: CheckEnv) -> Type {
     i = i + 1
   }
   TUnknown
+}
+
+# check_try_context is the rule for `?`: it returns the failure from the
+# enclosing function, so that function must be one, and it must return a Res
+# or an Opt for the failure to be returnable. A function with no return
+# annotation is not judged.
+fn check_try_context(c: Checker, line: I64) {
+  if len(c.fn_ret) == 0 {
+    report(c, line, "`?` outside a function: there is nothing to return the failure from")
+    return
+  }
+  let ret: Str = c.fn_ret[len(c.fn_ret) - 1]
+  if len(ret) == 0 { return }
+  let head: Str = ret
+  let i: I64 = bytes.index_of(ret, "[")
+  if i >= 0 { head = ret[0:i] }
+  if not bytes.equal(head, "Res") and not bytes.equal(head, "Opt") {
+    report(c, line, bytes.concat("`?` in a function that returns ", bytes.concat(ret,
+      ": the failure it propagates needs a Res or Opt return type")))
+  }
+}
+
+# ret_type_name is a function's named return type whichever slot the parser put
+# it in: a qualified or generic name arrives as text, a bare one as a
+# one-factor unit annotation. "" when there is none.
+fn ret_type_name(ret_type: Str, u: Opt[ast.UnitAnno]) -> Str {
+  if len(ret_type) > 0 { return ret_type }
+  match u {
+    Some(anno) => {
+      if len(anno.factors) == 1 and anno.factors[0].exp == 1 { return anno.factors[0].name }
+      ""
+    },
+    None => "",
+  }
+}
+
+# check_match_arms is the exhaustiveness check: every variant of the matched
+# enum has an arm, or a `_` stands for the rest. The enum is the one that owns
+# the variants the arms name, so the subject's static type is not needed; a
+# match naming variants of two enums, a variant twice, or a `_` after every
+# variant is already listed, is reported too. A variant this file cannot see --
+# one declared in an aliased module -- leaves the match unjudged, since the
+# checker reports only what it can prove (docs/type-system.md, "match").
+fn check_match_arms(c: Checker, m: ast.Match) {
+  let owner: Str = ""
+  let seen: Dict[Str, Bool] = dict_new()
+  let wildcard_at: I64 = -1
+  let i: I64 = 0
+  while i < len(m.arms) {
+    let arm: ast.MatchArm = m.arms[i]
+    let pat: ast.MatchPattern = arm.pattern
+    if pat.wildcard {
+      if wildcard_at >= 0 {
+        report(c, pat.line, "duplicate match arm: `_` appears twice")
+      }
+      wildcard_at = i
+      i = i + 1
+      continue
+    }
+    if wildcard_at >= 0 {
+      report(c, pat.line, bytes.concat("unreachable match arm: ", bytes.concat(pat.variant,
+        " comes after `_`, which already matches everything")))
+    }
+    if dict_has(seen, pat.variant) {
+      report(c, pat.line, bytes.concat("duplicate match arm: ", bytes.concat(pat.variant, " is already handled")))
+    }
+    dict_set(seen, pat.variant, true)
+    # Not an enum this file declares (or an ambiguous name): the match cannot
+    # be judged.
+    let en: Str = match dict_get(c.variant_owner, pat.variant) {
+      Some(name) => name,
+      None => return,
+    }
+    if len(en) == 0 { return }
+    if len(owner) == 0 {
+      owner = en
+    } else if not bytes.equal(owner, en) {
+      report(c, pat.line, bytes.concat("match arm ", bytes.concat(pat.variant,
+        bytes.concat(" belongs to enum ", bytes.concat(en,
+        bytes.concat(", but the earlier arms match ", owner))))))
+      return
+    }
+    i = i + 1
+  }
+  if len(owner) == 0 { return }
+  let variants: Arr[Str] = match dict_get(c.enums, owner) {
+    Some(vs) => vs,
+    None => return,
+  }
+  let missing: Str = ""
+  let n_missing: I64 = 0
+  for v in variants {
+    if not dict_has(seen, v) {
+      if n_missing > 0 { missing = bytes.concat(missing, ", ") }
+      missing = bytes.concat(missing, v)
+      n_missing = n_missing + 1
+    }
+  }
+  if wildcard_at >= 0 {
+    if n_missing == 0 {
+      let w: ast.MatchArm = m.arms[wildcard_at]
+      report(c, w.pattern.line, bytes.concat("unreachable match arm: `_` matches nothing, every variant of ",
+        bytes.concat(owner, " is already handled")))
+    }
+    return
+  }
+  if n_missing > 0 {
+    report(c, m.line, bytes.concat("match on ", bytes.concat(owner,
+      bytes.concat(" is not exhaustive: missing ", missing))))
+  }
 }
 
 fn as_record(t: Type) -> Opt[RecordType] {
@@ -1769,7 +1918,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
   }
 
   dict_set(c.stack, fd.id, true)
-  let body_type: Type = infer_fn_body(c, fd.body, scope)
+  let body_type: Type = infer_fn_body(c, fd.body, scope, ret_type_name(fd.ret_type, fd.ret_unit))
   dict_del(c.stack, fd.id)
 
   match fd.ret {
@@ -1799,16 +1948,18 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
 
 # A body is either a block, whose type is its last expression statement, or a
 # single expression after `=`.
-fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv) -> Type {
+fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv, ret: Str) -> Type {
   # A function body is a fresh scope for loop control, even when the call or the
   # definition sits inside a loop: a `break` in a `fn` written inside a loop is
   # an error, not a way out of that loop.
   let saved: I64 = c.loop_depth
   c.loop_depth = 0
+  push(c.fn_ret, ret)
   let t: Type = match body {
     EBlock(blk) => infer_block(c, blk, scope),
     _ => infer_expr(c, body, scope),
   }
+  pop(c.fn_ret)
   c.loop_depth = saved
   t
 }
@@ -1937,7 +2088,7 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
   }
 
   dict_set(c.stack, fn_.node_id, true)
-  let body_type: Type = infer_fn_body(c, fn_.body, scope)
+  let body_type: Type = infer_fn_body(c, fn_.body, scope, ret_type_name(fn_.ret_type, fn_.ret_unit))
   dict_del(c.stack, fn_.node_id)
 
   match fn_.ret {

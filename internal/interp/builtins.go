@@ -876,7 +876,10 @@ func (ip *Interp) installBuiltins() {
 		if err != nil {
 			return &value.Variant{Name: "None"}, nil
 		}
-		return &value.Variant{Name: "Some", Payload: tensor.Scalar(float64(n)), HasPayload: true}, nil
+		// An Int, not a scalar: the whole point of parsing an I64 from text is
+		// the values an f64 cannot hold, and rounding the answer here would put
+		// the precision back exactly where the caller was trying to keep it.
+		return &value.Variant{Name: "Some", Payload: value.Int(n), HasPayload: true}, nil
 	})
 
 	// env reads an environment variable as an Opt: Some(value) when set (even
@@ -1739,6 +1742,17 @@ func (ip *Interp) installBuiltins() {
 	def("tensor", 1, false, func(a []value.Value) (value.Value, error) {
 		if t, ok := a[0].(*tensor.Tensor); ok {
 			return t, nil
+		}
+		// A list holding a value that is being differentiated is assembled
+		// through concat, which has a gradient rule, rather than by copying the
+		// numbers out into a fresh buffer, which has none. Reading the numbers
+		// out is what FromNested does, and it left `tensor(list(a, b))` with no
+		// history at all: `jacobian` of a function that built its output that
+		// way returned zeros, silently, which is the shape of wrong answer this
+		// language exists to not give. A list of plain numbers still takes the
+		// direct path, so nothing on the ordinary route allocates more.
+		if out, built, err := gradAwareTensor(a[0]); built || err != nil {
+			return out, err
 		}
 		nested, err := valueToNested(a[0])
 		if err != nil {
@@ -2617,6 +2631,21 @@ func (ip *Interp) gradients(f value.Value, callArgs []value.Value) (*tensor.Tens
 	if len(callArgs) == 0 {
 		return nil, nil, nil, fmt.Errorf("gradient function requires at least one argument")
 	}
+	// A gradient taken inside a gradient is the same zero refuseNestedGrad
+	// refuses, reached the long way round: `let g = grad(f)` and then
+	// `grad(fn(x) = g(x) * 2)` puts a user function between the two, so the
+	// argument is not a grad builtin and the direct check sees nothing. The
+	// inner call still hands back a value with no history, the outer pass still
+	// differentiates a constant, and the answer is still silently zero. The
+	// depth counter catches it wherever the nesting is written.
+	if ip.gradDepth > 0 {
+		return nil, nil, nil, fmt.Errorf(
+			"a gradient taken inside a gradient is not a second derivative: the value the inner " +
+				"grad returns has no history, so differentiating it again gives zero. Use hessian(f) " +
+				"for a second derivative, or jacobian(f) for the matrix of first ones")
+	}
+	ip.gradDepth++
+	defer func() { ip.gradDepth-- }()
 	passArgs := make([]value.Value, len(callArgs))
 	nodes := make([]*gradNode, len(callArgs))
 	for i, v := range callArgs {
@@ -3014,6 +3043,55 @@ func toItems(v value.Value, who string) ([]value.Value, error) {
 		}
 	}
 	return nil, fmt.Errorf("%s expects a list or 1-D tensor", who)
+}
+
+// gradAwareTensor builds a tensor from a list at least one of whose elements
+// carries a gradient, by concatenating the elements along a new leading axis.
+// It reports built=false for anything else, leaving the ordinary path alone.
+//
+// Every element must be a scalar or share a shape, which is what concat
+// requires and what a well-formed tensor literal has anyway; a ragged list is
+// left to FromNested to reject with its own message.
+func gradAwareTensor(v value.Value) (value.Value, bool, error) {
+	lst, ok := v.(*value.List)
+	if !ok || len(lst.Items) == 0 {
+		return nil, false, nil
+	}
+	pieces := make([]*tensor.Tensor, len(lst.Items))
+	tracking := false
+	for i, it := range lst.Items {
+		t, isTensor := value.AsTensor(it)
+		if !isTensor {
+			return nil, false, nil
+		}
+		if t.RequiresGrad {
+			tracking = true
+		}
+		// Each element becomes a row: a scalar is a [1], and anything else gains
+		// a leading axis of 1, so concatenating on axis 0 stacks them.
+		shape := append([]int{1}, t.Shape...)
+		r, err := tensor.Reshape(t, shape)
+		if err != nil {
+			return nil, false, nil
+		}
+		pieces[i] = r
+	}
+	if !tracking {
+		return nil, false, nil
+	}
+	out, err := tensor.Concat(pieces, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	// A list of scalars is a vector, not an n-by-1 matrix.
+	if len(out.Shape) == 2 && out.Shape[1] == 1 {
+		flat, rerr := tensor.Reshape(out, []int{out.Shape[0]})
+		if rerr != nil {
+			return nil, false, rerr
+		}
+		return flat, true, nil
+	}
+	return out, true, nil
 }
 
 func valueToNested(v value.Value) (any, error) {

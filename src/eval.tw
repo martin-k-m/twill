@@ -72,7 +72,14 @@ struct ListVal {
 # free.
 struct RecordVal {
   fields: Dict[Str, Value],
+  # The struct a typed literal was built from (`Lexer { ... }`), or "" for a
+  # plain record. Struct types are otherwise erased; the name is kept so a field
+  # assignment can find the field's declared type (see STRUCT_FIELDS).
+  type_name: Str,
 }
+
+fn plain_record(fields: Dict[Str, Value]) -> RecordVal =
+  RecordVal { fields: fields, type_name: "" }
 
 struct BuiltinVal {
   name: Str,
@@ -106,6 +113,9 @@ struct VariantVal {
 # constructor is its own small Value carrying the tag. apply builds the variant.
 struct VariantCtor {
   name: Str,
+  # The case's declared payload type, or "": an `I64` or `F64` payload converts
+  # its argument at construction, the same rule a `let` annotation follows.
+  payload_type: Str,
 }
 
 # A value the native core owns and twill only passes around: a fitted gbm model
@@ -123,6 +133,12 @@ enum Value {
   # The distinction is invisible to a program: `as_tensor` widens on demand and
   # a Num is produced only where nothing can be differentiating it.
   VNum(F64),
+  # A systems-mode I64: a two's-complement 64-bit integer held exactly. It is
+  # internal/value.Int, and it arises only where the program said I64 -- an
+  # `I64` annotation, `i64()`, an integer literal an f64 cannot hold, or an
+  # operation on two of them -- so a numeric-mode program never sees one. This
+  # evaluator runs on the bootstrap, so arithmetic on the payload is exact.
+  VInt(I64),
   VTensor(tensor.Tensor),
   VBool(Bool),
   VStr(Str),
@@ -139,6 +155,7 @@ enum Value {
 fn type_name(v: Value) -> Str {
   match v {
     VNum(_) => "number",
+    VInt(_) => "number",
     VTensor(_) => "tensor",
     VBool(_) => "bool",
     VStr(_) => "string",
@@ -168,6 +185,11 @@ fn as_tensor(v: Value) -> Opt[tensor.Tensor] {
       push(data, x)
       Some(tensor.mk_raw(arr_new(), data, tensor.DT_F64))
     },
+    VInt(i) => {
+      let data: Arr[F64] = arr_new()
+      push(data, f64(i))
+      Some(tensor.mk_raw(arr_new(), data, tensor.DT_F64))
+    },
     _ => None,
   }
 }
@@ -177,6 +199,7 @@ fn as_tensor(v: Value) -> Opt[tensor.Tensor] {
 fn rank0_number(v: Value) -> Opt[F64] {
   match v {
     VNum(x) => Some(x),
+    VInt(i) => Some(f64(i)),
     VTensor(t) => {
       if len(t.shape) == 0 { return Some(tensor.at(t, 0)) }
       None
@@ -193,6 +216,7 @@ fn truthy(v: Value, line: I64) -> Res[Bool, RuntimeError] {
   match v {
     VBool(b) => Ok(b),
     VNum(x) => Ok(x != 0.0),
+    VInt(i) => Ok(i != 0),
     VTensor(t) => {
       if len(t.shape) == 0 { return Ok(tensor.at(t, 0) != 0.0) }
       Err(runtime_error(line, "condition must be a bool or a scalar number"))
@@ -309,7 +333,16 @@ fn assign_to(target: ast.Expr, v: Value, env: Env, line: I64) -> Res[Unit, Runti
       let obj: Value = eval_expr(t.target, env)?
       match obj {
         VRecord(r) => {
-          dict_set(r.fields, t.name, v)
+          # A struct's field keeps its declared type across an assignment, so
+          # `lx.i = lx.i + 1` on an I64 field stays an I64.
+          let stored: Value = v
+          if len(r.type_name) > 0 {
+            match struct_field_type(r.type_name, t.name) {
+              Some(ft) => stored = coerce_field(ft, v, t.line)?,
+              None => unit,
+            }
+          }
+          dict_set(r.fields, t.name, stored)
           Ok(unit)
         },
         _ => Err(runtime_error(t.line, bytes.concat("cannot set field ",
@@ -359,7 +392,11 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
   match s {
     SLet(st) => {
       let v: Value = eval_expr(st.value, env)?
-      env_define(env, st.name, coerce_scalar_i64(st.type_name, st.unit, v))
+      v = empty_container_for(st.type_name, v)
+      # A number bound at an `I64` annotation becomes an Int, and one bound at
+      # `F64` a Num: the annotation is where the program says which half of the
+      # language the value lives in.
+      env_define(env, st.name, coerce_scalar_anno(st.type_name, st.unit, v, st.line)?)
       Ok(Normal(VUnit))
     },
     SFn(st) => {
@@ -395,7 +432,7 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
       while i < len(st.variants) {
         let vt: ast.EnumVariant = st.variants[i]
         if vt.has_payload {
-          env_define(env, vt.name, VVariantCtor(VariantCtor { name: vt.name }))
+          env_define(env, vt.name, VVariantCtor(VariantCtor { name: vt.name, payload_type: vt.payload }))
         } else {
           env_define(env, vt.name, VVariant(VariantVal { name: vt.name, payload: None, has_payload: false }))
         }
@@ -406,7 +443,20 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
     STypeDecl(_) => Ok(Normal(VUnit)),
     # A struct is a record type: checked statically, erased at runtime, since a
     # record carries its own fields and needs no declaration to be built.
-    SStruct(_) => Ok(Normal(VUnit)),
+    SStruct(sd) => {
+      # The field types are kept anyway, so that a typed literal can convert a
+      # number at an I64 or F64 field, and read an empty `[]` at a container
+      # field as that container.
+      let fields: Dict[Str, Str] = dict_new()
+      let i: I64 = 0
+      while i < len(sd.fields) {
+        let f: ast.StructField = sd.fields[i]
+        dict_set(fields, f.name, f.type_name)
+        i = i + 1
+      }
+      dict_set(STRUCT_FIELDS, sd.name, fields)
+      Ok(Normal(VUnit))
+    },
     # A unit declaration is erased at run time: units are a static check and
     # carry no representation in a value.
     SUnitDecl(_) => Ok(Normal(VUnit)),
@@ -638,6 +688,7 @@ fn canonical(v: Value, depth: I64) -> Str {
   if depth > 32 { return "elided" }
   match v {
     VNum(x) => bytes.concat("num ", f64_hex(x)),
+    VInt(_) => "opaque value.Int",
     VTensor(t) => {
       if len(t.shape) == 0 { return bytes.concat("num ", f64_hex(tensor.at(t, 0))) }
       let out: Bytes = bytes.new()
@@ -754,15 +805,213 @@ fn canon_str_less(a: Str, b: Str) -> Bool {
 # is what makes the interpreted arithmetic match the compiled I64 semantics. Only
 # a bare `I64` annotation on a scalar Num is coerced; `Arr[I64]`, `F64`, an
 # unannotated let and non-numeric values pass through untouched.
-fn coerce_scalar_i64(type_name: Str, u: Opt[ast.UnitAnno], v: Value) -> Value {
+fn coerce_scalar_anno(type_name: Str, u: Opt[ast.UnitAnno], v: Value, line: I64) -> Res[Value, RuntimeError] {
   if is_i64_anno(type_name, u) {
+    return to_int(v, line)
+  }
+  if is_f64_anno(type_name, u) {
     match v {
-      VNum(x) => return VNum(i64_of_f64(x)),
+      VInt(i) => return Ok(VNum(f64(i))),
       _ => unit,
     }
   }
-  empty_container_for(type_name, v)
+  Ok(v)
 }
+
+# STRUCT_FIELDS is each declared struct's field types by name, kept so a typed
+# literal or a field assignment can apply the field's declared type. It is
+# interp.structFields.
+let STRUCT_FIELDS: Dict[Str, Dict[Str, Str]] = dict_new()
+
+# bare_type_name drops a module qualifier, so "resolve.Catalog" gives "Catalog".
+fn bare_type_name(name: Str) -> Str {
+  let i: I64 = len(name) - 1
+  while i >= 0 {
+    if name[i] == 46 { return slice(name, i + 1, len(name)) }
+    i = i - 1
+  }
+  name
+}
+
+fn struct_field_type(type_name: Str, field: Str) -> Opt[Str] {
+  match dict_get(STRUCT_FIELDS, type_name) {
+    Some(fields) => dict_get(fields, field),
+    None => None,
+  }
+}
+
+# coerce_field applies a struct field's declared type to a value stored in it:
+# an empty literal at a container type builds the container, and a number at an
+# I64 or F64 field converts, the same two rules a `let` annotation follows.
+fn coerce_field(field_type: Str, v: Value, line: I64) -> Res[Value, RuntimeError] {
+  let out: Value = empty_container_for(field_type, v)
+  coerce_scalar_anno(field_type, None, out, line)
+}
+
+# to_int converts a numeric value to an Int, truncating a fractional one toward
+# zero. A non-numeric value passes through unchanged. A number an I64 cannot
+# hold -- NaN, an infinity, or a magnitude at or beyond 2^63 -- is an error
+# rather than a saturated or wrapped value.
+fn to_int(v: Value, line: I64) -> Res[Value, RuntimeError] {
+  match v {
+    VInt(_) => Ok(v),
+    VNum(x) => int_of_float(x, line),
+    VTensor(t) => {
+      if len(t.shape) == 0 { return int_of_float(tensor.at(t, 0), line) }
+      Ok(v)
+    },
+    _ => Ok(v),
+  }
+}
+
+fn int_of_float(x: F64, line: I64) -> Res[Value, RuntimeError] {
+  if x != x or x < -9223372036854775808.0 or x >= 9223372036854775808.0 {
+    return Err(runtime_error(line, bytes.concat("cannot convert ",
+      bytes.concat(num_to_text(x), " to I64: out of range"))))
+  }
+  Ok(VInt(i64_of_f64(f64_trunc(x))))
+}
+
+# int_literal reads an integer literal that an f64 would round: one whose
+# magnitude is above 2^53. Small integer literals stay Num, so a numeric-mode
+# program is untouched. `negate` is set when the literal sits under a unary
+# minus, which is how MIN_I64 is spelled: 9223372036854775808 alone does not
+# fit and is rejected, but its negation does.
+fn int_literal(text: Str, negate: Bool) -> Opt[Value] {
+  if len(text) == 0 { return None }
+  let i: I64 = 0
+  while i < len(text) {
+    if text[i] < 48 or text[i] > 57 { return None }
+    i = i + 1
+  }
+  # The digits are accumulated negatively so MIN_I64, whose magnitude does not
+  # fit positive, still parses; i64_of_str cannot be used here because its
+  # payload travels as an f64 and rounds the very digits this exists to keep.
+  let limit: I64 = -922337203685477580
+  let n: I64 = 0
+  i = 0
+  while i < len(text) {
+    let d: I64 = text[i] - 48
+    if n < limit { return None }
+    if n == limit {
+      if negate and d > 8 { return None }
+      if not negate and d > 7 { return None }
+    }
+    n = n * 10 - d
+    i = i + 1
+  }
+  if not negate { n = 0 - n }
+  if n >= -9007199254740992 and n <= 9007199254740992 { return None }
+  Some(VInt(n))
+}
+
+# int_operands reports whether a binary operation is an I64 operation: both
+# sides Int, or one side Int and the other an integral number standing for one.
+# Two Nums are never an I64 operation, which is what keeps numeric mode's `/` a
+# float division.
+struct IntPair { x: I64, y: I64 }
+
+fn int_operands(l: Value, r: Value) -> Opt[IntPair] {
+  match l {
+    VInt(a) => {
+      match r {
+        VInt(b) => Some(IntPair { x: a, y: b }),
+        _ => {
+          match as_int(r) {
+            Some(b) => Some(IntPair { x: a, y: b }),
+            None => None,
+          }
+        },
+      }
+    },
+    _ => {
+      match r {
+        VInt(b) => {
+          match as_int(l) {
+            Some(a) => Some(IntPair { x: a, y: b }),
+            None => None,
+          }
+        },
+        _ => None,
+      }
+    },
+  }
+}
+
+# as_int reads a value as an I64: an Int directly, or an integral Num (or
+# rank-0 tensor) that stands for one. None for a fractional number and for
+# anything non-numeric.
+fn as_int(v: Value) -> Opt[I64] {
+  match v {
+    VInt(i) => Some(i),
+    _ => {
+      match rank0_number(v) {
+        Some(x) => int_of_num(x),
+        None => None,
+      }
+    },
+  }
+}
+
+fn int_of_num(x: F64) -> Opt[I64] {
+  if x != f64_trunc(x) or x < -9223372036854775808.0 or x >= 9223372036854775808.0 { return None }
+  Some(i64_of_f64(x))
+}
+
+# int_arith is `+ - * / % //` on two I64s. Everything wraps; the two divisions
+# truncate toward zero and refuse a zero divisor. `^` is left to the float path
+# on purpose. This evaluator runs on the bootstrap, whose I64 arithmetic is the
+# semantics being defined, so each line below is the operation itself.
+fn int_arith(op: Str, x: I64, y: I64, line: I64) -> Res[Value, RuntimeError] {
+  if bytes.equal(op, "+") { return Ok(VInt(x + y)) }
+  if bytes.equal(op, "-") { return Ok(VInt(x - y)) }
+  if bytes.equal(op, "*") { return Ok(VInt(x * y)) }
+  if bytes.equal(op, "/") or bytes.equal(op, "//") {
+    if y == 0 { return Err(runtime_error(line, "integer division by zero")) }
+    return Ok(VInt(x / y))
+  }
+  if y == 0 { return Err(runtime_error(line, "integer modulo by zero")) }
+  Ok(VInt(x % y))
+}
+
+fn is_int_arith_op(op: Str) -> Bool =
+  bytes.equal(op, "+") or bytes.equal(op, "-") or bytes.equal(op, "*")
+    or bytes.equal(op, "/") or bytes.equal(op, "%") or bytes.equal(op, "//")
+
+fn is_compare_op(op: Str) -> Bool =
+  bytes.equal(op, "==") or bytes.equal(op, "!=") or bytes.equal(op, "<")
+    or bytes.equal(op, "<=") or bytes.equal(op, ">") or bytes.equal(op, ">=")
+
+# int_compare orders two I64s exactly, so a value above 2^53 is not compared
+# through an f64 that cannot tell it from its neighbour.
+fn int_compare(op: Str, x: I64, y: I64) -> Bool {
+  if bytes.equal(op, "==") { return x == y }
+  if bytes.equal(op, "!=") { return x != y }
+  if bytes.equal(op, "<") { return x < y }
+  if bytes.equal(op, "<=") { return x <= y }
+  if bytes.equal(op, ">") { return x > y }
+  x >= y
+}
+
+# is_f64_anno reports whether an annotation is a bare `F64`, the systems-mode
+# float. Like is_i64_anno it reads whichever slot the parser used.
+fn is_f64_anno(type_name: Str, u: Opt[ast.UnitAnno]) -> Bool {
+  if bytes.equal(type_name, "F64") { return true }
+  match u {
+    Some(anno) => {
+      if len(anno.factors) == 1 {
+        let f: ast.UnitFactor = anno.factors[0]
+        return bytes.equal(f.name, "F64") and f.exp == 1
+      }
+      false
+    },
+    None => false,
+  }
+}
+
+# CALL_DEPTH counts the closures currently executing. It is what tells a `?`
+# at the top of a file that there is no function to return the failure from.
+let CALL_DEPTH: Arr[I64] = [0]
 
 # anno_head returns the constructor at the head of a type annotation, so that
 # "Arr[Str]" gives "Arr" and "Dict[Str, I64]" gives "Dict".
@@ -856,7 +1105,7 @@ fn exec_import(st: ast.Import, env: Env) -> Res[Flow, RuntimeError] {
           j = j + 1
         }
       } else {
-        env_define(env, st.alias, VRecord(RecordVal { fields: mod_env.vars }))
+        env_define(env, st.alias, VRecord(plain_record(mod_env.vars)))
       }
       Ok(Normal(VUnit))
     },
@@ -889,7 +1138,12 @@ fn hoist_module_fns(body: Arr[ast.Stmt], env: Env) {
 
 fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
   match e {
-    ENumber(x) => Ok(VNum(x.value)),
+    ENumber(x) => {
+      match int_literal(x.text, false) {
+        Some(v) => Ok(v),
+        None => Ok(VNum(x.value)),
+      }
+    },
     EString(x) => Ok(VStr(x.value)),
     EBool(x) => Ok(VBool(x.value)),
     EIdent(x) => {
@@ -902,6 +1156,14 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
           # only the bare identifier resolves to the value.
           if bytes.equal(x.name, "unit") {
             return Ok(VUnit)
+          }
+          # Res and Opt are built in: their cases are constructors and values
+          # in every scope, matching the Go bootstrap's variantCtor set.
+          if bytes.equal(x.name, "None") {
+            return Ok(VVariant(VariantVal { name: "None", payload: None, has_payload: false }))
+          }
+          if in_words("Ok Err Some", x.name) {
+            return Ok(VVariantCtor(VariantCtor { name: x.name, payload_type: "" }))
           }
           if is_builtin(x.name) {
             return Ok(plain_builtin(x.name))
@@ -928,14 +1190,34 @@ fn eval_expr(e: ast.Expr, env: Env) -> Res[Value, RuntimeError] {
     EIndex(x) => eval_index(x, env),
     ESlice(x) => eval_slice(x, env),
     ERecord(x) => {
+      # A typed literal reads its declared field types, so a number at an I64
+      # field is an Int, the same rule a `let` annotation follows. The name is
+      # looked up unqualified: `resolve.Catalog` and `Catalog` name the same
+      # declaration.
       let fields: Dict[Str, Value] = dict_new()
+      let declared: Opt[Dict[Str, Str]] = dict_get(STRUCT_FIELDS, bare_type_name(x.type_name))
+      let tn: Str = ""
+      match declared {
+        Some(_) => tn = bare_type_name(x.type_name),
+        None => unit,
+      }
       let i: I64 = 0
       while i < len(x.fields) {
         let f: ast.RecordField = x.fields[i]
-        dict_set(fields, f.name, eval_expr(f.value, env)?)
+        let v: Value = eval_expr(f.value, env)?
+        match declared {
+          Some(d) => {
+            match dict_get(d, f.name) {
+              Some(ft) => v = coerce_field(ft, v, ast.expr_line(f.value))?,
+              None => unit,
+            }
+          },
+          None => unit,
+        }
+        dict_set(fields, f.name, v)
         i = i + 1
       }
-      Ok(VRecord(RecordVal { fields: fields }))
+      Ok(VRecord(RecordVal { fields: fields, type_name: tn }))
     },
     EField(x) => field_value(eval_expr(x.target, env)?, x.name, x.line),
     EIf(x) => eval_if(x, env),
@@ -962,6 +1244,12 @@ fn eval_try(x: ast.Try, env: Env) -> Res[Value, RuntimeError] {
           None => Ok(VUnit),
         }
       } else {
+        # At the top of a file there is no function to return the failure
+        # from, so `?` there is an error naming the value.
+        if CALL_DEPTH[0] == 0 {
+          return Err(runtime_error(x.line, bytes.concat("`?` outside a function: the value was ",
+            format_value(v))))
+        }
         Ok(v)
       }
     },
@@ -1084,10 +1372,25 @@ fn flatten_tensor_lit(elems: Arr[ast.Expr], depth: I64, shape: Arr[I64],
 }
 
 fn eval_unary(x: ast.Unary, env: Env) -> Res[Value, RuntimeError] {
+  if bytes.equal(x.op, "-") {
+    # `-9223372036854775808` is MIN_I64 spelled the only way it can be: the
+    # magnitude does not fit, its negation does, so the literal is read under
+    # the minus rather than after it.
+    match x.operand {
+      ENumber(lit) => {
+        match int_literal(lit.text, true) {
+          Some(iv) => return Ok(iv),
+          None => unit,
+        }
+      },
+      _ => unit,
+    }
+  }
   let v: Value = eval_expr(x.operand, env)?
   if bytes.equal(x.op, "-") {
     match v {
       VNum(n) => return Ok(VNum(-n)),
+      VInt(i) => return Ok(VInt(0 - i)),
       # Negating a tensor is the elementwise neg kernel, the same traced op the
       # unary-math builtins use, so it records on the tape.
       VTensor(t) => return Ok(VTensor(tr_unary(tensor.OpNeg, t))),
@@ -1140,6 +1443,20 @@ fn eval_binary(x: ast.Binary, env: Env) -> Res[Value, RuntimeError] {
 
   let l: Value = eval_expr(x.left, env)?
   let r: Value = eval_expr(x.right, env)?
+
+  # An I64 operation: both sides Int, or an Int and an integral number. Exact
+  # comparison; wrapping arithmetic, truncating division, dividend-signed
+  # modulo. It comes before every float path, so an Int never rounds through
+  # an f64 on its way to an answer.
+  if is_compare_op(x.op) or is_int_arith_op(x.op) {
+    match int_operands(l, r) {
+      Some(pr) => {
+        if is_compare_op(x.op) { return Ok(VBool(int_compare(x.op, pr.x, pr.y))) }
+        return int_arith(x.op, pr.x, pr.y, x.line)
+      },
+      None => unit,
+    }
+  }
 
   # The bitwise words are the same operation infix as they are called, so both
   # routes land in bi_bitwise and the two spellings cannot come to mean
@@ -1295,10 +1612,22 @@ fn num_arith(op: Str, a: F64, b: F64, line: I64) -> Res[Value, RuntimeError] {
 # a string to a number is a question with an answer, and the answer is no.
 # internal/interp/equality_test.go pins this rule; see NEEDS-27.
 fn deep_equal(l: Value, r: Value) -> Bool {
+  # An Int against an integral number compares exactly; against a fractional
+  # number, or a non-number, through the float it stands for.
+  match int_operands(l, r) {
+    Some(pr) => return pr.x == pr.y,
+    None => unit,
+  }
   match l {
     VNum(a) => {
       match rank0_number(r) {
         Some(b) => a == b,
+        None => false,
+      }
+    },
+    VInt(a) => {
+      match rank0_number(r) {
+        Some(b) => f64(a) == b,
         None => false,
       }
     },
@@ -1327,6 +1656,7 @@ fn deep_equal(l: Value, r: Value) -> Bool {
         # same thing with different representations and a program cannot tell
         # them apart anywhere else either.
         VNum(b) => len(a.shape) == 0 and tensor.at(a, 0) == b,
+        VInt(b) => len(a.shape) == 0 and tensor.at(a, 0) == f64(b),
         _ => false,
       }
     },
@@ -1342,10 +1672,37 @@ fn deep_equal(l: Value, r: Value) -> Bool {
         _ => false,
       }
     },
+    # An enum value is its case and its payload: `Some(1) == Some(1)`, the way
+    # `[1] == [1]`.
+    VVariant(a) => {
+      match r {
+        VVariant(b) => variant_equal(a, b),
+        _ => false,
+      }
+    },
     # Two functions are equal only if they are the same function, and this has
     # no way to ask that, so it says no. Comparing functions is not something a
     # twill program has a reason to do.
     _ => false,
+  }
+}
+
+fn variant_equal(a: VariantVal, b: VariantVal) -> Bool {
+  if not bytes.equal(a.name, b.name) or a.has_payload != b.has_payload { return false }
+  if not a.has_payload { return true }
+  match a.payload {
+    Some(pa) => {
+      match b.payload {
+        Some(pb) => deep_equal(pa, pb),
+        None => false,
+      }
+    },
+    None => {
+      match b.payload {
+        Some(_) => false,
+        None => true,
+      }
+    },
   }
 }
 
@@ -1522,21 +1879,36 @@ fn apply(callee: Value, args: Arr[Value], line: I64) -> Res[Value, RuntimeError]
         return Err(runtime_error(line, bytes.concat(c.name, bytes.concat(" expects 1 argument(s), got ",
           str(len(args))))))
       }
-      Ok(VVariant(VariantVal { name: c.name, payload: Some(args[0]), has_payload: true }))
+      let p: Value = args[0]
+      if is_i64_anno(c.payload_type, None) or is_f64_anno(c.payload_type, None) {
+        p = coerce_scalar_anno(c.payload_type, None, p, line)?
+      }
+      Ok(VVariant(VariantVal { name: c.name, payload: Some(p), has_payload: true }))
     },
     _ => Err(runtime_error(line, bytes.concat("cannot call a ", type_name(callee)))),
   }
 }
 
 # coerce_return applies a closure's return annotation to the value it produced.
-fn coerce_return(c: Closure, v: Value) -> Value {
-  if is_i64_anno(c.ret_type, c.ret_unit) {
-    match v {
-      VNum(x) => return VNum(i64_of_f64(x)),
-      _ => unit,
-    }
+fn coerce_return(c: Closure, v: Value) -> Res[Value, RuntimeError] {
+  if is_i64_anno(c.ret_type, c.ret_unit) or is_f64_anno(c.ret_type, c.ret_unit) {
+    return coerce_scalar_anno(c.ret_type, c.ret_unit, v, ast.expr_line(c.body))
   }
-  v
+  Ok(v)
+}
+
+# param_type_name is a parameter's annotation as a bare name, or "" for a shape
+# annotation or none: what call_closure reads to convert an `I64`/`F64`
+# argument at the call. It is interp.paramTypes, one parameter at a time.
+fn param_type_name(p: ast.Param) -> Str {
+  if len(p.type_name) > 0 { return p.type_name }
+  match p.unit {
+    Some(u) => {
+      if len(u.factors) == 1 and u.factors[0].exp == 1 { return u.factors[0].name }
+      ""
+    },
+    None => "",
+  }
 }
 
 fn call_closure(c: Closure, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -1554,17 +1926,30 @@ fn call_closure(c: Closure, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
   let scope: Env = new_env(Some(c.env))
   let i: I64 = 0
   while i < len(c.params) {
-    env_define(scope, c.params[i].name, args[i])
+    let arg: Value = args[i]
+    # An `I64` or `F64` parameter converts its argument at the call, the way
+    # a `let` annotation converts a bound value.
+    let pt: Str = param_type_name(c.params[i])
+    if len(pt) > 0 {
+      arg = coerce_scalar_anno(pt, None, arg, ast.expr_line(c.body))?
+    }
+    env_define(scope, c.params[i].name, arg)
     i = i + 1
   }
-  # `-> I64` truncates the result toward zero, the same rule `let n: I64 = ...`
-  # applies to a bound value. Numbers run as F64, so the integer idioms -- a
-  # ceiling division `(n + k - 1) / k`, a midpoint, an index -- come back
-  # fractional, and a function that promised an I64 was handing one back.
-  match c.body {
-    EBlock(blk) => Ok(coerce_return(c, flow_value(exec_block(blk, scope)?))),
-    _ => Ok(coerce_return(c, eval_expr(c.body, scope)?)),
+  # `-> I64` converts the result to an Int, the same rule `let n: I64 = ...`
+  # applies to a bound value; `-> F64` converts an Int back to a number.
+  CALL_DEPTH[0] = CALL_DEPTH[0] + 1
+  let out: Res[Value, RuntimeError] = match c.body {
+    EBlock(blk) => {
+      match exec_block(blk, scope) {
+        Ok(f) => Ok(flow_value(f)),
+        Err(e) => Err(e),
+      }
+    },
+    _ => eval_expr(c.body, scope),
   }
+  CALL_DEPTH[0] = CALL_DEPTH[0] - 1
+  coerce_return(c, out?)
 }
 
 # ---- indexing and slicing --------------------------------------------------
@@ -1748,6 +2133,7 @@ fn arg_tensor(v: Value, who: Str, line: I64) -> Res[tensor.Tensor, RuntimeError]
 fn single_number(v: Value) -> Opt[F64] {
   match v {
     VNum(x) => Some(x),
+    VInt(i) => Some(f64(i)),
     VTensor(t) => {
       if tensor.numel(t) == 1 { return Some(tensor.at(t, 0)) }
       None
@@ -1971,6 +2357,16 @@ fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, Runtim
   if bytes.equal(name, "nbytes") { return bi_nbytes(args, line) }
   if in_words("and or band bor xor shl shr", name) { return bi_bitwise(name, args, line) }
   if bytes.equal(name, "bnot") { return bi_bnot(args, line) }
+  # i64 and f64 are the two conversions across the systems-mode seam. i64 makes
+  # an exact I64 of a number, truncating a fraction toward zero; f64 makes an
+  # F64 of an I64, which loses precision above 2^53.
+  if bytes.equal(name, "i64") {
+    match single_number(args[0]) {
+      Some(_) => return to_int(args[0], line),
+      None => return Err(runtime_error(line, "i64 expects a number")),
+    }
+  }
+  if bytes.equal(name, "f64") { return Ok(VNum(scalar_of(args[0], "f64", line)?)) }
   # `quantize` is a Go-bootstrap builtin: it packs a weight into int8/int4, which
   # is a memory layout the reference interpreter has no way to produce (it holds
   # every element as an F64). It is named in the table so a program using it type-
@@ -2006,6 +2402,7 @@ fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, Runtim
 fn format_value(v: Value) -> Str {
   match v {
     VNum(x) => tensor.dt_shortest(tensor.DT_F64, x),
+    VInt(i) => str(i),
     VTensor(t) => format_tensor(t),
     VBool(b) => { if b { "true" } else { "false" } },
     VStr(s) => s,
@@ -2473,22 +2870,29 @@ fn is_bitwise_op(op: Str) -> Bool =
 # so `and`/`shr` here are the bootstrap's, and reimplementing them in twill
 # would need the very operators being defined.
 fn bi_bitwise(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
-  let x: F64 = scalar_of(args[0], name, line)?
-  let y: F64 = scalar_of(args[1], name, line)?
-  let a: I64 = i64(x)
-  let b: I64 = i64(y)
+  let a: I64 = int64_of(args[0], name, line)?
+  let b: I64 = int64_of(args[1], name, line)?
   let out: I64 = 0
   if bytes.equal(name, "and") or bytes.equal(name, "band") { out = and(a, b) }
   if bytes.equal(name, "or") or bytes.equal(name, "bor") { out = or(a, b) }
   if bytes.equal(name, "xor") { out = xor(a, b) }
   if bytes.equal(name, "shl") { out = shl(a, b) }
   if bytes.equal(name, "shr") { out = shr(a, b) }
-  Ok(VTensor(tensor.scalar_of(f64(out), tensor.DT_F64)))
+  Ok(VInt(out))
+}
+
+# int64_of reads a scalar as an I64: exact for an Int, truncating for a number.
+# The result of every bitwise word is an Int, so a full 64-bit pattern such as a
+# sign bit survives the round trip.
+fn int64_of(v: Value, who: Str, line: I64) -> Res[I64, RuntimeError] {
+  match v {
+    VInt(i) => Ok(i),
+    _ => Ok(i64(scalar_of(v, who, line)?)),
+  }
 }
 
 fn bi_bnot(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
-  let x: F64 = scalar_of(args[0], "bnot", line)?
-  Ok(VTensor(tensor.scalar_of(f64(bnot(i64(x))), tensor.DT_F64)))
+  Ok(VInt(bnot(int64_of(args[0], "bnot", line)?)))
 }
 
 fn bi_nbytes(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
@@ -3230,7 +3634,7 @@ fn trace_arg(tp: tensor.Tape, v: Value) -> Traced {
         dict_set(fields, k, tr.passed)
         dict_set(nodes, k, tr.node)
       }
-      Traced { passed: VRecord(RecordVal { fields: fields }), node: GRecord(nodes) }
+      Traced { passed: VRecord(plain_record(fields)), node: GRecord(nodes) }
     },
     # A string, a function, a unit: it has no derivative, and the gradient
     # reported for it is a scalar zero rather than an error, so that passing a
@@ -3266,7 +3670,7 @@ fn grad_from_node(n: GradNode, grads: Arr[tensor.Tensor], shapes: Arr[tensor.Ten
       for k in dict_keys(nodes) {
         dict_set(fields, k, grad_from_node(dict_must(nodes, k), grads, shapes))
       }
-      VRecord(RecordVal { fields: fields })
+      VRecord(plain_record(fields))
     },
     GNone => VTensor(tensor.scalar(0.0)),
   }
@@ -3600,7 +4004,7 @@ fn map_leaves(f: Value, tree: Value) -> Res[Value, RuntimeError] {
       for k in dict_keys(r.fields) {
         dict_set(fields, k, map_leaves(f, dict_must(r.fields, k))?)
       }
-      Ok(VRecord(RecordVal { fields: fields }))
+      Ok(VRecord(plain_record(fields)))
     },
     # Non-tensor leaves pass through unchanged.
     _ => Ok(tree),
@@ -3668,7 +4072,7 @@ fn zip_leaves(f: Value, trees: Arr[Value]) -> Res[Value, RuntimeError] {
         }
         dict_set(fields, key, zip_leaves(f, sub)?)
       }
-      Ok(VRecord(RecordVal { fields: fields }))
+      Ok(VRecord(plain_record(fields)))
     },
     _ => Ok(trees[0]),
   }
@@ -3978,7 +4382,7 @@ fn bi_files(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] 
     }
   }
   if bytes.equal(name, "write_frame") {
-    let rec: RecordVal = RecordVal { fields: dict_new() }
+    let rec: RecordVal = plain_record(dict_new())
     match args[0] {
       VRecord(r) => rec = r,
       _ => return Err(runtime_error(line, "write_frame expects a frame (record of columns)")),
@@ -4061,7 +4465,7 @@ fn bi_files(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeError] 
             dict_set(fields, k, dict_must(r.fields, k))
           }
           dict_set(fields, n, args[2])
-          Ok(VRecord(RecordVal { fields: fields }))
+          Ok(VRecord(plain_record(fields)))
         },
         _ => Err(runtime_error(line, "with_field expects a string name")),
       }
@@ -4183,7 +4587,7 @@ fn read_frame(path_in: Str, line: I64) -> Res[Value, RuntimeError] {
     dict_set(fields, header[c], VTensor(tensor.mk_raw(shape, col, tensor.DT_F64)))
     c = c + 1
   }
-  Ok(VRecord(RecordVal { fields: fields }))
+  Ok(VRecord(plain_record(fields)))
 }
 
 # write_frame writes a record of equal-length 1-D column tensors to a CSV.

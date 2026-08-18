@@ -641,7 +641,7 @@ fn parse_primary(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
   if t.kind == lex.KIND_NUMBER {
     next_tok(p)
     match flt.f64_of_str(t.value) {
-      Some(v) => return Ok(ast.number_lit(p.ids, v, t.line)),
+      Some(v) => return Ok(ast.number_lit(p.ids, v, t.value, t.line)),
       None => return Err(err_at(t, bytes.concat("invalid number ", quoted(t.value)))),
     }
   }
