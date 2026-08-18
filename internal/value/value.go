@@ -2,6 +2,7 @@
 package value
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -29,6 +30,58 @@ type Value any
 // gradients see the same graph they always did.
 type Num float64
 
+// Int is a systems-mode I64: a two's-complement 64-bit integer held exactly.
+//
+// A Num is an f64 and holds an integer exactly only up to 2^53, which is why
+// every hash mixer, IEEE bit pattern and 64-bit generator written in twill was
+// silently wrong above that (docs/needs.md NEEDS-2). An Int is produced where
+// the program said I64 -- an `I64` annotation on a binding, parameter, return,
+// struct field or enum payload, the `i64()` conversion, an integer literal too
+// large for an f64 to hold exactly, and any arithmetic between two Ints. It is
+// never produced by a bare small literal, so numeric-mode programs, whose
+// numbers are all Num, do not see it.
+//
+// Arithmetic on two Ints wraps, `/` truncates toward zero, `%` takes the sign
+// of the dividend, and the bitwise words are exact on all 64 bits, per
+// docs/language-guide.md. An Int meeting an integral Num (a literal, a length,
+// a loop counter) computes as Int; meeting a fractional Num it widens to F64,
+// which is what the same expression did before Int existed.
+type Int int64
+
+// MinExactNum and MaxExactNum bound the integers an f64 holds exactly. A Num
+// inside them converts to Int and back without loss.
+const (
+	MaxExactNum = float64(1 << 53)
+	MinExactNum = -MaxExactNum
+)
+
+// IntOfNum reports the Int an integral Num stands for, when it is one: a whole
+// number inside the int64 range. A fractional Num, NaN, or an infinity is not
+// an Int and reports false.
+func IntOfNum(f float64) (int64, bool) {
+	if f != math.Trunc(f) || f < -9223372036854775808.0 || f >= 9223372036854775808.0 {
+		return 0, false
+	}
+	return int64(f), true
+}
+
+// AsInt reads a value as an I64: an Int directly, or an integral Num (or
+// rank-0 tensor) that stands for one. It reports false for a fractional number
+// and for anything non-numeric.
+func AsInt(v Value) (int64, bool) {
+	switch t := v.(type) {
+	case Int:
+		return int64(t), true
+	case Num:
+		return IntOfNum(float64(t))
+	case *tensor.Tensor:
+		if t.IsScalar() {
+			return IntOfNum(t.Data[0])
+		}
+	}
+	return 0, false
+}
+
 type Bool bool
 type Str string
 type Unit struct{}
@@ -45,6 +98,8 @@ func AsTensor(v Value) (*tensor.Tensor, bool) {
 		return t, true
 	case Num:
 		return tensor.Scalar(float64(t)), true
+	case Int:
+		return tensor.Scalar(float64(t)), true
 	}
 	return nil, false
 }
@@ -54,6 +109,8 @@ func AsTensor(v Value) (*tensor.Tensor, bool) {
 func AsNumber(v Value) (float64, bool) {
 	switch t := v.(type) {
 	case Num:
+		return float64(t), true
+	case Int:
 		return float64(t), true
 	case *tensor.Tensor:
 		if len(t.Data) == 1 {
@@ -72,6 +129,10 @@ type List struct {
 type Record struct {
 	Keys   []string
 	Fields map[string]Value
+	// TypeName is the struct a typed literal was built from (`Lexer { ... }`),
+	// or "" for a plain record. Struct types are otherwise erased at run time;
+	// the name is kept so a field assignment can find the field's declared type.
+	TypeName string
 }
 
 func NewRecord() *Record {
@@ -119,9 +180,13 @@ type Bytes struct {
 
 type Closure struct {
 	Params []string
-	Body   ast.Expr
-	Env    *Env
-	Name   string
+	// ParamTypes is the annotation on each parameter, by name ("" when there is
+	// none), so an `I64` or `F64` parameter converts its argument at the call the
+	// way a `let` converts its bound value. Parallel to Params.
+	ParamTypes []string
+	Body       ast.Expr
+	Env        *Env
+	Name       string
 	// The return annotation, kept so that `-> I64` truncates the returned value
 	// the way `let n: I64 = ...` truncates a bound one. Both spellings reach the
 	// annotation the same way the parser records it: a bare `I64` arrives as a
@@ -318,6 +383,8 @@ func Truthy(v Value) bool {
 	switch t := v.(type) {
 	case Num:
 		return t != 0
+	case Int:
+		return t != 0
 	case *tensor.Tensor:
 		if t.IsScalar() {
 			return t.Data[0] != 0
@@ -343,6 +410,8 @@ func Format(v Value) string {
 	switch t := v.(type) {
 	case Num:
 		return FormatNumber(float64(t))
+	case Int:
+		return strconv.FormatInt(int64(t), 10)
 	case *tensor.Tensor:
 		// f64 renders exactly as it always has -- the differential harness compares
 		// this text byte for byte against the bootstrap and every golden depends on

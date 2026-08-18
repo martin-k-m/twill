@@ -229,7 +229,10 @@ func (s *EnumDecl) Pos() int { return s.Line }
 
 type NumberLit struct {
 	Value float64
-	Line  int
+	// Text is the literal as written. An integer literal above 2^53 is not the
+	// f64 in Value, and the runtime reads the digits to make an exact I64 of it.
+	Text string
+	Line int
 }
 
 type StringLit struct {

@@ -90,11 +90,11 @@ func (ip *Interp) installBuiltins() {
 	}
 
 	def("bnot", 1, false, func(a []value.Value) (value.Value, error) {
-		x, err := scalarOf(a[0], "bnot")
+		x, err := int64Of(a[0], "bnot")
 		if err != nil {
 			return nil, err
 		}
-		return tensor.Scalar(float64(^int64(x))), nil
+		return value.Int(^x), nil
 	})
 
 	// Res and Opt are built in: their cases are constructors and values in every
@@ -150,10 +150,24 @@ func (ip *Interp) installBuiltins() {
 		}
 		return tensor.Scalar(math.Mod(x, y)), nil
 	})
-	// i64 and f64 are the conversion casts: i64 truncates toward zero, f64 is the
-	// identity, since a value is already a float64.
-	f64op("i64", math.Trunc)
-	f64op("f64", func(x float64) float64 { return x })
+	// i64 and f64 are the two conversions across the systems-mode seam. i64
+	// makes an exact I64 of a number, truncating a fraction toward zero; f64
+	// makes an F64 of an I64, which loses precision above 2^53. Neither is
+	// implicit anywhere else (docs/language-guide.md, "F64, and what a
+	// systems-mode scalar is").
+	def("i64", 1, false, func(a []value.Value) (value.Value, error) {
+		if _, ok := value.AsNumber(a[0]); !ok {
+			return nil, fmt.Errorf("i64 expects a number")
+		}
+		return toInt(a[0])
+	})
+	def("f64", 1, false, func(a []value.Value) (value.Value, error) {
+		x, err := scalarOf(a[0], "f64")
+		if err != nil {
+			return nil, err
+		}
+		return value.Num(x), nil
+	})
 	def("f64_pow", 2, false, func(a []value.Value) (value.Value, error) {
 		x, err := scalarOf(a[0], "f64_pow")
 		if err != nil {
@@ -395,6 +409,9 @@ func (ip *Interp) installBuiltins() {
 		// dict, so a numeric and a textual key never alias in practice.
 		if s, ok := v.(value.Str); ok {
 			return string(s), nil
+		}
+		if n, ok := value.AsInt(v); ok {
+			return strconv.FormatInt(n, 10), nil
 		}
 		if n, ok := value.AsNumber(v); ok {
 			return strconv.FormatInt(int64(n), 10), nil
@@ -2865,21 +2882,35 @@ var bitFuncs = map[string]func(x, y int64) int64{
 	"shr": func(x, y int64) int64 { return x >> uint64(y&63) },
 }
 
-// bitwiseInfix applies a bitwise word to two values, truncating each to I64.
+// bitwiseInfix applies a bitwise word to two values. Each operand is read as an
+// I64 -- an Int exactly, a number by truncation -- and the result is an Int, so
+// a full 64-bit pattern such as a sign bit survives the round trip.
 func bitwiseInfix(name string, a, b value.Value) (value.Value, error) {
 	f, ok := bitFuncs[name]
 	if !ok {
 		return nil, fmt.Errorf("%s is not a bitwise operator", name)
 	}
-	x, err := scalarOf(a, name)
+	x, err := int64Of(a, name)
 	if err != nil {
 		return nil, err
 	}
-	y, err := scalarOf(b, name)
+	y, err := int64Of(b, name)
 	if err != nil {
 		return nil, err
 	}
-	return tensor.Scalar(float64(f(int64(x), int64(y)))), nil
+	return value.Int(f(x, y)), nil
+}
+
+// int64Of reads a scalar as an I64: exact for an Int, truncating for a number.
+func int64Of(v value.Value, who string) (int64, error) {
+	if i, ok := v.(value.Int); ok {
+		return int64(i), nil
+	}
+	x, err := scalarOf(v, who)
+	if err != nil {
+		return 0, err
+	}
+	return int64(x), nil
 }
 
 func scalarOf(v value.Value, who string) (float64, error) {

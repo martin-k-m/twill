@@ -24,6 +24,8 @@ type Diagnostic struct {
 func Check(prog *ast.Program) []Diagnostic {
 	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}, units: map[string]bool{},
 		systems: prog.Mode == "systems"}
+	c.enums = map[string][]string{"Opt": {"Some", "None"}, "Res": {"Ok", "Err"}}
+	c.variantOwner = map[string]string{"Some": "Opt", "None": "Opt", "Ok": "Res", "Err": "Res"}
 	// Register declared record types and units first so forward references resolve.
 	for _, s := range prog.Body {
 		switch d := s.(type) {
@@ -88,11 +90,21 @@ func Check(prog *ast.Program) []Diagnostic {
 	// body is checked. The type they belong to is left advisory.
 	for _, s := range prog.Body {
 		if ed, ok := s.(*ast.EnumDecl); ok {
+			names := make([]string, 0, len(ed.Variants))
 			for _, v := range ed.Variants {
+				names = append(names, v.Name)
 				if _, seen := env.get(v.Name); !seen {
 					env.define(v.Name, tUnknown{})
 				}
+				// A variant name shared by two enums is ambiguous as a bare
+				// name; owner is left unset so a match on it is not judged.
+				if owner, dup := c.variantOwner[v.Name]; dup && owner != ed.Name {
+					c.variantOwner[v.Name] = ""
+				} else {
+					c.variantOwner[v.Name] = ed.Name
+				}
 			}
+			c.enums[ed.Name] = names
 		}
 	}
 	// Top-level `let` names too: a module-level constant may be referenced by a
@@ -145,6 +157,12 @@ type checker struct {
 	// single-file checker never read that module. Used only to soften the
 	// unknown-name report for a capitalized constructor name. See inferExpr.
 	aliasedImport bool
+	// enums is every enum declared in the file, by name, each as its variant
+	// names in declaration order; variantOwner maps a variant back to its enum.
+	// Opt and Res are built in and always present. Both are what a match is
+	// checked for exhaustiveness against.
+	enums        map[string][]string
+	variantOwner map[string]string
 	// Set for a `mode systems` file. The systems dialect names types the
 	// bootstrap has no definition for (I64, Str, Bool, and module-qualified
 	// names like cp.Caps), so an unresolved type annotation is advisory there
@@ -156,6 +174,11 @@ type checker struct {
 	// the language forbids crossing. See inferStmt (Break/Continue, While/For)
 	// and the two body walks (checkFnDef, inferUserCall).
 	loopDepth int
+	// fnRet is the return annotation of each function whose body is being
+	// checked, innermost last: what a `?` is checked against. A function with
+	// no return annotation pushes "", which judges nothing; the top of a file
+	// has an empty stack, where `?` has no function to return from.
+	fnRet []string
 }
 
 func (c *checker) registerType(td *ast.TypeDecl) {
@@ -195,6 +218,7 @@ type tFn struct {
 	params  []ast.Param
 	ret     *ast.ShapeAnno
 	retUnit *ast.UnitAnno
+	retType string // the named return type as written (`Res[I64, Str]`), or ""
 	body    ast.Expr
 	env     *checkEnv
 }
@@ -405,7 +429,7 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 			env.define(st.Name, rhs)
 		}
 	case *ast.FnDecl:
-		env.define(st.Name, tFn{node: st, params: st.Params, ret: st.Ret, retUnit: st.RetUnit, body: st.Body, env: env})
+		env.define(st.Name, tFn{node: st, params: st.Params, ret: st.Ret, retUnit: st.RetUnit, retType: st.RetType, body: st.Body, env: env})
 		// Check the body once at definition using the parameter annotations, so
 		// mistakes are caught even if the function is never called. Unannotated
 		// parameters are unknown, so this only reports definite errors.
@@ -560,7 +584,7 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		}
 		return tList{elems: elems}
 	case *ast.Lambda:
-		return tFn{node: ex, params: ex.Params, ret: ex.Ret, retUnit: ex.RetUnit, body: ex.Body, env: env}
+		return tFn{node: ex, params: ex.Params, ret: ex.Ret, retUnit: ex.RetUnit, retType: ex.RetType, body: ex.Body, env: env}
 	case *ast.Unary:
 		return c.inferUnary(ex, env)
 	case *ast.Binary:
@@ -606,6 +630,7 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		}
 	case *ast.Match:
 		c.inferExpr(ex.Subject, env)
+		c.checkMatchArms(ex)
 		// Each arm is checked in its own scope with the pattern's binding present
 		// (its type is unknown, since the payload type is advisory). The match's
 		// type is left unknown rather than unified across arms, which keeps the
@@ -622,11 +647,108 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		// The success payload's type is not tracked (Res/Opt are advisory), so
 		// the unwrapped value is left unknown; the subject is still checked.
 		c.inferExpr(ex.Expr, env)
+		c.checkTryContext(ex.Line)
 		return tUnknown{}
 	case *ast.Block:
 		return c.inferBlock(ex, newEnv(env))
 	}
 	return tUnknown{}
+}
+
+// checkTryContext is the rule for `?`: it returns the failure from the
+// enclosing function, so that function must be one, and it must return a Res
+// or an Opt for the failure to be returnable. A function with no return
+// annotation is not judged.
+func (c *checker) checkTryContext(line int) {
+	if len(c.fnRet) == 0 {
+		c.report(line, "`?` outside a function: there is nothing to return the failure from")
+		return
+	}
+	ret := c.fnRet[len(c.fnRet)-1]
+	if ret == "" {
+		return
+	}
+	head := ret
+	if i := strings.IndexByte(head, '['); i >= 0 {
+		head = head[:i]
+	}
+	if head != "Res" && head != "Opt" {
+		c.report(line, "`?` in a function that returns %s: the failure it propagates needs a Res or Opt return type", ret)
+	}
+}
+
+// retTypeName is a function's named return type whichever slot the parser put
+// it in: a qualified or generic name arrives as text, a bare one as a
+// one-factor unit annotation. "" when there is none.
+func retTypeName(retType string, u *ast.UnitAnno) string {
+	if retType != "" {
+		return retType
+	}
+	if u != nil && len(u.Factors) == 1 && u.Factors[0].Exp == 1 {
+		return u.Factors[0].Name
+	}
+	return ""
+}
+
+// checkMatchArms is the exhaustiveness check: every variant of the matched enum
+// has an arm, or a `_` stands for the rest. The enum is the one that owns the
+// variants the arms name, so the subject's static type is not needed; a match
+// naming variants of two enums, a variant twice, or a `_` after every variant
+// is already listed, is reported too. A variant this file cannot see -- one
+// declared in an aliased module -- leaves the match unjudged, since the
+// checker reports only what it can prove (docs/type-system.md, "match").
+func (c *checker) checkMatchArms(m *ast.Match) {
+	owner := ""
+	seen := map[string]bool{}
+	wildcardAt := -1
+	for i, arm := range m.Arms {
+		pat := arm.Pattern
+		if pat.Wildcard {
+			if wildcardAt >= 0 {
+				c.report(pat.Line, "duplicate match arm: `_` appears twice")
+			}
+			wildcardAt = i
+			continue
+		}
+		if wildcardAt >= 0 {
+			c.report(pat.Line, "unreachable match arm: %s comes after `_`, which already matches everything", pat.Variant)
+		}
+		if seen[pat.Variant] {
+			c.report(pat.Line, "duplicate match arm: %s is already handled", pat.Variant)
+		}
+		seen[pat.Variant] = true
+		en, known := c.variantOwner[pat.Variant]
+		if !known || en == "" {
+			// Not an enum this file declares (or an ambiguous name): the match
+			// cannot be judged.
+			return
+		}
+		if owner == "" {
+			owner = en
+		} else if owner != en {
+			c.report(pat.Line, "match arm %s belongs to enum %s, but the earlier arms match %s", pat.Variant, en, owner)
+			return
+		}
+	}
+	if owner == "" {
+		return
+	}
+	variants := c.enums[owner]
+	var missing []string
+	for _, v := range variants {
+		if !seen[v] {
+			missing = append(missing, v)
+		}
+	}
+	if wildcardAt >= 0 {
+		if len(missing) == 0 {
+			c.report(m.Arms[wildcardAt].Pattern.Line, "unreachable match arm: `_` matches nothing, every variant of %s is already handled", owner)
+		}
+		return
+	}
+	if len(missing) > 0 {
+		c.report(m.Line, "match on %s is not exhaustive: missing %s", owner, strings.Join(missing, ", "))
+	}
 }
 
 // elementCount multiplies a shape out, when every dimension is known.
@@ -1085,12 +1207,14 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 	// written inside a loop is an error, not a way out of that loop.
 	savedDepth := c.loopDepth
 	c.loopDepth = 0
+	c.fnRet = append(c.fnRet, retTypeName(fn.RetType, fn.RetUnit))
 	var bodyType Type
 	if blk, ok := fn.Body.(*ast.Block); ok {
 		bodyType = c.inferBlock(blk, scope)
 	} else {
 		bodyType = c.inferExpr(fn.Body, scope)
 	}
+	c.fnRet = c.fnRet[:len(c.fnRet)-1]
 	c.loopDepth = savedDepth
 	delete(c.stack, fn)
 
@@ -1181,12 +1305,14 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	// call itself sits inside a loop. See checkFnDef.
 	savedDepth := c.loopDepth
 	c.loopDepth = 0
+	c.fnRet = append(c.fnRet, retTypeName(fn.retType, fn.retUnit))
 	var bodyType Type
 	if blk, ok := fn.body.(*ast.Block); ok {
 		bodyType = c.inferBlock(blk, scope)
 	} else {
 		bodyType = c.inferExpr(fn.body, scope)
 	}
+	c.fnRet = c.fnRet[:len(c.fnRet)-1]
 	c.loopDepth = savedDepth
 	delete(c.stack, fn.node)
 
