@@ -113,6 +113,15 @@ type Interp struct {
 	// `Catalog { versions: {} }` is a dictionary, so the declaration is kept for
 	// that one purpose. See containerForAnnotation.
 	structFields map[string]map[string]string
+	// variantPayloads is each enum case's declared payload type, by case name,
+	// so a payload written as a number at an `I64` case is stored as one. Only
+	// the scalar conversions read it; everything else about a payload's type is
+	// the checker's.
+	variantPayloads map[string]string
+	// callDepth counts the closures currently executing. It is what tells a `?`
+	// at the top of a file, where there is no function to return from, apart
+	// from one inside a function.
+	callDepth int
 	// rngs holds the independent generator streams `rng_open` hands out, by
 	// handle. A twill value cannot carry a native pointer, so a stream is named
 	// by an integer, the same way a fitted gbm model is. This is separate from
@@ -134,16 +143,17 @@ func New(out func(string)) *Interp {
 		out = func(s string) { fmt.Println(s) }
 	}
 	ip := &Interp{
-		Global:       value.NewEnv(nil),
-		out:          out,
-		loaded:       map[string]bool{},
-		loading:      map[string]bool{},
-		rng:          rand.New(rand.NewSource(defaultSeed)),
-		gbmModels:    map[int64]*gbm.Model{},
-		variantNames: map[string]bool{},
-		structFields: map[string]map[string]string{},
-		rngs:         map[int64]*rand.Rand{},
-		tr:           trace.New(nil),
+		Global:          value.NewEnv(nil),
+		out:             out,
+		loaded:          map[string]bool{},
+		loading:         map[string]bool{},
+		rng:             rand.New(rand.NewSource(defaultSeed)),
+		gbmModels:       map[int64]*gbm.Model{},
+		variantNames:    map[string]bool{},
+		variantPayloads: map[string]string{},
+		structFields:    map[string]map[string]string{},
+		rngs:            map[int64]*rand.Rand{},
+		tr:              trace.New(nil),
 	}
 	ip.installBuiltins()
 	return ip
@@ -361,33 +371,21 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 		if out, ok := tensorForAnnotation(annoName(st.TypeName, st.Unit), v); ok {
 			v = out
 		}
-		// A scalar bound at an `I64` annotation truncates toward zero. Numbers run
-		// as float64, so integer division comes back fractional; a systems-mode
-		// kernel like tensor.tw's transpose_origins binds `let coord: I64 = rem /
-		// stride` and uses it as a buffer index, which then reads out of range.
-		// Truncating at the bind makes the interpreted arithmetic match the I64
-		// semantics the annotation promises. A real I64 runtime divides as integers
-		// and this is a no-op.
-		if isI64Anno(st.TypeName, st.Unit) {
-			switch t := v.(type) {
-			case value.Num:
-				v = value.Num(math.Trunc(float64(t)))
-			case *tensor.Tensor:
-				if t.IsScalar() {
-					v = value.Num(math.Trunc(t.Data[0]))
-				}
-			}
-		}
+		// A number bound at an `I64` annotation becomes an Int, and one bound at
+		// `F64` a Num: the annotation is where the program says which half of the
+		// language the value lives in (see int.go).
+		v = ip.coerceScalarAnno(st.TypeName, st.Unit, v, st.Line)
 		env.Define(st.Name, v)
 		return value.TheUnit
 	case *ast.FnDecl:
 		env.Define(st.Name, &value.Closure{
-			Params:  paramNames(st.Params),
-			Body:    st.Body,
-			Env:     env,
-			Name:    st.Name,
-			RetUnit: st.RetUnit,
-			RetType: st.RetType,
+			Params:     paramNames(st.Params),
+			ParamTypes: paramTypes(st.Params),
+			Body:       st.Body,
+			Env:        env,
+			Name:       st.Name,
+			RetUnit:    st.RetUnit,
+			RetType:    st.RetType,
 		})
 		return value.TheUnit
 	case *ast.Assign:
@@ -476,8 +474,14 @@ func (ip *Interp) execStmt(s ast.Stmt, env *value.Env) value.Value {
 			ip.variantNames[name] = true
 			var ctor value.Value
 			if v.HasPayload {
+				payloadType := v.Payload
+				ip.variantPayloads[name] = payloadType
 				ctor = &value.Builtin{Name: name, Arity: 1, Fn: func(a []value.Value) (value.Value, error) {
-					return &value.Variant{Name: name, Payload: a[0], HasPayload: true}, nil
+					p := a[0]
+					if isI64Anno(payloadType, nil) || isF64Anno(payloadType, nil) {
+						p = ip.coerceScalarAnno(payloadType, nil, p, st.Line)
+					}
+					return &value.Variant{Name: name, Payload: p, HasPayload: true}, nil
 				}}
 			} else {
 				ctor = &value.Variant{Name: name}
@@ -773,6 +777,9 @@ func (ip *Interp) resolveImport(path string) (string, error) {
 func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 	switch ex := e.(type) {
 	case *ast.NumberLit:
+		if i, ok := intLiteral(ex, false); ok {
+			return i
+		}
 		return value.Num(ex.Value)
 	case *ast.StringLit:
 		return value.Str(ex.Value)
@@ -799,12 +806,13 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		return &value.List{Items: items}
 	case *ast.Lambda:
 		return &value.Closure{
-			Params:  paramNames(ex.Params),
-			Body:    ex.Body,
-			Env:     env,
-			Name:    "",
-			RetUnit: ex.RetUnit,
-			RetType: ex.RetType,
+			Params:     paramNames(ex.Params),
+			ParamTypes: paramTypes(ex.Params),
+			Body:       ex.Body,
+			Env:        env,
+			Name:       "",
+			RetUnit:    ex.RetUnit,
+			RetType:    ex.RetType,
 		}
 	case *ast.Unary:
 		return ip.evalUnary(ex, env)
@@ -825,12 +833,13 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		// could do is turn an empty literal into an empty container, which is what
 		// the field wanted in every case where it matters.
 		declared := ip.structFields[bareTypeName(ex.TypeName)]
+		if declared != nil {
+			rec.TypeName = bareTypeName(ex.TypeName)
+		}
 		for _, f := range ex.Fields {
 			v := ip.evalExpr(f.Value, env)
 			if t, ok := declared[f.Name]; ok {
-				if out, converted := containerForAnnotation(t, v); converted {
-					v = out
-				}
+				v = ip.coerceField(t, v, f.Value.Pos())
 			}
 			rec.Set(f.Name, v)
 		}
@@ -882,6 +891,12 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		if variant.Name == "Ok" || variant.Name == "Some" {
 			return variant.Payload
 		}
+		// At the top of a file there is no function to return the failure from,
+		// so `?` there used to end the program quietly with exit status 0 -- the
+		// one thing a failed read must not do. It is an error naming the value.
+		if ip.callDepth == 0 {
+			ip.panicf(ex.Line, "`?` outside a function: the value was %s", value.Format(variant))
+		}
 		panic(returnSignal{value: variant})
 	case *ast.Block:
 		return ip.execBlockIn(ex, value.NewEnv(env))
@@ -915,10 +930,23 @@ func (ip *Interp) tensorNested(elements []ast.Expr, line int) []any {
 }
 
 func (ip *Interp) evalUnary(ex *ast.Unary, env *value.Env) value.Value {
+	if ex.Op == "-" {
+		// `-9223372036854775808` is MIN_I64 spelled the only way it can be: the
+		// magnitude does not fit, its negation does, so the literal is read under
+		// the minus rather than after it.
+		if lit, ok := ex.Operand.(*ast.NumberLit); ok {
+			if i, ok := intLiteral(lit, true); ok {
+				return i
+			}
+		}
+	}
 	v := ip.evalExpr(ex.Operand, env)
 	if ex.Op == "-" {
 		if n, isNum := v.(value.Num); isNum {
 			return -n
+		}
+		if i, isInt := v.(value.Int); isInt {
+			return -i
 		}
 		t, ok := v.(*tensor.Tensor)
 		if !ok {
@@ -962,6 +990,19 @@ func (ip *Interp) evalBinary(ex *ast.Binary, env *value.Env) value.Value {
 		// the IR carries the six comparison opcodes; those are reached through
 		// `where` and through the gradient transform.
 		return value.Bool(ip.compare(op, l, r, ex.Line))
+	case "+", "-", "*", "/", "%", "//":
+		// An I64 operation: both sides Int, or an Int and an integral number.
+		// Wrapping arithmetic, truncating division, dividend-signed modulo.
+		if x, y, isInt := intOperands(l, r); isInt {
+			ip.escape()
+			out, err := intArith(op, x, y)
+			if err != nil {
+				ip.panicf(ex.Line, "%s", err.Error())
+			}
+			return out
+		}
+	}
+	switch op {
 	// The bitwise words are the same operation infix as they are called: one
 	// definition, in bitwiseInfix, so `x shr 8` and `shr(x, 8)` cannot drift.
 	// `//` divides and truncates toward zero: the integer division every
@@ -1087,6 +1128,8 @@ func rank0Number(v value.Value) (float64, bool) {
 	switch t := v.(type) {
 	case value.Num:
 		return float64(t), true
+	case value.Int:
+		return float64(t), true
 	case *tensor.Tensor:
 		if t.IsScalar() {
 			return t.Data[0], true
@@ -1099,6 +1142,13 @@ func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
 	ip.escape()
 	// Scalar comparison covers loop conditions and guards, so it reads the
 	// numbers out directly rather than widening either side to a tensor first.
+	// An Int on either side compares exactly as I64, so two values that differ
+	// only above 2^53 are not equal through an f64 that cannot tell them apart.
+	if x, y, isInt := intOperands(l, r); isInt {
+		if res, ok := intCompare(op, x, y); ok {
+			return res
+		}
+	}
 	a, aok := rank0Number(l)
 	b, bok := rank0Number(r)
 	if aok && bok {
@@ -1156,6 +1206,18 @@ func (ip *Interp) compare(op string, l, r value.Value, line int) bool {
 func deepEqual(l, r value.Value) bool {
 	// A number equals a rank-0 tensor holding it: whether a value went down the
 	// unboxed path is an implementation detail, not something `==` may see.
+	if x, y, isInt := intOperands(l, r); isInt {
+		return x == y
+	}
+	if li, isInt := l.(value.Int); isInt {
+		// An Int against a fractional number, or against a non-number.
+		rn, isNum := rank0Number(r)
+		return isNum && float64(li) == rn
+	}
+	if ri, isInt := r.(value.Int); isInt {
+		ln, isNum := rank0Number(l)
+		return isNum && ln == float64(ri)
+	}
 	if ln, ok := l.(value.Num); ok {
 		rn, isNum := rank0Number(r)
 		return isNum && float64(ln) == rn
@@ -1210,6 +1272,30 @@ func deepEqual(l, r value.Value) bool {
 			}
 		}
 		return true
+	case *value.Variant:
+		// An enum value is its case and its payload: `Some(1) == Some(1)`, the
+		// way `[1] == [1]`. It used to fall through to identity below, so two
+		// separately built Ok(3) were unequal, which no caller expected.
+		rv, ok := r.(*value.Variant)
+		if !ok || lv.Name != rv.Name || lv.HasPayload != rv.HasPayload {
+			return false
+		}
+		return !lv.HasPayload || deepEqual(lv.Payload, rv.Payload)
+	case *value.Dict:
+		rv, ok := r.(*value.Dict)
+		if !ok || len(lv.Keys) != len(rv.Keys) {
+			return false
+		}
+		for _, k := range lv.Keys {
+			other, has := rv.Get(k)
+			if !has || !deepEqual(lv.Map[k], other) {
+				return false
+			}
+		}
+		return true
+	case *value.Bytes:
+		rv, ok := r.(*value.Bytes)
+		return ok && string(lv.Data) == string(rv.Data)
 	case *value.Closure:
 		rv, ok := r.(*value.Closure)
 		return ok && lv == rv
@@ -1449,9 +1535,15 @@ func (ip *Interp) Apply(callee value.Value, args []value.Value, line int) value.
 }
 
 func (ip *Interp) callClosure(c *value.Closure, args []value.Value) (ret value.Value) {
+	ip.callDepth++
+	defer func() { ip.callDepth-- }()
 	scope := value.NewEnv(c.Env)
 	for i, p := range c.Params {
-		scope.Define(p, args[i])
+		arg := args[i]
+		if i < len(c.ParamTypes) && c.ParamTypes[i] != "" {
+			arg = ip.coerceScalarAnno(c.ParamTypes[i], nil, arg, c.Body.Pos())
+		}
+		scope.Define(p, arg)
 	}
 	// `-> I64` truncates the result toward zero, the same rule `let n: I64 = ...`
 	// applies to a bound value. Numbers run as float64, so the integer idioms --
@@ -1483,16 +1575,8 @@ func (ip *Interp) coerceReturn(c *value.Closure, v value.Value) value.Value {
 		return v
 	}
 	ip.escape()
-	if isI64Anno(c.RetType, c.RetUnit) {
-		switch t := v.(type) {
-		case value.Num:
-			return value.Num(math.Trunc(float64(t)))
-		case *tensor.Tensor:
-			if t.IsScalar() {
-				return value.Num(math.Trunc(t.Data[0]))
-			}
-		}
-		return v
+	if isI64Anno(c.RetType, c.RetUnit) || isF64Anno(c.RetType, c.RetUnit) {
+		return ip.coerceScalarAnno(c.RetType, c.RetUnit, v, c.Body.Pos())
 	}
 	if out, ok := tensorForAnnotation(annoName(c.RetType, c.RetUnit), v); ok {
 		return out
@@ -1510,6 +1594,16 @@ func annoName(typeName string, u *ast.UnitAnno) string {
 		return u.Factors[0].Name
 	}
 	return ""
+}
+
+// coerceField applies a struct field's declared type to a value stored in it:
+// an empty literal at a container type builds the container, and a number at
+// an I64 or F64 field converts, the same two rules a `let` annotation follows.
+func (ip *Interp) coerceField(fieldType string, v value.Value, line int) value.Value {
+	if out, converted := containerForAnnotation(fieldType, v); converted {
+		return out
+	}
+	return ip.coerceScalarAnno(fieldType, nil, v, line)
 }
 
 // tensorForAnnotation reads a list of numbers at a `Tensor` annotation as a
@@ -1557,6 +1651,13 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 		rec, ok := obj.(*value.Record)
 		if !ok {
 			ip.panicf(t.Line, "cannot set field %q of a non-record", t.Name)
+		}
+		// A struct's field keeps its declared type across an assignment, so
+		// `lx.i = lx.i + 1` on an I64 field stays an I64.
+		if rec.TypeName != "" {
+			if ft, declared := ip.structFields[rec.TypeName][t.Name]; declared {
+				v = ip.coerceField(ft, v, t.Line)
+			}
 		}
 		rec.Set(t.Name, v)
 	case *ast.Index:
@@ -1727,6 +1828,27 @@ func (ip *Interp) indexTensor(t *tensor.Tensor, idx, line int) *tensor.Tensor {
 		ip.panicf(line, "%s", err.Error())
 	}
 	return res
+}
+
+// paramTypes is the annotation on each parameter as a bare name, or "" for a
+// shape annotation or none: what callClosure reads to convert an `I64`/`F64`
+// argument at the call.
+func paramTypes(params []ast.Param) []string {
+	out := make([]string, len(params))
+	found := false
+	for i, p := range params {
+		if p.TypeName != "" {
+			out[i] = p.TypeName
+			found = true
+		} else if p.Unit != nil && len(p.Unit.Factors) == 1 && p.Unit.Factors[0].Exp == 1 {
+			out[i] = p.Unit.Factors[0].Name
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	return out
 }
 
 func paramNames(params []ast.Param) []string {

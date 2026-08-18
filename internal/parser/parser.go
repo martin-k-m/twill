@@ -543,7 +543,7 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		if err != nil {
 			return nil, p.errf(t, "invalid number %q", t.Value)
 		}
-		return &ast.NumberLit{Value: v, Line: t.Line}, nil
+		return &ast.NumberLit{Value: v, Text: t.Value, Line: t.Line}, nil
 	case lexer.STRING:
 		p.next()
 		return &ast.StringLit{Value: t.Value, Line: t.Line}, nil
