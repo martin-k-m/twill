@@ -61,6 +61,22 @@ func (ip *Interp) registerFS(def func(string, int, bool, func([]value.Value) (va
 		info, statErr := os.Stat(p)
 		return value.Bool(statErr == nil && info.IsDir()), nil
 	})
+	// mtime is the other half of a stat: when the file last changed, in whole
+	// seconds since the epoch, or -1 when the path cannot be read -- the same
+	// convention file_size follows. Seconds rather than nanoseconds because this
+	// is for asking whether a cached artefact is older than its sources, and a
+	// filesystem's timestamp resolution does not honestly support finer.
+	def("mtime", 1, false, func(a []value.Value) (value.Value, error) {
+		p, err := pathArg(a, 0, "mtime")
+		if err != nil {
+			return nil, err
+		}
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			return value.Int(-1), nil
+		}
+		return value.Int(info.ModTime().Unix()), nil
+	})
 	def("mkdir_all", 1, false, func(a []value.Value) (value.Value, error) {
 		p, err := pathArg(a, 0, "mkdir_all")
 		if err != nil {
@@ -108,17 +124,34 @@ func (ip *Interp) registerFS(def func(string, int, bool, func([]value.Value) (va
 		}
 		return fsOk(value.TheUnit), nil
 	})
-	def("rename_path", 2, false, func(a []value.Value) (value.Value, error) {
-		from, err := pathArg(a, 0, "rename_path")
+	def("rename", 2, false, func(a []value.Value) (value.Value, error) {
+		from, err := pathArg(a, 0, "rename")
 		if err != nil {
 			return nil, err
 		}
-		to, err := pathArg(a, 1, "rename_path")
+		to, err := pathArg(a, 1, "rename")
 		if err != nil {
 			return nil, err
 		}
 		if mvErr := os.Rename(from, to); mvErr != nil {
 			return fsErr(mvErr), nil
+		}
+		return fsOk(value.TheUnit), nil
+	})
+	// remove_all removes whatever is at the path -- a file, or a directory and
+	// everything under it -- and succeeds when there was nothing there. That
+	// last part is what separates it from remove_file and remove_dir: those two
+	// each refuse the other's argument and report a missing path, because a
+	// caller naming one of them knows which it meant. A caller of remove_all is
+	// saying "make sure this is gone", which is already true of a path that does
+	// not exist. It is spelled out in full because it is the recursive one.
+	def("remove_all", 1, false, func(a []value.Value) (value.Value, error) {
+		p, err := pathArg(a, 0, "remove_all")
+		if err != nil {
+			return nil, err
+		}
+		if rmErr := os.RemoveAll(p); rmErr != nil {
+			return fsErr(rmErr), nil
 		}
 		return fsOk(value.TheUnit), nil
 	})

@@ -2850,7 +2850,7 @@ var builtinNames = map[string]bool{
 	"Ok": true, "Err": true, "Some": true, "None": true, "unit": true,
 	// Filesystem and paths (internal/interp/fs.go).
 	"path_exists": true, "path_is_dir": true, "mkdir_all": true, "remove_file": true,
-	"remove_dir": true, "rename_path": true, "temp_dir": true, "cwd": true,
+	"remove_dir": true, "rename": true, "remove_all": true, "mtime": true, "mono_ns": true, "temp_dir": true, "cwd": true,
 	"path_join": true, "path_base": true, "path_dir": true, "path_ext": true,
 	"path_stem": true, "path_normalize": true, "path_is_abs": true,
 	// Scalar f64 math, conversions and IEEE bit access for the systems dialect.
@@ -2895,7 +2895,7 @@ var builtinNames = map[string]bool{
 var builtinArity = map[string]int{
 	// nullary
 	"args": 0, "arr_new": 0, "bytes_new": 0, "clock_now_ms": 0, "dict_new": 0,
-	"gpu_available": 0, "gpu_device_count": 0, "is_tty_stdout": 0, "rng_normal": 0,
+	"gpu_available": 0, "gpu_device_count": 0, "is_tty_stdout": 0, "rng_normal": 0, "mono_ns": 0,
 	"rng_uniform": 0, "window_size": 0, "cwd": 0,
 	// unary -- elementwise math (unaryOp / elemOp) and the rest
 	"relu": 1, "exp": 1, "log": 1, "sin": 1, "cos": 1, "tanh": 1, "sigmoid": 1,
@@ -2913,12 +2913,12 @@ var builtinArity = map[string]int{
 	"write_err": 1, "write_out": 1, "exit": 1, "arr_of_tensor": 1, "all_finite": 1, "file_size": 1, "numel": 1,
 	"f64_bits_hi": 1, "f64_bits_lo": 1,
 	"path_exists": 1, "path_is_dir": 1, "mkdir_all": 1, "remove_file": 1, "remove_dir": 1,
-	"temp_dir": 1, "path_base": 1, "path_dir": 1, "path_ext": 1, "path_stem": 1,
+	"temp_dir": 1, "remove_all": 1, "mtime": 1, "path_base": 1, "path_dir": 1, "path_ext": 1, "path_stem": 1,
 	"path_normalize": 1, "path_is_abs": 1,
 	// binary -- elementwise/tensor pairs (binTensor), bit ops (bitOp), and the rest
 	"matmul": 2, "dot": 2, "conv2d": 2, "maximum": 2, "minimum": 2, "greater": 2,
 	"less": 2, "greater_equal": 2, "less_equal": 2, "equal": 2,
-	"read_text_or": 2, "write_text_or": 2, "f64_from_halves": 2, "rename_path": 2,
+	"read_text_or": 2, "write_text_or": 2, "f64_from_halves": 2, "rename": 2,
 	"and": 2, "or": 2, "band": 2, "bor": 2, "xor": 2, "shl": 2, "shr": 2,
 	"append": 2, "arr_push": 2, "buf_get8": 2, "bytes_push": 2, "concat": 2,
 	"dict_del": 2, "dict_get": 2, "dict_has": 2, "dict_must": 2, "f64_mod": 2,

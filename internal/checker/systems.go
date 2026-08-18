@@ -554,7 +554,7 @@ func systemsBuiltinResult(name string, args []Type) (Type, bool) {
 		return nil
 	}
 	switch name {
-	case "i64", "i64_of_f64", "clock_now_ms", "file_size", "buf_len", "buf_get8", "rng_open":
+	case "i64", "i64_of_f64", "clock_now_ms", "mono_ns", "mtime", "file_size", "buf_len", "buf_get8", "rng_open":
 		return tInt{}, true
 	case "f64", "f64_of_i64":
 		return scalar(), true
@@ -590,7 +590,7 @@ func systemsBuiltinResult(name string, args []Type) (Type, bool) {
 		return tBool{}, true
 	case "path_join", "path_base", "path_dir", "path_ext", "path_stem", "path_normalize":
 		return tStr{}, true
-	case "mkdir_all", "remove_file", "remove_dir", "rename_path":
+	case "mkdir_all", "remove_file", "remove_dir", "remove_all", "rename":
 		return tEnum{name: "Res", args: []Type{tUnit{}, tStr{}}}, true
 	case "temp_dir", "cwd":
 		return tEnum{name: "Res", args: []Type{tStr{}, tStr{}}}, true
