@@ -1,5 +1,70 @@
 # Changelog
 
+## [Unreleased]
+
+Everything here came out of putting 1.6 to work: the nine ecosystem
+repositories were moved onto the release, and what they hit is what is below.
+Dogfooding is the only way most of it would have been found -- none of these
+was reachable from twill's own sources.
+
+### Added
+
+- **`twill lsp`**, a language server. Diagnostics republished as you type,
+  formatting, and hover reporting the inferred type and shape. Hover is the one
+  worth having: in a tensor-first language the question you actually have is
+  what shape something is, and it is answered from the checker without running
+  anything, so `logits @ w` costs nothing to ask about and a gigabyte to
+  evaluate. No completion, deliberately -- `docs/roadmap.md`'s own advice is not
+  to build one before the semantic information is reliable.
+  `editors/README.md` sets it up for Neovim and Helix, and says plainly why
+  there is no VS Code client yet.
+- **`read_file_at(path, offset, count)`**, a ranged read. `read_file` returns
+  the whole file, so a reader following a growing log read all of it again on
+  every poll and one processing a file larger than memory could not run at all.
+  A short read at the end is not an error.
+- **`mem_allocs`, `mem_bytes`, `mem_live_bytes`, `mem_counters_available`**, the
+  counters bobbin designed its memory module around and then could not call.
+  `mem_tensors` is -1, meaning not counted: counting tensors is an atomic
+  increment at forty-odd construction sites on the hot path of every numeric
+  program, which is a tax on everyone not benchmarking for a number that moves
+  `mem_allocs` anyway.
+- **`remove_all`, `rename`, `mtime`** and a **monotonic `mono_ns()`**, the names
+  the ecosystem had already written. `rename_path` is `rename`; it was
+  introduced in this cycle and nothing outside it can depend on the old
+  spelling.
+
+### Fixed
+
+- **A `match` on an enum from another module is checked for exhaustiveness.**
+  The checker reads one file, so it did not know an imported enum's other cases
+  and said nothing -- and matching on an imported enum is how the ecosystem is
+  written, so the check silently did nothing in exactly the place it was most
+  wanted. An import is now followed for its enum declarations and nothing else.
+  `Check` is unchanged and still pure; `CheckFile` is the entry point that reads.
+- **A `match` arm's expression continues onto the next line.**
+
+      Some(v) => "got "
+        + str(v),
+
+  was a syntax error, on a continuation legal in every other position. The arm
+  body's own first token was setting the column the continuation rule measures
+  against. Two repositories hit it on the same day and each extracted a helper
+  function to work around it.
+- **An `I64` can be saved.** `value.Int` went into the runtime and not into the
+  save format, so `save` on anything holding one failed -- which is loom's whole
+  checkpoint-to-disk path. It writes as eight bytes under its own tag rather
+  than as an f64, which would have worked and corrupted exactly the values above
+  2^53 that an `I64` exists for. Files with no `I64` in them are byte for byte
+  what they were, and every older file still reads.
+- **Ordering is type-checked.** `find() < 0`, where `find` returns an
+  `Opt[I64]`, checked clean and failed at run time -- precisely the shape the
+  mistake takes when a function that used to return -1 starts returning an Opt,
+  so the checker could not be trusted to find the call sites of that migration.
+  `==` and `!=` are deep equality and stay defined on everything.
+- **A release candidate publishes as a prerelease.** `v1.6.0-rc1` was published
+  as the repository's Latest release, ahead of the stable version, so anyone
+  landing on the page was offered a candidate as the recommended download.
+
 ## [1.6.0-rc1] - 2026-08-18
 
 The completeness release. 1.5 made the ecosystem run; this one makes the
