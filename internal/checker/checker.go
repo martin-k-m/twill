@@ -26,6 +26,8 @@ func Check(prog *ast.Program) []Diagnostic {
 		systems: prog.Mode == "systems"}
 	c.enums = map[string][]string{"Opt": {"Some", "None"}, "Res": {"Ok", "Err"}}
 	c.variantOwner = map[string]string{"Some": "Opt", "None": "Opt", "Ok": "Res", "Err": "Res"}
+	c.payloads = map[string]Type{"Some": nil, "Ok": nil, "Err": nil}
+	c.structDecls = map[string]*ast.StructDecl{}
 	// Register declared record types and units first so forward references resolve.
 	for _, s := range prog.Body {
 		switch d := s.(type) {
@@ -34,20 +36,29 @@ func Check(prog *ast.Program) []Diagnostic {
 		case *ast.UnitDecl:
 			c.units[d.Name] = true
 		case *ast.StructDecl:
-			// A struct registers as a record type whose fields exist but whose
-			// field types are advisory (the systems types the bootstrap does not
-			// model), so `m.field` is checked for existence and left unknown.
+			// A struct registers as a nominal record type. Its field types are
+			// parsed once every struct and enum name is known (structFieldTypes,
+			// below), since a field may name either.
 			fields := map[string]Type{}
 			for _, f := range d.Fields {
 				fields[f.Name] = tUnknown{}
 			}
-			c.types[d.Name] = tRecord{fields: fields}
+			c.types[d.Name] = tRecord{fields: fields, name: d.Name}
 		}
 	}
 	env := newEnv(nil)
 	for name := range builtinNames {
 		env.define(name, tBuiltin{name})
 	}
+	// The built-in enums' cases are values with types: Some/Ok/Err are
+	// constructors, None is an Opt.
+	env.define("Some", tCtor{enum: "Opt", variant: "Some"})
+	env.define("Ok", tCtor{enum: "Res", variant: "Ok"})
+	env.define("Err", tCtor{enum: "Res", variant: "Err"})
+	env.define("None", tEnum{name: "Opt"})
+	// `unit` is the Unit value, not a function: a match arm or a function body
+	// that ends in it evaluates to Unit.
+	env.define("unit", tUnit{})
 	// An import with no alias brings its names in unqualified, and this checker
 	// does not read the imported file, so it cannot know what those names are.
 	// One of them is enough to make every unknown name unreliable, so the whole
@@ -93,9 +104,6 @@ func Check(prog *ast.Program) []Diagnostic {
 			names := make([]string, 0, len(ed.Variants))
 			for _, v := range ed.Variants {
 				names = append(names, v.Name)
-				if _, seen := env.get(v.Name); !seen {
-					env.define(v.Name, tUnknown{})
-				}
 				// A variant name shared by two enums is ambiguous as a bare
 				// name; owner is left unset so a match on it is not judged.
 				if owner, dup := c.variantOwner[v.Name]; dup && owner != ed.Name {
@@ -105,6 +113,33 @@ func Check(prog *ast.Program) []Diagnostic {
 				}
 			}
 			c.enums[ed.Name] = names
+		}
+	}
+	// With every enum and struct named, their payload and field types can be
+	// parsed, and each variant bound as the value it is: a constructor for a
+	// payload case, the enum itself for a bare one.
+	for _, s := range prog.Body {
+		if ed, ok := s.(*ast.EnumDecl); ok {
+			for _, v := range ed.Variants {
+				if v.HasPayload {
+					c.payloads[v.Name] = c.parseType(v.Payload)
+				}
+			}
+		}
+	}
+	c.structFieldTypes(prog)
+	for _, s := range prog.Body {
+		if ed, ok := s.(*ast.EnumDecl); ok {
+			for _, v := range ed.Variants {
+				if _, seen := env.get(v.Name); seen && !isBuiltinCtor(v.Name) {
+					continue
+				}
+				if t, ok := c.enumValueType(v.Name); ok {
+					env.define(v.Name, t)
+				} else {
+					env.define(v.Name, tUnknown{})
+				}
+			}
 		}
 	}
 	// Top-level `let` names too: a module-level constant may be referenced by a
@@ -123,6 +158,12 @@ func Check(prog *ast.Program) []Diagnostic {
 		c.inferStmt(s, env)
 	}
 	return dedupe(c.diags)
+}
+
+// isBuiltinCtor reports whether a name is one of the built-in enums' cases,
+// which a user enum may re-declare (a file's own `enum Opt`) and then owns.
+func isBuiltinCtor(name string) bool {
+	return name == "Some" || name == "None" || name == "Ok" || name == "Err"
 }
 
 // dedupe removes repeated diagnostics (a body checked at definition and again
@@ -163,6 +204,11 @@ type checker struct {
 	// checked for exhaustiveness against.
 	enums        map[string][]string
 	variantOwner map[string]string
+	// payloads is each payload-carrying variant's declared payload type; a
+	// payload-less variant is absent. structDecls keeps each struct's
+	// declaration for its field order.
+	payloads    map[string]Type
+	structDecls map[string]*ast.StructDecl
 	// Set for a `mode systems` file. The systems dialect names types the
 	// bootstrap has no definition for (I64, Str, Bool, and module-qualified
 	// names like cp.Caps), so an unresolved type annotation is advisory there
@@ -212,7 +258,10 @@ type tBool struct{}
 type tStr struct{}
 type tUnit struct{}
 type tList struct{ elems []Type } // nil elems: unknown contents
-type tRecord struct{ fields map[string]Type }
+type tRecord struct {
+	fields map[string]Type
+	name   string // the struct's name for a nominal type; "" for a plain record
+}
 type tFn struct {
 	node    ast.Node
 	params  []ast.Param
@@ -410,10 +459,17 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 	switch st := s.(type) {
 	case *ast.Let:
 		rhs := c.inferExpr(st.Value, env)
-		if st.TypeName != "" {
-			// A qualified or generic type annotation is always a type, never a
-			// unit, so the binding just takes the value's type.
-			env.define(st.Name, rhs)
+		if st.TypeName != "" || (st.Unit != nil && c.isAdvisoryTypeAnno(st.Unit)) {
+			// A type annotation: the binding is declared to be that type, and the
+			// value has to be one. In systems mode the name is one of the dialect's
+			// types; elsewhere it is a record type or unknown, and judged only if
+			// known.
+			want := c.parseType(annoText(st.TypeName, st.Unit))
+			what := fmt.Sprintf("%q", st.Name)
+			if c.checkAssignable(st.Line, what, want, rhs) {
+				c.fractionalLiteralAtInt(st.Line, what, want, st.Value)
+			}
+			env.define(st.Name, bindingType(want, rhs))
 		} else if st.Unit != nil && !c.isAdvisoryTypeAnno(st.Unit) {
 			want := c.resolveUnit(st.Unit, st.Line)
 			if t, ok := rhs.(tTensor); ok {
@@ -440,8 +496,18 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 			env.assign(id.Name, v)
 		} else {
 			// A field or index target: infer it so a malformed one is still
-			// checked, but there is no name to rebind.
-			c.inferExpr(st.Target, env)
+			// checked, but there is no name to rebind. A struct field keeps its
+			// declared type across the assignment, so the value is checked
+			// against it.
+			target := c.inferExpr(st.Target, env)
+			if fld, ok := st.Target.(*ast.Field); ok {
+				if rec, ok := c.inferExpr(fld.Target, env).(tRecord); ok && rec.name != "" {
+					what := fmt.Sprintf("field %q of %s", fld.Name, rec.name)
+					if c.checkAssignable(st.Line, what, target, v) {
+						c.fractionalLiteralAtInt(st.Line, what, target, st.Value)
+					}
+				}
+			}
 		}
 	case *ast.While:
 		c.inferExpr(st.Cond, env)
@@ -457,7 +523,8 @@ func (c *checker) inferStmt(s ast.Stmt, env *checkEnv) {
 		c.loopDepth--
 	case *ast.Return:
 		if st.Value != nil {
-			c.inferExpr(st.Value, env)
+			got := c.inferExpr(st.Value, env)
+			c.checkReturnType(st.Line, got, st.Value)
 		}
 	case *ast.Import:
 		// Imported definitions are resolved at runtime. For a namespaced
@@ -508,6 +575,10 @@ func elemType(t Type) Type {
 		}
 	case tList:
 		return tUnknown{}
+	case tArr:
+		if v.elem != nil {
+			return v.elem
+		}
 	}
 	return tUnknown{}
 }
@@ -600,6 +671,9 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		for _, f := range ex.Fields {
 			fields[f.Name] = c.inferExpr(f.Value, env)
 		}
+		if ex.TypeName != "" {
+			return c.checkStructLit(ex, fields)
+		}
 		return tRecord{fields: fields}
 	case *ast.Field:
 		// `Opt.Some` names a variant by its enum. The enum name is not a value, so
@@ -629,16 +703,16 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 			return tUnknown{}
 		}
 	case *ast.Match:
-		c.inferExpr(ex.Subject, env)
+		subject := c.inferExpr(ex.Subject, env)
 		c.checkMatchArms(ex)
-		// Each arm is checked in its own scope with the pattern's binding present
-		// (its type is unknown, since the payload type is advisory). The match's
-		// type is left unknown rather than unified across arms, which keeps the
-		// dialect's records-and-enums permissive.
+		// Each arm is checked in its own scope with the pattern's binding present,
+		// typed as the payload when the subject's type says what that is. The
+		// match's type is left unknown rather than unified across arms, which
+		// keeps the dialect's records-and-enums permissive.
 		for _, arm := range ex.Arms {
 			armEnv := newEnv(env)
 			if arm.Pattern.Binding != "" {
-				armEnv.define(arm.Pattern.Binding, tUnknown{})
+				armEnv.define(arm.Pattern.Binding, c.matchBindingType(subject, arm.Pattern))
 			}
 			c.inferStmt(arm.Body, armEnv)
 		}
@@ -866,6 +940,9 @@ func (c *checker) inferUnary(ex *ast.Unary, env *checkEnv) Type {
 		if tt, ok := t.(tTensor); ok {
 			return tt
 		}
+		if _, ok := t.(tInt); ok {
+			return t
+		}
 		return tUnknown{}
 	}
 	return tBool{}
@@ -895,6 +972,20 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 	}
 	l := c.inferExpr(ex.Left, env)
 	r := c.inferExpr(ex.Right, env)
+
+	// An I64 is a scalar to the shape and unit rules; what is I64 about it is
+	// the result type. Two I64s (or an I64 and a whole-number literal) give an
+	// I64 for the arithmetic operators; an I64 against a fraction, or against a
+	// scalar the checker cannot tell is whole, is F64.
+	_, lInt := l.(tInt)
+	_, rInt := r.(tInt)
+	if lInt {
+		l = scalar()
+	}
+	if rInt {
+		r = scalar()
+	}
+	intResult := lInt && rInt || (lInt && isWholeLiteral(ex.Right)) || (rInt && isWholeLiteral(ex.Left))
 
 	lt, lok := l.(tTensor)
 	rt, rok := r.(tTensor)
@@ -949,8 +1040,21 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 			c.report(ex.Line, "%s", msg)
 			return tUnknown{}
 		}
+		if intResult {
+			return tInt{}
+		}
 		return withUnit(res, c.arithUnit(op, lt, rt, ex.Line))
 	}
+}
+
+// isWholeLiteral reports whether an expression is an integer literal (or a
+// negated one), which computes as an I64 beside an I64.
+func isWholeLiteral(e ast.Expr) bool {
+	if u, ok := e.(*ast.Unary); ok && u.Op == "-" {
+		e = u.Operand
+	}
+	lit, ok := e.(*ast.NumberLit)
+	return ok && lit.Value == float64(int64(lit.Value)) && !strings.ContainsAny(lit.Text, ".eE")
 }
 
 // withUnit attaches a unit to a tTensor result, leaving other types unchanged.
@@ -1012,6 +1116,19 @@ func (c *checker) inferIndex(ex *ast.Index, env *checkEnv) Type {
 		return tTensor{dims: v.dims[1:], unit: v.unit}
 	case tList:
 		return tUnknown{}
+	case tArr:
+		if v.elem != nil {
+			return v.elem
+		}
+		return tUnknown{}
+	case tDict:
+		if v.val != nil {
+			return v.val
+		}
+		return tUnknown{}
+	case tStr:
+		// A Str indexes to the byte at that offset, as a number.
+		return tInt{}
 	}
 	return tUnknown{}
 }
@@ -1068,6 +1185,10 @@ func (c *checker) inferSlice(ex *ast.Slice, env *checkEnv) Type {
 		return tTensor{dims: append([]int{first}, v.dims[1:]...), unit: v.unit}
 	case tList:
 		return tList{}
+	case tArr:
+		return v
+	case tStr:
+		return tStr{}
 	}
 	return tUnknown{}
 }
@@ -1107,12 +1228,31 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 
 	switch fn := callee.(type) {
 	case tBuiltin:
+		if t, ok := systemsBuiltinResult(fn.name, argTypes); ok {
+			// The arity check the shape cases would have made still applies.
+			if arity, known := builtinArity[fn.name]; known && len(callEx.Args) != arity {
+				c.report(ex.Line, "%s expects %d argument(s), got %d", fn.name, arity, len(callEx.Args))
+				return tUnknown{}
+			}
+			return t
+		}
 		return c.inferBuiltinCall(fn.name, callEx, argTypes)
 	case tFn:
 		return c.inferUserCall(fn, callEx, argTypes)
+	case tCtor:
+		return c.callCtor(fn, ex.Line, argTypes, callEx.Args)
+	case tFnType:
+		if len(fn.params) != len(argTypes) {
+			c.report(ex.Line, "function expects %d argument(s), got %d", len(fn.params), len(argTypes))
+			return tUnknown{}
+		}
+		for i, p := range fn.params {
+			c.checkAssignable(ex.Line, fmt.Sprintf("argument %d", i+1), p, argTypes[i])
+		}
+		return fn.ret
 	case tUnknown:
 		return tUnknown{}
-	case tList, tBool, tStr, tUnit, tRecord:
+	case tList, tBool, tStr, tUnit, tRecord, tInt, tArr, tDict, tEnum, tBytes:
 		c.report(ex.Line, "value is not callable")
 		return tUnknown{}
 	}
@@ -1166,7 +1306,7 @@ func (c *checker) paramType(p ast.Param) Type {
 		if c.units[p.TypeName] {
 			return tTensor{dims: []int{}, unit: unitMap{p.TypeName: 1}}
 		}
-		return tUnknown{}
+		return c.parseType(p.TypeName)
 	case p.Shape != nil:
 		return tTensor{dims: p.Shape.ConcreteDims()}
 	default:
@@ -1228,6 +1368,70 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 	if fn.RetUnit != nil && !c.isAdvisoryTypeAnno(fn.RetUnit) {
 		c.checkReturnUnit(fn.Line, fn.Name, fn.RetUnit, bodyType)
 	}
+	c.checkBodyReturnType(fn.Line, fn.Name, retTypeName(fn.RetType, fn.RetUnit), bodyType)
+}
+
+// checkBodyReturnType compares what a function body evaluates to against its
+// declared named return type. A block whose last statement is not an
+// expression (it returned early, or ends in a loop) evaluates to Unit and is
+// not judged, since its `return` statements were checked where they stand.
+func (c *checker) checkBodyReturnType(line int, name, retType string, bodyType Type) {
+	if retType == "" {
+		return
+	}
+	want := c.parseType(retType)
+	if _, isUnit := bodyType.(tUnit); isUnit {
+		if _, wantUnit := want.(tUnit); !wantUnit {
+			return
+		}
+	}
+	who := "function"
+	if name != "" {
+		who = fmt.Sprintf("function %q", name)
+	}
+	if !assignable(want, bodyType) {
+		c.report(line, "%s returns %s but its signature declares %s", who, c.typeString(bodyType), c.typeString(want))
+	}
+}
+
+// checkReturnType is checkBodyReturnType for an explicit `return e`, against
+// the return type of the innermost function being checked.
+func (c *checker) checkReturnType(line int, got Type, e ast.Expr) {
+	if len(c.fnRet) == 0 || c.fnRet[len(c.fnRet)-1] == "" {
+		return
+	}
+	want := c.parseType(c.fnRet[len(c.fnRet)-1])
+	if !assignable(want, got) {
+		c.report(line, "return gives %s but the function declares %s", c.typeString(got), c.typeString(want))
+	}
+}
+
+// checkStructLit types a typed record literal `Name { f: v, ... }` against
+// its struct declaration: every field named must exist and its value must be
+// of the declared type. The literal's type is the struct.
+func (c *checker) checkStructLit(ex *ast.RecordLit, fields map[string]Type) Type {
+	name := ex.TypeName
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	decl, ok := c.types[name]
+	if !ok {
+		return tRecord{fields: fields}
+	}
+	if _, isStruct := c.structDecls[name]; isStruct {
+		for _, f := range ex.Fields {
+			want, declared := decl.fields[f.Name]
+			if !declared {
+				c.report(ex.Line, "%s has no field %q", name, f.Name)
+				continue
+			}
+			what := fmt.Sprintf("field %q of %s", f.Name, name)
+			if c.checkAssignable(ex.Line, what, want, fields[f.Name]) {
+				c.fractionalLiteralAtInt(ex.Line, what, want, f.Value)
+			}
+		}
+	}
+	return decl
 }
 
 // isAdvisoryTypeAnno reports whether a single-name annotation (on a parameter,
@@ -1265,15 +1469,20 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 				c.checkArgUnit(ex.Line, i, p.Name, want, argTypes[i])
 				scope.define(p.Name, tTensor{dims: []int{}, unit: want})
 			} else {
-				// In systems mode the name is a type the bootstrap has no
-				// definition for (I64, Str, Arr[I64], cp.Caps). The annotation is
-				// advisory and the type genuinely unknown, so the parameter is
-				// left unknown rather than pinned to whatever the argument
-				// happened to be: pinning it would make indexing an `Arr[I64]`
-				// param report a false error when a scalar was passed in a test.
-				// In numeric mode an unknown type name is still reported.
+				// A systems-mode type (I64, Str, Arr[I64], fn(I64) -> F64) or a
+				// name from another module (cp.Caps). The argument is checked
+				// against the declared type when the checker knows it, and the
+				// parameter is bound as the declared type -- not as whatever the
+				// argument happened to be, so a body indexing an Arr[I64] is not
+				// judged by a scalar a test passed in. In numeric mode an unknown
+				// type name is still reported.
 				if c.systems {
-					scope.define(p.Name, tUnknown{})
+					want := c.parseType(p.TypeName)
+					what := fmt.Sprintf("argument %d (%q)", i+1, p.Name)
+					if c.checkAssignable(ex.Line, what, want, argTypes[i]) && i < len(ex.Args) {
+						c.fractionalLiteralAtInt(ex.Line, what, want, ex.Args[i])
+					}
+					scope.define(p.Name, want)
 				} else {
 					c.report(ex.Line, "unknown type %q on parameter %q", p.TypeName, p.Name)
 					scope.define(p.Name, argTypes[i])
@@ -1315,6 +1524,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	c.fnRet = c.fnRet[:len(c.fnRet)-1]
 	c.loopDepth = savedDepth
 	delete(c.stack, fn.node)
+	c.checkBodyReturnType(ex.Line, "", retTypeName(fn.retType, fn.retUnit), bodyType)
 
 	if fn.ret != nil {
 		expected := tTensor{dims: substitute(fn.ret.Dims, subst)}
@@ -2468,7 +2678,7 @@ func join(a, b Type) Type {
 
 func isDefiniteNonTensor(t Type) bool {
 	switch t.(type) {
-	case tBool, tStr, tUnit, tList, tRecord, tFn, tBuiltin:
+	case tBool, tStr, tUnit, tList, tRecord, tFn, tBuiltin, tArr, tDict, tEnum, tBytes, tCtor, tFnType:
 		return true
 	}
 	return false
