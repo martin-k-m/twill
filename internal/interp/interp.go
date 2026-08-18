@@ -118,6 +118,10 @@ type Interp struct {
 	// the scalar conversions read it; everything else about a payload's type is
 	// the checker's.
 	variantPayloads map[string]string
+	// gradDepth counts the reverse-mode passes currently running, so a gradient
+	// taken inside one is refused rather than answered with a silent zero. See
+	// gradients in builtins.go.
+	gradDepth int
 	// callDepth counts the closures currently executing. It is what tells a `?`
 	// at the top of a file, where there is no function to return from, apart
 	// from one inside a function.

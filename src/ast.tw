@@ -114,7 +114,9 @@ struct TypeField {
 
 # ---- expressions -----------------------------------------------------------
 
-struct NumberLit { id: I64, value: F64, line: I64 }
+# text is the literal as written. An integer literal above 2^53 is not the
+# f64 in value, and the runtime reads the digits to make an exact I64 of it.
+struct NumberLit { id: I64, value: F64, text: Str, line: I64 }
 struct StringLit { id: I64, value: Str, line: I64 }
 struct BoolLit { id: I64, value: Bool, line: I64 }
 struct Ident { id: I64, name: Str, line: I64 }
@@ -456,8 +458,8 @@ fn stmt_id(s: Stmt) -> I64 {
 # per node kind. A node built without an id would break the checker's recursion
 # guard in a way that shows up as a hang, not as a wrong answer.
 
-fn number_lit(ids: NodeIds, value: F64, line: I64) -> Expr =
-  ENumber(NumberLit { id: fresh(ids), value: value, line: line })
+fn number_lit(ids: NodeIds, value: F64, text: Str, line: I64) -> Expr =
+  ENumber(NumberLit { id: fresh(ids), value: value, text: text, line: line })
 
 fn string_lit(ids: NodeIds, value: Str, line: I64) -> Expr =
   EString(StringLit { id: fresh(ids), value: value, line: line })
