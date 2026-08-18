@@ -57,7 +57,7 @@ European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths: 200000
 landed on the closed-form Greeks. No tape object, no `requires_grad`, no
 `.backward()`. The full program is [`examples/montecarlo_option.tw`](examples/montecarlo_option.tw).
 
-This is an early prototype; the current release is v1.5.1.1, and as of v1.5.0
+This is an early prototype; the current release is v1.6.0-rc1, and as of v1.5.0
 the twill compiler written in twill runs on the Go bootstrap and reproduces the
 reference across every stage (see [twill is being written in
 twill](#twill-is-being-written-in-twill)). The reference implementation is a
@@ -475,6 +475,7 @@ version:
 | Document | For |
 | --- | --- |
 | [tutorial.md](docs/tutorial.md) | from nothing to a trained model |
+| [tutorial-systems.md](docs/tutorial-systems.md) | `mode systems`, ending in a working parser |
 | [language-guide.md](docs/language-guide.md) | the reference |
 | [design.md](docs/design.md) | why it is built this way, and the roadmap |
 | [self-hosting.md](docs/self-hosting.md) | the systems subset, and the port |

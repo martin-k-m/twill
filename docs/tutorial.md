@@ -136,7 +136,7 @@ print("rows:", shape(data)[0])
 
 ## Catching shape mistakes
 
-Run `twill check file.tw` to shape-check without running. Aster infers tensor
+Run `twill check file.tw` to shape-check without running. Twill infers tensor
 shapes and reports mismatches it can prove:
 
 ```
@@ -153,5 +153,77 @@ fn matvec(A: [3, 2], x: [2]) -> [3] {
 }
 ```
 
+In the REPL, `:shape` asks the same question about one expression, and answers
+it without running anything -- so it costs nothing even for a result that would
+not fit in memory:
+
+```
+twill> :shape zeros(4, 8) @ zeros(8, 2)
+[4, 2]
+twill> :shape zeros(2, 3) + zeros(4)
+shape mismatch: [2, 3] vs [4] cannot broadcast
+```
+
+## Units, which are checked and then disappear
+
+A number can carry a unit, and the checker does the algebra:
+
+```rust
+unit USD
+unit share
+
+fn notional(px: USD/share, qty: share) -> USD { px * qty }
+
+let price: USD/share = 150.0
+let quantity: share = 200.0
+let value = notional(price, quantity)   # inferred: USD
+```
+
+Adding `USD` to `share` is an error before the program runs. Multiplying them
+is not, and the result's unit is what the multiplication says it is. Units are
+erased at run time, so none of this costs anything: the program that runs is
+plain arithmetic.
+
+## Checking a gradient
+
+`grad` gives an answer quickly and a wrong one looks exactly like a right one.
+A model with a bad gradient does not crash; it trains to a worse loss than it
+should have. `std/gradcheck` compares the gradient against a difference
+quotient, which is the same derivative reached a different way:
+
+```rust
+import "std/gradcheck" as gc
+
+let report = gc.check_tree(fn(m) = loss(m, x, y), model)
+if not report.ok {
+  print("the gradient disagrees by", report.error)
+}
+```
+
+It costs two evaluations per parameter, so it is a thing to run once while
+writing a model and not something a training loop calls.
+
+## Packages, and the rest of the ecosystem
+
+Twill's standard library ships inside the binary and is imported by name:
+
+```rust
+import "std/nn" as nn        # a module of the library
+import "helpers.tw"          # a file, next to this one
+```
+
+Everything larger lives in its own package, written in twill:
+[spool](https://github.com/twill-lang/spool) resolves and vendors dependencies,
+[loom](https://github.com/twill-lang/loom) is the training loop,
+[warp](https://github.com/twill-lang/warp) is data pipelines,
+[weft](https://github.com/twill-lang/weft) plots,
+[skein](https://github.com/twill-lang/skein) tokenises,
+[heddle](https://github.com/twill-lang/heddle) does Bayesian inference,
+[selvedge](https://github.com/twill-lang/selvedge) serialises models,
+[shuttle](https://github.com/twill-lang/shuttle) serves them, and
+[bobbin](https://github.com/twill-lang/bobbin) benchmarks.
+
 That's the whole language. The [language guide](language-guide.md) is the
-complete reference.
+complete reference, and it has a second half -- `mode systems`, with integers,
+strings, arrays, dictionaries, structs, enums and `?` -- which is what twill's
+own compiler is written in.

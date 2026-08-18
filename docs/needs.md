@@ -1,20 +1,45 @@
 # What the self-hosted compiler needs from the language
 
-The source under `src/` is twill's compiler written in twill. It does not run
-today. This file is the reason it does not, item by item: every language or
-runtime feature `src/` uses that the bootstrap implementation in `internal/`
-does not yet provide.
+The source under `src/` is twill's compiler written in twill. It runs. Since
+v1.5.0 it runs on the Go bootstrap and is checked against it by
+`internal/interp/selfhost_test.go`, which pins the two implementations to the
+same diagnostics on the same inputs, and 1.6 added the systems-mode types the
+two now agree about. The opening sentence of this file used to say the opposite,
+and said it for months after it had stopped being true.
 
-It is the work queue for the systems subset. Each entry says what the feature
-is, which file and line reaches for it, and what the Go bootstrap does in the
-same place, so that implementing an entry is a matter of making the Go side do
-in twill what it already does in Go.
+So what this file is has changed. It began as the list of reasons `src/` could
+not run, and its oldest entries are therefore done: NEEDS-1 through NEEDS-24 are
+almost entirely closed, and reading from the top now gives a history rather than
+a queue. What remains is a backlog, and it is a mixed one. Some entries are open
+language questions that nobody has answered (user-defined generics, NEEDS-4).
+Some are measured costs that a workaround absorbs (NEEDS-79, NEEDS-81). Some are
+deferred on the project's own evidence rather than forgotten (the GPU chain,
+NEEDS-100 through NEEDS-108). The two sections at the end of the file, "What 1.6
+closed" and "What is still open after 1.6", are the short version.
 
-Ordering is by dependency, not by priority: nothing below can be attempted
-before the entries it rests on. The `NEEDS-n` ids are referenced from comments
-in `src/`.
+Each entry says what the feature is, which file and line reaches for it, and
+what the Go bootstrap does in the same place. That framing is inherited and it
+is now slightly wrong in one direction: for a growing number of entries the
+bootstrap is the thing that gained the feature, so "what the Go side does" is
+the answer rather than the gap.
 
-Status key: **blocking** means no file in `src/` parses without it.
+Ordering is by dependency, not by priority. The `NEEDS-n` ids are referenced
+from comments in `src/`.
+
+Status key. **done** means it works and was verified against the binary or the
+tests, with the date it landed. **blocking** no longer means "no file in `src/`
+parses without it", because they all parse; it now means the compiler cannot do
+its job correctly without it. **open** is wanted and not started. **not
+blocking** is a recorded cost with a workaround in place. **superseded**,
+**answered** and **deferred** mean what they say, and an entry with any of them
+is kept rather than deleted, because a reader who finds the old advice needs to
+be told it is old. NEEDS-87 is the model for that: it exists only to say that
+NEEDS-29 is answered and that its advice will send you to write the wrong
+function.
+
+Every status line below was re-verified against `twill16.exe` in 2026-08. Where
+an entry's advice is now wrong, it says so in place rather than being edited to
+look as though it had always been right.
 
 An id is permanent once assigned. Three agents appended concurrently and
 collided on 68 through 72; the collision was resolved by moving one set, and
@@ -27,8 +52,13 @@ month later as it did when it was written.
 
 ## NEEDS-1: `mode systems` as a file-level declaration
 
-**Status:** the declaration is recognised and preserved on both sides
-(2026-08-09). The dialect *semantics* it should select are the remaining work.
+**Status:** done for what it asks (2026-08). The declaration is recognised and
+preserved on both sides (2026-08-09), and since 1.6 it selects real dialect
+semantics rather than one advisory rule: in a systems-mode file the type
+annotations are checked (NEEDS-49), `enum` and `match` are checked for
+exhaustiveness (NEEDS-3), and `?` is checked against the enclosing signature
+(NEEDS-10). What is left is the other direction, refusing systems constructs in
+numeric mode, which nothing has needed yet.
 
 The gate from `docs/self-hosting.md` section 1.1. The first non-comment line of
 a file is `mode systems`; the default with no declaration is numeric mode and is
@@ -66,8 +96,18 @@ typed record literals, and leading-`and`/`or` line continuation.
 
 ## NEEDS-2: `I64` with bitwise operators
 
-**Status:** the six operators are spelled and work (2026-08-09); a true 64-bit
-`I64` distinct from float64 remains. The bitwise builtins `and`, `or`, `xor`,
+**Status:** done (2026-08, 1.6). `value.Int` is a real int64 and an `I64`
+annotation on a `let`, a parameter, a return, a struct field or an enum payload
+converts to it, as does `i64()`. An integer literal above 2^53 is exact
+(`9007199254740993` prints itself), `Int op Int` wraps, and the bitwise builtins
+are exact on all 64 bits including the sign bit, so `shl(i64(1), 63)` is
+`-9223372036854775808` and round-trips. The paragraph below that says values are
+float64 is the record of what was true before 1.6; it is no longer. What it
+predicted is what happened: the exactness had to come first, and NEEDS-84,
+NEEDS-19, NEEDS-24 and NEEDS-85 all closed or narrowed on the back of it.
+
+*(Original status: the six operators are spelled and work (2026-08-09); a true
+64-bit `I64` distinct from float64 remains.)* The bitwise builtins `and`, `or`, `xor`,
 `shl`, `shr`, `bnot` operate on scalar integers, with `shr` arithmetic and shift
 counts masked to 0..63. `and`/`or` share the boolean keywords' spelling but are
 the bitwise builtins when called (`and(x, y)`); a line that begins `and(`/`or(`
@@ -97,7 +137,19 @@ and returns a float.
 
 ## NEEDS-3: `enum` with payloads and exhaustive `match`
 
-**Status:** blocking for `src/ast.tw` and everything downstream of it.
+**Status:** done for variant patterns (2026-08, 1.6); the pattern language
+itself is still narrow. An `enum` with payloads is declared, constructed and
+matched, and the checker reports the four things this entry wanted: a missing
+variant by name (`match on C is not exhaustive: missing B`), a duplicate arm, an
+arm after `_`, a `_` that covers nothing, and, one more than was asked for, arms
+that mix two enums.
+
+What is **not** there, and is worth naming because the entry reads as though
+exhaustiveness were the whole job: a pattern may only be a variant name with
+optional binders. A literal pattern (`3 => ...`) is a syntax error, a nested
+pattern (`Ok(Some(v))`) is a syntax error, and there are no guards
+(`A(n) if n > 0`). Every one of those is what a compiler written in twill wants
+next, so this entry is done and its successor is not filed.
 
 Tagged unions, matched by pattern, exhaustiveness enforced as an error. The AST
 is forty variants and the token kind is seven; `src/lex.tw:29` spells the token
@@ -113,8 +165,17 @@ is precisely the property the twill version is meant to gain.
 
 ## NEEDS-4: generics: `Arr[T]`, `Dict[K,V]`, `Opt[T]`, `Res[T,E]`
 
-**Status:** generic type *annotations* parse and check (2026-08-09); generic
-type *declarations* and real monomorphization remain.
+**Status:** the annotations are now real types (2026-08, 1.6); generic
+*declarations* and monomorphization remain, and this is the largest open
+language question in the file. 1.6 turned `Arr[T]`, `Dict[K, V]`, `Opt[T]` and
+`Res[T, E]` from tolerated text into types the checker enforces at bindings,
+arguments, returns, struct fields and enum payloads. What still does not exist
+is any way to write your own: `struct Box[T] { ... }` and `enum MyOpt[T] { ... }`
+are both a syntax error at the `[`. So the four built-in generics are generic
+and nothing else can be.
+
+*(Original status: generic type annotations parse and check (2026-08-09);
+generic type declarations and real monomorphization remain.)*
 
 Type parameters on structs, enums and functions. No bounds, no traits,
 monomorphized. Used on nearly every line of `src/`; `src/lex.tw:198` (`Lexer`
@@ -143,8 +204,13 @@ models them as `tList` and `tRecord` with no element type.
 
 ## NEEDS-5: `struct`: nominal, mutable, reference semantics
 
-**Status:** the semantics are now decided and written down; the implementation
-is still blocking. `src/lex.tw:198` `Lexer` is a cursor that advances. **The
+**Status:** done (2026-08). Structs are nominal, their fields are mutable in
+place, and a struct is passed by handle: a function that assigns to `p.x`
+through its parameter is seen by the caller, and so is an assignment through a
+field of another struct (`o.i.n = ...` on an `Outer` holding an `Inner`), which
+is the case NEEDS-42 added and which is verified. `Record` is still the separate
+value it had to stay. `src/lex.tw:198` `Lexer` is a cursor that advances and
+now advances. **The
 normative text is `docs/language-guide.md`, `struct`, and what a parameter is.**
 It states reference semantics for `struct`, `Arr`, `Dict` and `Bytes` together,
 including mutation through a field of another struct, and it says that copying
@@ -164,7 +230,10 @@ mutability. `interp` supports record field assignment only through rebinding.
 
 ## NEEDS-6: indexable, sliceable `Str`
 
-**Status:** blocking.
+**Status:** done (2026-08). `s[i]` is the byte value as an `I64`, `s[a:b]` is a
+`Str`, `len(s)` is the byte length, and `+` concatenates (NEEDS-35). The
+paragraph below saying a lexer written in twill cannot read its first character
+is the record of what was true; it can.
 
 `s[i]` yields the `I64` byte value, `s[a:b]` yields a `Str` copy, `len(s)` is
 the byte length. `src/lex.tw` is built on this: `scan_ident` at
@@ -178,7 +247,8 @@ character.
 
 ## NEEDS-7: `Bytes`: a growable byte buffer
 
-**Status:** blocking. The whole of `src/bytes.tw`.
+**Status:** done (2026-08). `bytes_new`, `bytes_push` and `bytes_to_str` are
+builtins and `src/bytes.tw` runs on them.
 
 `bytes_new`, `bytes_push`, `bytes_to_str`. Everything the compiler prints is
 built by appending. `src/bytes.tw:41` (`concat`) exists so that the rest of the
@@ -189,7 +259,11 @@ compiler never builds a string by repeated `+`, which is quadratic.
 
 ## NEEDS-8: `Dict[Str, V]` with insertion-ordered iteration
 
-**Status:** blocking.
+**Status:** done (2026-08). `dict_new`, `dict_set`, `dict_get` returning an
+`Opt`, `dict_has`, `dict_del`, `dict_keys` and `len` are all builtins, and
+`dict_keys` returns insertion order: setting `z`, `a`, `m` gives `[z, a, m]`,
+not a sorted or a randomized order. The reason insertion order is load-bearing,
+below, is unchanged and is why this was checked rather than assumed.
 
 `dict_new`, `dict_set`, `dict_get` returning `Opt[V]`, `dict_has`, `dict_del`,
 `len`, and iteration in insertion order. `src/lex.tw:149` (`keyword_table`) is
@@ -207,7 +281,9 @@ own `Keys` slice for exactly this reason.
 
 ## NEEDS-9: a byte literal
 
-**Status:** not blocking. Worked around in `src/lex.tw:91`.
+**Status:** not blocking, and unchanged (re-checked 2026-08). There is still no
+`b'x'` literal and `ch(s) = s[0]` is still the idiom. The workaround is honest
+and the cost is paid once, so nothing about the argument below has moved.
 
 There is no character literal, so `src/lex.tw` defines `ch(s) = s[0]` and writes
 `let C_QUOTE = ch("\"")`. That is readable and it is a runtime call and a
@@ -219,7 +295,30 @@ is paid once.
 
 ## NEEDS-10: `Res[T, E]` and postfix `?`
 
-**Status:** blocking.
+**Status:** done (2026-08, 1.6), with one sharp gap that is worth more than the
+rest of this entry. `Res` and `Opt` are types, `?` propagates, and the checker
+reports the three misuses: `?` outside a function ("there is nothing to return
+the failure from"), `?` in a function whose return type is not a `Res` or an
+`Opt`, and `?` on a value that is neither. `?` yields the success payload's
+type. At the top level of a file a failing `?` is now a diagnostic instead of a
+silent exit 0, which is the change most likely to break someone's script and the
+one most worth having.
+
+**The gap, found 2026-08 by probe.** The checker does not propagate a
+*block-bodied* function's declared return type to its call sites: it types the
+call `Unit`. So
+
+    fn g(n: I64) -> Res[I64, Str] { return Ok(n) }
+    fn h(n: I64) -> Res[I64, Str] { let v = g(n)?
+      return Ok(v) }
+
+is rejected with ``` `?` needs a Res or an Opt, but the value is Unit ```, and
+runs correctly under `--no-check`. An expression-bodied `fn g(n: I64) ->
+Res[I64, Str] = Ok(n)` is accepted. The same gap makes `let c: Str = s(...)`
+a false error for any block-bodied `s`. It is a checker bug rather than a
+language question, it is not confined to `?` (see NEEDS-49 and NEEDS-82), and it
+is the first thing to fix in 1.7: `?` on a user-defined function is the most
+common shape this feature has and it is precisely the shape that is refused.
 
 `src/lex.tw:294` (`tokenize`) is `Res[Arr[Token], SyntaxError]` and uses `?` to
 propagate. Without it every call site of every scanner function grows an
@@ -235,7 +334,11 @@ the same string.
 
 ## NEEDS-11: `abort(msg)`
 
-**Status:** blocking. `src/lex.tw:45` and about thirty other places.
+**Status:** done (2026-08). `abort(msg)` is a builtin in both modes and stops
+the program with `runtime error: abort: <msg>` and the source line. The review
+rule below, that every `abort` in `src/` should be unreachable for any input, is
+the part of this entry that still has work in it, and it is a review rule rather
+than a feature.
 
 A panic that means a compiler bug, never a user error. Every `abort` in `src/`
 should be unreachable for any input; that is a review rule and it is worth
@@ -275,7 +378,9 @@ pin the two to the same diagnostics.
 
 ## NEEDS-13: `Unit` as a value, and `unit` as its literal
 
-**Status:** not blocking; cosmetic. `src/lex.tw:421`.
+**Status:** done (2026-08). `unit` is a literal, `Res[Unit, Str]` works, and
+`Ok(unit)` prints as `Ok(())`. `src/lex.tw:421` `scan_string` has something to
+put in the `Ok`.
 
 `scan_string` returns `Res[Unit, SyntaxError]`, so it needs something to put in
 the `Ok`. The checker already has a `tUnit` type; the value side is missing.
@@ -285,8 +390,11 @@ no source syntax.
 
 ## NEEDS-14: a `Bool` type name in annotations
 
-**Status:** specified; the parser change is still blocking, trivially. **The
-normative text is `docs/language-guide.md`, Systems-mode types → `Bool`.**
+**Status:** done (2026-08, 1.6). `Bool` is a type name anywhere a type is,
+including the struct field `trailing: Bool` this entry was filed for, and it is
+checked: a `Bool` field given a `Str` is a diagnostic. There is no conversion to
+or from `I64` in either direction, as specified. **The normative text is
+`docs/language-guide.md`, Systems-mode types → `Bool`.**
 `Bool` is a type name in systems mode, legal anywhere a type is, with no
 conversion to or from `I64` in either direction.
 
@@ -314,7 +422,11 @@ on it, the fix is a decoder in `trim_space`, not in the scanner.
 
 ## NEEDS-16: recursive enum payloads without explicit indirection
 
-**Status:** blocking. `src/ast.tw` throughout.
+**Status:** done (2026-08). Verified both shapes: a struct whose field is an
+`Opt` of the struct itself, and an enum whose payload is an `Arr` of the enum
+(`enum J { JNum(F64), JArr(Arr[J]) }` constructs, prints and matches). No `Box`
+was needed, which is what the entry asked to be true rather than merely
+intended. NEEDS-90 is the same property asked from `std/json.tw`.
 
 `Expr` holds `Expr`. The subset's answer is that an enum payload is a struct and
 a struct is a handle, so the recursion needs no `Box`. That has to actually be
@@ -325,9 +437,12 @@ true in the implementation, including for a payload that is the enum itself
 
 ## NEEDS-17: a growable `Arr` with `pop` and `set`
 
-**Status:** `set` via indexed assignment landed (2026-08-09): `xs[i] = v` mutates
-a list element in place (and `obj.f = v` a record field), both sides. `pop` and
-non-quadratic `append` remain.
+**Status:** done (2026-08). `set` via indexed assignment landed 2026-08-09
+(`xs[i] = v` mutates a list element in place, and `obj.f = v` a record field, on
+both sides). `pop(xs)` is now a builtin: it removes the last element and returns
+it. The non-quadratic growth is `push(xs, x)`, which mutates in place; `append`
+still returns a new list and is still quadratic in a loop, and that is now a
+choice between two builtins rather than a missing one.
 
 `append(xs, x)` returns a new list today, so building an n-element list is
 quadratic. `docs/self-hosting.md` section 1.2 makes the same argument for the
@@ -337,7 +452,17 @@ token stream.
 
 ## NEEDS-18: `f64_of_str` / `str_to_f64`
 
-**Status:** blocking. `src/parse.tw` `parse_number`.
+**Status:** done (2026-08), under the name `str_to_f64`. It calls Go's
+`strconv.ParseFloat` directly, so the bit-exact agreement this entry is entirely
+about is by construction rather than by reimplementation, and
+`std/float.f64_of_str` delegates to it on the bootstrap for the reason given in
+`internal/interp/builtins.go`: the pure-twill decimal parser needs exact 64-bit
+integers to assemble an IEEE pattern. One deliberate divergence from
+`strconv.ParseFloat`, documented at the definition: underscores are stripped
+before the parse, so `str_to_f64("_1.0")` is `Some(1)` where Go's own function
+is an error. That matches twill's own numeric literals, and it is written down
+here because a reader of this entry would otherwise expect `strconv`'s exact
+acceptance set. See NEEDS-60, which is the caller that cares.
 
 The parser turns a NUMBER token's text into a float and must produce bit-exact
 agreement with Go's `strconv.ParseFloat`, or two implementations disagree on
@@ -350,7 +475,11 @@ primitive that calls the same conversion the Go side does.
 
 ## NEEDS-19: `i64_of_str`
 
-**Status:** blocking. `src/parse.tw` shape dimensions and unit exponents.
+**Status:** done (2026-08, 1.6). `i64_of_str` returns `Opt[I64]` and the `I64`
+is exact: `i64_of_str("123456789012345678")` is `Some(123456789012345678)`, not
+a rounded float, which is what real `I64` (NEEDS-2) bought. A failure is `None`,
+so the two implementations fail on the same inputs by returning the same
+option.
 
 The integer equivalent, matching `strconv.Atoi` including its overflow
 behaviour, since `parseDim` reports "shape dimension must be a non-negative
@@ -360,7 +489,14 @@ integer" on a failure and the two implementations must fail on the same inputs.
 
 ## NEEDS-20: string formatting
 
-**Status:** blocking. Every diagnostic in `src/parse.tw` and `src/check.tw`.
+**Status:** done in substance (2026-08), by pieces rather than by a format
+verb. `str(n)` renders an `I64` as digits and an `F64` the way
+`internal/value.FormatNumber` does, `str_quote(s)` is Go's `%q`, `f64_to_str` is
+`strconv.FormatFloat(x, 'g', -1, 64)`, and `+` concatenates (NEEDS-35), so a
+diagnostic is built by joining rather than by a template. There is no `Sprintf`
+and no format string, and none is planned: the entry asked for the `%d`, `%s`
+and `%q` *equivalents*, which is what these are. `src/lex.tw:478` `quote_char`'s
+remaining narrowness is NEEDS-32.
 
 `internal/checker` builds messages with `fmt.Sprintf` and the twill versions
 must produce byte-identical strings, because the diagnostics are compared. The
@@ -377,7 +513,12 @@ supplies the joining; what is missing is the rendering of a float the way Go's
 
 ## NEEDS-21: identity of a heap value (`is_same`)
 
-**Status:** blocking. `src/check.tw` recursion guard.
+**Status:** done, by both routes (2026-08). `is_same` is a builtin and compares
+identity: `is_same(arr(1), arr(1))` is `false` on two structurally equal
+arrays. `src/check.tw` still takes the node-id route described below, and the
+argument for it is unchanged, so the two coexist rather than one replacing the
+other. What is still missing is the thing NEEDS-81 asks for, which is a `Dict`
+*keyed* by that identity rather than a linear scan calling `is_same`.
 
 `internal/checker/checker.go` keys its recursion guard on `map[ast.Node]bool`,
 that is, on the *identity* of an AST node, not its contents. Two structurally
@@ -395,7 +536,8 @@ the canonical dump a stable name for a node, so it is not purely a workaround.
 
 ## NEEDS-22: `Opt[T]` returned from `Dict` lookup, and `match` on it
 
-**Status:** blocking. Every environment lookup in `src/check.tw`.
+**Status:** done (2026-08). `dict_get` returns `Opt[V]` and
+`match dict_get(d, k) { Some(v) => ..., None => ... }` is the working form.
 
 Go's `v, ok := m[k]` is two returns; twill has one. `Opt` is the whole reason
 `Res`/`Opt` are in the subset.
@@ -438,8 +580,14 @@ comparator question that the subset does not need to answer yet.
 
 ## NEEDS-24: integer division and modulo on `I64`
 
-**Status:** specified; the implementation is still blocking. `src/check.tw`
-`unit_sqrt` (`v % 2`, `v / 2`). **The normative text is
+**Status:** done (2026-08, 1.6), and NEEDS-44 is this entry filed twice, now
+also done. Verified against the binary: `/` and `//` truncate toward zero, `%`
+takes the sign of the dividend, and division or modulo by zero is a runtime
+error naming itself (`integer division by zero`, `integer modulo by zero`)
+rather than a `Res` or a silent infinity. Note the boundary the entry does not
+mention and a caller trips over: these are the `Int` operators, so `-7 / 2` on
+two float literals is still `-3.5` and only `i64(-7) / i64(2)` is `-3`. `src/check.tw`
+`unit_sqrt` (`v % 2`, `v / 2`) works. **The normative text is
 `docs/language-guide.md`, Operators → Integer division and modulo on `I64`**,
 and NEEDS-44 is the same entry filed twice. `/` truncates toward zero, `%` takes
 the sign of the dividend, `MIN_I64 / -1` wraps to `MIN_I64`, and a zero divisor
