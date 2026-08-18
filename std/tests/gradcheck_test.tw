@@ -1,0 +1,90 @@
+# gradcheck_test.tw: the gradient checker, checked.
+#
+# Run with:  twill test std/tests/gradcheck_test.tw
+#
+# A checker that always says yes is worse than no checker, so half of what is
+# below is disagreement it has to find: a sign flip, a factor of two, the
+# gradient of a different function. The relative error it reports is asserted
+# against numbers worked out from its definition, not against remembered ones.
+
+import "std/gradcheck" as gc
+import "harness.tw" as h
+
+fn the_error_measure_is_zero_for_agreement_and_scales_with_disagreement() {
+  h.test("the error measure is zero for agreement and scales with disagreement")
+  let g = [2.0, -4.0, 6.0]
+  h.check("two identical gradients disagree by nothing", h.near(item(gc.rel_error(g, g)), 0.0))
+  # |g - 2g| / max(|g|, |2g|, 1) = |g| / 2|g| = 0.5, at every element.
+  h.check("a gradient twice too large reports one half",
+          h.near(item(gc.rel_error(g, g * 2.0)), 0.5))
+  # |g - (-g)| / |g| = 2, so a sign error is unmissable.
+  h.check("a sign flip reports two", h.near(item(gc.rel_error(g, 0.0 - g)), 2.0))
+  # Near zero the measure is absolute, so a true zero does not divide by zero.
+  h.check("a gradient of zero against a tiny one is that tiny number",
+          h.near(item(gc.rel_error([0.0], [1.0e-9])), 1.0e-9))
+}
+
+fn the_numerical_gradient_matches_derivatives_worked_out_by_hand() {
+  h.test("the numerical gradient matches derivatives worked out by hand")
+  # d/dx sum(x^2) = 2x.
+  h.check("the derivative of a square is twice the value",
+          h.near_all(gc.numeric_grad(fn(v) = sum(v * v), [1.0, -3.0, 0.5], 1.0e-5),
+                     [2.0, -6.0, 1.0]))
+  # d/dx sum(exp(x)) = exp(x), and exp(0) is 1.
+  h.check("the derivative of exp is itself",
+          h.near_all(gc.numeric_grad(fn(v) = sum(exp(v)), [0.0], 1.0e-5), [1.0]))
+  h.check("it keeps the shape of the input it differentiates",
+          h.shaped(gc.numeric_grad(fn(m) = sum(m * m), zeros(2, 3), 1.0e-5), list(2, 3)))
+}
+
+fn a_correct_gradient_passes() {
+  h.test("a correct gradient passes")
+  let x = [0.3, -1.2, 2.0]
+  h.check("a polynomial and a transcendental together",
+          gc.check_at(fn(v) = sum(v * v * v) + sum(sin(v)), x).ok)
+  h.check("softmax against a weighting",
+          gc.check_at(fn(v) = sum(softmax(v) * [1.0, 2.0, 3.0]), x).ok)
+  h.check("a matmul through a nonlinearity",
+          gc.check_at(fn(v) = sum(tanh([[1.0, 0.5, -2.0]] @ reshape(v, list(3, 1)))), x).ok)
+  h.check("and the error it passed at is far below the tolerance",
+          gc.check_at(fn(v) = sum(v * v), x).error < 1.0e-8)
+}
+
+fn a_wrong_gradient_fails() {
+  h.test("a wrong gradient fails")
+  # There is no way to install a wrong gradient rule from twill, so the wrong
+  # answer is supplied the other way round: the analytic gradient of one
+  # function against the numerical gradient of another. That is exactly the
+  # shape of the mistake a bad rule makes.
+  let x = [0.3, -1.2, 2.0]
+  let analytic = grad(fn(v) = sum(v * v))(x)
+  let numeric = gc.numeric_grad(fn(v) = sum(v * v * v), x, 1.0e-5)
+  h.check("the gradient of the wrong function is caught",
+          item(gc.rel_error(analytic, numeric)) > 0.1)
+  h.check("and a checker run at an impossible tolerance says so",
+          not gc.check_with(fn(v) = sum(v * v), x, 1.0e-5, 1.0e-14).ok)
+}
+
+fn it_walks_a_parameter_tree() {
+  h.test("it walks a parameter tree")
+  let model = { w: [[1.0, 2.0], [0.5, -1.0]], b: [0.1, 0.2] }
+  let report = gc.check_tree(fn(m) = sum(tanh(m.w @ [1.0, -0.5] + m.b)), model)
+  h.check("every leaf of a two-field model agrees", report.ok)
+  h.check("and the worst leaf is still far inside the tolerance", report.error < 1.0e-8)
+
+  let nested = { l1: { w: [[0.5, -0.25]], b: [0.3] }, l2: { w: [[2.0]], b: [-0.1] } }
+  fn forward(m) = sum(m.l2.w @ tanh(m.l1.w @ [1.0, 2.0] + m.l1.b) + m.l2.b)
+  h.check("and so does a nested one", gc.check_tree(forward, nested).ok)
+
+  h.check("the tree walk counts every leaf", gc.leaf_count(nested) == 4)
+  h.check("reads the leaf at a position", h.near_all(gc.leaf_at(model, 1), [0.1, 0.2]))
+  h.check("and replaces one without disturbing the rest",
+          h.near_all(gc.with_leaf(model, 1, [9.0, 9.0]).b, [9.0, 9.0]))
+}
+
+the_error_measure_is_zero_for_agreement_and_scales_with_disagreement()
+the_numerical_gradient_matches_derivatives_worked_out_by_hand()
+a_correct_gradient_passes()
+a_wrong_gradient_fails()
+it_walks_a_parameter_tree()
+h.report("gradcheck_test")

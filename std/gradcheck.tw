@@ -1,0 +1,198 @@
+# gradcheck.tw — is the gradient the derivative?
+#
+# `grad(f)` gives an answer very quickly and there is nothing about a wrong one
+# that looks wrong. A model with a bad gradient does not crash; it trains to a
+# worse loss than it should have, and the search for why starts at the learning
+# rate and ends weeks later. This module is how to find out in a second instead.
+#
+# THE METHOD
+#
+# The derivative is a limit, and a limit can be approximated by taking the
+# difference the limit is of. For each element of the input in turn, nudge it by
+# h, nudge it the other way, and divide:
+#
+#     df/dx_i  ~=  (f(x + h e_i) - f(x - h e_i)) / 2h
+#
+# That is the central difference, and its error falls as h^2 rather than the
+# forward difference's h, which is why it is worth the second evaluation. It is
+# not the analytical answer and is not meant to be: it is an answer arrived at
+# by a completely different route, so agreement between the two is evidence
+# neither is wrong. That is the whole value here, and it is why this must not be
+# built out of `grad` — a check that shares an implementation with the thing it
+# checks proves nothing.
+#
+# THE TOLERANCE, AND WHY IT IS RELATIVE
+#
+# Two floating-point numbers arrived at differently do not agree exactly, so the
+# check is whether they agree closely enough. "Closely" cannot be absolute: a
+# gradient of 1e-8 and a gradient of 1e8 are both ordinary, and a bound that
+# suits one is meaningless for the other. The measure is
+#
+#     |analytic - numeric| / max(|analytic|, |numeric|, 1)
+#
+# which is relative where the values are large and absolute where they are near
+# zero, so a true gradient of zero does not divide by one.
+#
+# WHERE IT WILL REPORT A FAILURE THAT IS NOT ONE
+#
+# Three places, and reading a report means knowing them:
+#
+#   - At a kink. `relu` at exactly 0, `abs` at 0, `maximum` at a tie, `clip` at
+#     a bound: the function has no derivative there, twill picks one of the two
+#     one-sided answers (docs/CORRECTNESS.md pins which), and the difference
+#     quotient straddles the kink and returns the average. Nudge the input off
+#     the kink; a random input rarely lands on one.
+#   - Where f is not smooth at the scale of h. A step, a rounding, an integer
+#     index computed from the input.
+#   - In a narrow dtype. The nudge has to survive being stored, and at bf16 a
+#     step of 1e-5 does not: it rounds away and the quotient is 0/2h. Check in
+#     f64 and cast afterwards.
+#
+# A failure that is none of those is a bug in a gradient rule, and worth a
+# report.
+
+import "std/num" as num
+
+# The default step. Small enough that the second-order error term is negligible
+# and large enough to survive f64's rounding: at 1e-5 the two errors are of
+# comparable size, which is about where the total is least. A much smaller h is
+# not a more accurate check, it is a noisier one, because f(x+h) and f(x-h)
+# agree in more and more of their leading digits and the subtraction cancels
+# them away.
+let DEFAULT_H = 1.0e-5
+
+# Anything above this counts as a disagreement. Well above the 1e-8 a correct
+# gradient typically reaches and well below the 1e-2 a wrong one usually shows,
+# so the verdict rarely depends on the exact number.
+let DEFAULT_TOL = 1.0e-6
+
+# The numerical gradient of a scalar-valued `f` at a tensor `x`, element by
+# element.
+#
+# One evaluation of `f` per element per side, so 2n evaluations for n elements.
+# That is why this is a development tool and not something a training loop
+# calls: it is n times the cost of the gradient it is checking.
+fn numeric_grad(f, x, h) {
+  let flat = reshape(x, list(num.numel(x)))
+  let n = num.numel(x)
+  let out = zeros(n)
+  let i = 0
+  while i < n {
+    let bump = zeros(n)
+    bump[i] = h
+    let up = f(reshape(flat + bump, shape(x)))
+    let down = f(reshape(flat - bump, shape(x)))
+    out[i] = (up - down) / (2.0 * h)
+    i = i + 1
+  }
+  reshape(out, shape(x))
+}
+
+# The relative error between two gradients of the same shape, as one number:
+# the largest disagreement anywhere in them.
+fn rel_error(analytic, numeric) {
+  let diff = abs(analytic - numeric)
+  let scale = maximum(maximum(abs(analytic), abs(numeric)), ones(1))
+  max(diff / scale)
+}
+
+# Check `grad(f)` against the difference quotient at `x`, for a scalar-valued
+# `f` of one tensor argument.
+#
+# The result is a record, so a caller can decide what to do with it:
+#
+#     { ok: Bool, error: F64, analytic: Tensor, numeric: Tensor }
+#
+# `ok` is the verdict at the default tolerance; `error` is the number it was
+# reached from, which is the useful part when it fails, because 1e-3 and 1e+0
+# mean different things. A wrong sign gives about 2; a wrong scale gives the
+# factor; a rule that is right except at one element gives a number in between.
+fn check_at(f, x) = check_with(f, x, DEFAULT_H, DEFAULT_TOL)
+
+fn check_with(f, x, h, tol) {
+  let analytic = grad(f)(x)
+  let numeric = numeric_grad(f, x, h)
+  let err = rel_error(analytic, numeric)
+  { ok: err <= tol, error: err, analytic: analytic, numeric: numeric }
+}
+
+# The same check over a parameter tree.
+#
+# `grad` follows a record's structure, so a model's gradient is a record with
+# the model's fields, and checking one means checking every leaf against a
+# perturbation of that leaf with the rest of the tree held fixed. The result is
+# the worst leaf: `{ ok, error }`, without the two gradients, because for a
+# tree those are trees and printing them is not what a caller wants from a
+# verdict.
+#
+# `f` takes the whole tree and returns a scalar, which is the shape a loss
+# already has:
+#
+#     let report = gc.check_tree(fn(m) = loss(m, x, y), model)
+#     if not report.ok { print("gradient error:", report.error) }
+fn check_tree(f, tree) = check_tree_with(f, tree, DEFAULT_H, DEFAULT_TOL)
+
+fn check_tree_with(f, tree, h, tol) {
+  let analytic = grad(f)(tree)
+  let worst = 0.0
+  # One leaf at a time: rebuild the tree with this leaf replaced by its nudged
+  # copy, which is what `zip_leaves` over the tree and a mask does. The mask is
+  # a tree of zeros with a one at the leaf being moved, so the substitution is
+  # arithmetic rather than structural surgery the language has no operator for.
+  let index = 0
+  let count = leaf_count(tree)
+  while index < count {
+    let picked = index
+    let g_leaf = leaf_at(analytic, picked)
+    let n = num.numel(g_leaf)
+    let numeric = zeros(n)
+    let flat_leaf = reshape(leaf_at(tree, picked), list(n))
+    let i = 0
+    while i < n {
+      let bump = zeros(n)
+      bump[i] = h
+      let up = f(with_leaf(tree, picked, reshape(flat_leaf + bump, shape(g_leaf))))
+      let down = f(with_leaf(tree, picked, reshape(flat_leaf - bump, shape(g_leaf))))
+      numeric[i] = (up - down) / (2.0 * h)
+      i = i + 1
+    }
+    let err = rel_error(reshape(g_leaf, list(n)), numeric)
+    if err > worst { worst = err }
+    index = index + 1
+  }
+  { ok: worst <= tol, error: worst }
+}
+
+# ---- walking a tree by leaf position ---------------------------------------
+#
+# `map_leaves` visits every leaf and rebuilds the tree, which is everything
+# needed to read one leaf or replace one, given a counter that says which. The
+# counter is a captured binding rather than an argument because `map_leaves`
+# passes the leaf and nothing else; that is the same idiom `std/loss.l2_penalty`
+# uses to total a tree.
+
+fn leaf_count(tree) {
+  let n = 0
+  map_leaves(fn(leaf) { n = n + 1  leaf }, tree)
+  n
+}
+
+fn leaf_at(tree, index) {
+  let seen = 0
+  let found = zeros(1)
+  map_leaves(fn(leaf) {
+    if seen == index { found = leaf }
+    seen = seen + 1
+    leaf
+  }, tree)
+  found
+}
+
+fn with_leaf(tree, index, replacement) {
+  let seen = 0
+  map_leaves(fn(leaf) {
+    let out = if seen == index { replacement } else { leaf }
+    seen = seen + 1
+    out
+  }, tree)
+}
