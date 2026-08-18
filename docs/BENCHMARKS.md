@@ -425,7 +425,7 @@ before the release rather than assumed, against the binary built from the commit
 1.6 branched from, on the machine described in section 1, best of five with
 nothing else running.
 
-| | 1.5.1.1 | 1.6.0-rc1 |
+| | 1.5.1.1 | 1.6.0 |
 | --- | --- | --- |
 | scalar loop, 3M iterations | 806 ms | 772 ms |
 | `matmul_512` | 69 ms | 59 ms |
