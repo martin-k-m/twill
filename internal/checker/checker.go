@@ -1014,6 +1014,19 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 		if lok && rok && !unitEqual(lt.unit, rt.unit) {
 			c.report(ex.Line, "comparing incompatible units %s and %s", unitString(lt.unit), unitString(rt.unit))
 		}
+		// `==` and `!=` are deep equality and are defined on everything.
+		// Ordering is not: it is numbers and strings, and anything else is the
+		// runtime's "cannot compare these values". An `Opt[I64]` compared
+		// against 0 is the shape that mistake takes -- it is what a call that
+		// used to return -1 looks like after it starts returning an Opt -- so
+		// it is worth catching where it is written.
+		if op != "==" && op != "!=" {
+			if bad, ok := c.unorderable(l); ok {
+				c.report(ex.Line, "cannot order %s with %q: ordering is numbers and strings", bad, op)
+			} else if bad, ok := c.unorderable(r); ok {
+				c.report(ex.Line, "cannot order %s with %q: ordering is numbers and strings", bad, op)
+			}
+		}
 		return tBool{}
 	}
 
@@ -2711,6 +2724,17 @@ func join(a, b Type) Type {
 		return at
 	}
 	return tUnknown{}
+}
+
+// unorderable names a type that `<` and its relatives are not defined on, when
+// the checker is sure of it. A type it cannot resolve reports false, so nothing
+// is judged on a guess.
+func (c *checker) unorderable(t Type) (string, bool) {
+	switch t.(type) {
+	case tEnum, tArr, tDict, tRecord, tList, tBytes, tUnit, tBool, tCtor, tFnType, tFn, tBuiltin:
+		return c.typeString(t), true
+	}
+	return "", false
 }
 
 func isDefiniteNonTensor(t Type) bool {

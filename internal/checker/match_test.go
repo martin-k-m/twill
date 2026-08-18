@@ -102,3 +102,32 @@ fn k(n: I64) -> I64 {
 func TestTryInAnUnannotatedFunctionIsNotJudged(t *testing.T) {
 	wantNone(t, "mode systems\nfn p() -> Res[I64, Str] { Ok(1) }\nfn f() { p()? }")
 }
+
+// `==` and `!=` are deep equality and are defined on everything. Ordering is
+// not: it is numbers and strings. An Opt compared against 0 is the shape that
+// mistake takes -- it is what a function that used to return -1 looks like
+// after it starts returning an Opt -- so it is worth catching where it is
+// written rather than where it runs. Found while migrating spool and selvedge
+// off their sentinels: the checker could not be trusted to find the call sites,
+// so they had to be grepped for.
+func TestOrderingOnAnUnorderableTypeIsReported(t *testing.T) {
+	wantOne(t, "mode systems\nfn find() -> Opt[I64] { Some(3) }\nfn f() -> Bool { find() < 0 }",
+		`cannot order Opt[I64] with "<"`)
+	wantOne(t, "mode systems\nfn f(xs: Arr[I64]) -> Bool { xs > xs }",
+		`cannot order Arr[I64] with ">"`)
+	wantOne(t, "mode systems\nfn f(a: Bool) -> Bool { a <= a }",
+		`cannot order Bool with "<="`)
+}
+
+func TestEqualityIsStillDefinedOnEverything(t *testing.T) {
+	wantNone(t, "mode systems\nfn find() -> Opt[I64] { Some(3) }\nfn f() -> Bool { find() == None }")
+	wantNone(t, "mode systems\nfn f(xs: Arr[I64], ys: Arr[I64]) -> Bool { xs != ys }")
+}
+
+func TestOrderingOnNumbersAndStringsIsFine(t *testing.T) {
+	wantNone(t, "mode systems\nfn f(a: I64, b: I64) -> Bool { a < b }")
+	wantNone(t, "mode systems\nfn f(a: Str, b: Str) -> Bool { a < b }")
+	wantNone(t, "mode systems\nfn f(a: F64, b: I64) -> Bool { a >= f64(b) }")
+	// A type the checker cannot resolve is not judged on a guess.
+	wantNone(t, "mode systems\nfn f(a: cp.Thing, b: cp.Thing) -> Bool { a < b }")
+}

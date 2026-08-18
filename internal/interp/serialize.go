@@ -37,6 +37,14 @@ const (
 	tagStr    byte = 'S'
 	tagUnit   byte = 'U'
 	tagModel  byte = 'G' // a gbm.Model
+	// An I64, written as eight bytes rather than as the rank-0 tensor a Num
+	// becomes. An I64 exists for the values an f64 cannot hold, so saving one
+	// through an f64 would corrupt exactly the values the type was added for,
+	// silently, on the round trip. A file that has no I64 in it is byte for
+	// byte what it was, and every file written before this tag existed still
+	// reads, because no reader ever has to understand a tag a writer did not
+	// write.
+	tagInt byte = 'I'
 )
 
 func saveValue(v value.Value, path string) error {
@@ -126,6 +134,11 @@ func writeValue(w *bufio.Writer, v value.Value) error {
 			}
 		}
 		return nil
+	case value.Int:
+		if err := w.WriteByte(tagInt); err != nil {
+			return err
+		}
+		return binary.Write(w, binary.LittleEndian, int64(t))
 	case value.Bool:
 		b := byte(0)
 		if t {
@@ -188,6 +201,12 @@ func readValue(r *bufio.Reader) (value.Value, error) {
 			shape[i] = int(d)
 		}
 		return tensor.New(data, shape), nil
+	case tagInt:
+		var n int64
+		if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+			return nil, err
+		}
+		return value.Int(n), nil
 	case tagList:
 		n, err := readCount(r)
 		if err != nil {
