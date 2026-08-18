@@ -22,12 +22,32 @@ type Diagnostic struct {
 
 // Check analyses a program and returns any diagnostics found.
 func Check(prog *ast.Program) []Diagnostic {
+	c := newChecker(prog)
+	env := c.prelude(prog)
+	for _, s := range prog.Body {
+		c.inferStmt(s, env)
+	}
+	return dedupe(c.diags)
+}
+
+// newChecker makes a checker for a program. It is apart from Check so the REPL
+// can describe a single expression against the same setup rather than a second
+// copy of it (see Describe).
+func newChecker(prog *ast.Program) *checker {
 	c := &checker{stack: map[ast.Node]bool{}, types: map[string]tRecord{}, units: map[string]bool{},
 		systems: prog.Mode == "systems"}
 	c.enums = map[string][]string{"Opt": {"Some", "None"}, "Res": {"Ok", "Err"}}
 	c.variantOwner = map[string]string{"Some": "Opt", "None": "Opt", "Ok": "Res", "Err": "Res"}
 	c.payloads = map[string]Type{"Some": nil, "Ok": nil, "Err": nil}
 	c.structDecls = map[string]*ast.StructDecl{}
+	return c
+}
+
+// prelude registers everything a body may refer to before the walk reaches it:
+// declared types and units, the builtins, the enums' cases, and the names of
+// the file's own functions and top-level lets. It returns the scope they are
+// in.
+func (c *checker) prelude(prog *ast.Program) *checkEnv {
 	// Register declared record types and units first so forward references resolve.
 	for _, s := range prog.Body {
 		switch d := s.(type) {
@@ -154,10 +174,7 @@ func Check(prog *ast.Program) []Diagnostic {
 			}
 		}
 	}
-	for _, s := range prog.Body {
-		c.inferStmt(s, env)
-	}
-	return dedupe(c.diags)
+	return env
 }
 
 // isBuiltinCtor reports whether a name is one of the built-in enums' cases,

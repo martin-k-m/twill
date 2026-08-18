@@ -27,6 +27,10 @@ func main() {
 
 	switch args[0] {
 	case "-v", "--version", "version":
+		if hasFlag(args, "--verbose") {
+			versionVerbose()
+			return
+		}
 		fmt.Println("Twill", version)
 	case "-h", "--help", "help":
 		usage()
@@ -52,7 +56,10 @@ func main() {
 		}
 		os.Exit(runFile(args[1], !hasFlag(args, "--no-check")))
 	case "test":
-		os.Exit(runTests(nonFlagArgs(args[1:]), hasFlag(args, "--verbose") || hasFlag(args, "-v")))
+		os.Exit(runTests(nonFlagArgs(args[1:]), hasFlag(args, "--verbose") || hasFlag(args, "-v"),
+			flagValue(args, "--filter")))
+	case "doctor":
+		os.Exit(doctor())
 	case "repl":
 		repl()
 	default:
@@ -196,7 +203,8 @@ func repl() {
 	for sc.Scan() {
 		line := sc.Text()
 		if buf.Len() == 0 {
-			switch strings.TrimSpace(line) {
+			trimmed := strings.TrimSpace(line)
+			switch trimmed {
 			case ":quit", ":q":
 				return
 			case ":help":
@@ -204,6 +212,15 @@ func repl() {
 				fmt.Print("twill> ")
 				continue
 			case "":
+				fmt.Print("twill> ")
+				continue
+			}
+			// `:type e` and `:shape e` answer what the checker inferred, without
+			// running anything. A tensor-first language's most useful REPL
+			// question is what shape something is, and asking it by evaluating
+			// and printing the value does not answer it for anything large.
+			if verb, expr, ok := replQuery(trimmed); ok {
+				fmt.Println(describeExpr(verb, expr))
 				fmt.Print("twill> ")
 				continue
 			}
@@ -291,14 +308,68 @@ func hasFlag(args []string, flag string) bool {
 // nonFlagArgs drops the leading-dash words, leaving the positional paths. Used
 // by `twill test`, whose arguments are any number of paths in any order with an
 // optional -v among them.
-func nonFlagArgs(args []string) []string {
-	var out []string
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			out = append(out, a)
+// flagValue reads `--flag value` or `--flag=value`, returning "" when the flag
+// is absent.
+func flagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+		if v, ok := strings.CutPrefix(a, flag+"="); ok {
+			return v
 		}
 	}
+	return ""
+}
+
+// valueFlags are the flags that take a separate following argument, so that
+// argument is not mistaken for a path.
+var valueFlags = map[string]bool{"--filter": true}
+
+func nonFlagArgs(args []string) []string {
+	var out []string
+	skip := false
+	for _, a := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			skip = valueFlags[a]
+			continue
+		}
+		out = append(out, a)
+	}
 	return out
+}
+
+// replQuery splits a `:type expr` or `:shape expr` line into its verb and its
+// expression. It reports false for anything else, including a bare verb with
+// nothing after it.
+func replQuery(line string) (verb, expr string, ok bool) {
+	for _, v := range []string{":type", ":shape"} {
+		if strings.HasPrefix(line, v+" ") {
+			rest := strings.TrimSpace(line[len(v):])
+			if rest != "" {
+				return v, rest, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// describeExpr answers a REPL query by checking the expression, not running it:
+// the answer to "what shape is this" should not depend on being able to
+// afford the value.
+func describeExpr(verb, expr string) string {
+	desc, err := checker.Describe(expr)
+	if err != nil {
+		return err.Error()
+	}
+	if verb == ":shape" {
+		return desc.Shape
+	}
+	return desc.Type
 }
 
 func usage() {
@@ -314,9 +385,12 @@ Usage:
   twill fmt <file> --write   Format the file in place
   twill test [path ...]      Run every *_test.tw under the paths (default: .)
   twill test <paths> -v      Show each suite's output, not only failures'
+  twill test --filter <sub>  Run only the suites whose path contains <sub>
+  twill doctor               Report what is installed, and what looks wrong
   twill                      Start the REPL
   twill --version            Print the version
+  twill --version --verbose  ...with the build and library it came from
 
-In the REPL: :help, :quit
+In the REPL: :help, :quit, :type <expr>, :shape <expr>
 `, version)
 }
