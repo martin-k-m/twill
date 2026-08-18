@@ -1,6 +1,7 @@
 # Build output
 /twill
 /twill.exe
+/twill*.exe
 /dist/
 
 # Go
