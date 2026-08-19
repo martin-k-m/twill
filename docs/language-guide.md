@@ -657,6 +657,9 @@ grads(f)           # -> function returning [df/d(arg0), df/d(arg1), ...]
 value_and_grad(f)  # -> function returning [f(args), df/d(arg0)]
 jacobian(f)        # -> function returning the [m, n] Jacobian of a vector output
 hessian(f)         # -> function returning the [n, n] Hessian of a scalar output
+jvp(f)             # -> function of (x, v) returning [f(x), J v]
+vjp(f)             # -> function of (x, v) returning [f(x), vᵀ J]
+hvp(f)             # -> function of (x, v) returning H v
 ```
 
 `grad`, `grads`, and `value_and_grad` require the differentiated function to
@@ -688,6 +691,90 @@ first-order, so a nested gradient is not supported: it is refused with an error
 naming `hessian`, rather than returning the zero it would otherwise compute. The
 gradient `grad` hands back is a plain value with no history, so differentiating
 it again differentiates a constant.
+
+### The two primitives underneath: `jvp` and `vjp`
+
+The five operations above are conveniences over two passes, and those two passes
+are nameable in their own right. Reach for them when you want a derivative in one
+direction rather than all of them, or when you are writing the derivative rule for
+something the language does not already have.
+
+```rust
+jvp(f)(x, v)   # [f(x), the Jacobian of f at x times v]      forward mode
+vjp(f)(x, v)   # [f(x), v times the Jacobian of f at x]      reverse mode
+```
+
+Both return a two-element list rather than only the derivative, matching
+`value_and_grad`, because the value at the point you differentiated is almost
+always wanted and computing it twice is waste.
+
+`jvp(f)(x, v)` is forward mode. `v` is a **tangent**: it lives in the input's
+space, so it must have the same structure and the same shapes as `x` -- the same
+record fields, the same list lengths, the same tensor shapes -- and the answer has
+the shape of `f(x)`. For a scalar `f` it is the directional derivative
+`grad(f)(x) . v`, computed without ever forming `grad(f)(x)`.
+
+`vjp(f)(x, v)` is reverse mode. `v` is a **cotangent**: it lives in the output's
+space, so it must have the shape of `f(x)`, and the answer has the structure of
+`x`. `grad(f)(x)` is exactly `vjp(f)(x, 1.0)` on a scalar output, which is all
+`grad` has ever been.
+
+```rust
+fn f(x) = sum(x * x * x)
+vjp(f)([1.0, 2.0, 3.0], 1.0)          # [36, [3, 12, 27]] -- the same as grad
+jvp(f)([1.0, 2.0, 3.0], [0.5, -1.0, 2.0])   # [36, 43.5]  -- grad . v, in one pass
+```
+
+Both follow a parameter tree the way `grad` does, so a record of model weights is
+a legal input; `jvp`'s tangent is then a record with the same fields, and `vjp`'s
+result is. See `examples/jvp.tw`.
+
+**What they cost.** `jvp` is one evaluation of `f` and nothing else, whatever the
+size of the input, which is why forward mode is the cheap direction when a
+function has few inputs and many outputs. `vjp` is one evaluation plus one
+backward sweep, the same cost as `grad`, which is the cheap direction when a
+function has many inputs and one output -- the machine-learning case, and the
+reason `grad` is reverse mode (`docs/DECISIONS.md`, decision 1). Getting the full
+`jacobian(f)(x)` costs one `vjp` per output row, so when what you need is `J v` or
+`vᵀ J`, forming the matrix first is the expensive way to get it.
+
+**The cotangent is an argument, not a closure.** In JAX, `vjp(f)(x)` returns the
+value together with a *pullback* function you call later, once per cotangent,
+reusing the graph. twill cannot offer that, and the reason is decision 2: the tape
+is the tensor graph, so there is no recorded program to replay. A retained
+pullback would pin the whole graph, would accumulate into the same per-node
+gradient buffers on a second call rather than replacing them, and would outlive
+the graph-building region the interpreter opens around a differentiated call. A
+closure that quietly gives a different answer the second time is the plausible
+wrong number this language refuses to return, so the cotangent is a second
+argument and each call is one pass.
+
+**Ops without a forward rule.** Reverse mode covers more operations than forward
+mode does; `einsum` is one that has a gradient but no jet. `jvp` and `hvp` on such
+a function report it by name rather than propagating a zero tangent, because a
+zero tangent is a plausible derivative and an error is not. `vjp` on the same
+function works.
+
+### `hvp`: curvature without the matrix
+
+```rust
+hvp(f)(x, v)   # H v, for a scalar f, with the shape of x
+```
+
+`hessian(f)(x)` builds the whole `[n, n]` matrix. Second-order optimisation almost
+never wants the matrix: Newton-CG, trust-region methods and Gauss-Newton all only
+ever ask for the Hessian times a vector, and `hvp` is that product directly.
+`examples/jvp.tw` runs conjugate gradients on it for a Newton step.
+
+**What it costs, plainly.** `2n+1` forward passes for an `n`-element input, not
+the single forward-over-reverse pass JAX charges. Decision 2 again: twill's
+reverse pass is not re-differentiable, so the gradient cannot be sent back through
+forward mode, and the exact second-order machinery here is the forward 2-jet.
+What `hvp` does buy over `hessian(f)(x) @ v` is still real -- `n(n+1)/2` passes
+become `2n+1`, and the `[n, n]` result is never allocated -- but it is a constant
+factor better, not an asymptotic one, and a model with many parameters is out of
+reach for both. It supports the same operations `hessian` does and refuses the
+same ones.
 
 The refusal covers the nesting wherever it is written, not only the literal
 `grad(grad(f))`. Putting a function between the two --

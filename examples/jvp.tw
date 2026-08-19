@@ -1,0 +1,100 @@
+# jvp.tw: the two primitives every other derivative is made of.
+#
+# `grad`, `jacobian` and `hessian` are conveniences over two passes:
+#
+#   jvp(f)(x, v)  forward mode: f(x), and the Jacobian times the tangent v.
+#                 One evaluation of f. Cheap in the number of INPUTS.
+#   vjp(f)(x, v)  reverse mode: f(x), and the cotangent v times the Jacobian.
+#                 One evaluation plus one backward sweep. Cheap in OUTPUTS.
+#
+# Both return a two-element list, [value, derivative], because you almost always
+# want the value you differentiated at and computing it twice is a waste.
+
+# --- vjp is where grad comes from -------------------------------------------
+
+fn f(x) = sum(x * x * x)
+let x = [1.0, 2.0, 3.0]
+
+# A cotangent of 1.0 on a scalar output is exactly the gradient. grad(f) is this
+# call with the 1.0 filled in, which is all it has ever been.
+print("vjp(f)(x, 1.0) =", vjp(f)(x, 1.0))
+print("grad(f)(x)     =", grad(f)(x))
+
+# --- jvp goes the other way --------------------------------------------------
+
+# The tangent has the shape of the INPUT, and the answer has the shape of the
+# output. For a scalar f that is the directional derivative, grad(f) . v, but
+# computed without ever building grad(f).
+let v = [0.5, -1.0, 2.0]
+print("jvp(f)(x, v)   =", jvp(f)(x, v))
+print("grad(f)(x) . v =", sum(grad(f)(x) * v))
+
+# For a vector-valued f, jvp gives one COLUMN combination of the Jacobian and
+# vjp gives one ROW combination, each for the price of a single pass. The full
+# jacobian(f)(x) costs one pass per output row, so when you only need J @ v or
+# vᵀ @ J, forming the matrix is the expensive way to get it.
+fn g(x) {
+  let a = x[0:1] * x[1:2]
+  let b = sin(x[1:2] * x[2:3])
+  concat([a, b], 0)
+}
+print("J @ v      =", jvp(g)(x, v)[1])
+print("same, via  =", jacobian(g)(x) @ v)
+print("vᵀ @ J     =", vjp(g)(x, [1.0, -0.5])[1])
+print("same, via  =", transpose(jacobian(g)(x)) @ [1.0, -0.5])
+
+# Both follow a parameter tree, the way grad does, so a model's record of
+# weights is a legal input and the tangent is a record with the same fields.
+let params = { w: [[0.5, -0.2], [0.3, 0.7]], b: [0.1, -0.4] }
+let X = [[1.0, 2.0], [0.5, 1.5]]
+fn loss(p) = sum(square(tanh(X @ p.w + p.b)))
+let direction = { w: [[1.0, 0.0], [0.0, 1.0]], b: [1.0, 1.0] }
+print("loss and its slope along `direction`:", jvp(loss)(params, direction))
+
+# --- hvp: curvature without the matrix ---------------------------------------
+
+# `hessian(f)(x)` builds the whole n by n matrix. Second-order optimisation
+# almost never wants the matrix -- it wants H v, one vector. `hvp(f)(x, v)` is
+# that product directly, and it never allocates the matrix.
+#
+# The Hessian of the quadratic form xᵀAx is A + Aᵀ at every point, so this one
+# can be checked by hand.
+let A = [[2.0, 0.5, -1.0], [0.5, 6.0, 0.25], [-1.0, 0.25, 3.0]]
+fn quad(z) = sum((A @ z) * z)
+print("H v   =", hvp(quad)(x, v))
+print("(A + Aᵀ) v =", (A + transpose(A)) @ v)
+
+# A Newton step needs H⁻¹ g, and the standard way to get it without inverting
+# anything is conjugate gradients, which only ever asks for H times a vector.
+# Ten iterations here on a 3-D quadratic, where CG is exact in at most 3.
+fn newton_direction(fq, at, g, iters) {
+  let z = g * 0.0
+  let r = g
+  let p = r
+  let rr = sum(r * r)
+  for _ in range(iters) {
+    let Hp = hvp(fq)(at, p)
+    let alpha = rr / sum(p * Hp)
+    z = z + p * alpha
+    r = r - Hp * alpha
+    let rr_new = sum(r * r)
+    p = r + p * (rr_new / rr)
+    rr = rr_new
+  }
+  z
+}
+
+# Minimise (1/2) zᵀ(A + Aᵀ)z - gᵀz, whose stationary point solves (A + Aᵀ)z = g.
+let g = grad(quad)(x)
+let step = newton_direction(quad, x, g, 3)
+print("CG solved H z = g; residual =", max(abs(hvp(quad)(x, step) - g)))
+
+# One full Newton step lands exactly on the minimum of a quadratic.
+print("x - z, which should be the minimiser [0, 0, 0]:", x - step)
+
+# THE COST, PLAINLY. jvp is one forward pass and vjp is one forward pass plus
+# one backward sweep, both independent of the size of the input. hvp is not:
+# twill's reverse pass is not re-differentiable (docs/DECISIONS.md, decision 2),
+# so hvp runs forward-mode 2-jets and costs 2n+1 forward passes for an n-element
+# input. That is still far less than hessian's n(n+1)/2, and it never allocates
+# the n by n matrix, which is the part that stops mattering first.

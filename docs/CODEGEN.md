@@ -280,7 +280,11 @@ before-and-after.
 **`hessian` does not compile in the first version.** It runs forward-mode jets
 (`internal/tensor/jet.go`) through a separate `recordJets` path with its own
 per-node closures, and second-order over a fused kernel is a much larger design.
-Traces containing a `hessian` call force to the interpreter.
+Traces containing a `hessian` call force to the interpreter. `jvp` and `hvp` are
+the same path and force for the same reason. `vjp` compiles no better than it
+suspends: its backward sweep runs through the interpreter's per-operation
+closures, which a traced body does not build, so it suspends the tracer exactly
+as `jacobian` does.
 
 ---
 
@@ -308,7 +312,8 @@ The design's correctness does not depend on the list being short.
   computed condition, and `for` over a computed range. The tracer reaches the
   condition, needs the value, and forces. Capturing control flow into the IR is
   the natural second version and is not attempted here.
-- **`hessian` and the forward-mode jet path**, for the reason in section 5.
+- **`hessian`, `jvp` and `hvp`, and the forward-mode jet path**, for the reason
+  in section 5. `vjp` suspends the tracer for `jacobian`'s reason.
 - **Non-numeric values.** Records, lists, dicts, strings, bytes, closures,
   variants. A record of weights is unpacked by the optimiser into tensors before
   any arithmetic happens, so this costs less than it sounds like, but the tracer

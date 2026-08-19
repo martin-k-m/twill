@@ -5612,3 +5612,96 @@ fn hessian(tp: Tape, root: I64, leaf: I64) -> Res[Tensor, Str] {
   # subtracts two nearly equal numbers, which is where precision is lost fastest.
   Ok(mk(shape, h, hdt))
 }
+
+# jet_forward_multi seeds several leaves in one forward sweep, which is what a
+# jvp over a parameter tree needs: `jvp(loss)({w: ..., b: ...}, {w: ..., b: ...})`
+# has one leaf per field and one tangent per leaf, and they all travel together
+# in a single pass.
+#
+# The single-leaf jet_forward above is this with one entry, kept separate only
+# because hessian calls it in a loop and reads better for it.
+fn jet_forward_multi(tp: Tape, root: I64, leaves: Arr[I64], vs: Arr[Arr[F64]]) -> Res[Jets, Str] {
+  let js: Jets = jets_new(tp)
+  let k: I64 = 0
+  while k < len(leaves) {
+    let l: I64 = leaves[k]
+    let v: Arr[F64] = vs[k]
+    let i: I64 = 0
+    # A leaf the output does not reach, or a tangent longer than the leaf, is
+    # trimmed here rather than refused: the caller has already checked the
+    # shapes, and a leaf past the root contributes nothing to the sweep.
+    while i < len(v) and i < len(js.d[l]) {
+      js.d[l][i] = v[i]
+      i = i + 1
+    }
+    k = k + 1
+  }
+  # A leaf entry has no inputs, so jet_node returns without touching its tangent
+  # and the seeding above survives the sweep. That is why this loop, unlike
+  # jet_forward's, does not need to skip the leaves by index.
+  let n: I64 = 0
+  while n <= root {
+    jet_node(tp, n, js)?
+    n = n + 1
+  }
+  Ok(js)
+}
+
+# hessian_vector: H v for a scalar output, without forming the n by n matrix.
+#
+# Polarization one step further out than hessian's. A forward 2-jet in direction
+# u gives the scalar u' H u, so
+#
+#   (e_i + v)' H (e_i + v) = e_i' H e_i + 2 e_i' H v + v' H v
+#
+# and component i of H v is (dd(e_i + v) - dd(e_i) - dd(v)) / 2.
+#
+# THE COST, PLAINLY. 2n+1 forward passes, not the single forward-over-reverse
+# pass JAX charges for the same product. Decision 2 in docs/DECISIONS.md is the
+# reason: the reverse pass is not re-differentiable, so the gradient cannot be
+# sent through forward mode, and the forward 2-jet is the only exact
+# second-order machinery there is. What it does buy over hessian(f)(x) @ v is
+# real: n(n+1)/2 passes become 2n+1, and the n by n result is never allocated.
+fn hessian_vector(tp: Tape, root: I64, leaf: I64, v: Arr[F64]) -> Res[Tensor, Str] {
+  let lt: Tensor = value_of(tp, leaf)
+  let n: I64 = element_count(lt.shape)
+  let hdt: I64 = grad_dtype(lt.dtype)
+  if len(v) != n {
+    return Err(bytes.concat("hvp: the direction has ",
+      bytes.concat(num_to_text(len(v)), bytes.concat(" elements but the input has ",
+        num_to_text(n)))))
+  }
+  # A root of -1 is f ignoring its argument, and a root before the leaf cannot
+  # depend on it. Zeros rather than an error, for the reason hessian gives.
+  if root < 0 or root < leaf {
+    return Ok(mk_raw(copy_shape(lt.shape), alloc(n), hdt))
+  }
+  if not is_scalar(tp.entries[root].out) {
+    return Err("hvp: the function must return a scalar")
+  }
+  let jv: Jets = jet_forward(tp, root, leaf, v)?
+  let vhv: F64 = jv.dd[root][0]
+  let out: Arr[F64] = alloc(n)
+  let e: Arr[F64] = alloc(n)
+  let i: I64 = 0
+  while i < n {
+    let z: I64 = 0
+    while z < n {
+      e[z] = 0.0
+      z = z + 1
+    }
+    e[i] = 1.0
+    let ji: Jets = jet_forward(tp, root, leaf, e)?
+    let eihei: F64 = ji.dd[root][0]
+    z = 0
+    while z < n {
+      e[z] = v[z]
+      z = z + 1
+    }
+    e[i] = 1.0 + v[i]
+    let jm: Jets = jet_forward(tp, root, leaf, e)?
+    out[i] = (jm.dd[root][0] - eihei - vhv) / 2.0
+    i = i + 1
+  }
+  Ok(mk(copy_shape(lt.shape), out, hdt))
+}

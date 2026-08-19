@@ -601,6 +601,12 @@ var nonDifferentiable = map[string]string{
 	"RoundToDType": "dtype arithmetic", "ShortestForDType": "formatting",
 	// Second-order machinery, checked against finite differences in jet_test.go.
 	"Hessian": "second-order; checked in jet_test.go",
+	// Forward-mode machinery rather than operators: Directional runs one jet
+	// sweep over a graph the operators built, and HessianVector polarizes three
+	// of those sweeps. Both are checked against finite differences and against
+	// Hessian in jet_test.go, and neither has a gradient of its own to check.
+	"Directional":   "forward-mode sweep; checked in jet_test.go",
+	"HessianVector": "second-order; checked in jet_test.go",
 }
 
 // TestGradientCheckCoversEveryOperator closes the list. It walks the operators
