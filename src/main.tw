@@ -155,7 +155,41 @@ fn eval_program(path: Str, src: Str) -> I64 {
         }
         i = i + 1
       }
-      EXIT_OK
+      run_main(path, src, prog, env)
+    },
+  }
+}
+
+# A systems-mode program's entry point is main(), the way Go and Rust spell it,
+# and a numeric-mode file is its top-level statements. That is the split the
+# bootstrap's RunFileMain documents, and this side did not have it: `twill run`
+# on a systems-mode program executed the declarations and stopped, so the
+# self-hosted CLI could not run the dialect the self-hosted compiler is itself
+# written in. The differential harness never caught it because every program it
+# compares is numeric mode, where there is no main to call.
+#
+# A file with no main, or whose main takes arguments, runs its top level and
+# nothing more, which is what the bootstrap does with one too.
+fn run_main(path: Str, src: Str, prog: ast.Program, env: eval.Env) -> I64 {
+  if prog.mode != "systems" {
+    return EXIT_OK
+  }
+  match eval.env_get(env, "main") {
+    None => EXIT_OK,
+    Some(v) => match v {
+      VClosure(c) => {
+        if len(c.params) != 0 {
+          return EXIT_OK
+        }
+        match eval.apply(v, arr_new(), 0) {
+          Ok(_) => EXIT_OK,
+          Err(er) => {
+            report_runtime(path, src, er)
+            EXIT_ERROR
+          },
+        }
+      },
+      _ => EXIT_OK,
     },
   }
 }

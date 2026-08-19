@@ -580,3 +580,60 @@ func TestSelfHostedCheckCatchesTryContext(t *testing.T) {
 		t.Fatalf("check of `?` in a Res-returning function exited %d, want 0", code)
 	}
 }
+
+// runBothWaysAsCLI compares the two engines the way a user meets them: through
+// RunFileMain on each side. runBothWays runs the Go half with Run, which
+// evaluates a top level and nothing else, and that is symmetric only for a
+// numeric-mode program -- exactly the kind it is used for. A systems-mode
+// program has an entry point, so comparing it needs both sides to look for one.
+func runBothWaysAsCLI(t *testing.T, source string) (goOut, selfOut string) {
+	t.Helper()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "input.tw")
+	if err := os.WriteFile(target, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var goBuf strings.Builder
+	goIP := interp.New(func(s string) { goBuf.WriteString(s) })
+	if _, _, err := goIP.RunFileMain(target, nil); err != nil {
+		t.Fatalf("Go interpreter errored: %v", err)
+	}
+
+	var selfBuf strings.Builder
+	selfIP := interp.New(func(s string) { selfBuf.WriteString(s) })
+	if _, ranMain, err := selfIP.RunFileMain(filepath.Join("..", "..", "src", "main.tw"),
+		[]string{"twill", "run", target}); err != nil {
+		t.Fatalf("self-hosted CLI errored: %v", err)
+	} else if !ranMain {
+		t.Fatal("self-hosted main did not run")
+	}
+	return goBuf.String(), selfBuf.String()
+}
+
+// A systems-mode program's entry point is main(), which is what RunFileMain
+// documents and what the self-hosted CLI did not do: `twill run` on a
+// systems-mode file executed the declarations and stopped, so the self-hosted
+// side could not run the dialect the self-hosted compiler is written in. Every
+// program the rest of this harness compares is numeric mode, where there is no
+// main to call, which is why nothing caught it.
+func TestSelfHostedRunsSystemsModeMain(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, "mode systems\nfn main() {\n  print(\"from main\")\n}\n")
+	if goOut != "from main" || selfOut != goOut {
+		t.Fatalf("go = %q, self = %q, want both %q", goOut, selfOut, "from main")
+	}
+}
+
+// A file with no main, or whose main takes arguments, runs its top level and
+// nothing more -- on both sides.
+func TestSelfHostedSystemsModeWithoutAMain(t *testing.T) {
+	for _, src := range []string{
+		"mode systems\nprint(\"top level\")\n",
+		"mode systems\nprint(\"top level\")\nfn main(x: I64) {\n  print(\"not the entry\")\n}\n",
+	} {
+		goOut, selfOut := runBothWaysAsCLI(t, src)
+		if goOut != "top level" || selfOut != goOut {
+			t.Errorf("go = %q, self = %q, want both %q\nsource:\n%s", goOut, selfOut, "top level", src)
+		}
+	}
+}

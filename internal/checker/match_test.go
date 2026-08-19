@@ -131,3 +131,24 @@ func TestOrderingOnNumbersAndStringsIsFine(t *testing.T) {
 	// A type the checker cannot resolve is not judged on a guess.
 	wantNone(t, "mode systems\nfn f(a: cp.Thing, b: cp.Thing) -> Bool { a < b }")
 }
+
+// MAX_I64 written as a literal is not a fraction, and it is the commonest
+// constant in the subset. The check read fractionality from a round trip
+// through int64, which is an out-of-range conversion for anything at or above
+// 2^63: it landed on MIN_I64, disagreed with itself, and rejected
+// `let mx: I64 = 9223372036854775807`. Shipped in 1.6.0 and found by comparing
+// the two checkers, because the interpreter tests never run the checker.
+func TestMaxI64IsNotAFraction(t *testing.T) {
+	wantNone(t, "mode systems\nlet mx: I64 = 9223372036854775807\n")
+	wantNone(t, "mode systems\nlet mn: I64 = -9223372036854775808\n")
+	wantNone(t, "mode systems\nlet big: I64 = 9007199254740993\n")
+	// An integer written in exponent form is still an integer.
+	wantNone(t, "mode systems\nlet k: I64 = 2.5e3\n")
+}
+
+func TestAFractionAtAnI64IsStillReported(t *testing.T) {
+	wantOne(t, "mode systems\nlet x: I64 = 2.5\n", "the fraction 2.5")
+	// A negated fraction reaches the digits under the minus, which the old
+	// check did not look through at all.
+	wantOne(t, "mode systems\nlet x: I64 = -2.5\n", "the fraction 2.5")
+}
