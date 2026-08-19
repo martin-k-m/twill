@@ -12,6 +12,24 @@ import (
 
 // TestExamplesRunClean shape-checks and runs every example program in-process,
 // so the suite covers them without depending on the built binary.
+// heavyExamples train a small model and take fifteen seconds or more each,
+// where every other example is milliseconds. They are skipped in short mode,
+// and the only pass that is short is the race one -- where they buy little: the
+// parallelism a race detector is looking at lives in the tensor kernels, which
+// every other example and the whole of internal/tensor exercise too. The
+// ordinary CI run has no -short and runs them on every build.
+//
+// Two models at fifteen seconds, over a corpus the tracer walks twice, was
+// most of the race pass's 25-minute budget.
+var heavyExamples = map[string]bool{"gpt.tw": true, "llama.tw": true}
+
+func skipHeavyExample(t *testing.T, path string) {
+	t.Helper()
+	if testing.Short() && heavyExamples[filepath.Base(path)] {
+		t.Skip("skipping a model-training example in short mode")
+	}
+}
+
 func TestExamplesRunClean(t *testing.T) {
 	dir := filepath.Join("..", "..", "examples")
 	files, err := filepath.Glob(filepath.Join(dir, "*.tw"))
@@ -21,6 +39,7 @@ func TestExamplesRunClean(t *testing.T) {
 	for _, f := range files {
 		f := f
 		t.Run(filepath.Base(f), func(t *testing.T) {
+			skipHeavyExample(t, f)
 			src, err := os.ReadFile(f)
 			if err != nil {
 				t.Fatal(err)

@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.6.6] - 2026-08-19
+
+### Fixed
+
+- **The race pass fits its budget again.** 1.6.5's CI timed out at 25 minutes
+  on `go test -race -short`, and the cause was the suite having grown rather
+  than anything being slow: the two model-training examples take fifteen
+  seconds each where every other example is milliseconds, and the corpus is
+  walked twice, once as written and once as formatted.
+
+  `-short` now skips those two examples and the self-hosted differential runs.
+  That is not running them less -- the ordinary CI pass has no `-short` and runs
+  every one of them on every build. It is that the race detector is looking for
+  races in the parallel tensor kernels, and a single-threaded tree walk over a
+  twill source file is not where those live. The short pass went from 164
+  seconds to 46, and 252 of the 306 tests still run in it.
+
+  Recorded because the first attempt was wrong and the measurement said so:
+  cloning a gradient leaf only when the tape already held that object, to avoid
+  the copy, was **slower** than cloning unconditionally -- the backwards scan
+  that decides costs more than the copy it saves. The unconditional clone
+  stands.
+
 ## [1.6.5] - 2026-08-19
 
 ### Added
