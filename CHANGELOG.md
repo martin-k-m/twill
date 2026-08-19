@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.6.5] - 2026-08-19
+
+### Added
+
+- **`stop_grad(x)`** -- the same values, outside the graph, so a gradient
+  reaching it stops. It is what a stabilisation needs when the rewrite it
+  performs is not an exact algebraic identity: `std/nn`'s `rms_norm` gets away
+  without it because its reassociation *is* exact and the extra terms cancel,
+  while a rescaling that merely improves conditioning does not, and
+  differentiating through one gives the derivative of the trick rather than of
+  the function. It is also how a straight-through estimator, a target network
+  and a moving average are each written.
+
+### Fixed
+
+- **`grads(f)(c, c)` -- one tensor passed as two arguments -- put the whole
+  gradient on the second parameter and returned zeros for the first**, in the
+  self-hosted evaluator. A node is found again by tensor identity, so two
+  leaves holding the same object were indistinguishable and every operand
+  inside `f` resolved to whichever was registered last. A leaf now owns a copy.
+  The bootstrap was always correct.
+
 ## [1.6.4] - 2026-08-19
 
 The release where the checker stopped having holes in it, and where twill got
