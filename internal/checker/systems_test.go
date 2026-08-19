@@ -86,8 +86,30 @@ func TestGenericParamIsBoundAsDeclared(t *testing.T) {
 	wantNone(t, "mode systems\nfn head(xs: Arr[I64]) -> I64 = xs[0]\nlet ys: Arr[I64] = arr_new()\nlet r = head(ys)")
 }
 
+// A real unit typo is still caught in numeric mode, which is what this test was
+// written to protect. The case it used to use was `let n: I64 = 3`, and that
+// was the bug rather than the behaviour: `I64` is one of the language's types,
+// the program runs correctly, and the checker rejected it in the DEFAULT mode
+// while advising the author to write `unit I64`, which would make it worse. A
+// name that is not a type is still an undeclared unit and still reported.
 func TestNumericModeStillRejectsUnknownLetUnit(t *testing.T) {
-	wantOne(t, "let n: I64 = 3", "unknown unit")
+	wantOne(t, "let n: Metre = 3", "unknown unit")
+	wantOne(t, "let n: USD = 3", "unknown unit")
+}
+
+// The language's own type names annotate a numeric-mode binding without
+// complaint. The types exist at run time in both modes; only the annotation
+// syntax is documented as belonging to systems mode.
+func TestNumericModeAcceptsTheLanguagesTypeNames(t *testing.T) {
+	for _, src := range []string{
+		"let b: Bool = true\nlet r = b",
+		"let n: I64 = 3\nlet r = n",
+		"let s: Str = \"x\"\nlet r = s",
+		"let f: F64 = 1.5\nlet r = f",
+		"fn name(x: Str) -> Str = x\nlet r = name(\"a\")",
+	} {
+		wantNone(t, src)
+	}
 }
 
 func TestNumericModeStillRejectsUnknownParamType(t *testing.T) {

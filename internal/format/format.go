@@ -4,6 +4,7 @@ package format
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -290,7 +291,7 @@ func (p *printer) shape(s *ast.ShapeAnno) string {
 func (p *printer) expr(e ast.Expr) string {
 	switch ex := e.(type) {
 	case *ast.NumberLit:
-		return formatNumber(ex.Value)
+		return formatNumberLit(ex)
 	case *ast.StringLit:
 		return strconv.Quote(ex.Value)
 	case *ast.BoolLit:
@@ -324,14 +325,24 @@ func (p *printer) expr(e ast.Expr) string {
 		if ex.Op == "not" {
 			return "not " + p.operand(ex.Operand)
 		}
+		// MIN_I64 is spelled as a minus over 9223372036854775808, a magnitude
+		// no positive int64 holds, so the literal alone cannot be printed from
+		// its digits and the sign has to be read with it.
+		if ex.Op == "-" {
+			if lit, ok := ex.Operand.(*ast.NumberLit); ok && lit.Text != "" && isDigits(lit.Text) {
+				if n, err := strconv.ParseInt("-"+lit.Text, 10, 64); err == nil {
+					return strconv.FormatInt(n, 10)
+				}
+			}
+		}
 		return ex.Op + p.operand(ex.Operand)
 	case *ast.Binary:
 		return p.parenChild(ex.Left, ex.Op, false) + " " + ex.Op + " " +
 			p.parenChild(ex.Right, ex.Op, true)
 	case *ast.Call:
-		return p.expr(ex.Callee) + "(" + p.exprList(ex.Args) + ")"
+		return p.postfixTarget(ex.Callee) + "(" + p.exprList(ex.Args) + ")"
 	case *ast.Index:
-		return p.expr(ex.Target) + "[" + p.expr(ex.Index) + "]"
+		return p.postfixTarget(ex.Target) + "[" + p.expr(ex.Index) + "]"
 	case *ast.Slice:
 		lo, hi := "", ""
 		if ex.Start != nil {
@@ -340,9 +351,9 @@ func (p *printer) expr(e ast.Expr) string {
 		if ex.End != nil {
 			hi = p.expr(ex.End)
 		}
-		return p.expr(ex.Target) + "[" + lo + ":" + hi + "]"
+		return p.postfixTarget(ex.Target) + "[" + lo + ":" + hi + "]"
 	case *ast.Field:
-		return p.expr(ex.Target) + "." + ex.Name
+		return p.postfixTarget(ex.Target) + "." + ex.Name
 	case *ast.IfExpr:
 		return p.ifExpr(ex)
 	case *ast.Match:
@@ -357,6 +368,23 @@ func (p *printer) expr(e ast.Expr) string {
 
 // operand parenthesizes a binary expression under a unary operator so
 // `-(a + b)` / `not (a and b)` keep their meaning.
+// postfixTarget formats the thing a postfix operator applies to: the target of
+// an index, a slice or a field access, and a call's callee. Anything that binds
+// looser than a postfix keeps the parentheses it was written with.
+//
+// Without this the parentheses were dropped and the program changed meaning
+// silently: `(x + y).to(i8)` became `x + y.to(i8)`, which casts y alone;
+// `(p + q).field` read q's field; `(m + n)[0]` indexed n. A formatter rewriting
+// what a program computes is the worst thing a formatter can do, and
+// shuttle's src/quant.tw is a real file it happened to.
+func (p *printer) postfixTarget(e ast.Expr) string {
+	switch e.(type) {
+	case *ast.Binary, *ast.Unary, *ast.IfExpr, *ast.Match, *ast.Lambda:
+		return "(" + p.expr(e) + ")"
+	}
+	return p.expr(e)
+}
+
 func (p *printer) operand(e ast.Expr) string {
 	if _, ok := e.(*ast.Binary); ok {
 		return "(" + p.expr(e) + ")"
@@ -474,8 +502,39 @@ func (p *printer) inlineBlock(blk *ast.Block) string {
 	return "{ " + strings.Join(lines, "; ") + " }"
 }
 
+// formatNumberLit prints a numeric literal, from its digits when it has them.
+//
+// An integer literal is not printed through the f64 the parser produced,
+// because an f64 holds integers exactly only to 2^53 and the formatter must not
+// change the program. It was doing exactly that: 9007199254740993 came back as
+// ...992, 1234567890123456789 as ...768, and 9223372036854775807 -- MAX_I64 --
+// as the float 9.223372036854776e+18. Before 1.6 those values were f64 anyway
+// and the damage was already done at parse time; now an I64 literal is an exact
+// value, so this is a semantic change written to disk by `twill fmt --write`.
+//
+// Only a literal whose digits fit an int64 takes this path. Anything else --
+// a fraction, an exponent form, a magnitude past int64 -- is a float and prints
+// as one, so `3.0` still normalises to `3` the way every golden expects.
+func formatNumberLit(lit *ast.NumberLit) string {
+	if lit.Text != "" && isDigits(lit.Text) {
+		if n, err := strconv.ParseInt(lit.Text, 10, 64); err == nil {
+			return strconv.FormatInt(n, 10)
+		}
+	}
+	return formatNumber(lit.Value)
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
 func formatNumber(n float64) string {
-	if n == float64(int64(n)) {
+	if n == math.Trunc(n) && n >= -9223372036854775808.0 && n < 9223372036854775808.0 {
 		return strconv.FormatInt(int64(n), 10)
 	}
 	return strconv.FormatFloat(n, 'g', -1, 64)

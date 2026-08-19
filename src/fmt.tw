@@ -509,7 +509,7 @@ fn shape(s: ast.ShapeAnno) -> Str {
 
 fn expr(p: Printer, e: ast.Expr) -> Str {
   match e {
-    ENumber(x) => format_number(x.value),
+    ENumber(x) => format_number_lit(x),
     EString(x) => quoted(x.value),
     EBool(x) => bool_text(x.value),
     EIdent(x) => x.name,
@@ -546,15 +546,22 @@ fn expr(p: Printer, e: ast.Expr) -> Str {
       if bytes.equal(x.op, "not") {
         bytes.concat("not ", operand(p, x.operand))
       } else {
+        # MIN_I64 is spelled as a minus over 9223372036854775808, a magnitude
+        # no positive I64 holds, so the literal alone cannot be printed from
+        # its digits and the sign has to be read with it.
+        match negated_int_literal(x) {
+          Some(t) => return t,
+          None => unit,
+        }
         bytes.concat(x.op, operand(p, x.operand))
       }
     },
     EBinary(x) => bytes.concat(paren_child(p, x.left, x.op, false),
       bytes.concat(" ", bytes.concat(x.op, bytes.concat(" ",
         paren_child(p, x.right, x.op, true))))),
-    ECall(x) => bytes.concat(expr(p, x.callee),
+    ECall(x) => bytes.concat(postfix_target(p, x.callee),
       bytes.concat("(", bytes.concat(expr_list(p, x.args), ")"))),
-    EIndex(x) => bytes.concat(expr(p, x.target),
+    EIndex(x) => bytes.concat(postfix_target(p, x.target),
       bytes.concat("[", bytes.concat(expr(p, x.index), "]"))),
     ESlice(x) => {
       let lo: Str = ""
@@ -567,10 +574,10 @@ fn expr(p: Printer, e: ast.Expr) -> Str {
         Some(s) => hi = expr(p, s),
         None => unit,
       }
-      bytes.concat(expr(p, x.target), bytes.concat("[", bytes.concat(lo,
+      bytes.concat(postfix_target(p, x.target), bytes.concat("[", bytes.concat(lo,
         bytes.concat(":", bytes.concat(hi, "]")))))
     },
-    EField(x) => bytes.concat(expr(p, x.target), bytes.concat(".", x.name)),
+    EField(x) => bytes.concat(postfix_target(p, x.target), bytes.concat(".", x.name)),
     EIf(x) => if_expr(p, x),
     EMatch(x) => match_expr(p, x),
     ETry(x) => bytes.concat(expr(p, x.expr), "?"),
@@ -626,6 +633,26 @@ fn inline_stmt(p: Printer, s: ast.Stmt) -> Str {
 
 # operand parenthesizes a binary expression under a unary operator so
 # `-(a + b)` / `not (a and b)` keep their meaning.
+# What a postfix operator applies to: the target of an index, a slice or a
+# field access, and a call's callee. Anything that binds looser than a postfix
+# keeps the parentheses it was written with.
+#
+# Without this the parentheses were dropped and the program changed meaning
+# silently: `(x + y).to(i8)` became `x + y.to(i8)`, which casts y alone, and
+# `(m + n)[0]` indexed n. A formatter that rewrites what a program computes is
+# the worst kind of formatter bug, and shuttle's src/quant.tw is a real file it
+# happened to.
+fn postfix_target(p: Printer, e: ast.Expr) -> Str {
+  match e {
+    EBinary(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
+    EUnary(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
+    EIf(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
+    EMatch(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
+    ELambda(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
+    _ => expr(p, e),
+  }
+}
+
 fn operand(p: Printer, e: ast.Expr) -> Str {
   match e {
     EBinary(_) => bytes.concat("(", bytes.concat(expr(p, e), ")")),
@@ -817,6 +844,62 @@ fn quoted(s: Str) -> Str = lex.quote_value(s)
 # conversion is undefined outside it, and an unguarded `i64(n)` on 1e30 would
 # compare equal to nothing useful. Inside the range the guard changes nothing;
 # outside it Go reaches `%g` too, so the guard is how the two agree.
+# `-<digits>` as one exact integer, when that is what it is. Reads the sign
+# together with the digits so that MIN_I64, whose magnitude no positive I64
+# holds, survives the round trip.
+fn negated_int_literal(x: ast.Unary) -> Opt[Str] {
+  if not bytes.equal(x.op, "-") {
+    return None
+  }
+  match x.operand {
+    ENumber(lit) => {
+      if not is_digits(lit.text) {
+        return None
+      }
+      match i64_of_str(bytes.concat("-", lit.text)) {
+        Some(n) => Some(str(n)),
+        None => None,
+      }
+    },
+    _ => None,
+  }
+}
+
+# A numeric literal, printed from its digits when it has them.
+#
+# An integer literal does not go through the F64 the parser produced: an F64
+# holds integers exactly only to 2^53, so 9007199254740993 came back as ...992
+# and 9223372036854775807 as 9.223372036854776e+18. The formatter must not
+# change the program, and since 1.6 an I64 literal is an exact value, so that
+# was a semantic change and not a cosmetic one.
+#
+# Only digits take this path. A fraction or an exponent form is a float and
+# prints as one, so `3.0` still normalises to `3`.
+fn format_number_lit(x: ast.NumberLit) -> Str {
+  if is_digits(x.text) {
+    match i64_of_str(x.text) {
+      Some(n) => return str(n),
+      None => unit,
+    }
+  }
+  format_number(x.value)
+}
+
+fn is_digits(s: Str) -> Bool {
+  if len(s) == 0 {
+    return false
+  }
+  let i: I64 = 0
+  while i < len(s) {
+    let c: I64 = s[i]
+    if c < 48 or c > 57 {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}
+
 fn format_number(n: F64) -> Str {
   if n >= -9223372036854775808.0 and n < 9223372036854775808.0 {
     let k: I64 = i64(n)

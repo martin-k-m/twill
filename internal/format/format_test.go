@@ -3,6 +3,7 @@ package format_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/twill-lang/twill/internal/format"
@@ -83,6 +84,67 @@ func TestFormatBasics(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("format(%q) =\n%q\nwant\n%q", in, got, want)
+		}
+	}
+}
+
+// The formatter must not change what a program computes. Both of these did.
+
+// An integer literal is printed from its digits. Through the f64 the parser
+// produced, 9007199254740993 came back as ...992, 1234567890123456789 as
+// ...768, and MAX_I64 as the float 9.223372036854776e+18. Since 1.6 an I64
+// literal is an exact value, so that was a semantic change written to disk by
+// `twill fmt --write`.
+func TestFormatPreservesLargeIntegerLiterals(t *testing.T) {
+	for _, lit := range []string{
+		"9223372036854775807",  // MAX_I64
+		"-9223372036854775808", // MIN_I64, which is a minus over a magnitude no positive int64 holds
+		"9007199254740993",     // 2^53 + 1, the first integer an f64 cannot hold
+		"1234567890123456789",
+		"4611686018427387904",
+	} {
+		src := "mode systems\nlet x: I64 = " + lit + "\n"
+		out, err := format.Source(src)
+		if err != nil {
+			t.Fatalf("%s: %v", lit, err)
+		}
+		if want := "let x: I64 = " + lit; !strings.Contains(out, want) {
+			t.Errorf("formatting %s gave %q, want it to contain %q", lit, out, want)
+		}
+	}
+}
+
+// A float still normalises the way every golden expects.
+func TestFormatStillNormalisesNumbers(t *testing.T) {
+	out, err := format.Source("let a = 3.0\nlet b = 1e-3\nlet c = 1.5e10\nlet d = 0.5\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"let a = 3", "let b = 0.001", "let c = 15000000000", "let d = 0.5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q is missing %q", out, want)
+		}
+	}
+}
+
+// Parentheses a postfix operator needs are kept. Dropping them silently changed
+// the program: `(x + y).to(i8)` cast y alone, `(p + q).field` read q's field,
+// and `(m + n)[0]` indexed n. shuttle's src/quant.tw is a real file it happened
+// to, and the damage only showed up as a second `fmt` producing different text.
+func TestFormatKeepsParenthesesAPostfixNeeds(t *testing.T) {
+	for _, src := range []string{
+		"let a = (x + y).to(i8)\n",
+		"let b = (p + q).field\n",
+		"let c = (m + n)[0]\n",
+		"let d = (m + n)[0:2]\n",
+		"let e = (f + g)(x)\n",
+	} {
+		out, err := format.Source(src)
+		if err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+		if out != src {
+			t.Errorf("formatting %q gave %q; the parentheses are load-bearing", src, out)
 		}
 	}
 }

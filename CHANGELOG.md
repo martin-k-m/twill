@@ -1,5 +1,60 @@
 # Changelog
 
+## [1.6.2] - 2026-08-19
+
+Six bugs, found by two techniques that the repository had never applied to
+itself: running the checker and the interpreter over the same program and
+diffing, and running the Go bootstrap and the self-hosted compiler over the same
+program and diffing. Neither half can find these alone, which is why they
+survived a release.
+
+### Fixed
+
+- **`twill fmt` no longer changes what a program computes.** Two ways, both of
+  which wrote the damage to disk under `--write`:
+
+  An integer literal was printed through the f64 the parser produced, so
+  `9007199254740993` came back as `...992`, `1234567890123456789` as `...768`,
+  and `9223372036854775807` -- MAX_I64 -- as the float `9.223372036854776e+18`.
+  Before 1.6 those were f64 values anyway; since 1.6 an `I64` literal is exact,
+  so the formatter was silently changing the program. It prints from the digits
+  now.
+
+  Parentheses a postfix operator needs were dropped: `(x + y).to(i8)` became
+  `x + y.to(i8)`, which casts `y` alone; `(p + q).field` read `q`'s field; and
+  `(m + n)[0]` indexed `n`. shuttle's `src/quant.tw` is a real file this
+  happened to, and it only surfaced because a second `fmt` produced different
+  text from the first.
+
+- **A function that falls off its end is reported.** `fn name(b: Bool) -> Str {
+  if b { "yes" } }` returns `()`, and the check skipped every body that
+  evaluated to Unit on the grounds that its `return` statements were checked
+  where they stand -- but a body with no `return` at all also evaluates to Unit,
+  so the commonest shape of the mistake was the one case never judged. An
+  `if` with no `else` now types as Unit, which is the honest half of what it
+  can produce.
+
+- **Ordering a non-scalar tensor is reported.** `where(A > 0.0, A, B)` -- the
+  masking idiom every array library has -- failed at run time for every
+  non-scalar `A` while the checker, which knew the rank, said nothing.
+  `greater(A, 0.0)` is the elementwise form that yields the mask.
+
+- **A type name is not an unknown unit in numeric mode.** `let b: Bool = true`
+  was rejected with "unknown unit \"Bool\" (declare it with `unit Bool`)" -- a
+  false positive in the default mode, advising a change that would make the
+  program worse. The types exist at run time in both modes; only the annotation
+  syntax is documented as belonging to systems mode. A name that is not one of
+  the language's types is still an undeclared unit and still reported.
+
+- **The self-hosted checker knows the builtins 1.6 added.** All twenty-four of
+  the filesystem, path, clock and memory primitives were added to the Go side
+  and not to `src/builtins.tw`, so the self-hosted checker rejected the
+  repository's own standard library: `std/io.tw` and `std/random.tw` both failed
+  it on names the language has.
+
+- **Both CLIs report the same version.** The self-hosted one said `1.5.1.1`,
+  two releases behind.
+
 ## [1.6.1] - 2026-08-19
 
 Two bugs in 1.6.0, both found by comparing the Go bootstrap against the
