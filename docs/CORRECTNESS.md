@@ -281,3 +281,31 @@ ones, and it has been in the suite since before this document.
 | Checker catches decidable errors | `TestCheckerCatchesWhatItCanSee` | 2,646/2,646 |
 | Examples check clean and run | `TestExamplesRunClean` | all |
 | Forward numerics match the self-hosted implementation | the differential harness, `tools/diff/` | 443 files on `check`, 89 on `fmt` |
+
+## The gate, and why it is the whole of CI
+
+`make check` runs what CI runs: build, gofmt, vet, the full test suite, and the
+race pass with CI's own flags and timeout. `make ci` adds the two linters, which
+are separate only because they fetch a tool and need the network.
+
+This is written down because the gate was wrong once and it cost a release.
+`check` was `vet test` plus a gofmt check, and was commented "What CI runs",
+which it had stopped being: CI also ran `go test -race -short -timeout 25m` and
+a lint job. 1.6.5 was tagged on a green local run and its CI failed, because the
+test suite had grown past the race pass's budget and nothing local was measuring
+that.
+
+The failure was a timeout rather than a data race, and the cause is worth
+knowing for anyone adding to the corpus: two of the examples train a small model
+and take fifteen seconds each where every other example is milliseconds, and the
+corpus is walked twice -- once as written, once as formatted. Under the race
+detector that was most of the budget. Those two, and the self-hosted
+differential runs, are skipped when `-short` is passed, which is the flag the
+race pass uses and the only pass that uses it. The ordinary run has no `-short`
+and runs all of them on every build.
+
+So: a new example that trains anything belongs in `heavyExamples`, and a new
+test that spawns the self-hosted compiler belongs behind `skipUnderShort`.
+Neither reduces what is checked; both keep the race pass measuring what it is
+for, which is the parallel tensor kernels rather than a tree walk over a twill
+source file.
