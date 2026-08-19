@@ -95,14 +95,14 @@ func containsTensor(topo []*Tensor, t *Tensor) bool {
 	return false
 }
 
-// directional runs one forward-mode pass over topo, seeding `leaf` with the
-// direction v (all other leaves get zero tangent), and returns the output's
-// first and second directional derivatives. It errors if the graph uses an op
-// without forward-mode support.
+// directional runs one forward-mode pass over topo, seeding each leaf in
+// `leaves` with the matching direction in `vs` (every other leaf gets a zero
+// tangent), and returns the output's first and second directional derivatives.
+// It errors if the graph uses an op without forward-mode support.
 //
-// The leaf must appear in topo. Callers check that first, because a leaf the
+// Every leaf must appear in topo. Callers check that first, because a leaf the
 // output does not depend on has no jet state to seed.
-func directional(output, leaf *Tensor, topo []*Tensor, v []float64) ([]float64, []float64, error) {
+func directional(output *Tensor, leaves []*Tensor, topo []*Tensor, vs [][]float64) ([]float64, []float64, error) {
 	for _, n := range topo {
 		if n.jet == nil {
 			n.jet = &jetState{}
@@ -123,9 +123,13 @@ func directional(output, leaf *Tensor, topo []*Tensor, v []float64) ([]float64, 
 			}
 		}
 	}
-	copy(leaf.jet.d, v)
+	isLeaf := make(map[*Tensor]bool, len(leaves))
+	for i, l := range leaves {
+		copy(l.jet.d, vs[i])
+		isLeaf[l] = true
+	}
 	for _, n := range topo {
-		if n == leaf {
+		if isLeaf[n] {
 			continue
 		}
 		if n.jet.jvp != nil {
@@ -135,6 +139,39 @@ func directional(output, leaf *Tensor, topo []*Tensor, v []float64) ([]float64, 
 		}
 	}
 	return output.jet.d, output.jet.dd, nil
+}
+
+// Directional is the forward-mode pass on its own: one sweep over the graph
+// rooted at `output`, seeding the given leaves with the given tangents, and
+// returning the output's first and second directional derivatives elementwise.
+//
+// Leaves the output does not depend on are dropped rather than refused, for the
+// reason Hessian gives below: a function that ignores an input, or reaches it
+// only through a piecewise-constant op such as floor, has a zero derivative in
+// that direction and that is the answer grad already gives.
+//
+// The caller owns the shape agreement between each leaf and its tangent; the
+// only thing checked here is that the tangent is not shorter than the leaf,
+// which would be a silently truncated seed rather than a wrong one.
+func Directional(output *Tensor, leaves []*Tensor, tangents [][]float64) ([]float64, []float64, error) {
+	if len(leaves) != len(tangents) {
+		return nil, nil, fmt.Errorf("forward-mode: %d leaves but %d tangents", len(leaves), len(tangents))
+	}
+	topo := output.forwardTopo()
+	var live []*Tensor
+	var liveV [][]float64
+	for i, l := range leaves {
+		if !containsTensor(topo, l) {
+			continue
+		}
+		if len(tangents[i]) < len(l.Data) {
+			return nil, nil, fmt.Errorf("forward-mode: tangent has %d elements but the input has %d",
+				len(tangents[i]), len(l.Data))
+		}
+		live = append(live, l)
+		liveV = append(liveV, tangents[i])
+	}
+	return directional(output, live, topo, liveV)
 }
 
 // Hessian returns the n×n Hessian of a scalar output with respect to the input
@@ -175,7 +212,7 @@ func Hessian(output, leaf *Tensor) ([]float64, int, error) {
 			e[k] = 0
 		}
 		e[i] = 1
-		_, dd, err := directional(output, leaf, topo, e)
+		_, dd, err := directional(output, []*Tensor{leaf}, topo, [][]float64{e})
 		if err != nil {
 			return nil, 0, err
 		}
@@ -189,7 +226,7 @@ func Hessian(output, leaf *Tensor) ([]float64, int, error) {
 			}
 			e[i] = 1
 			e[j] = 1
-			_, dd, err := directional(output, leaf, topo, e)
+			_, dd, err := directional(output, []*Tensor{leaf}, topo, [][]float64{e})
 			if err != nil {
 				return nil, 0, err
 			}
@@ -200,4 +237,68 @@ func Hessian(output, leaf *Tensor) ([]float64, int, error) {
 		}
 	}
 	return H, n, nil
+}
+
+// HessianVector returns H v, the Hessian of a scalar output at the input leaf
+// times the direction v, without ever materialising the n×n matrix.
+//
+// It is polarization again, one degree further out than Hessian's. A forward
+// 2-jet pass in direction u gives the scalar uᵀHu, so
+//
+//	(eᵢ+v)ᵀH(eᵢ+v) = eᵢᵀHeᵢ + 2 eᵢᵀHv + vᵀHv
+//
+// and the i-th component of H v falls out as (dd(eᵢ+v) - dd(eᵢ) - dd(v))/2.
+//
+// THE COST, PLAINLY. That is 2n+1 forward passes, not the single
+// forward-over-reverse pass JAX's hvp costs. The reason is decision 2 in
+// docs/DECISIONS.md: the reverse pass is not re-differentiable, so the gradient
+// cannot be run through forward mode to get its directional derivative, and the
+// only exact second-order machinery here is the forward 2-jet. What this does
+// buy over hessian(f)(x) @ v is real, though: n(n+1)/2 passes become 2n+1, and
+// the n×n result is never allocated.
+func HessianVector(output, leaf *Tensor, v []float64) ([]float64, error) {
+	if !output.IsScalar() {
+		return nil, fmt.Errorf("hvp: the function must return a scalar")
+	}
+	n := len(leaf.Data)
+	if len(v) != n {
+		return nil, fmt.Errorf("hvp: the direction has %d elements but the input has %d", len(v), n)
+	}
+	topo := output.forwardTopo()
+	// A leaf the output does not reach differentiably has a zero second
+	// derivative, for the reason spelled out on Hessian.
+	if !containsTensor(topo, leaf) {
+		return make([]float64, n), nil
+	}
+	one := []*Tensor{leaf}
+	_, ddv, err := directional(output, one, topo, [][]float64{v})
+	if err != nil {
+		return nil, err
+	}
+	vHv := ddv[0]
+	out := make([]float64, n)
+	e := make([]float64, n)
+	for i := 0; i < n; i++ {
+		for k := range e {
+			e[k] = 0
+		}
+		e[i] = 1
+		_, ddi, err := directional(output, one, topo, [][]float64{e})
+		if err != nil {
+			return nil, err
+		}
+		eiHei := ddi[0]
+		e[i] = 1 + v[i]
+		for k := range e {
+			if k != i {
+				e[k] = v[k]
+			}
+		}
+		_, ddm, err := directional(output, one, topo, [][]float64{e})
+		if err != nil {
+			return nil, err
+		}
+		out[i] = (ddm[0] - eiHei - vHv) / 2
+	}
+	return out, nil
 }

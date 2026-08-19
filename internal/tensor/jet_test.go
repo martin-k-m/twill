@@ -147,7 +147,7 @@ func TestHessianFDProd(t *testing.T) {
 		leaf := Leaf(xd, []int{len(xd)})
 		leaf.RequiresGrad = true
 		out, _ := ProdAxis(leaf, 0)
-		d, dd, err := directional(out, leaf, []*Tensor{leaf, out}, v)
+		d, dd, err := directional(out, []*Tensor{leaf}, []*Tensor{leaf, out}, [][]float64{v})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -312,5 +312,136 @@ func TestHessianConstantFunction(t *testing.T) {
 		if v != 0 {
 			t.Fatalf("H[%d] = %v, want 0", i, v)
 		}
+	}
+}
+
+// checkHVP compares HessianVector against the full Hessian and against a second
+// central difference along v. Two independent routes to the same vector: the
+// polarization identity HessianVector uses is not the one Hessian uses for its
+// off-diagonals, and the finite difference shares nothing with either.
+func checkHVP(t *testing.T, name string, xdata, v []float64, shape []int, f func(*Tensor) *Tensor) {
+	t.Helper()
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	leaf := Leaf(xdata, shape)
+	out := f(leaf)
+	hv, err := HessianVector(out, leaf, v)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	H, n, err := Hessian(out, leaf)
+	if err != nil {
+		t.Fatalf("%s: hessian: %v", name, err)
+	}
+	for i := 0; i < n; i++ {
+		want := 0.0
+		for j := 0; j < n; j++ {
+			want += H[i*n+j] * v[j]
+		}
+		if math.Abs(want-hv[i]) > 1e-9 {
+			t.Errorf("%s: (Hv)[%d] = %v, hessian@v = %v", name, i, hv[i], want)
+		}
+	}
+	// vᵀHv by a second central difference along v.
+	eval := func(s float64) float64 {
+		y := append([]float64(nil), xdata...)
+		for i := range y {
+			y[i] += s * v[i]
+		}
+		return f(New(y, shape)).Data[0]
+	}
+	const h = 1e-3
+	num := (eval(h) - 2*eval(0) + eval(-h)) / (h * h)
+	ana := 0.0
+	for i := range hv {
+		ana += hv[i] * v[i]
+	}
+	tol := 1e-4 * math.Max(1, math.Abs(ana))
+	if math.Abs(num-ana) > tol {
+		t.Errorf("%s: vᵀHv jet=%v finite-diff=%v", name, ana, num)
+	}
+}
+
+func TestHessianVectorMatchesHessian(t *testing.T) {
+	checkHVP(t, "variance", []float64{1, -2, 3, 0.5}, []float64{0.4, 1.5, -0.9, 0.25}, []int{4},
+		func(x *Tensor) *Tensor { return Mean(Square(sub(x, Mean(x)))) })
+	checkHVP(t, "logsumexp", []float64{0.2, 1.1, -0.7, 0.9}, []float64{1, 0.25, -0.5, 0.75}, []int{4},
+		func(x *Tensor) *Tensor {
+			l, _ := LogSumExp(x, 0)
+			return Square(l)
+		})
+	checkHVP(t, "matmul-square", []float64{1, 0.5, -0.3, 0.8}, []float64{0.2, -0.4, 1, 0.1}, []int{2, 2},
+		func(x *Tensor) *Tensor { return Sum(Square(matmul(x, x))) })
+	checkHVP(t, "reciprocal", []float64{1.3, -0.7, 2.1}, []float64{0.4, 1.5, -0.9}, []int{3},
+		func(x *Tensor) *Tensor {
+			ones := Filled([]int{3}, 1)
+			return Sum(div(ones, add(Square(x), Filled([]int{3}, 2))))
+		})
+}
+
+// A quadratic form has a constant Hessian A + Aᵀ, which is exact rather than
+// approximate, so the product is exact too and any tolerance would be hiding
+// something.
+func TestHessianVectorOnAQuadraticFormIsExact(t *testing.T) {
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	A := New([]float64{2, 0.5, -1, 0.5, 6, 0.25, -1, 0.25, 3}, []int{3, 3})
+	v := []float64{0.4, 1.5, -0.9}
+	leaf := Leaf([]float64{1, -2, 0.5}, []int{3})
+	out := Sum(mul(matmul(A, leaf), leaf))
+	hv, err := HessianVector(out, leaf, v)
+	if err != nil {
+		t.Fatalf("hvp: %v", err)
+	}
+	// A is symmetric here, so A + Aᵀ = 2A.
+	for i := 0; i < 3; i++ {
+		want := 0.0
+		for j := 0; j < 3; j++ {
+			want += 2 * A.Data[i*3+j] * v[j]
+		}
+		if math.Abs(want-hv[i]) > 1e-12 {
+			t.Errorf("(Hv)[%d] = %v, want %v", i, hv[i], want)
+		}
+	}
+}
+
+// A tangent per leaf, seeded in one sweep: this is what jvp over a parameter
+// record needs, and the single-leaf Hessian path never exercises it. f(a,b) =
+// sum(a*b) has directional derivative sum(da*b + a*db).
+func TestDirectionalSeedsSeveralLeaves(t *testing.T) {
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	a := Leaf([]float64{1, 2, 3}, []int{3})
+	b := Leaf([]float64{0.5, -1, 2}, []int{3})
+	out := Sum(mul(a, b))
+	da := []float64{1, 0, -2}
+	db := []float64{0.25, 3, 1}
+	d, _, err := Directional(out, []*Tensor{a, b}, [][]float64{da, db})
+	if err != nil {
+		t.Fatalf("directional: %v", err)
+	}
+	want := 0.0
+	for i := range da {
+		want += da[i]*b.Data[i] + a.Data[i]*db[i]
+	}
+	if math.Abs(d[0]-want) > 1e-12 {
+		t.Errorf("directional = %v, want %v", d[0], want)
+	}
+}
+
+// A leaf the output does not reach gets no tangent rather than an error, which
+// is the answer grad already gives for the same expression.
+func TestDirectionalIgnoresAnUnreachedLeaf(t *testing.T) {
+	SetRecordJets(true)
+	defer SetRecordJets(false)
+	a := Leaf([]float64{1, 2, 3}, []int{3})
+	unused := Leaf([]float64{9, 9, 9}, []int{3})
+	out := Sum(Square(a))
+	d, _, err := Directional(out, []*Tensor{a, unused}, [][]float64{{1, 1, 1}, {1, 1, 1}})
+	if err != nil {
+		t.Fatalf("directional: %v", err)
+	}
+	if math.Abs(d[0]-12) > 1e-12 { // sum(2x) = 2*(1+2+3)
+		t.Errorf("directional = %v, want 12", d[0])
 	}
 }

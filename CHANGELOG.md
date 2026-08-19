@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`jvp`, `vjp` and `hvp`: the composable primitives underneath `grad`.**
+  `grad`, `grads`, `value_and_grad`, `jacobian` and `hessian` were always
+  conveniences over two passes, and the two passes were not nameable. They are
+  now.
+
+  `jvp(f)(x, v)` is forward mode: `[f(x), J v]` in one evaluation of `f`, with
+  the tangent `v` carrying the input's structure and shapes -- records, nested
+  lists, tensors -- and the answer carrying `f(x)`'s shape.
+  `vjp(f)(x, v)` is reverse mode: `[f(x), vᵀ J]` in one evaluation plus one
+  backward sweep, with the cotangent `v` carrying `f(x)`'s shape and the answer
+  carrying `x`'s structure. `grad(f)(x)` is `vjp(f)(x, 1.0)`, which is all it
+  ever was.
+  `hvp(f)(x, v)` is `H v` for a scalar `f`, without allocating the `[n, n]`
+  matrix -- what Newton-CG and trust-region methods actually ask for.
+
+  Both interpreters carry them, byte for byte, and `examples/jvp.tw` runs
+  conjugate gradients on `hvp` for a Newton step.
+
+  Two things are *not* what JAX offers, and both are decision 2 rather than an
+  omission. `vjp` takes the cotangent as an argument instead of returning a
+  pullback closure, because the tape is the tensor graph: there is no recorded
+  program to replay, a retained pullback would accumulate into the same
+  gradient buffers on its second call, and a closure that quietly answers
+  differently the second time is the plausible wrong number this project
+  refuses. And `hvp` costs `2n+1` forward passes rather than one
+  forward-over-reverse pass, because the reverse pass is not re-differentiable;
+  it beats `hessian(f)(x) @ v`'s `n(n+1)/2` passes by a constant factor and
+  never allocates the matrix, and the guide says so rather than implying an
+  asymptotic win it does not have.
+
 ## [1.6.3] - 2026-08-19
 
 Three silent wrong answers in the self-hosted evaluator, all one cause, and the

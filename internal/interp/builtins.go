@@ -1656,6 +1656,51 @@ func (ip *Interp) installBuiltins() {
 		}}, nil
 	})
 
+	// jvp(f)(x, v): the value of f at x and its directional derivative along the
+	// tangent v, in one forward-mode pass.
+	def("jvp", 1, false, func(a []value.Value) (value.Value, error) {
+		f := a[0]
+		if err := refuseDerivativeOfGrad("jvp", f); err != nil {
+			return nil, err
+		}
+		return &value.Builtin{Name: "jvp(fn)", Arity: 2, Fn: func(call []value.Value) (value.Value, error) {
+			if len(call) != 2 {
+				return nil, fmt.Errorf("jvp(f) takes exactly two arguments, the input and the tangent")
+			}
+			return ip.jvp(f, call[0], call[1])
+		}}, nil
+	})
+
+	// vjp(f)(x, v): the value of f at x and the vector-Jacobian product with the
+	// cotangent v, in one reverse-mode pass.
+	def("vjp", 1, false, func(a []value.Value) (value.Value, error) {
+		f := a[0]
+		if err := refuseDerivativeOfGrad("vjp", f); err != nil {
+			return nil, err
+		}
+		return &value.Builtin{Name: "vjp(fn)", Arity: 2, Fn: func(call []value.Value) (value.Value, error) {
+			if len(call) != 2 {
+				return nil, fmt.Errorf("vjp(f) takes exactly two arguments, the input and the cotangent")
+			}
+			return ip.vjp(f, call[0], call[1])
+		}}, nil
+	})
+
+	// hvp(f)(x, v): the Hessian of a scalar f at x times the direction v, without
+	// forming the matrix.
+	def("hvp", 1, false, func(a []value.Value) (value.Value, error) {
+		f := a[0]
+		if err := refuseDerivativeOfGrad("hvp", f); err != nil {
+			return nil, err
+		}
+		return &value.Builtin{Name: "hvp(fn)", Arity: 2, Fn: func(call []value.Value) (value.Value, error) {
+			if len(call) != 2 {
+				return nil, fmt.Errorf("hvp(f) takes exactly two arguments, the input and the direction")
+			}
+			return ip.hvp(f, call[0], call[1])
+		}}, nil
+	})
+
 	// Higher-order list helpers.
 	def("map", 2, false, func(a []value.Value) (value.Value, error) {
 		f := a[0]
@@ -2825,6 +2870,290 @@ func (ip *Interp) applyToTensor(f value.Value, arg *tensor.Tensor) (*tensor.Tens
 		return nil, fmt.Errorf("jacobian: f must return a tensor, got %s", value.Format(out))
 	}
 	return yt, nil
+}
+
+// --- jvp / vjp / hvp -------------------------------------------------------
+//
+// grad, grads, value_and_grad, jacobian and hessian are all built from two
+// primitives that were not themselves nameable until now: one forward-mode pass
+// (a Jacobian-vector product) and one reverse-mode pass (a vector-Jacobian
+// product). Naming them is what lets a user write the derivative rule for
+// something the language does not already have.
+//
+// WHY THE TWO-ARGUMENT FORM, AND NOT JAX'S PULLBACK CLOSURE. In JAX, vjp(f)(x)
+// returns the value and a pullback function to be called later with as many
+// cotangents as you like, which is what makes a Jacobian cheap: build the graph
+// once, seed it repeatedly. That form is not available here and decision 2 in
+// docs/DECISIONS.md is the reason. The tape is the tensor graph, so there is no
+// recorded program to replay: a retained pullback would have to hold the live
+// output tensor and every intermediate behind it, the gradients it accumulates
+// into those intermediates are per-node state that a second call would add to
+// rather than replace, and the graph-building region the interpreter opens
+// around a differentiated call (OpenGrad/CloseGrad, and the gradDepth guard that
+// stops a derivative nesting inside a derivative) is scoped to the call and
+// cannot outlive it. Returning a closure that mostly works and silently
+// accumulates on the second call is the plausible wrong number the project
+// refuses. The cotangent is therefore an argument, one pass per call, and
+// jacobian still re-runs f per output row exactly as decision 2 says it must.
+
+// tangentsFor flattens a tangent value onto the gradient leaves of a traced
+// argument, in the same order leavesOf produces them. The tangent has to have
+// the input's structure -- same list lengths, same record fields, same shapes --
+// because a tangent is a point in the input's tangent space and there is nowhere
+// else for a mismatched one to belong.
+func tangentsFor(op string, n *gradNode, v value.Value, path string) ([][]float64, error) {
+	switch {
+	case n.leaf != nil:
+		vt, ok := value.AsTensor(v)
+		if !ok {
+			return nil, fmt.Errorf("%s: the tangent%s must be a tensor or a number, got %s",
+				op, at(path), value.Format(v))
+		}
+		if !sameShape(vt.Shape, n.leaf.Shape) {
+			return nil, fmt.Errorf("%s: the tangent%s has shape %s but the input has shape %s",
+				op, at(path), formatShape(vt.Shape), formatShape(n.leaf.Shape))
+		}
+		return [][]float64{append([]float64(nil), vt.Data...)}, nil
+	case n.list != nil:
+		vl, ok := v.(*value.List)
+		if !ok {
+			return nil, fmt.Errorf("%s: the input%s is a list of %d, so the tangent must be a list too, got %s",
+				op, at(path), len(n.list), value.Format(v))
+		}
+		if len(vl.Items) != len(n.list) {
+			return nil, fmt.Errorf("%s: the input%s is a list of %d but the tangent is a list of %d",
+				op, at(path), len(n.list), len(vl.Items))
+		}
+		var out [][]float64
+		for i, c := range n.list {
+			sub, err := tangentsFor(op, c, vl.Items[i], fmt.Sprintf("%s[%d]", path, i))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, sub...)
+		}
+		return out, nil
+	case n.record != nil:
+		vr, ok := v.(*value.Record)
+		if !ok {
+			return nil, fmt.Errorf("%s: the input%s is a record, so the tangent must be a record too, got %s",
+				op, at(path), value.Format(v))
+		}
+		if len(vr.Keys) != len(n.record.keys) {
+			return nil, fmt.Errorf("%s: the tangent%s has %d fields but the input has %d",
+				op, at(path), len(vr.Keys), len(n.record.keys))
+		}
+		var out [][]float64
+		for _, k := range n.record.keys {
+			fv, present := vr.Get(k)
+			if !present {
+				return nil, fmt.Errorf("%s: the tangent%s has no field %s, which the input has",
+					op, at(path), k)
+			}
+			sub, err := tangentsFor(op, n.record.nodes[k], fv, path+"."+k)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, sub...)
+		}
+		return out, nil
+	}
+	// A non-differentiable argument -- a string, a function -- carries no tangent.
+	return nil, nil
+}
+
+// at renders a position inside a parameter tree for an error message, and
+// renders nothing at all for the root, so a plain tensor input does not get told
+// its tangent is wrong "at the input".
+func at(path string) string {
+	if path == "" {
+		return ""
+	}
+	return " at " + path
+}
+
+func sameShape(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func formatShape(s []int) string {
+	if len(s) == 0 {
+		return "scalar"
+	}
+	parts := make([]string, len(s))
+	for i, d := range s {
+		parts[i] = strconv.Itoa(d)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// nestedDerivativeHint is the tail of the message every "a derivative inside a
+// derivative" refusal ends with. It says the same thing gradients says, in the
+// same words, because it is the same fact.
+const nestedDerivativeHint = "the value the inner derivative returns has no history, so " +
+	"differentiating it again gives zero. Use hessian(f) or hvp(f) for a second derivative, " +
+	"or jacobian(f) for the matrix of first ones"
+
+// refuseDerivativeOfGrad rejects jvp/vjp/hvp applied to grad(f), which is the
+// same silent zero refuseNestedGrad refuses: the value grad returns has no
+// history, so a forward pass over it carries no tangent and a reverse pass over
+// it finds no graph.
+func refuseDerivativeOfGrad(caller string, f value.Value) error {
+	b, ok := f.(*value.Builtin)
+	if !ok {
+		return nil
+	}
+	switch b.Name {
+	case "grad(fn)", "grads(fn)", "value_and_grad(fn)":
+	default:
+		return nil
+	}
+	hint := "use hessian(f) or hvp(f) for a second derivative"
+	if caller == "hvp" {
+		hint = "hvp(f) is already the second derivative in a direction, so pass f itself"
+	}
+	return fmt.Errorf(
+		"%s(%s) is not a second derivative: the value %s returns is a plain value with no "+
+			"history, so differentiating it again gives zero; %s",
+		caller, b.Name, b.Name, hint)
+}
+
+// jvp computes f(x) and the directional derivative of f at x along the tangent
+// v, in one forward-mode pass. The tangent has the structure of x, the result
+// has the shape of f(x), and the cost is one evaluation of f.
+func (ip *Interp) jvp(f value.Value, x, v value.Value) (value.Value, error) {
+	// Forward-mode jets live in per-node closures that a traced (compiled)
+	// operation never builds, so the tangent would come back zero. hessian
+	// suspends the tracer for the same reason.
+	ip.tr.Suspend()
+	defer ip.tr.Resume()
+	if ip.gradDepth > 0 {
+		return nil, fmt.Errorf("jvp taken inside a derivative: %s", nestedDerivativeHint)
+	}
+	ip.gradDepth++
+	defer func() { ip.gradDepth-- }()
+
+	passX, node := traceArg(x)
+	tangents, err := tangentsFor("jvp", node, v, "")
+	if err != nil {
+		return nil, err
+	}
+	leaves := leavesOf([]*gradNode{node})
+
+	// Record jet closures only while this graph is built, so ordinary evaluation
+	// and grad pay nothing for forward-mode support.
+	tensor.SetRecordJets(true)
+	defer tensor.SetRecordJets(false)
+	out := ip.Apply(f, []value.Value{passX}, 0)
+	ot, ok := value.AsTensor(out)
+	if !ok {
+		return nil, fmt.Errorf("jvp: f must return a tensor, got %s", value.Format(out))
+	}
+	d, _, err := tensor.Directional(ot, leaves, tangents)
+	if err != nil {
+		return nil, fmt.Errorf("jvp: the function uses an operation without forward-mode support")
+	}
+	val := tensor.New(append([]float64(nil), ot.Data...), append([]int{}, ot.Shape...))
+	tan := tensor.New(append([]float64(nil), d...), append([]int{}, ot.Shape...))
+	return &value.List{Items: []value.Value{val, tan}}, nil
+}
+
+// vjp computes f(x) and the vector-Jacobian product v-transpose times df/dx, in
+// one reverse-mode pass. The cotangent v has the shape of f(x), the result has
+// the structure of x, and the cost is one evaluation of f plus one backward
+// sweep -- the same cost as grad, which is this with v = 1 on a scalar output.
+func (ip *Interp) vjp(f value.Value, x, v value.Value) (value.Value, error) {
+	// The backward sweep runs through interpreter-built tensor closures, which a
+	// traced body does not have. jacobian suspends the tracer for the same reason.
+	ip.tr.Suspend()
+	defer ip.tr.Resume()
+	if ip.gradDepth > 0 {
+		return nil, fmt.Errorf("vjp taken inside a derivative: %s", nestedDerivativeHint)
+	}
+	ip.gradDepth++
+	defer func() { ip.gradDepth-- }()
+
+	passX, node := traceArg(x)
+	out := ip.Apply(f, []value.Value{passX}, 0)
+	ot, ok := value.AsTensor(out)
+	if !ok {
+		return nil, fmt.Errorf("vjp: f must return a tensor, got %s", value.Format(out))
+	}
+	vt, ok := value.AsTensor(v)
+	if !ok {
+		return nil, fmt.Errorf("vjp: the cotangent must be a tensor or a number, got %s", value.Format(v))
+	}
+	if !sameShape(vt.Shape, ot.Shape) {
+		return nil, fmt.Errorf("vjp: the cotangent has shape %s but f returned shape %s",
+			formatShape(vt.Shape), formatShape(ot.Shape))
+	}
+	// Seeding the reverse pass with v is the move jacobian already makes to
+	// isolate one output component: contract the output against the cotangent and
+	// backpropagate the resulting scalar. Backward only accepts a scalar root,
+	// and sum(f(x) * v) is exactly the root whose gradient is the vjp.
+	seed := tensor.New(append([]float64(nil), vt.Data...), append([]int{}, ot.Shape...))
+	prod, err := tensor.Mul(ot, seed)
+	if err != nil {
+		return nil, err
+	}
+	if err := tensor.Sum(prod).Backward(); err != nil {
+		return nil, err
+	}
+	val := tensor.New(append([]float64(nil), ot.Data...), append([]int{}, ot.Shape...))
+	return &value.List{Items: []value.Value{val, gradFromNode(node)}}, nil
+}
+
+// hvp computes H v, the Hessian of a scalar f at x times the direction v,
+// without ever forming the n by n matrix. See tensor.HessianVector for the cost,
+// which is 2n+1 forward passes rather than the single forward-over-reverse pass
+// JAX charges, and for why decision 2 leaves no cheaper exact route here.
+func (ip *Interp) hvp(f value.Value, x, v value.Value) (value.Value, error) {
+	// Same reason as hessian: a traced operation records no jet, so the second
+	// derivative would come back as whatever an unrecorded node contributes,
+	// which is nothing.
+	ip.tr.Suspend()
+	defer ip.tr.Resume()
+	xt, ok := value.AsTensor(x)
+	if !ok {
+		return nil, fmt.Errorf("hvp: the input must be a tensor")
+	}
+	vt, ok := value.AsTensor(v)
+	if !ok {
+		return nil, fmt.Errorf("hvp: the direction must be a tensor or a number, got %s", value.Format(v))
+	}
+	if !sameShape(vt.Shape, xt.Shape) {
+		return nil, fmt.Errorf("hvp: the direction has shape %s but the input has shape %s",
+			formatShape(vt.Shape), formatShape(xt.Shape))
+	}
+	leaf := tensor.Leaf(xt.Data, xt.Shape)
+	tensor.SetRecordJets(true)
+	defer tensor.SetRecordJets(false)
+	out := ip.Apply(f, []value.Value{leaf}, 0)
+	ot, ok := value.AsTensor(out)
+	if !ok {
+		return nil, fmt.Errorf("hvp: f must return a tensor, got %s", value.Format(out))
+	}
+	hv, err := tensor.HessianVector(ot, leaf, vt.Data)
+	if err != nil {
+		// The forward-mode refusal comes back worded for hessian, whose caller it
+		// was written for. hvp names itself instead, because an error naming the
+		// wrong operation sends the reader to the wrong page. Its own messages
+		// already say hvp and pass straight through.
+		const forHessian = "second-order autodiff: "
+		if rest, cut := strings.CutPrefix(err.Error(), forHessian); cut {
+			return nil, fmt.Errorf("hvp: %s", rest)
+		}
+		return nil, err
+	}
+	return tensor.New(hv, append([]int{}, xt.Shape...)), nil
 }
 
 // --- argument coercion -----------------------------------------------------

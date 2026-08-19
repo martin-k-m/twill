@@ -2197,7 +2197,7 @@ fn in_words(list: Str, name: Str) -> Bool {
   bytes.index_of(hay, needle) >= 0
 }
 
-let ARITY1: Str = "relu exp log sin cos tanh sigmoid sqrt square abs grad grads value_and_grad jacobian hessian tensor scalar seed permutation eye shape len item dtype str int floor ceil round read_csv read_frame load columns nbytes"
+let ARITY1: Str = "relu exp log sin cos tanh sigmoid sqrt square abs grad grads value_and_grad jacobian hessian jvp vjp hvp tensor scalar seed permutation eye shape len item dtype str int floor ceil round read_csv read_frame load columns nbytes"
 
 let ARITY2: Str = "pow matmul dot linear conv2d maxpool2d gather maximum minimum greater less greater_equal less_equal equal concat map append gbm_predict write_frame save field map_leaves zip_leaves"
 
@@ -2211,6 +2211,7 @@ fn builtin_arity(name: Str) -> I64 {
   # The builtins returned by grad/grads/value_and_grad take whatever the
   # function they wrap takes; jacobian's and hessian's take exactly one.
   if in_words("jacobian(fn) hessian(fn)", name) { return 1 }
+  if in_words("jvp(fn) vjp(fn) hvp(fn)", name) { return 2 }
   -1
 }
 
@@ -2413,8 +2414,8 @@ let REDUCTIONS: Str = "sum mean max min prod median"
 let SCANS: Str = "cumsum cumprod cummax cummin"
 let LAST_AXIS: Str = "argmax argmin flip diff"
 let ELEM_ROUND: Str = "floor ceil round"
-let DERIVATIVES: Str = "grad grads value_and_grad jacobian hessian"
-let DERIVED: Str = "grad(fn) grads(fn) value_and_grad(fn) jacobian(fn) hessian(fn)"
+let DERIVATIVES: Str = "grad grads value_and_grad jacobian hessian jvp vjp hvp"
+let DERIVED: Str = "grad(fn) grads(fn) value_and_grad(fn) jacobian(fn) hessian(fn) jvp(fn) vjp(fn) hvp(fn)"
 let TREE_OPS: Str = "map zip fold append enumerate map_leaves zip_leaves"
 let MAKERS: Str = "tensor scalar zeros ones fill randn rand seed permutation eye linspace arange"
 # The makers whose trailing argument may be a dtype name (NEEDS-110). seed and
@@ -3602,6 +3603,9 @@ fn bi_derivative(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
   if in_words("grad grads", name) {
     refuse_nested_grad(name, f, line)?
   }
+  if in_words("jvp vjp hvp", name) {
+    refuse_derivative_of_grad(name, f, line)?
+  }
   Ok(VBuiltin(BuiltinVal { name: bytes.concat(name, "(fn)"), captured: Some(f) }))
 }
 
@@ -3665,6 +3669,24 @@ fn bi_derived(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, RuntimeE
   # these two take one argument. The check is kept because the Go original keeps
   # it and its message differs from the arity one, so a change to the arity
   # table shows up here rather than silently.
+  if bytes.equal(b.name, "jvp(fn)") {
+    if len(args) != 2 {
+      return Err(runtime_error(line, "jvp(f) takes exactly two arguments, the input and the tangent"))
+    }
+    return do_jvp(f, args[0], args[1], line)
+  }
+  if bytes.equal(b.name, "vjp(fn)") {
+    if len(args) != 2 {
+      return Err(runtime_error(line, "vjp(f) takes exactly two arguments, the input and the cotangent"))
+    }
+    return do_vjp(f, args[0], args[1], line)
+  }
+  if bytes.equal(b.name, "hvp(fn)") {
+    if len(args) != 2 {
+      return Err(runtime_error(line, "hvp(f) takes exactly two arguments, the input and the direction"))
+    }
+    return do_hvp(f, args[0], args[1], line)
+  }
   if bytes.equal(b.name, "jacobian(fn)") {
     if len(args) != 1 {
       return Err(runtime_error(line, "jacobian(f) takes exactly one argument"))
@@ -3980,6 +4002,332 @@ fn apply_to_tensor(f: Value, arg: tensor.Tensor, line: I64) -> Res[tensor.Tensor
     None => Err(runtime_error(line, bytes.concat("jacobian: f must return a tensor, got ",
       format_value(out)))),
   }
+}
+
+
+# ---- jvp, vjp and hvp -------------------------------------------------------
+#
+# The two primitives grad, jacobian and hessian are made of: one forward-mode
+# pass and one reverse-mode pass, each named and each callable. The bootstrap's
+# internal/interp/builtins.go carries the same three, with the same contracts and
+# the same messages, and says at length there why vjp takes the cotangent as an
+# argument instead of returning a pullback closure the way JAX does. The short
+# version is decision 2: the tape is the tensor graph, so there is no recorded
+# program for a retained pullback to replay.
+
+# The leaf node indices of a traced argument, in creation order, which is the
+# order trace_arg walked the argument and therefore the order the tangents below
+# are flattened into.
+fn collect_leaves(n: GradNode, out: Arr[I64]) {
+  match n {
+    GLeaf(idx) => push(out, idx),
+    GList(nodes) => {
+      let i: I64 = 0
+      while i < len(nodes) {
+        collect_leaves(nodes[i], out)
+        i = i + 1
+      }
+    },
+    GRecord(nodes) => {
+      for k in dict_keys(nodes) {
+        collect_leaves(dict_must(nodes, k), out)
+      }
+    },
+    GNone => unit,
+  }
+}
+
+# A shape as an error message renders it: "[2, 3]", or "scalar" for rank zero.
+fn shape_text(shape: Arr[I64]) -> Str {
+  if len(shape) == 0 { return "scalar" }
+  let out: Str = "["
+  let i: I64 = 0
+  while i < len(shape) {
+    if i > 0 { out = bytes.concat(out, ", ") }
+    out = bytes.concat(out, num_to_text(shape[i]))
+    i = i + 1
+  }
+  bytes.concat(out, "]")
+}
+
+fn same_shape(a: Arr[I64], b: Arr[I64]) -> Bool {
+  if len(a) != len(b) { return false }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+# A position inside a parameter tree, rendered for an error message, and
+# rendered as nothing at all for the root so a plain tensor input is not told its
+# tangent is wrong "at the input".
+fn at_path(path: Str) -> Str {
+  if bytes.equal(path, "") { return "" }
+  bytes.concat(" at ", path)
+}
+
+fn tensor_elems(t: tensor.Tensor) -> Arr[F64] {
+  let out: Arr[F64] = arr_new()
+  let i: I64 = 0
+  let n: I64 = tensor.numel(t)
+  while i < n {
+    push(out, tensor.at(t, i))
+    i = i + 1
+  }
+  out
+}
+
+# tangents_for flattens a tangent value onto the gradient leaves of a traced
+# argument, in the same order collect_leaves produces them. The tangent has to
+# have the input's structure -- same list lengths, same record fields, same
+# shapes -- because a tangent is a point in the input's tangent space and there
+# is nowhere else for a mismatched one to belong.
+fn tangents_for(op: Str, n: GradNode, v: Value, path: Str, tp: tensor.Tape,
+                out: Arr[Arr[F64]], line: I64) -> Res[Unit, RuntimeError] {
+  match n {
+    GLeaf(idx) => {
+      match as_tensor(v) {
+        Some(t) => {
+          let leaf: tensor.Tensor = tensor.value_of(tp, idx)
+          if not same_shape(t.shape, leaf.shape) {
+            return Err(runtime_error(line, bytes.concat(op,
+              bytes.concat(": the tangent", bytes.concat(at_path(path),
+              bytes.concat(" has shape ", bytes.concat(shape_text(t.shape),
+              bytes.concat(" but the input has shape ", shape_text(leaf.shape)))))))))
+          }
+          push(out, tensor_elems(t))
+          Ok(unit)
+        },
+        None => Err(runtime_error(line, bytes.concat(op,
+          bytes.concat(": the tangent", bytes.concat(at_path(path),
+          bytes.concat(" must be a tensor or a number, got ", format_value(v))))))),
+      }
+    },
+    GList(nodes) => {
+      match v {
+        VList(l) => {
+          if len(l.items) != len(nodes) {
+            return Err(runtime_error(line, bytes.concat(op,
+              bytes.concat(": the input", bytes.concat(at_path(path),
+              bytes.concat(" is a list of ", bytes.concat(num_to_text(len(nodes)),
+              bytes.concat(" but the tangent is a list of ", num_to_text(len(l.items))))))))))
+          }
+          let i: I64 = 0
+          while i < len(nodes) {
+            let sub: Str = bytes.concat(path,
+              bytes.concat("[", bytes.concat(num_to_text(i), "]")))
+            tangents_for(op, nodes[i], l.items[i], sub, tp, out, line)?
+            i = i + 1
+          }
+          Ok(unit)
+        },
+        _ => Err(runtime_error(line, bytes.concat(op,
+          bytes.concat(": the input", bytes.concat(at_path(path),
+          bytes.concat(" is a list of ", bytes.concat(num_to_text(len(nodes)),
+          bytes.concat(", so the tangent must be a list too, got ", format_value(v))))))))),
+      }
+    },
+    GRecord(nodes) => {
+      match v {
+        VRecord(r) => {
+          if len(dict_keys(r.fields)) != len(dict_keys(nodes)) {
+            return Err(runtime_error(line, bytes.concat(op,
+              bytes.concat(": the tangent", bytes.concat(at_path(path),
+              bytes.concat(" has ", bytes.concat(num_to_text(len(dict_keys(r.fields))),
+              bytes.concat(" fields but the input has ", num_to_text(len(dict_keys(nodes)))))))))))
+          }
+          for k in dict_keys(nodes) {
+            if not dict_has(r.fields, k) {
+              return Err(runtime_error(line, bytes.concat(op,
+                bytes.concat(": the tangent", bytes.concat(at_path(path),
+                bytes.concat(" has no field ", bytes.concat(k, ", which the input has")))))))
+            }
+            tangents_for(op, dict_must(nodes, k), dict_must(r.fields, k),
+              bytes.concat(path, bytes.concat(".", k)), tp, out, line)?
+          }
+          Ok(unit)
+        },
+        _ => Err(runtime_error(line, bytes.concat(op,
+          bytes.concat(": the input", bytes.concat(at_path(path),
+          bytes.concat(" is a record, so the tangent must be a record too, got ",
+          format_value(v))))))),
+      }
+    },
+    # A non-differentiable argument -- a string, a function -- carries no tangent.
+    GNone => Ok(unit),
+  }
+}
+
+# refuse_derivative_of_grad rejects jvp/vjp/hvp applied to grad(f), which is the
+# same silent zero refuse_nested_grad refuses: the value grad returns has no
+# history, so a forward pass over it carries no tangent and a reverse pass over
+# it finds no graph. value_and_grad(fn) is refused here as well, and is not
+# refused by refuse_nested_grad, because it is the first element of its pair that
+# has history and the second that does not, so differentiating the pair is wrong
+# either way round.
+fn refuse_derivative_of_grad(caller: Str, f: Value, line: I64) -> Res[Unit, RuntimeError] {
+  match f {
+    VBuiltin(b) => {
+      if not in_words("grad(fn) grads(fn) value_and_grad(fn)", b.name) {
+        return Ok(unit)
+      }
+      let hint: Str = "use hessian(f) or hvp(f) for a second derivative"
+      if bytes.equal(caller, "hvp") {
+        hint = "hvp(f) is already the second derivative in a direction, so pass f itself"
+      }
+      Err(runtime_error(line, bytes.concat(caller, bytes.concat("(", bytes.concat(b.name,
+        bytes.concat(") is not a second derivative: the value ", bytes.concat(b.name,
+        bytes.concat(" returns is a plain value with no history, so differentiating it again ",
+        bytes.concat("gives zero; ", hint)))))))))
+    },
+    _ => Ok(unit),
+  }
+}
+
+# jvp(f)(x, v): the value of f at x and the directional derivative of f along the
+# tangent v, in ONE forward-mode pass. The tangent has the structure of x, the
+# result has the shape of f(x), and the cost is one evaluation of f.
+fn do_jvp(f: Value, x: Value, v: Value, line: I64) -> Res[Value, RuntimeError] {
+  let tp: tensor.Tape = tensor.new_tape()
+  let tr: Traced = trace_arg(tp, x)
+  let leaves: Arr[I64] = arr_new()
+  collect_leaves(tr.node, leaves)
+  let tangents: Arr[Arr[F64]] = arr_new()
+  # Before f runs, so a mismatched tangent is reported without the side effects
+  # of an evaluation that was never going to be used.
+  tangents_for("jvp", tr.node, v, "", tp, tangents, line)?
+
+  let args: Arr[Value] = arr_new()
+  push(args, tr.passed)
+  # Record forward-mode (jet) closures only while building this graph, so
+  # ordinary evaluation and grad pay nothing for forward-mode support.
+  tensor.set_record_jets(true)
+  let built: Res[TracedRun, RuntimeError] = run_traced(f, args, tp, line)
+  tensor.set_record_jets(false)
+  let ran: TracedRun = built?
+  let ot: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(ran.value) {
+    Some(t) => ot = t,
+    None => return Err(runtime_error(line, bytes.concat("jvp: f must return a tensor, got ",
+      format_value(ran.value)))),
+  }
+  # A root of -1 is f ignoring its argument. Its directional derivative is zero,
+  # which is the answer grad already gives for the same expression.
+  let tangent: tensor.Tensor = tensor.zeros_like(ot)
+  if ran.node >= 0 {
+    match tensor.jet_forward_multi(tp, ran.node, leaves, tangents) {
+      Ok(js) => {
+        let d: Arr[F64] = arr_new()
+        let i: I64 = 0
+        while i < tensor.numel(ot) {
+          push(d, js.d[ran.node][i])
+          i = i + 1
+        }
+        tangent = tensor.mk_raw(tensor.copy_shape(ot.shape), d, tensor.grad_dtype(ot.dtype))
+      },
+      Err(m) => return Err(runtime_error(line,
+        "jvp: the function uses an operation without forward-mode support")),
+    }
+  }
+  let pair: Arr[Value] = arr_new()
+  push(pair, VTensor(ot))
+  push(pair, VTensor(tangent))
+  Ok(VList(ListVal { items: pair }))
+}
+
+# vjp(f)(x, v): the value of f at x and the vector-Jacobian product with the
+# cotangent v, in ONE reverse-mode pass. The cotangent has the shape of f(x), the
+# result has the structure of x, and the cost is one evaluation of f plus one
+# backward sweep -- exactly grad's cost, because grad is this with v = 1 on a
+# scalar output.
+fn do_vjp(f: Value, x: Value, v: Value, line: I64) -> Res[Value, RuntimeError] {
+  let tp: tensor.Tape = tensor.new_tape()
+  let tr: Traced = trace_arg(tp, x)
+  let args: Arr[Value] = arr_new()
+  push(args, tr.passed)
+  let ran: TracedRun = run_traced(f, args, tp, line)?
+  let ot: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(ran.value) {
+    Some(t) => ot = t,
+    None => return Err(runtime_error(line, bytes.concat("vjp: f must return a tensor, got ",
+      format_value(ran.value)))),
+  }
+  let vt: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(v) {
+    Some(t) => vt = t,
+    None => return Err(runtime_error(line, bytes.concat("vjp: the cotangent must be a tensor or a number, got ",
+      format_value(v)))),
+  }
+  if not same_shape(vt.shape, ot.shape) {
+    return Err(runtime_error(line, bytes.concat("vjp: the cotangent has shape ",
+      bytes.concat(shape_text(vt.shape), bytes.concat(" but f returned shape ",
+        shape_text(ot.shape))))))
+  }
+  # The cotangent IS the seed of the backward pass. grad seeds a scalar 1 here;
+  # every other cotangent on the tape is derived from whatever this is, which is
+  # the whole of what "vector-Jacobian product" means.
+  let seed: tensor.Tensor = tensor.mk_raw(tensor.copy_shape(ot.shape), tensor_elems(vt), ot.dtype)
+  let all_grads: Arr[tensor.Tensor] = arr_new()
+  match tensor.backward(tp, ran.node, seed) {
+    Ok(g) => all_grads = g,
+    Err(m) => return Err(runtime_error(line, m)),
+  }
+  let pair: Arr[Value] = arr_new()
+  push(pair, VTensor(ot))
+  push(pair, grad_from_node(tr.node, all_grads, tape_leaf_values(tp)))
+  Ok(VList(ListVal { items: pair }))
+}
+
+# hvp(f)(x, v): the Hessian of a scalar f at x times the direction v, without
+# ever forming the n by n matrix. tensor.hessian_vector states the cost, which is
+# 2n+1 forward passes rather than the single forward-over-reverse pass JAX
+# charges, and why decision 2 leaves no cheaper exact route.
+fn do_hvp(f: Value, x: Value, v: Value, line: I64) -> Res[Value, RuntimeError] {
+  let xt: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(x) {
+    Some(t) => xt = t,
+    None => return Err(runtime_error(line, "hvp: the input must be a tensor")),
+  }
+  let vt: tensor.Tensor = tensor.scalar(0.0)
+  match as_tensor(v) {
+    Some(t) => vt = t,
+    None => return Err(runtime_error(line, bytes.concat("hvp: the direction must be a tensor or a number, got ",
+      format_value(v)))),
+  }
+  if not same_shape(vt.shape, xt.shape) {
+    return Err(runtime_error(line, bytes.concat("hvp: the direction has shape ",
+      bytes.concat(shape_text(vt.shape), bytes.concat(" but the input has shape ",
+        shape_text(xt.shape))))))
+  }
+  let tp: tensor.Tape = tensor.new_tape()
+  let leaf: I64 = tensor.leaf(tp, xt)
+  let args: Arr[Value] = arr_new()
+  push(args, VTensor(tensor.value_of(tp, leaf)))
+  tensor.set_record_jets(true)
+  let built: Res[TracedRun, RuntimeError] = run_traced(f, args, tp, line)
+  tensor.set_record_jets(false)
+  let ran: TracedRun = built?
+  match tensor.hessian_vector(tp, ran.node, leaf, tensor_elems(vt)) {
+    Ok(t) => Ok(VTensor(t)),
+    # The forward-mode refusal comes back worded for hessian, whose caller it was
+    # written for. hvp names itself instead, because an error that names the
+    # wrong operation sends the reader to the wrong page.
+    Err(m) => Err(runtime_error(line, rename_for_hvp(m))),
+  }
+}
+
+# The forward-mode refusal comes back worded for hessian, whose caller it was
+# written for. hvp names itself instead, because an error naming the wrong
+# operation sends the reader to the wrong page. hessian_vector's own messages
+# already say hvp and pass straight through.
+fn rename_for_hvp(m: Str) -> Str {
+  let prefix: Str = "second-order autodiff: "
+  if bytes.index_of(m, prefix) == 0 {
+    return bytes.concat("hvp: ", slice(m, len(prefix), len(m)))
+  }
+  m
 }
 
 # ---- higher-order list and tree helpers ------------------------------------

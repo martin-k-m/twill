@@ -754,3 +754,93 @@ fn main() { print(f(Some(4)), f(Some(0)), f(None)) }
 		t.Fatalf("go = %q, self = %q, want both %q", goOut, selfOut, "40 6 7")
 	}
 }
+
+// jvp, vjp and hvp are language operations, so the reference implementation owes
+// the same answers as the bootstrap. The source below is the whole contract in
+// one file: a scalar output and a tensor one, a record parameter tree and a
+// nested list, the cross-checks against grad, jacobian and hessian, and the two
+// zero-derivative cases where a refusal would be stricter than grad.
+func TestSelfHostedJVPVJPHVPMatch(t *testing.T) {
+	src := `let p = { w: [[1.0, 2.0], [3.0, 4.0]], b: [0.5, -0.5] }
+let X = [[1.0, 2.0], [0.5, 1.5]]
+fn loss(p) = sum(square(tanh(X @ p.w + p.b))) + sum(exp(p.b * 0.5))
+let dp = { w: [[0.1, -0.2], [0.3, 0.05]], b: [1.0, -1.0] }
+print(grads(loss)(p))
+print(jvp(loss)(p, dp))
+print(vjp(loss)(p, 1.0))
+let xs = list([1.0, 2.0], [0.3, -0.7, 1.5])
+fn g(x) = sum(square(x[0])) + sum(exp(x[1] * 0.5))
+print(jvp(g)(xs, list([1.0, -0.5], [0.25, 2.0, -1.0])))
+print(vjp(g)(xs, 1.0))
+fn h(x) = x * x
+print(jvp(h)([1.0, 2.0, 3.0], [0.5, -1.0, 2.0]))
+print(vjp(h)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0]))
+print(jacobian(h)([1.0, 2.0, 3.0]))
+fn q(x) = sum(x * x * x)
+print(hvp(q)([1.0, 2.0, 3.0], [0.5, -1.0, 2.0]))
+print(hessian(q)([1.0, 2.0, 3.0]))
+fn c(x) = sum(square(floor(x)))
+print(jvp(c)([1.5, 2.5], [1.0, 1.0]))
+print(hvp(c)([1.5, 2.5], [1.0, 1.0]))
+fn ignores(x) = 3.0
+print(jvp(ignores)([1.5, 2.5], [1.0, 1.0]))
+print(hvp(ignores)([1.5, 2.5], [1.0, 1.0]))
+`
+	goOut, selfOut := runBothWays(t, src)
+	if goOut != selfOut {
+		t.Fatalf("jvp/vjp/hvp output differs:\nGo:   %q\nself: %q", goOut, selfOut)
+	}
+	if !strings.Contains(goOut, "tensor([3, -12, 36], shape=[3])") {
+		t.Errorf("hvp of sum(x³) at [1,2,3] along [0.5,-1,2] should be 6*x*v: %q", goOut)
+	}
+}
+
+// The refusals are part of the contract too: a program the bootstrap refuses has
+// to be refused by the reference as well, or the same source passes on one and
+// fails on the other. The self-hosted CLI reports a runtime error by printing it
+// and returning 1, and the exit code is what is checked here; the messages
+// themselves are pinned against the bootstrap's in jvp_test.go.
+func TestSelfHostedJVPRefusalsMatch(t *testing.T) {
+	for _, src := range []string{
+		"fn f(x) = sum(square(x))\nprint(hvp(grad(f))([1.0, 2.0], [1.0, 0.0]))\n",
+		"fn f(p) = sum(p.w)\nprint(jvp(f)({ w: [1.0] }, { b: [1.0] }))\n",
+		"fn f(x) = sum(x[0]) + sum(x[1])\nprint(jvp(f)(list([1.0], [2.0]), list([1.0])))\n",
+		"fn f(x) = sum(square(x))\nprint(jvp(f)([1.0, 2.0], [1.0, 2.0, 3.0]))\n",
+		"fn f(x) = sum(square(x))\nprint(vjp(f)([1.0, 2.0], [1.0, 2.0]))\n",
+		"fn f(x) = x * x\nprint(hvp(f)([1.0, 2.0], [1.0, 0.0]))\n",
+		"fn f(x) = sum(einsum(\"ij,jk->ik\", x, x))\nprint(hvp(f)([[1.0, 2.0], [3.0, 4.0]], [[1.0, 0.0], [0.0, 0.0]]))\n",
+	} {
+		ip := interp.New(func(string) {})
+		if _, err := ip.Run(src); err == nil {
+			t.Errorf("the bootstrap answered %q instead of refusing it", src)
+		}
+		if code := runSelfHostedRun(t, src); code == 0 {
+			t.Errorf("the self-hosted evaluator answered %q instead of refusing it", src)
+		}
+	}
+}
+
+// runSelfHostedRun runs a program through the self-hosted CLI and returns its
+// exit code: 0 for a program that ran, 1 for one it refused.
+func runSelfHostedRun(t *testing.T, src string) int {
+	t.Helper()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "input.tw")
+	if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ip := interp.New(func(string) {})
+	result, ranMain, err := ip.RunFileMain(filepath.Join("..", "..", "src", "main.tw"),
+		[]string{"twill", "run", target})
+	if err != nil {
+		t.Fatalf("self-hosted CLI errored: %v", err)
+	}
+	if !ranMain {
+		t.Fatal("self-hosted main did not run")
+	}
+	n, ok := value.AsNumber(result)
+	if !ok {
+		t.Fatalf("self-hosted main returned a non-number: %v", result)
+	}
+	return int(n)
+}
