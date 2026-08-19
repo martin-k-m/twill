@@ -1,5 +1,69 @@
 # Changelog
 
+## [1.6.4] - 2026-08-19
+
+The release where the checker stopped having holes in it, and where twill got
+the autodiff primitives and the model pieces a current transformer is built
+from.
+
+### Added
+
+- **`jvp`, `vjp` and `hvp`**, the operations `grad` is built from.
+  `jvp(f)(x, v)` is forward mode -- the value and the Jacobian times a tangent,
+  in one pass, at the cost of that pass. `vjp(f)(x, v)` is reverse mode, and is
+  what `grad` is with the cotangent fixed at 1. `hvp(f)(x, v)` is the Hessian
+  times a vector without building the Hessian.
+
+  Two things are deliberately **not** what JAX does, and the guide says so.
+  `vjp` takes the cotangent as an argument rather than returning a pullback
+  closure: the tape is the tensor graph, so a retained pullback would pin it,
+  the gradient buffers accumulate rather than replace, and a closure that
+  answers differently the second time is the plausible wrong number this
+  project refuses. And `hvp` costs 2n+1 forward passes rather than one
+  forward-over-reverse, because `grad`'s output has no history and
+  `jvp(grad(f))` would return a silent zero -- it is a constant-factor win over
+  building the matrix, not an asymptotic one.
+
+  Checked against central differences, against each other, and against
+  `jacobian`: worst discrepancy 3.2e-07 on a second central difference,
+  everything else at or below 5.7e-10, and the adjoint identity exact to
+  4.4e-16. `examples/jvp.tw` solves `Hz = g` by conjugate gradients using
+  nothing but `hvp`.
+
+- **The modern transformer, in `std`.** `rms_norm` (Llama-style, no mean
+  subtraction, and it survives 1e200 where the naive form silently returns
+  zeros), rotary position embeddings, `swiglu`/`geglu`, and `std/sample.tw`
+  with temperature, top-k, top-p and a categorical draw through a seeded
+  stream. `std/llama.tw` is the model assembled, with `examples/llama.tw`
+  running it end to end.
+
+  RoPE uses the **half-split** pairing, which is what released checkpoints are
+  trained against; the interleaved convention is incompatible and produces
+  fluent nonsense rather than an error, so an exact-value test pins it.
+
+### Fixed
+
+- **`m[i][j] = v` on a tensor of rank 2 or more wrote nothing.** Indexing a row
+  hands back a copy, so the write went into the copy and vanished, with no
+  change and no error. Lists of lists were never affected, because a list is a
+  handle -- it was only ever wrong for the tensors numerical code is made of.
+- **Five checker holes**: `[]` is a list rather than a tensor of shape [0], so
+  `sum([])` is caught; a scalar has no axes, so `sum(1.0, 0)` is caught;
+  `slice` is typed as the Str slice it is rather than propagating a wrong Arr
+  type; reading a field of something that cannot have one is reported; and a
+  file's own enum claims its variant names, where an imported enum sharing a
+  name used to disable exhaustive matching for it with no diagnostic.
+- **A gradient inside a gradient is refused by the self-hosted evaluator too.**
+  It had only the direct check on `grad(grad(f))` and answered [0, 0] to the
+  nesting written the long way round -- the silent zero the refusal exists to
+  prevent.
+
+### Known
+
+The self-hosted `grads` is wrong when the same tensor is passed as two
+arguments: the whole gradient lands on the second parameter. Distinct arguments
+agree, and the bootstrap is correct.
+
 ## [Unreleased]
 
 ### Added
