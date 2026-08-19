@@ -711,7 +711,12 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		case *ast.IfExpr:
 			return join(then, c.inferExpr(alt, env))
 		default:
-			return tUnknown{}
+			// No else, so the value is the branch's when the condition holds
+			// and `()` when it does not. Unit is the honest half to report: it
+			// is the one a caller is not expecting, and it is what makes
+			// `fn f() -> Str { if b { "yes" } }` a function that can hand back
+			// a unit where it promised a string.
+			return tUnit{}
 		}
 	case *ast.Match:
 		subject := c.inferExpr(ex.Subject, env)
@@ -1405,20 +1410,33 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 	if fn.RetUnit != nil && !c.isAdvisoryTypeAnno(fn.RetUnit) {
 		c.checkReturnUnit(fn.Line, fn.Name, fn.RetUnit, bodyType)
 	}
-	c.checkBodyReturnType(fn.Line, fn.Name, retTypeName(fn.RetType, fn.RetUnit), bodyType)
+	c.checkBodyReturnType(fn.Line, fn.Name, retTypeName(fn.RetType, fn.RetUnit), bodyType, fn.Body)
 }
 
 // checkBodyReturnType compares what a function body evaluates to against its
 // declared named return type. A block whose last statement is not an
 // expression (it returned early, or ends in a loop) evaluates to Unit and is
 // not judged, since its `return` statements were checked where they stand.
-func (c *checker) checkBodyReturnType(line int, name, retType string, bodyType Type) {
+func (c *checker) checkBodyReturnType(line int, name, retType string, bodyType Type, body ast.Expr) {
 	if retType == "" {
 		return
 	}
 	want := c.parseType(retType)
 	if _, isUnit := bodyType.(tUnit); isUnit {
-		if _, wantUnit := want.(tUnit); !wantUnit {
+		if _, wantUnit := want.(tUnit); wantUnit {
+			return
+		}
+		// A body that evaluates to Unit against a declared value type is a
+		// function that falls off its end, and that is worth reporting -- but
+		// only when there is no `return` in it to have produced the value
+		// instead. `return` statements are checked where they stand, and a
+		// body ending in a loop or an if-without-else evaluates to Unit while
+		// still returning properly from inside.
+		//
+		// This skipped the whole case, so `fn name(b: Bool) -> Str { if b {
+		// "yes" } }` returned () silently and the caller got a unit where it
+		// had been promised a string.
+		if body == nil || hasValueReturn(body) {
 			return
 		}
 	}
@@ -1429,6 +1447,67 @@ func (c *checker) checkBodyReturnType(line int, name, retType string, bodyType T
 	if !assignable(want, bodyType) {
 		c.report(line, "%s returns %s but its signature declares %s", who, c.typeString(bodyType), c.typeString(want))
 	}
+}
+
+// hasValueReturn reports whether a function body contains a `return` carrying a
+// value, anywhere that is not inside a nested function -- a nested function's
+// returns are its own.
+func hasValueReturn(e ast.Expr) bool {
+	found := false
+	var walkStmt func(ast.Stmt)
+	var walkExpr func(ast.Expr)
+	walkStmt = func(s ast.Stmt) {
+		if found || s == nil {
+			return
+		}
+		switch st := s.(type) {
+		case *ast.Return:
+			if st.Value != nil {
+				found = true
+			}
+		case *ast.Block:
+			for _, in := range st.Body {
+				walkStmt(in)
+			}
+		case *ast.While:
+			walkStmt(st.Body)
+		case *ast.For:
+			walkStmt(st.Body)
+		case *ast.ExprStmt:
+			walkExpr(st.X)
+		case *ast.Let:
+			walkExpr(st.Value)
+		case *ast.Assign:
+			walkExpr(st.Value)
+		}
+	}
+	walkExpr = func(x ast.Expr) {
+		if found || x == nil {
+			return
+		}
+		switch ex := x.(type) {
+		case *ast.Block:
+			for _, in := range ex.Body {
+				walkStmt(in)
+			}
+		case *ast.IfExpr:
+			walkStmt(ex.Then)
+			if ex.Else != nil {
+				switch alt := ex.Else.(type) {
+				case *ast.Block:
+					walkStmt(alt)
+				case *ast.IfExpr:
+					walkExpr(alt)
+				}
+			}
+		case *ast.Match:
+			for _, arm := range ex.Arms {
+				walkStmt(arm.Body)
+			}
+		}
+	}
+	walkExpr(e)
+	return found
 }
 
 // checkReturnType is checkBodyReturnType for an explicit `return e`, against
@@ -1479,7 +1558,40 @@ func (c *checker) checkStructLit(ex *ast.RecordLit, fields map[string]Type) Type
 // and is checked; in numeric mode nothing is advisory, so an undeclared unit is
 // still reported; and a compound annotation (`USD/year`) is always a unit.
 func (c *checker) isAdvisoryTypeAnno(u *ast.UnitAnno) bool {
-	return c.systems && len(u.Factors) == 1 && u.Factors[0].Exp == 1 && !c.units[u.Factors[0].Name]
+	if len(u.Factors) != 1 || u.Factors[0].Exp != 1 || c.units[u.Factors[0].Name] {
+		return false
+	}
+	if c.systems {
+		return true
+	}
+	// In numeric mode a bare name is ordinarily a unit, and an undeclared one is
+	// a typo worth reporting. A name that is one of the dialect's own types is
+	// not: `let b: Bool = true` is a correct numeric-mode program that ran fine,
+	// and the checker rejected it with "unknown unit \"Bool\" (declare it with
+	// `unit Bool`)" -- a false positive in the default mode, giving advice that
+	// would make the program worse. The types exist at run time in both modes;
+	// only the annotation syntax is documented as systems-mode.
+	return isKnownTypeName(u.Factors[0].Name)
+}
+
+// annoHeadName is a type annotation's head: `Arr` for `Arr[I64]`, and the whole
+// text when there is no argument list.
+func annoHeadName(text string) string {
+	if i := strings.IndexByte(text, '['); i >= 0 {
+		return text[:i]
+	}
+	return text
+}
+
+// isKnownTypeName reports whether a bare annotation names one of the language's
+// types rather than a unit of measure.
+func isKnownTypeName(name string) bool {
+	switch name {
+	case "I64", "F64", "Bool", "Str", "Bytes", "Byte", "Unit", "Arr", "Dict",
+		"Opt", "Res", "Tensor", "List":
+		return true
+	}
+	return false
 }
 
 func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
@@ -1513,7 +1625,10 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 				// argument happened to be, so a body indexing an Arr[I64] is not
 				// judged by a scalar a test passed in. In numeric mode an unknown
 				// type name is still reported.
-				if c.systems {
+				// A name that is one of the language's own types is a type in
+				// either mode, so numeric mode does not report it as unknown --
+				// the same correction the `let` annotation needed.
+				if c.systems || isKnownTypeName(annoHeadName(p.TypeName)) {
 					want := c.parseType(p.TypeName)
 					what := fmt.Sprintf("argument %d (%q)", i+1, p.Name)
 					if c.checkAssignable(ex.Line, what, want, argTypes[i]) && i < len(ex.Args) {
@@ -1561,7 +1676,7 @@ func (c *checker) inferUserCall(fn tFn, ex *ast.Call, argTypes []Type) Type {
 	c.fnRet = c.fnRet[:len(c.fnRet)-1]
 	c.loopDepth = savedDepth
 	delete(c.stack, fn.node)
-	c.checkBodyReturnType(ex.Line, "", retTypeName(fn.retType, fn.retUnit), bodyType)
+	c.checkBodyReturnType(ex.Line, "", retTypeName(fn.retType, fn.retUnit), bodyType, fn.body)
 
 	if fn.ret != nil {
 		expected := tTensor{dims: substitute(fn.ret.Dims, subst)}
@@ -2735,9 +2850,19 @@ func join(a, b Type) Type {
 // the checker is sure of it. A type it cannot resolve reports false, so nothing
 // is judged on a guess.
 func (c *checker) unorderable(t Type) (string, bool) {
-	switch t.(type) {
+	switch v := t.(type) {
 	case tEnum, tArr, tDict, tRecord, tList, tBytes, tUnit, tBool, tCtor, tFnType, tFn, tBuiltin:
 		return c.typeString(t), true
+	case tTensor:
+		// Ordering is scalar-only, so a tensor of known rank above 0 cannot be
+		// ordered and the runtime refuses it. `where(A > 0.0, A, B)` is the
+		// shape this takes in practice -- the masking idiom every array library
+		// has -- and it failed at run time for every non-scalar A while the
+		// checker, which knew the rank, said nothing. `greater(A, 0.0)` is the
+		// elementwise form and yields the mask.
+		if len(v.dims) > 0 && fullyKnown(v) {
+			return c.typeString(t), true
+		}
 	}
 	return "", false
 }

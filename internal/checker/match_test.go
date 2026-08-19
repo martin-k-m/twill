@@ -152,3 +152,47 @@ func TestAFractionAtAnI64IsStillReported(t *testing.T) {
 	// check did not look through at all.
 	wantOne(t, "mode systems\nlet x: I64 = -2.5\n", "the fraction 2.5")
 }
+
+// Ordering is scalar-only, so a tensor of known rank above 0 cannot be ordered
+// and the runtime refuses it. `where(A > 0.0, A, B)` is the shape this takes in
+// practice -- the masking idiom every array library has -- and it failed at run
+// time for every non-scalar A while the checker, which knew the rank, said
+// nothing. `greater(A, 0.0)` is the elementwise form that yields the mask.
+func TestOrderingANonScalarTensorIsReported(t *testing.T) {
+	wantOne(t, "let r = [1.0, 2.0] > 0.0", `cannot order a tensor of shape [2] with ">"`)
+	wantOne(t, "let A = [[1.0, 2.0], [3.0, 4.0]]\nlet r = where(A > 0.0, A, A)",
+		`cannot order a tensor of shape [2, 2] with ">"`)
+	// A scalar orders fine, and an unknown rank is not judged on a guess.
+	wantNone(t, "let r = 1.0 < 2.0")
+	wantNone(t, "fn f(x) = x < 1.0\nlet r = f(2.0)")
+	wantNone(t, "let r = greater([1.0, 2.0], 0.0)")
+}
+
+// A function that declares a value type and falls off its end returns `()`.
+// The check skipped every body that evaluated to Unit, on the grounds that its
+// `return` statements were checked where they stand -- but a body with no
+// `return` at all also evaluates to Unit, so the commonest shape of the mistake
+// was the one case never judged.
+func TestAFunctionThatFallsOffItsEndIsReported(t *testing.T) {
+	wantOne(t, "mode systems\nfn name(b: Bool) -> Str {\n  if b { \"yes\" }\n}",
+		`function "name" returns Unit but its signature declares Str`)
+}
+
+func TestAFunctionThatReturnsProperlyIsQuiet(t *testing.T) {
+	for _, src := range []string{
+		// A `return` inside the if, with a value after it.
+		"mode systems\nfn f(b: Bool) -> Str {\n  if b { return \"yes\" }\n  \"no\"\n}",
+		// An if-else, where both branches are values.
+		"mode systems\nfn g(b: Bool) -> Str {\n  if b { \"yes\" } else { \"no\" }\n}",
+		// A body ending in a loop, whose value comes after it.
+		"mode systems\nfn h(n: I64) -> I64 {\n  let i: I64 = 0\n  while i < n { i = i + 1 }\n  i\n}",
+		// Every path returns explicitly.
+		"mode systems\nfn r(b: Bool) -> Str {\n  if b { return \"y\" }\n  return \"n\"\n}",
+		// A return from inside a loop inside the body.
+		"mode systems\nfn l(n: I64) -> I64 {\n  let i: I64 = 0\n  while i < n {\n    if i == 3 { return i }\n    i = i + 1\n  }\n  0\n}",
+		// No declared return type: nothing to judge against.
+		"mode systems\nfn q(b: Bool) {\n  if b { print(1.0) }\n}",
+	} {
+		wantNone(t, src)
+	}
+}
