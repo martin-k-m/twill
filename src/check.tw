@@ -1183,6 +1183,14 @@ fn same_dims(a: Arr[I64], b: Arr[I64]) -> Bool {
 # and typed Unknown, because a shape invented from the first row would produce a
 # second, imaginary error downstream instead of this real one.
 fn infer_tensor_lit(c: Checker, ex: ast.TensorLit) -> Type {
+  # `[]` evaluates to an empty list, not to a tensor of shape [0]: the evaluator
+  # has no elements to read a shape from, so it builds the container that does
+  # not need one. Typing it as a tensor made the checker confidently wrong at
+  # the dimension-0 boundary, where a shape checker is supposed to earn its
+  # keep, and `sum([])` checked clean and then failed at run time.
+  if len(ex.elements) == 0 {
+    return TList(ListType { elems: None })
+  }
   let dims: Arr[I64] = arr_new()
   let ok: Arr[Bool] = arr_new()
   push(ok, true)
@@ -2320,7 +2328,7 @@ fn builtin_fixed_arity(name: Str) -> I64 {
   if in_set(name, "args arr_new bytes_new clock_now_ms dict_new gpu_available gpu_device_count is_tty_stdout rng_normal rng_uniform window_size") {
     return 0
   }
-  if in_set(name, "relu exp log sin cos tanh sigmoid sqrt square floor ceil round abort abs arr_clear bnot buf_len buf_new bytes_to_str chr columns dict_keys emit_line enumerate env eye f64_bits f64_from_bits f64_hex f64_of_i64 f64_signbit f64_to_str gbm_describe grad grads hessian dtype i64_of_f64 i64_of_str int item jacobian len list_dir load load_value module_source nbytes num_to_text permutation pop read_csv read_file read_frame rng_perm rng_seed scalar seed shape str str_quote str_to_f64 tensor value_and_grad write_err write_out") {
+  if in_set(name, "relu exp log sin cos tanh sigmoid sqrt square floor ceil round abort abs arr_clear bnot buf_len buf_new bytes_to_str chr columns dict_keys emit_line enumerate env eye f64_bits f64_from_bits f64_hex f64_of_i64 f64_signbit f64_to_str gbm_describe grad grads hessian hvp jvp vjp dtype i64_of_f64 i64_of_str int item jacobian len list_dir load load_value module_source nbytes num_to_text permutation pop read_csv read_file read_frame rng_perm rng_seed scalar seed shape str str_quote str_to_f64 tensor value_and_grad write_err write_out") {
     return 1
   }
   if in_set(name, "matmul dot conv2d maximum minimum greater less greater_equal less_equal equal and or band bor xor shl shr append arr_push buf_get8 bytes_push concat dict_del dict_get dict_has dict_must f64_mod f64_pow field gather is_same linear map map_leaves maxpool2d pow push save save_value write_file write_frame zip_leaves") {
@@ -2330,6 +2338,45 @@ fn builtin_fixed_arity(name: Str) -> I64 {
     return 3
   }
   -1
+}
+
+# The builtins whose arguments the runtime requires to be tensors or numbers.
+# Deliberately a short, checked list rather than everything: len, map, fold,
+# concat, append, sort, zip and the rest take lists on purpose, and reporting
+# those would be the false positive that makes a checker worth turning off.
+let TENSOR_ONLY: Str = "sum mean prod median max min argmax argmin exp log sin cos tanh sigmoid sqrt square abs relu softmax logsumexp transpose reshape shape matmul dot linear broadcast_to cumsum cumprod flip roll diff"
+
+# Whether a type certainly is not a tensor. TUnknown is not, which is what keeps
+# an unannotated program silent.
+fn definite_non_tensor(t: Type) -> Bool {
+  match t {
+    TBool => true,
+    TStr => true,
+    TUnit => true,
+    TList(_) => true,
+    TRecord(_) => true,
+    TFn(_) => true,
+    TBuiltin(_) => true,
+    TTensor(_) => false,
+    TUnknown => false,
+  }
+}
+
+# A type as a diagnostic names it. The wording matches the Go checker's
+# typeString for every case this lattice can produce, because the two
+# implementations' diagnostics are compared byte for byte.
+fn type_text(t: Type) -> Str {
+  match t {
+    TBool => "Bool",
+    TStr => "Str",
+    TUnit => "Unit",
+    TList(_) => "a list",
+    TRecord(_) => "a record",
+    TFn(_) => "a function",
+    TBuiltin(_) => "a function",
+    TTensor(_) => "a tensor",
+    TUnknown => "an unknown value",
+  }
 }
 
 fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type], dt: I64) -> Type {
@@ -2342,6 +2389,25 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     report(c, ex.line, bytes.concat(name, bytes.concat(" expects ", bytes.concat(str(arity),
       bytes.concat(" argument(s), got ", str(len(ex.args)))))))
     return TUnknown
+  }
+  # A builtin that works on tensors, handed something that is definitely not
+  # one. Only the operands are checked, not the trailing arguments: reshape and
+  # broadcast_to take their shape as a list of dimensions, and an axis is an
+  # ordinary number.
+  if in_set(name, TENSOR_ONLY) and len(arg_types) > 0 {
+    let operands: I64 = 1
+    if in_set(name, "matmul dot linear") {
+      operands = 2
+    }
+    let i: I64 = 0
+    while i < operands and i < len(arg_types) {
+      if definite_non_tensor(arg_types[i]) {
+        report(c, ex.line, bytes.concat(name, bytes.concat(" expects a tensor, but argument ",
+          bytes.concat(str(i + 1), bytes.concat(" is ", type_text(arg_types[i]))))))
+        return TUnknown
+      }
+      i = i + 1
+    }
   }
   # Shape and unit preserved. So is the dtype: relu and clip preserve
   # integrality and keep it (tensor.unary_result_dtype).
@@ -2595,7 +2661,7 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   if bytes.equal(name, "tensor") { return tensor_builtin_result(arg_types, dt) }
   # These return values whose shape depends on runtime data; treat the result as
   # unknown so downstream code is not falsely flagged.
-  if in_set(name, "grad grads value_and_grad jacobian hessian gbm_fit") { return TUnknown }
+  if in_set(name, "grad grads value_and_grad jacobian hessian jvp vjp hvp gbm_fit") { return TUnknown }
   # A cumulative scan, a reversal, or elementwise rounding all preserve the
   # input's shape and dtype but not necessarily its unit, so the unit is
   # dropped.
@@ -3067,10 +3133,52 @@ fn transpose_result(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Type {
 # silences everything downstream as well. Detecting a mistake and saying nothing
 # is the worst of the three options.
 fn report_axis(c: Checker, ex: ast.Call, t: TensorType) {
+  # A scalar has no axes at all, so the "numbered 0 to -1" the general form
+  # would produce is nonsense. It is also the case the axis checks skipped, each
+  # guarding on rank > 0 before validating, so `sum(1.0, 0)` reached the runtime.
+  if len(t.dims) == 0 {
+    report(c, ex.line, bytes.concat("a scalar has no axes, so there is no axis ",
+      bytes.concat(axis_text(ex), " to reduce over")))
+    return unit
+  }
   report(c, ex.line, bytes.concat("axis out of range for ", bytes.concat(dims_string(t),
     bytes.concat(": it has ", bytes.concat(str(len(t.dims)),
     bytes.concat(" ", bytes.concat(plural(len(t.dims), "axis", "axes"),
     bytes.concat(", numbered 0 to ", str(len(t.dims) - 1)))))))))
+}
+
+# An axis given for a scalar, which has none. True when it reported, so the
+# caller stops.
+fn rank0_axis(c: Checker, ex: ast.Call, arg_types: Arr[Type]) -> Bool {
+  if len(arg_types) < 2 {
+    return false
+  }
+  match arg_tensor(arg_types, 0) {
+    Some(t) => {
+      if len(t.dims) != 0 {
+        return false
+      }
+      match const_int(ex.args[1]) {
+        Some(_) => {
+          report_axis(c, ex, t)
+          true
+        },
+        None => false,
+      }
+    },
+    None => false,
+  }
+}
+
+# The axis argument as written, for the scalar diagnostic.
+fn axis_text(ex: ast.Call) -> Str {
+  if len(ex.args) > 1 {
+    match const_int(ex.args[1]) {
+      Some(n) => return str(n),
+      None => unit,
+    }
+  }
+  "there"
 }
 
 fn plural(n: I64, one: Str, many: Str) -> Str {
@@ -3099,6 +3207,9 @@ fn reduce_result(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type]) -> T
     return set_dtype(tensor_with_unit(arr_new(), u), rdt)
   }
   if len(arg_types) == 2 {
+    if rank0_axis(c, ex, arg_types) {
+      return TUnknown
+    }
     match arg_tensor(arg_types, 0) {
       Some(t) => {
         if len(t.dims) > 0 {
