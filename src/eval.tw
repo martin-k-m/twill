@@ -1029,6 +1029,19 @@ fn is_f64_anno(type_name: Str, u: Opt[ast.UnitAnno]) -> Bool {
 # at the top of a file that there is no function to return the failure from.
 let CALL_DEPTH: Arr[I64] = [0]
 
+# How many gradient passes are running, so that a gradient taken inside one is
+# refused rather than answered with a zero.
+#
+# refuse_nested_grad catches `grad(grad(f))` written directly, and misses it
+# the long way round: `let g = grad(f)` and then `grad(fn(x) = g(x) * 2)` puts a
+# user function between the two, so the argument is not a grad builtin and the
+# direct check sees nothing. The inner call still returns a value with no
+# history, the outer pass still differentiates a constant, and the answer is
+# still zero -- silently, which is the one thing docs/DECISIONS.md says this
+# refusal exists to prevent. The bootstrap has carried this counter since the
+# refusal was written; this side did not, and answered [0, 0].
+let GRAD_DEPTH: Arr[I64] = [0]
+
 # The failure a `?` is carrying out of the function, when one is in flight.
 #
 # `?` returns the failure from the enclosing function, and an expression here
@@ -3871,12 +3884,20 @@ struct TracedRun {
 # by then the tape is no longer installed, and an outer grad's tape would be,
 # so the convenient form would answer about the wrong tape.
 fn run_traced(f: Value, args: Arr[Value], tp: tensor.Tape, line: I64) -> Res[TracedRun, RuntimeError] {
+  if GRAD_DEPTH[0] > 0 {
+    return Err(runtime_error(line, bytes.concat("a gradient taken inside a gradient is not a ",
+      bytes.concat("second derivative: the value the inner grad returns has no history, so ",
+      bytes.concat("differentiating it again gives zero. Use hessian(f) for a second derivative, ",
+      "or jacobian(f) for the matrix of first ones")))))
+  }
+  GRAD_DEPTH[0] = GRAD_DEPTH[0] + 1
   tape_push(tp)
   # Line 0, and it is deliberate: the call comes from inside grad, not from a
   # source position, and reporting the grad site would point at the wrong line
   # when the failure is inside f. The Go side passes 0 here for the same reason.
   let out: Res[Value, RuntimeError] = apply(f, args, 0)
   tape_pop()
+  GRAD_DEPTH[0] = GRAD_DEPTH[0] - 1
   let v: Value = out?
   match tape_node_in(tp, v) {
     Some(n) => Ok(TracedRun { value: v, node: n }),

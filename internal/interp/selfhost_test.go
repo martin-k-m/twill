@@ -844,3 +844,63 @@ func runSelfHostedRun(t *testing.T, src string) int {
 	}
 	return int(n)
 }
+
+// A gradient taken inside a gradient is refused by both engines, with the same
+// words. The bootstrap has carried a depth counter since the refusal was
+// written; the self-hosted evaluator had only the direct check on
+// `grad(grad(f))`, which misses the nesting written the long way round -- a
+// `let g = grad(f)` with a user function between the two. It answered [0, 0],
+// which is the silent zero docs/DECISIONS.md says the refusal exists to
+// prevent.
+func TestSelfHostedRefusesAGradientInsideAGradient(t *testing.T) {
+	dir := t.TempDir()
+	const src = `fn g(x) = sum(x * x)
+fn outer(x) = sum(grad(g)(x))
+print(grad(outer)([1.0, 2.0]))
+`
+	target := filepath.Join(dir, "input.tw")
+	if err := os.WriteFile(target, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	goIP := interp.New(func(string) {})
+	_, _, goErr := goIP.RunFileMain(target, nil)
+	if goErr == nil {
+		t.Fatal("the Go bootstrap accepted a gradient inside a gradient")
+	}
+
+	var selfOut strings.Builder
+	selfIP := interp.New(func(s string) { selfOut.WriteString(s) })
+	if _, _, err := selfIP.RunFileMain(filepath.Join("..", "..", "src", "main.tw"),
+		[]string{"twill", "run", target}); err != nil {
+		t.Fatalf("self-hosted CLI errored: %v", err)
+	}
+	// It must not have printed an answer, and least of all a zero.
+	if got := selfOut.String(); got != "" {
+		t.Errorf("the self-hosted evaluator answered %q; it must refuse", got)
+	}
+	if !strings.Contains(goErr.Error(), "gradient taken inside a gradient") {
+		t.Errorf("go error = %v", goErr)
+	}
+}
+
+// The ordinary derivatives are unaffected by that guard, on both engines.
+func TestSelfHostedDerivativesStillAgree(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `fn f(x) = sum(x * x * x)
+let x = [1.0, 2.0, 3.0]
+let v = [1.0, 0.0, 0.0]
+print(grad(f)(x))
+print(value_and_grad(f)(x))
+print(jvp(f)(x, v))
+print(vjp(f)(x, 1.0))
+print(hvp(f)(x, v))
+print(hessian(f)([1.0, 2.0]))
+print(jacobian(fn(y) = y * y)([1.0, 2.0]))
+`)
+	if goOut != selfOut {
+		t.Fatalf("go = %q, self = %q", goOut, selfOut)
+	}
+	if !strings.Contains(goOut, "3, 12, 27") {
+		t.Errorf("output %q does not contain the expected gradient", goOut)
+	}
+}
