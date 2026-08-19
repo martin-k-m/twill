@@ -904,3 +904,57 @@ print(jacobian(fn(y) = y * y)([1.0, 2.0]))
 		t.Errorf("output %q does not contain the expected gradient", goOut)
 	}
 }
+
+// stop_grad puts a value outside the graph: the same numbers, no history, so a
+// gradient reaching it stops. It is what a stabilisation needs when the rewrite
+// it performs is not an exact algebraic identity, and it is how a
+// straight-through estimator is written.
+func TestSelfHostedStopGrad(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `fn plain(x) = sum(x * x)
+fn stopped(x) = sum(x * stop_grad(x))
+let x = [1.0, 2.0, 3.0]
+print(plain(x), stopped(x))
+print(grad(plain)(x))
+print(grad(stopped)(x))
+fn ste(x) = sum(x + stop_grad(floor(x) - x))
+print(ste([1.7, 2.3]), grad(ste)([1.7, 2.3]))
+print(shape(stop_grad(zeros(2, 3))), dtype(stop_grad(zeros(2, 2, bf16))))
+`)
+	if goOut != selfOut {
+		t.Fatalf("go = %q, self = %q", goOut, selfOut)
+	}
+	for _, want := range []string{
+		"14 14",                        // the forward value is unchanged
+		"tensor([2, 4, 6], shape=[3])", // d/dx sum(x*x) = 2x
+		"tensor([1, 2, 3], shape=[3])", // the stopped factor contributes nothing, so it is x
+		"3 tensor([1, 1], shape=[2])",  // the estimator: floor forward, identity backward
+		"[2, 3] bf16",                  // shape and dtype ride through
+	} {
+		if !strings.Contains(goOut, want) {
+			t.Errorf("output %q is missing %q", goOut, want)
+		}
+	}
+}
+
+// The same tensor passed as two arguments gets a gradient for each. A node is
+// found again by tensor identity, so two leaves holding the same object were
+// indistinguishable: every operand inside f resolved to whichever was
+// registered last, the whole gradient landed on the second parameter, and the
+// first came back zeros. The bootstrap was always right; this is the reference
+// implementation agreeing with it.
+func TestSelfHostedGradsWithAliasedArguments(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `let a = [1.0, 2.0]
+let b = [3.0, 4.0]
+print(grads(fn(p, q) = sum(p * q))(a, b))
+let c = [1.0, 2.0]
+print(grads(fn(p, q) = sum(p * q))(c, c))
+`)
+	if goOut != selfOut {
+		t.Fatalf("go = %q, self = %q", goOut, selfOut)
+	}
+	// d/dp = q and d/dq = p, so aliasing gives each parameter the other's
+	// value, which is its own.
+	if !strings.Contains(goOut, "[tensor([1, 2], shape=[2]), tensor([1, 2], shape=[2])]") {
+		t.Errorf("output %q does not carry a gradient for both aliased parameters", goOut)
+	}
+}

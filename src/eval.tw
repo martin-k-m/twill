@@ -2442,6 +2442,7 @@ fn call_builtin(b: BuiltinVal, args: Arr[Value], line: I64) -> Res[Value, Runtim
   if bytes.equal(name, "print") { return bi_print(args) }
   if in_words(UNARY_MATH, name) { return bi_unary_math(name, args, line) }
   if bytes.equal(name, "abs") { return bi_abs(args, line) }
+  if bytes.equal(name, "stop_grad") { return bi_stop_grad(args, line) }
   if bytes.equal(name, "pow") { return bi_pow(args, line) }
   if in_words(BIN_TENSOR, name) { return bi_binary(name, args, line) }
   if bytes.equal(name, "maxpool2d") { return bi_maxpool2d(args, line) }
@@ -2684,6 +2685,19 @@ fn bi_unary_math(name: Str, args: Arr[Value], line: I64) -> Res[Value, RuntimeEr
 # |x| = relu(x) + relu(-x), keeping it differentiable. Written as two relus
 # rather than a sign test because a sign test has no gradient at all, and this
 # has the subgradient 0 at the origin, which is the conventional choice.
+# stop_grad(x): the same values, outside the graph.
+#
+# The tape records the operations that produced a value, so a tensor built
+# straight from its numbers has no node on it and a backward pass reaching one
+# stops there. That is the whole of it: mk_raw rather than a traced op.
+#
+# The numbers are copied rather than shared, so that a later in-place write
+# through the original cannot change what the detached copy holds.
+fn bi_stop_grad(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
+  let t: tensor.Tensor = arg_tensor(args[0], "stop_grad", line)?
+  Ok(VTensor(tensor.clone(t)))
+}
+
 fn bi_abs(args: Arr[Value], line: I64) -> Res[Value, RuntimeError] {
   let t: tensor.Tensor = arg_tensor(args[0], "abs", line)?
   let pos: tensor.Tensor = tr_unary(tensor.OpRelu, t)

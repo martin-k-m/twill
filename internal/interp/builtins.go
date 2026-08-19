@@ -51,6 +51,18 @@ func (ip *Interp) installBuiltins() {
 	unaryOp("sqrt", tensor.Sqrt)
 	unaryOp("square", tensor.Square)
 
+	// stop_grad(x): the same values, outside the graph. A gradient reaching it
+	// stops, which is what a stabilisation whose rewrite is not an exact
+	// identity needs, and how a straight-through estimator and a target network
+	// are each written. A number that was never differentiating passes through
+	// unchanged.
+	def("stop_grad", 1, false, func(a []value.Value) (value.Value, error) {
+		t, err := asTensor(a[0], "stop_grad")
+		if err != nil {
+			return nil, err
+		}
+		return tensor.Detach(t), nil
+	})
 	def("abs", 1, false, func(a []value.Value) (value.Value, error) {
 		t, err := asTensor(a[0], "abs")
 		if err != nil {

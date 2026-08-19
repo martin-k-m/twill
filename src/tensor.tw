@@ -2910,8 +2910,20 @@ fn value_of(tp: Tape, node: I64) -> Tensor = tp.entries[node].out
 # A leaf is a value a gradient is wanted for. A const is a value that is on the
 # tape only so that a later entry can name it; it gets a cotangent slot like
 # everything else and nobody reads it.
+# A differentiated input, registered as its own node.
+#
+# The tensor is cloned, and that is load-bearing rather than tidy. A node is
+# found again by tensor identity (tape_node_of_tensor scans for the object), so
+# two leaves holding the same object are indistinguishable -- and
+# `grads(f)(c, c)`, one tensor passed as two arguments, is exactly that. Every
+# operand inside f resolved to whichever leaf was registered last, so the whole
+# gradient landed on the second parameter and the first came back zeros.
+#
+# The copy costs one buffer per differentiated argument per call. The reference
+# implementation is the one that has to be right; the bootstrap is the one that
+# has to be quick.
 fn leaf(tp: Tape, t: Tensor) -> I64 {
-  let n: I64 = record(tp, OpLeaf, arr_new(), t, no_ints(), no_floats(), "")
+  let n: I64 = record(tp, OpLeaf, arr_new(), clone(t), no_ints(), no_floats(), "")
   push(tp.leaves, n)
   n
 }
