@@ -15,7 +15,23 @@ import (
 // file exercises the whole front end -- lexer, parser and checker, all in twill
 // -- end to end. Its exit code is the milestone under guard: 0 for a clean file,
 // 1 for one with a shape error, matching what the Go `check` command returns.
+// Every test in this file runs the self-hosted compiler, which means the Go
+// interpreter interpreting src/*.tw -- the slowest thing in the repository by a
+// wide margin. They are skipped in short mode, which is not a way of running
+// them less: CI's ordinary `go test` runs every one of them on every build. It
+// is the race pass that passes -short, and the race detector is looking for
+// data races in the parallel tensor kernels, which is not what a single-
+// threaded tree walk over a twill source file exercises. Running them there
+// bought nothing and cost the pass its 25-minute budget.
+func skipUnderShort(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping the self-hosted differential run in short mode")
+	}
+}
+
 func runSelfHostedCheck(t *testing.T, source string) int {
+	skipUnderShort(t)
 	t.Helper()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "input.tw")
@@ -43,6 +59,7 @@ func runSelfHostedCheck(t *testing.T, source string) int {
 // each. The self-hosted evaluator is meant to match the bootstrap byte for
 // byte, so a builtin added to one is not done until it agrees on the other.
 func runBothWays(t *testing.T, source string) (goOut, selfOut string) {
+	skipUnderShort(t)
 	t.Helper()
 	var goBuf strings.Builder
 	goIP := interp.New(func(s string) { goBuf.WriteString(s) })
@@ -587,6 +604,7 @@ func TestSelfHostedCheckCatchesTryContext(t *testing.T) {
 // numeric-mode program -- exactly the kind it is used for. A systems-mode
 // program has an entry point, so comparing it needs both sides to look for one.
 func runBothWaysAsCLI(t *testing.T, source string) (goOut, selfOut string) {
+	skipUnderShort(t)
 	t.Helper()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "input.tw")

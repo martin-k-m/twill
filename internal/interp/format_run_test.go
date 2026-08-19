@@ -23,6 +23,9 @@ func TestFormattedExamplesMatch(t *testing.T) {
 		}
 		f := f
 		t.Run(filepath.Base(f), func(t *testing.T) {
+			// This runs each example twice, original and formatted, so the two
+			// model-training examples cost four runs between them.
+			skipHeavyExample(t, f)
 			formatted, err := format.Source(string(src))
 			if err != nil {
 				t.Fatalf("format: %v", err)
