@@ -7,6 +7,7 @@ package checker
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -1086,7 +1087,11 @@ func isWholeLiteral(e ast.Expr) bool {
 		e = u.Operand
 	}
 	lit, ok := e.(*ast.NumberLit)
-	return ok && lit.Value == float64(int64(lit.Value)) && !strings.ContainsAny(lit.Text, ".eE")
+	// Trunc, not a round trip through int64: converting a float at or above
+	// 2^63 to an int64 is out of range and lands on MIN_I64, which made
+	// MAX_I64 read as not-whole and quietly turned `mx + 1` into F64
+	// arithmetic. See fractionalLiteralAtInt.
+	return ok && lit.Value == math.Trunc(lit.Value) && !strings.ContainsAny(lit.Text, ".eE")
 }
 
 // withUnit attaches a unit to a tTensor result, leaving other types unchanged.

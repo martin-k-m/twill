@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.6.1] - 2026-08-19
+
+Two bugs in 1.6.0, both found by comparing the Go bootstrap against the
+self-hosted compiler rather than by either one on its own.
+
+### Fixed
+
+- **`MAX_I64` is not a fraction.** `let mx: I64 = 9223372036854775807` was
+  refused, with a message calling the commonest constant in the subset a
+  decimal. The check read fractionality from a round trip through `int64`, and
+  for a value at or above 2^63 that is an out-of-range conversion: it lands on
+  `MIN_I64`, so the comparison disagreed with itself. It reads the value against
+  `math.Trunc` now, which has no range to fall out of and reads `2.5e3` as the
+  whole number it is. The same round trip decided whether an operand was an
+  integer for `I64` arithmetic, so `mx + 1` was quietly computing in floating
+  point.
+
+  The interpreter's own tests never caught it because they do not run the
+  checker, and `twill run` does.
+
+- **The self-hosted CLI runs a systems-mode program.** A systems-mode
+  program's entry point is `main()`, which the bootstrap documents and does;
+  `src/main.tw` executed the top level and stopped, so the self-hosted CLI could
+  not run the dialect the self-hosted compiler is itself written in. The
+  differential harness compares numeric-mode programs, where there is no `main`
+  to call, which is why nothing reported it. It also compared the Go half's
+  top-level evaluation against the self-hosted half's full CLI, an asymmetry
+  that only numeric mode hides; the new tests compare the two CLIs.
+
 ## [1.6.0] - 2026-08-19
 
 The completeness release. Four things were true of twill before it and are not

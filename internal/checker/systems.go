@@ -2,6 +2,7 @@ package checker
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/twill-lang/twill/internal/ast"
@@ -415,9 +416,25 @@ func (c *checker) fractionalLiteralAtInt(line int, what string, want Type, e ast
 	if _, isInt := want.(tInt); !isInt {
 		return
 	}
-	if lit, ok := e.(*ast.NumberLit); ok && lit.Value != float64(int64(lit.Value)) {
-		c.report(line, "%s is declared I64 but the value is the fraction %s", what, lit.Text)
+	// A negated literal is a unary minus over a number, so `-2.5` is read
+	// through to the digits under it.
+	if u, ok := e.(*ast.Unary); ok && u.Op == "-" {
+		e = u.Operand
 	}
+	lit, ok := e.(*ast.NumberLit)
+	if !ok {
+		return
+	}
+	// math.Trunc rather than a round trip through int64. `float64(int64(v))`
+	// is an out-of-range conversion for anything at or above 2^63, and it
+	// lands on MIN_I64, so the comparison disagreed with itself and called
+	// 9223372036854775807 -- MAX_I64, the commonest constant in the subset --
+	// a fraction. Trunc has no range to fall out of, and it reads 2.5e3 as the
+	// whole number it is rather than as a decimal point.
+	if lit.Value == math.Trunc(lit.Value) {
+		return
+	}
+	c.report(line, "%s is declared I64 but the value is the fraction %s", what, lit.Text)
 }
 
 // bindingType is the type a `let` or a parameter takes from its annotation:
