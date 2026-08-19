@@ -31,6 +31,7 @@
 
 import "std/nn" as nn
 import "std/loss" as loss
+import "std/sample" as sample
 
 # ── Configuration ────────────────────────────────────────────────────────────
 #
@@ -70,6 +71,79 @@ fn feedforward_params(dim, hidden, strategy) = {
 }
 
 fn feedforward(p, X) = nn.dense_apply(p.fc2, nn.gelu(nn.dense_apply(p.fc1, X)))
+
+# ── The gated feed-forward sub-layer ─────────────────────────────────────────
+#
+# What Llama, PaLM, Mistral and Gemma use in place of the two-layer MLP above.
+#
+# The plain feed-forward projects up, squashes, and projects back down. The
+# gated one projects up *twice*, into a value and a gate, multiplies them
+# elementwise, and projects the product down:
+#
+#   plain    down(gelu(up(x)))                 two matrices
+#   gated    down(value(x) * silu(gate(x)))    three matrices
+#
+# The gate gives the layer a multiplicative interaction it did not have before:
+# a channel can be switched off by a *different* function of the input than the
+# one that computed it, rather than only being squashed by its own magnitude.
+# Shazeer's 2020 note tried this with every activation in the gate slot and the
+# gated forms won across the board; SiLU won among the gated forms, and that
+# combination is what "SwiGLU" names.
+#
+# THE HIDDEN WIDTH, WHICH IS THE PART EVERYONE GETS WRONG
+#
+# Three matrices of width `hidden` is 1.5x the parameters of two, so a gated
+# feed-forward at the usual `hidden = 4 * dim` is a 50% larger model and any
+# comparison against a plain block is measuring the size, not the gating. The
+# convention that fixes this, and the one the released checkpoints follow, is to
+# shrink the hidden width by 2/3:
+#
+#     hidden = 4 * dim * 2/3 = 8 * dim / 3
+#
+# which lands the parameter count back on 4 * dim * dim * 2, exactly the plain
+# block. `swiglu_hidden` below computes that and rounds it up to a multiple of
+# `multiple_of`, which is why real models have feed-forward widths like 11008
+# (from dim 4096) rather than round numbers: the rounding is there to keep the
+# matrix shapes friendly to the hardware, and it is applied after the 2/3, not
+# before.
+#
+# NO BIASES
+#
+# `w_gate`, `w_up` and `w_down` are bare weights, not `nn.dense_params` records,
+# because modern decoders drop the feed-forward bias entirely. It costs nothing
+# to remove -- an RMSNorm-scaled input into a linear map has no offset the bias
+# is correcting -- and the measured quality is unchanged, so the parameters are
+# better spent on width. That is also why the sub-layer is written with `linear`
+# directly rather than through `nn.dense_apply`.
+
+# The hidden width for a gated feed-forward, given the model width.
+#
+# `multiple_of` rounds the result up; pass 1 to disable the rounding, which is
+# what a small test model wants.
+fn swiglu_hidden(dim, multiple_of) {
+  # `int` on both divisions, because `/` here is floating-point division and a
+  # hidden width of 170.67 is not a shape. The truncation has to happen at each
+  # step rather than once at the end: rounding up to a multiple is a ceiling
+  # division, and a ceiling division of a value that is already fractional
+  # rounds the fraction up too and overshoots by a whole block.
+  let target = int((8 * dim) / 3)
+  let blocks = int((target + multiple_of - 1) / multiple_of)
+  blocks * multiple_of
+}
+
+# Three [out, in] weights, in the `linear`-friendly layout the rest of the
+# library uses. `hidden` is what `swiglu_hidden` returns, not 4 * dim.
+fn swiglu_ff_params(dim, hidden, strategy) = {
+  w_gate: nn.init(strategy, hidden, dim),
+  w_up: nn.init(strategy, hidden, dim),
+  w_down: nn.init(strategy, dim, hidden)
+}
+
+# X is [T, dim]; the result is [T, dim]. Both projections read the same input,
+# so the two `linear` calls are independent and the gate is applied to the
+# widened representation, not to the input.
+fn swiglu_ff(p, X) =
+  linear(nn.swiglu(linear(X, p.w_up), linear(X, p.w_gate)), p.w_down)
 
 # ── The decoder block ────────────────────────────────────────────────────────
 #
@@ -177,6 +251,33 @@ fn generate(p, prompt, steps, cfg) {
     let logits = gpt_logits(p, ctx, cfg)
     let next = argmax(logits[len(ctx) - 1], 0)
     out = concat(list(out, reshape(next, list(1))), 0)
+  }
+  out
+}
+
+
+# Continuation by sampling, the counterpart to `generate` above.
+#
+# Same loop, same context truncation; the only difference is that the next token
+# comes from `sample.sample_token` instead of from `argmax`. The decoding
+# parameters are the ones std/sample documents: `temp` scales the logits, `k`
+# keeps the top k (0 for off), `p` keeps the nucleus (1.0 for off).
+#
+# `r` is an `Rng` from `std/random.new_rng(seed)`, and it is an argument for the
+# reason that whole module exists: the generation is a pure function of the
+# parameters, the prompt and the seed. Two runs of a script agree, and a run
+# that also trains with dropout still agrees, because the sampler is not sharing
+# a stream with anything.
+#
+# `temp = 0.0` reduces to greedy and so reproduces `generate` exactly, without
+# drawing from `r` at all.
+fn generate_sampled(p, prompt, steps, cfg, r, temp, k, nucleus) {
+  let out = prompt
+  for i in range(steps) {
+    let ctx = if len(out) > cfg.max_T { slice_last(out, cfg.max_T) } else { out }
+    let logits = gpt_logits(p, ctx, cfg)
+    let next = sample.sample_token(r, logits[len(ctx) - 1], temp, k, nucleus)
+    out = concat(list(out, tensor([next])), 0)
   }
   out
 }

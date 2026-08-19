@@ -8,6 +8,8 @@
 # a *decoder*, and that the whole stack differentiates and learns.
 
 import "std/transformer" as tf
+import "std/gradcheck" as gc
+import "std/random" as rnd
 import "harness.tw" as h
 
 seed(3)
@@ -92,9 +94,81 @@ fn the_stack_differentiates_and_learns_a_pattern() {
           h.near_all(gen, tensor([0, 1, 2, 3, 4, 0, 1])))
 }
 
+
+fn the_gated_feedforward_is_a_drop_in_for_the_plain_one() {
+  h.test("the gated feedforward is a drop in for the plain one")
+  # Both are [T, dim] -> [T, dim], which is what lets a block swap one for the
+  # other without touching anything around it.
+  let X = randn(4, 8)
+  let hidden = tf.swiglu_hidden(8, 1)
+  let gp = tf.swiglu_ff_params(8, hidden, "xavier")
+  h.check("the hidden width is 8*dim/3 truncated", hidden == 21)
+  h.check("the gated form maps [T, dim] to [T, dim]",
+          h.shaped(tf.swiglu_ff(gp, X), list(4, 8)))
+  h.check("as the plain form does",
+          h.shaped(tf.feedforward(tf.feedforward_params(8, 32, "xavier"), X),
+                   list(4, 8)))
+  # The three weights are stored [out, in] like every other weight here, so the
+  # gate and up projections widen and the down projection narrows.
+  h.check("w_gate widens", h.shaped(gp.w_gate, list(21, 8)))
+  h.check("w_up widens", h.shaped(gp.w_up, list(21, 8)))
+  h.check("w_down narrows", h.shaped(gp.w_down, list(8, 21)))
+  # A zero gate closes the layer completely: silu(0) = 0, so the product is zero
+  # whatever the value projection did, and the output is exactly zero.
+  let closed = { w_gate: zeros(21, 8), w_up: gp.w_up, w_down: gp.w_down }
+  h.check("a zero gate matrix shuts the layer off entirely",
+          h.near(item(max(abs(tf.swiglu_ff(closed, X)))), 0.0))
+}
+
+fn the_gated_feedforward_differentiates() {
+  h.test("the gated feedforward differentiates")
+  # The gradient has to reach all three matrices, and through a product, which
+  # is where a wrong operand order would show up as a dead weight rather than
+  # as an error.
+  let X = randn(3, 6)
+  let gp = tf.swiglu_ff_params(6, tf.swiglu_hidden(6, 1), "xavier")
+  let g = grad(fn(w) = sum(tf.swiglu_ff(w, X)))(gp)
+  h.check("the gate weight gets gradient", h.truthy(item(max(abs(g.w_gate))) > 0.0))
+  h.check("the up weight gets gradient", h.truthy(item(max(abs(g.w_up))) > 0.0))
+  h.check("the down weight gets gradient", h.truthy(item(max(abs(g.w_down))) > 0.0))
+  # And it is the actual derivative, not merely non-zero.
+  let r = gc.check_tree(fn(w) = sum(tf.swiglu_ff(w, X) * COTANGENT), gp)
+  h.check("and every leaf agrees with the difference quotient", r.ok)
+}
+
+let COTANGENT = randn(3, 6)
+
+fn sampled_generation_is_greedy_at_temperature_zero() {
+  h.test("sampled generation is greedy at temperature zero")
+  let cfg = tf.config(5, 16, 2, 1, 8)
+  let p = tf.gpt_params(cfg, "xavier")
+  let prompt = tensor([0, 1, 2])
+  let want = tf.generate(p, prompt, 4, cfg)
+  let r = rnd.new_rng(2)
+  h.check("temperature 0 reproduces greedy generation exactly",
+          h.near_all(tf.generate_sampled(p, prompt, 4, cfg, r, 0.0, 0, 1.0), want))
+  h.check("and the continuation is the prompt plus four tokens",
+          h.shaped(want, list(7)))
+  # Two runs from the same seed must agree; that is the entire reason the
+  # generator is an argument rather than the global stream.
+  let r1 = rnd.new_rng(31)
+  let r2 = rnd.new_rng(31)
+  h.check("sampled generation is reproducible from a seed",
+          h.near_all(tf.generate_sampled(p, prompt, 4, cfg, r1, 1.0, 0, 1.0),
+                     tf.generate_sampled(p, prompt, 4, cfg, r2, 1.0, 0, 1.0)))
+  # Every generated id must be a real token, whatever the decoding settings.
+  let r3 = rnd.new_rng(4)
+  let out = tf.generate_sampled(p, prompt, 6, cfg, r3, 1.2, 3, 0.9)
+  h.check("every sampled id is inside the vocabulary",
+          h.truthy(item(max(out)) < 5 and item(min(out)) >= 0))
+}
+
 the_parameter_count_is_the_sum_of_the_pieces()
 the_logits_have_one_row_per_position_and_one_column_per_token()
 a_position_cannot_see_the_future()
 a_pre_norm_block_preserves_the_residual_stream_shape()
 the_stack_differentiates_and_learns_a_pattern()
+the_gated_feedforward_is_a_drop_in_for_the_plain_one()
+the_gated_feedforward_differentiates()
+sampled_generation_is_greedy_at_temperature_zero()
 h.report("transformer_test")

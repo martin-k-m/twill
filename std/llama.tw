@@ -1,0 +1,206 @@
+# llama.tw: the modern decoder, written in Twill.
+#
+# Import it with:  import "std/llama" as llama
+#
+# std/transformer is a GPT-2: learned positional table, LayerNorm, a plain gelu
+# feed-forward, weights tied between the embedding and the output head. That is
+# the architecture of 2019 and it still trains. This is the architecture of the
+# models people actually run now -- Llama, Mistral, Qwen, Gemma all agree on the
+# same four departures from it, and they are the four things this file changes:
+#
+#   RMSNorm            instead of LayerNorm            (nn.rms_norm)
+#   rotary positions   instead of a learned table      (nn.attention_causal_rope)
+#   SwiGLU             instead of a gelu MLP           (tf.swiglu_ff)
+#   an untied head     instead of weight tying
+#
+# Every one of those pieces lives somewhere else and is tested somewhere else.
+# What is here is the wiring, which is the part that is easy to get subtly wrong
+# and impossible to notice: a model with the norm in the wrong place trains,
+# just worse.
+#
+# WHY THIS IS A SEPARATE MODULE AND NOT A FLAG ON `tf.config`
+#
+# The alternative was `config(..., modern: true)` threaded through the existing
+# block. It was rejected for a specific reason rather than on taste.
+#
+# The four changes are not four independent switches; three of them change the
+# *shape of the parameter tree*. A modern block has no `pos` table, its norms
+# have a `gamma` and no `beta`, its feed-forward has three weights instead of
+# two weight/bias pairs, and it has an `output` field a tied model does not.
+# A flag would therefore make `gpt_params` return one of two differently-shaped
+# trees, and every consumer of that tree -- `grad`, `map_leaves`, the
+# optimizers, `save`/`load` -- would be correct only as long as the flag that
+# built the tree matched the flag that reads it. Nothing checks that. Load a
+# checkpoint under the wrong flag and the shapes mismatch if you are lucky and
+# silently misalign if you are not.
+#
+# Keeping the two architectures in two modules makes each tree fixed by
+# construction, which is the same argument std/nn makes for keeping the config
+# out of the parameter tree in the first place. The cost is that the block
+# below looks a lot like the one in std/transformer. That duplication is real
+# and it is the cheaper of the two problems.
+
+import "std/nn" as nn
+import "std/loss" as loss
+import "std/transformer" as tf
+import "std/sample" as sample
+
+# ── Configuration ────────────────────────────────────────────────────────────
+#
+#   vocab       size of the token alphabet
+#   dim         residual-stream width; must divide by `heads`
+#   heads       number of attention heads; dim/heads must be even, because RoPE
+#               splits each head into pairs
+#   depth       number of stacked blocks
+#   max_T       the longest context a generation will carry
+#
+# The two filled in here that a call site rarely changes:
+#
+#   eps         1e-5, the RMSNorm guard, matching the rest of this library
+#   rope_base   10000.0, the original RoPE base and Llama-2's. Long-context
+#               models raise it (Llama 3 uses 500000), so it is in the config
+#               rather than baked into the call.
+#
+# `max_T` does NOT bound what the model can represent, which is the difference
+# from the GPT config where it was the height of the positional table. RoPE
+# computes its angles, so there is no table to run off the end of; `max_T` here
+# is only how much context generation carries forward, and raising it costs
+# attention time rather than parameters.
+fn config(vocab, dim, heads, depth, max_T) = {
+  vocab: vocab,
+  dim: dim,
+  heads: heads,
+  depth: depth,
+  max_T: max_T,
+  hidden: tf.swiglu_hidden(dim, 1),
+  eps: 0.00001,
+  rope_base: 10000.0
+}
+
+# The same, with the feed-forward width rounded up to a multiple. Real models
+# round to 256 to keep the matrix shapes friendly to the hardware; a test model
+# wants 1, which `config` above uses.
+fn config_with(vocab, dim, heads, depth, max_T, multiple_of, rope_base) = {
+  vocab: vocab,
+  dim: dim,
+  heads: heads,
+  depth: depth,
+  max_T: max_T,
+  hidden: tf.swiglu_hidden(dim, multiple_of),
+  eps: 0.00001,
+  rope_base: rope_base
+}
+
+# ── The block ────────────────────────────────────────────────────────────────
+#
+# Pre-norm, exactly as in std/transformer and for exactly the same reason: the
+# residual path from input to output is an unbroken sum, so the gradient reaches
+# the first block undiminished. Written out,
+#
+#   h = X + attention_rope(rms_norm(X))
+#   y = h + swiglu_ff(rms_norm(h))
+#
+# The one structural difference from the GPT block, beyond which functions are
+# called, is that the position information enters *inside* the attention rather
+# than at the embedding. That is what makes the residual stream carry only
+# content: nothing is added to it that says where it is, and every block
+# re-derives position from the rotation applied to its own queries and keys.
+fn block_params(dim, heads, hidden, strategy) = {
+  attn_norm: nn.rms_norm_params(dim),
+  attn: nn.attention_params(dim, strategy),
+  ffn_norm: nn.rms_norm_params(dim),
+  ff: tf.swiglu_ff_params(dim, hidden, strategy)
+}
+
+fn block(p, X, heads, eps, rope_base) {
+  let h = X + nn.attention_causal_rope(p.attn, nn.rms_norm(p.attn_norm, X, eps), heads, rope_base)
+  h + tf.swiglu_ff(p.ff, nn.rms_norm(p.ffn_norm, h, eps))
+}
+
+# ── The whole model ──────────────────────────────────────────────────────────
+#
+# A token-embedding table, `depth` blocks, a final RMSNorm, and an output
+# projection. There is no positional table.
+#
+# The head is NOT tied to the embedding, which is the one place this departs
+# from std/transformer on purpose. Llama and Mistral both ship a separate
+# `output` matrix. The argument for untying is that the two maps are asked for
+# different things once the model is large -- the embedding wants tokens that
+# behave alike to sit together, the head wants them separated so it can choose
+# between them -- and at a large vocabulary the extra vocab*dim parameters are a
+# small fraction of the model. At the sizes in this repository tying is probably
+# the better trade, and it is what std/transformer does; both are here, and the
+# difference is visible in which module you imported rather than in a flag.
+fn llama_params(cfg, strategy) {
+  let blocks = list()
+  for i in range(cfg.depth) {
+    blocks = append(blocks, block_params(cfg.dim, cfg.heads, cfg.hidden, strategy))
+  }
+  {
+    tok: { W: nn.embedding_init(cfg.vocab, cfg.dim) },
+    blocks: blocks,
+    norm: nn.rms_norm_params(cfg.dim),
+    output: { W: nn.init(strategy, cfg.vocab, cfg.dim) }
+  }
+}
+
+# ids is a 1-D tensor (or list) of T token indices; returns the [T, vocab]
+# logits, one distribution over the next token per position.
+#
+# The embedding is the whole input: no positional term is added. Compare
+# `tf.gpt_logits`, whose first line after the lookup is `te + pe`.
+fn llama_logits(p, ids, cfg) {
+  let T = len(ids)
+  let h = gather(p.tok.W, ids)
+  for i in range(len(p.blocks)) {
+    h = block(p.blocks[i], h, cfg.heads, cfg.eps, cfg.rope_base)
+  }
+  linear(nn.rms_norm(p.norm, h, cfg.eps), p.output.W)
+}
+
+# The training loss for one sequence: predict `ids` shifted left by one.
+fn llama_loss(p, ids, targets, cfg) =
+  loss.cross_entropy_batch(llama_logits(p, ids, cfg), loss.onehot_rows(targets, cfg.vocab))
+
+# The mean loss over a batch of sequences, as a plain sum over the list so one
+# reverse pass differentiates the whole batch.
+fn llama_loss_batch(p, xs, ys, cfg) {
+  let total = 0.0
+  for i in range(len(xs)) {
+    total = total + llama_loss(p, xs[i], ys[i], cfg)
+  }
+  total / len(xs)
+}
+
+# ── Generation ───────────────────────────────────────────────────────────────
+
+# Greedy continuation, the deterministic one a test can assert on.
+fn generate(p, prompt, steps, cfg) {
+  let out = prompt
+  for i in range(steps) {
+    let ctx = if len(out) > cfg.max_T { tf.slice_last(out, cfg.max_T) } else { out }
+    let logits = llama_logits(p, ctx, cfg)
+    let next = argmax(logits[len(ctx) - 1], 0)
+    out = concat(list(out, reshape(next, list(1))), 0)
+  }
+  out
+}
+
+# Continuation by sampling. `r` is an `Rng` from `std/random.new_rng(seed)`;
+# `temp`, `k` and `nucleus` are as documented in std/sample, and `temp = 0.0`
+# reduces to `generate` above without drawing from `r`.
+fn generate_sampled(p, prompt, steps, cfg, r, temp, k, nucleus) {
+  let out = prompt
+  for i in range(steps) {
+    let ctx = if len(out) > cfg.max_T { tf.slice_last(out, cfg.max_T) } else { out }
+    let logits = llama_logits(p, ctx, cfg)
+    let next = sample.sample_token(r, logits[len(ctx) - 1], temp, k, nucleus)
+    out = concat(list(out, tensor([next])), 0)
+  }
+  out
+}
+
+# The number of scalars in the model. Shares std/transformer's implementation
+# because a parameter tree is a parameter tree; the walk does not know or care
+# which architecture built it.
+fn num_params(p) = tf.num_params(p)

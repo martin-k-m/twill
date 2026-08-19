@@ -245,6 +245,73 @@ fn layernorm(p, x, eps) {
 
 fn layernorm_params(dim) = { gamma: ones(dim), beta: zeros(dim) }
 
+# Root-mean-square normalisation (Zhang & Sennrich 2019), the normaliser Llama,
+# Mistral, Gemma and most models trained since 2022 use in place of `layernorm`.
+#
+# The claim the paper makes, and which held up: of the two things layernorm does
+# -- recentre to zero mean, then rescale to unit variance -- only the rescaling
+# earns its keep. So this drops the mean subtraction and the learned shift, and
+# divides by the root mean square of the features instead of by their standard
+# deviation:
+#
+#     y = gamma * x / sqrt(mean(x^2) + eps)
+#
+# That is one reduction instead of two and one parameter vector instead of two.
+# The saving is small per call and it is on the critical path of every block, so
+# on a deep stack it is a few percent of the forward pass for no measured loss
+# in quality.
+#
+# The parameter convention matches `layernorm` exactly: a record passed first, a
+# `gamma` of length `dim` broadcast against the last axis. What is absent is
+# `beta`, and its absence is the point rather than an omission -- a record built
+# by `layernorm_params` will work here and its `beta` will be silently ignored,
+# so use `rms_norm_params`.
+#
+# `eps` is inside the square root, guarding the division. Without it a row of
+# exact zeros divides by zero; with it the worst case is a row scaled by
+# 1/sqrt(eps). 1e-5 is this library's value elsewhere and 1e-6 is what Llama
+# ships; either is fine and the choice is the caller's because it is visible.
+#
+# ON NOT OVERFLOWING
+#
+# The obvious spelling, `x / sqrt(mean(square(x)) + eps)`, squares the input.
+# An activation of 1e200 is finite and its square is not, so a stack that has
+# started to diverge reports `inf` and then `NaN` from the normaliser that was
+# supposed to be holding it together -- and it reports it from the wrong layer,
+# which is the expensive part.
+#
+# The fix is to divide the row by its own largest magnitude before squaring.
+# Writing s for that magnitude and z for x/s,
+#
+#     x / sqrt(mean(x^2) + eps)  =  s*z / sqrt(s^2 * mean(z^2) + eps)
+#                                =  z / sqrt(mean(z^2) + eps/s^2)
+#
+# which is an exact reassociation, not an approximation: every element of z is
+# in [-1, 1], so `mean(square(z))` cannot overflow whatever x was. The
+# rescaling is clamped at 1 with `maximum`, so it only ever shrinks. For the
+# ordinary case where the activations are around unit scale, s is 1, the
+# division by it is exact, and the result is bit-for-bit the naive formula.
+#
+# Because the identity is exact, the derivative is unaffected by the detour and
+# the terms routed through s cancel. They cancel in the arithmetic too, but they
+# are still computed: Twill has no way to detach a subexpression from the
+# gradient tape, so `max(abs(x))` is differentiated and its contribution
+# subtracts back out. It is a few wasted operations in the backward pass, and it
+# is the reason `rms_norm` gradient-checks to the same error as `layernorm`
+# rather than to something worse.
+fn rms_norm(p, x, eps) {
+  let axis = len(shape(x)) - 1
+  let scale = maximum(keepdim(max(abs(x), axis), x, axis), ones(1))
+  let z = x / scale
+  let ms = keepdim(mean(square(z), axis), x, axis)
+  p.gamma * z / sqrt(ms + eps / (scale * scale))
+}
+
+# The scale vector, and only the scale vector. Initialised to ones, so an
+# untrained `rms_norm` is exactly the normalisation with no learned distortion
+# on top of it.
+fn rms_norm_params(dim) = { gamma: ones(dim) }
+
 # A reduction result put back at length 1 on the axis it reduced and expanded to
 # the original shape. Broadcasting aligns from the right, so a [B] mean will not
 # combine with a [B, D] tensor the way anyone intends; this is the fix.
@@ -379,6 +446,131 @@ fn split_heads(X, T, heads, dh) = transpose(reshape(X, T, heads, dh), 1, 0, 2)
 
 fn merge_heads(C, T, dim) = reshape(transpose(C, 1, 0, 2), T, dim)
 
+# ── Rotary position embeddings ──────────────────────────────────────────────
+#
+# How every current large language model tells one position from another.
+#
+# The learned table in `std/transformer` adds a vector to each token: position
+# is a thing the model carries alongside its content, and the table has a last
+# row, so a sequence longer than `max_T` has nowhere to look. RoPE (Su et al.,
+# 2021) instead *rotates* each query and key by an angle proportional to its
+# position, and does it inside attention rather than at the input.
+#
+# The reason that is better is one line of trigonometry. Rotate a
+# two-dimensional query at position t by t*theta and a key at position s by
+# s*theta, and their dot product picks up a factor of cos((t - s)*theta): it
+# depends on t - s and not on t and s separately. So attention becomes a
+# function of *relative* distance, which is the thing that generalises, and it
+# becomes so without a bias term, an extra parameter, or a length limit -- the
+# angles are computed, so a longer sequence is a larger t and nothing else.
+#
+# A head of width dh is treated as dh/2 independent 2-D planes, each with its
+# own rate theta_i = base^(-2i/dh). The low i rotate fast and distinguish
+# neighbours; the high i rotate slowly and still differ over thousands of
+# tokens. `base` is 10000 in the original and in Llama 2; models extended to
+# long context raise it (Llama 3 uses 500000), which stretches the slow end so
+# far-apart positions stay distinguishable, so it is an argument here rather
+# than a constant.
+#
+# There are no parameters. RoPE learns nothing.
+#
+# WHICH TWO DIMENSIONS MAKE A PLANE -- READ THIS BEFORE LOADING ANY WEIGHTS
+#
+# Two conventions are in use and they are not compatible. A model trained under
+# one and run under the other does not fail loudly; it produces fluent nonsense,
+# because the rotation is still a rotation, just of the wrong pairs.
+#
+#   interleaved  pairs are the neighbours (x0,x1), (x2,x3), ... This is the
+#                original RoFormer paper and the reference GPT-NeoX kernel.
+#   half-split   pairs are (x_i, x_{i + dh/2}): the first half of the head is
+#                rotated against the second half. This is what Hugging Face's
+#                `rotate_half` does, and therefore what the released Llama,
+#                Mistral, Qwen and Gemma checkpoints are trained against.
+#
+# THIS FILE IMPLEMENTS HALF-SPLIT.
+#
+# Two reasons. It is the convention the weights anyone would actually want to
+# import were trained under, which is the argument that settles it. And it is
+# `split` and `concat` on one axis, where interleaving needs a strided reshape
+# that Twill would have to express as a reshape to [..., dh/2, 2] and a
+# transpose -- doable, but a slower and less obvious pass over the same data.
+#
+# The two are related by a fixed permutation of the head's dimensions, so a
+# checkpoint in the other convention can be converted once at load time rather
+# than needing a second code path here. Nothing in this file will detect the
+# mismatch for you.
+
+# The cos and sin tables for positions `start .. start + T - 1`, each [T, dh/2].
+#
+# Half width, not full: the table holds one angle per plane, and both members of
+# a plane rotate by it. Implementations that duplicate the tables to [T, dh] do
+# so to make the elementwise form line up; here `split` has already separated
+# the halves, so the angle is used where it belongs and the memory is halved.
+#
+# The rates are built as exp(-log(base) * 2i/dh) rather than with `pow`, which
+# is the same number and avoids raising a tensor to a tensor power.
+fn rope_tables_from(start, T, dh, base) {
+  let half = dh / 2
+  let i = tensor(range(half))
+  let inv_freq = exp(0.0 - log(base) * 2.0 * i / dh)
+  let pos = tensor(range(T)) + start
+  # Outer product: angle[t, i] = (start + t) * inv_freq[i], shape [T, dh/2].
+  let angles = reshape(pos, T, 1) * reshape(inv_freq, 1, half)
+  [cos(angles), sin(angles)]
+}
+
+# The usual case, a sequence starting at position 0.
+fn rope_tables(T, dh, base) = rope_tables_from(0, T, dh, base)
+
+# Apply the rotation to `x`, whose last axis is the head width dh.
+#
+# Works on a [heads, T, dh] stack (what `split_heads` produces) and on a plain
+# [T, dh] single head, because the tables are [T, dh/2] and broadcasting aligns
+# from the right: the leading head axis is simply carried along, and every head
+# is rotated by the same angles, which is correct -- the position of a token is
+# not a per-head fact.
+#
+# The rotation itself, per plane:
+#
+#     [ a' ]   [ cos  -sin ] [ a ]
+#     [ b' ] = [ sin   cos ] [ b ]
+#
+# with a the first half of the head and b the second. `split` gives each half
+# its own gradient path and `concat` is its exact inverse, so this is
+# differentiable in x, which matters: x is a projection of the residual stream
+# and the gradient has to get back through here to Wq and Wk.
+fn rope(x, cos_t, sin_t) {
+  let axis = len(shape(x)) - 1
+  let halves = split(x, 2, axis)
+  let a = halves[0]
+  let b = halves[1]
+  concat(list(a * cos_t - b * sin_t, a * sin_t + b * cos_t), axis)
+}
+
+# Causal multi-head self-attention with RoPE, the attention every current
+# decoder uses. Identical to `attention_causal` except that the queries and keys
+# are rotated after projection and before the scores are formed.
+#
+# The values are *not* rotated, and that is not an oversight. The rotation is
+# there to make the query-key dot product depend on relative distance; a value
+# is not dotted with anything, it is averaged, and rotating it would only mix
+# the halves of the head for no reason.
+fn attention_causal_rope(p, X, heads, base) {
+  let T = len(X)
+  let dim = len(X[0])
+  let dh = dim / heads
+  let tables = rope_tables(T, dh, base)
+  let cos_t = tables[0]
+  let sin_t = tables[1]
+  let Q = rope(split_heads(linear(X, p.Wq), T, heads, dh), cos_t, sin_t)
+  let K = rope(split_heads(linear(X, p.Wk), T, heads, dh), cos_t, sin_t)
+  let V = split_heads(linear(X, p.Wv), T, heads, dh)
+  let scores = einsum("hti,hsi->hts", Q, K) / sqrt(dh)
+  let attn = softmax(scores + causal_mask(T), 2)
+  let ctx = einsum("hts,hsi->hti", attn, V)
+  linear(merge_heads(ctx, T, dim), p.Wo)
+}
+
 # ── Sequential ──────────────────────────────────────────────────────────────
 #
 # A network as a list of layers, applied in order.
@@ -435,6 +627,9 @@ fn dropout_layer(rate, train) = list(fn(p, x) = dropout(x, rate, train), list())
 
 fn layernorm_layer(dim, eps) =
   list(fn(p, x) = layernorm(p, x, eps), layernorm_params(dim))
+
+fn rms_norm_layer(dim, eps) =
+  list(fn(p, x) = rms_norm(p, x, eps), rms_norm_params(dim))
 
 fn embedding_layer(vocab, dim) =
   list(fn(p, ids) = embedding(p, ids), embedding_params(vocab, dim))
@@ -497,3 +692,31 @@ fn softsign(x) = x / (1.0 + abs(x))
 # same shape trap `keepdim` exists for, and here it would silently produce the
 # wrong normalisation on the axis anyone actually reduces.
 fn log_softmax(x, axis) = x - keepdim(logsumexp(x, axis), x, axis)
+
+# ── Gating ──────────────────────────────────────────────────────────────────
+#
+# A gated unit multiplies one linear projection by a squashed copy of another,
+# so the network can learn to shut a channel off rather than only to shrink it.
+# Dauphin et al. (2017) introduced the form for convolutional language models;
+# Shazeer's "GLU Variants Improve Transformer" (2020) tried every activation in
+# the gate position and found the gated feed-forward beat the plain one on every
+# task tested, with SiLU (swish) the best of the variants. That result is why
+# Llama, PaLM, Mistral and Gemma all use `swiglu` where GPT-2 used gelu.
+#
+# These take the two projections already computed, rather than doing the
+# projections themselves. The parameter shapes belong with the layer that owns
+# them, and they are in `std/transformer.swiglu_ff_params`; what is here is the
+# elementwise part, which is the part with a name.
+
+# The original: gate with a sigmoid, so the multiplier is in (0, 1) and reads
+# literally as a gate held open by that fraction.
+fn glu(value, gate) = value * sigmoid(gate)
+
+# The one modern models use. SiLU is unbounded above, so the "gate" can amplify
+# as well as attenuate, and it is smooth through zero, which is where a sigmoid
+# gate spends most of its time saturated at 1/2.
+fn swiglu(value, gate) = value * silu(gate)
+
+# GEGLU, the gelu-gated variant. Shazeer measured it within noise of swiglu;
+# it is here because a checkpoint that used it needs it.
+fn geglu(value, gate) = value * gelu(gate)

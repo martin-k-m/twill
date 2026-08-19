@@ -1,0 +1,159 @@
+# llama.tw: a character-level modern decoder, trained end-to-end with `grad`.
+#
+# The companion to `examples/gpt.tw`, on the same corpus, at the same size, so
+# the two can be read side by side. What differs is the architecture: this is
+# the block current language models are built from rather than the 2019 one.
+#
+#   examples/gpt.tw          this file
+#   ---------------------    ------------------------------------------------
+#   learned position table   rotary embeddings, applied inside attention
+#   LayerNorm                RMSNorm
+#   gelu feed-forward        SwiGLU, gated, at 8/3 the width instead of 4x
+#   tied output head         its own output matrix
+#
+# The model is `std/llama`, which is a hundred lines of Twill over `std/nn` and
+# `std/transformer`. This file is only the data and the loop: characters to ids,
+# train, and sample the model back into text.
+#
+# Sampling here is not greedy. `std/sample` gives temperature, top-k and nucleus
+# filtering over a logits vector, drawing from a seeded `std/random` generator,
+# so the output below is a genuine draw from the model and is still the same on
+# every run. That last part is the reason the generator is passed in rather than
+# taken from the global stream.
+
+import "std/llama" as llama
+import "std/optim" as optim
+import "std/sample" as sample
+import "std/random" as rnd
+import "std/text" as text
+
+seed(1)
+
+# The same small, repetitive corpus `examples/gpt.tw` uses. A model this size
+# cannot learn English, but it can learn the letter-by-letter shape of a few
+# repeated lines, which is enough to watch prediction work.
+let corpus = "the loom weaves the warp and the weft. " +
+             "the shuttle carries the thread. " +
+             "the loom weaves the warp and the weft. " +
+             "the shuttle carries the thread. "
+
+# ── Tokenise: characters to ids ──────────────────────────────────────────────
+let n = text.char_len(corpus)
+let to_id = dict_new()
+let codes = list()
+for i in range(n) {
+  let c = text.char_code(corpus, i)
+  if dict_has(to_id, c) == false {
+    dict_set(to_id, c, len(codes))
+    codes = append(codes, c)
+  }
+}
+let vocab = len(codes)
+
+let data = list()
+for i in range(n) {
+  data = append(data, dict_must(to_id, text.char_code(corpus, i)))
+}
+let data_t = tensor(data)
+print("corpus", n, "chars,", vocab, "distinct")
+
+# ── Training windows ─────────────────────────────────────────────────────────
+#
+# Every length-T window is one example: T characters in, the same characters
+# shifted left by one as targets, so position t is asked to predict t+1. The
+# causal mask is what makes that a fair question.
+let T = 16
+let xs = list()
+let ys = list()
+for s in range(n - T - 1) {
+  let xi = list()
+  let yi = list()
+  for j in range(T) {
+    xi = append(xi, s + j)
+    yi = append(yi, s + j + 1)
+  }
+  xs = append(xs, gather(data_t, tensor(xi)))
+  ys = append(ys, gather(data_t, tensor(yi)))
+}
+
+# ── The model ────────────────────────────────────────────────────────────────
+#
+# dim 48 over 4 heads is 12 per head, which RoPE splits into 6 rotating planes.
+# The head width has to be even for that split; 12 is.
+#
+# `config` leaves the feed-forward width unrounded, so hidden is 8*48/3 = 128.
+# A real model would round that up to a multiple of 256 with `config_with`, for
+# the hardware rather than for the mathematics.
+let cfg = llama.config(vocab, 48, 4, 2, T)   # vocab, dim, heads, depth, context
+let p = llama.llama_params(cfg, "xavier")
+print("model", llama.num_params(p), "parameters, feed-forward width", cfg.hidden)
+
+# ── Train ────────────────────────────────────────────────────────────────────
+#
+# Full-batch Adam over every window. `grad(loss)(p)` returns a gradient shaped
+# exactly like the parameter tree -- records, the list of blocks, and all -- and
+# the optimizer walks it with `map_leaves`. Nothing about the architecture
+# changes that: RMSNorm, the rotation and the gate are all just differentiable
+# operations on tensors.
+let m = optim.zeros_like(p)
+let v = optim.zeros_like(p)
+print("loss before", llama.llama_loss_batch(p, xs, ys, cfg))
+for step in range(40) {
+  let g = grad(fn(w) = llama.llama_loss_batch(w, xs, ys, cfg))(p)
+  let out = optim.adam_step(p, g, m, v, step + 1, 0.01, 0.9, 0.999, 0.00000001)
+  p = out[0]
+  m = out[1]
+  v = out[2]
+  if step % 10 == 0 {
+    print("step", step, "loss", llama.llama_loss_batch(p, xs, ys, cfg))
+  }
+}
+print("loss after ", llama.llama_loss_batch(p, xs, ys, cfg))
+
+# ── Sample ───────────────────────────────────────────────────────────────────
+fn encode(s) {
+  let ids = list()
+  for i in range(text.char_len(s)) {
+    ids = append(ids, dict_must(to_id, text.char_code(s, i)))
+  }
+  tensor(ids)
+}
+
+fn decode(ids) {
+  let s = ""
+  for i in range(len(ids)) {
+    s = text.concat(s, text.from_byte(codes[int(item(ids[i]))]))
+  }
+  s
+}
+
+let prompt = "the loom "
+print("prompt:    ", prompt)
+
+# Greedy, for comparison: the deterministic argmax continuation.
+print("greedy:    ", decode(llama.generate(p, encode(prompt), 48, cfg)))
+
+# The same model sampled three ways, each from its own generator seeded 7. All
+# three start from the identical state, so the differences below are the
+# decoding settings and nothing else.
+#
+# Low temperature is nearly greedy. Temperature 1 with a nucleus is what a chat
+# model ships with. High temperature with no filtering shows what the truncation
+# was protecting against: the tail is genuinely full of nonsense, and without a
+# top-k or a top-p every draw can reach it.
+print("t=0.5 k=0 p=1.0:  ",
+      decode(llama.generate_sampled(p, encode(prompt), 48, cfg,
+                                    rnd.new_rng(7), 0.5, 0, 1.0)))
+print("t=1.0 k=8 p=0.9:  ",
+      decode(llama.generate_sampled(p, encode(prompt), 48, cfg,
+                                    rnd.new_rng(7), 1.0, 8, 0.9)))
+print("t=1.5 k=0 p=1.0:  ",
+      decode(llama.generate_sampled(p, encode(prompt), 48, cfg,
+                                    rnd.new_rng(7), 1.5, 0, 1.0)))
+
+# Reproducibility, stated as a check rather than as a claim: the same seed and
+# the same settings give the same text, which is what makes a sampled result
+# something you can put in a bug report.
+let a = llama.generate_sampled(p, encode(prompt), 24, cfg, rnd.new_rng(42), 1.0, 8, 0.9)
+let b = llama.generate_sampled(p, encode(prompt), 24, cfg, rnd.new_rng(42), 1.0, 8, 0.9)
+print("same seed reproduces the same text:", max(abs(a - b)) == 0.0)
