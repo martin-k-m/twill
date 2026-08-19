@@ -126,7 +126,7 @@ func (c *checker) prelude(prog *ast.Program) *checkEnv {
 	for _, s := range prog.Body {
 		if ed, ok := s.(*ast.EnumDecl); ok {
 			delete(c.enums, ed.Name)
-			c.registerEnum(ed)
+			c.registerEnumFrom(ed, true)
 		}
 	}
 	// With every enum and struct named, their payload and field types can be
@@ -231,6 +231,10 @@ type checker struct {
 	// the language forbids crossing. See inferStmt (Break/Continue, While/For)
 	// and the two body walks (checkFnDef, inferUserCall).
 	loopDepth int
+	// inCallee is set while the callee of a call is being inferred, so that
+	// `a.push(v)` -- uniform call syntax for `push(a, v)` -- is not reported as
+	// reading a field of an array.
+	inCallee bool
 	// fnRet is the return annotation of each function whose body is being
 	// checked, innermost last: what a `?` is checked against. A function with
 	// no return annotation pushes "", which judges nothing; the top of a file
@@ -693,11 +697,24 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		if c.isQualifiedVariant(ex.Target, ex.Name, env) {
 			return tUnknown{}
 		}
-		if rec, ok := c.inferExpr(ex.Target, env).(tRecord); ok {
+		target := c.inferExpr(ex.Target, env)
+		if rec, ok := target.(tRecord); ok {
 			if ft, ok := rec.fields[ex.Name]; ok {
 				return ft
 			}
 			c.report(ex.Line, "record has no field %q", ex.Name)
+			return tUnknown{}
+		}
+		// A field of something that cannot have one. The record case was
+		// checked and this one was not, though the checker knows the type just
+		// as well: `let x: I64 = 5` followed by `x.foo` reached the runtime.
+		//
+		// Not when it is a call's callee, though: `a.push(v)` is uniform call
+		// syntax for `push(a, v)` and works on any value, so a field there is a
+		// function name and not a field at all. A tensor is excluded for the
+		// same family of reasons -- `t.to(f32)` is written this way.
+		if !c.inCallee && isDefiniteNonRecord(target) {
+			c.report(ex.Line, "cannot read field %q of %s", ex.Name, c.typeString(target))
 			return tUnknown{}
 		}
 		return tUnknown{}
@@ -936,6 +953,15 @@ func sameDims(a, b []int) bool {
 }
 
 func (c *checker) inferTensorLit(ex *ast.TensorLit) Type {
+	// `[]` evaluates to an empty list, not to a tensor of shape [0]: the
+	// evaluator has no elements to read a shape from, so it builds the
+	// container that does not need one. Typing it as a tensor made the checker
+	// confidently wrong at the dimension-0 boundary, which is exactly where a
+	// shape checker is supposed to earn its keep -- `sum([])` checked clean and
+	// then failed at run time.
+	if len(ex.Elements) == 0 {
+		return tList{}
+	}
 	var dims []int
 	ok := true
 	var walk func(elems []ast.Expr, depth int)
@@ -1247,7 +1273,10 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 	if t, ok := c.inferCast(ex, env); ok {
 		return t
 	}
+	savedInCallee := c.inCallee
+	c.inCallee = true
 	callee := c.inferExpr(ex.Callee, env)
+	c.inCallee = savedInCallee
 	// A trailing dtype name on a maker, `zeros([2, 3], bf16)`, is contextual: it
 	// counts only on a maker and only when nothing in scope binds it. Strip it so
 	// the maker infers its shape from the rest -- the dtype changes the element
@@ -1815,6 +1844,25 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 		c.report(ex.Line, "%s expects %d argument(s), got %d", name, arity, len(ex.Args))
 		return tUnknown{}
 	}
+	// A builtin that works on tensors, handed something that is definitely not
+	// one. The runtime rejects these and the checker knew the type; it was most
+	// visible at `[]`, an empty list reaching sum, mean, exp or matmul.
+	if tensorOnlyBuiltins[name] && len(argTypes) > 0 {
+		// Only the operands, not the trailing arguments: reshape and
+		// broadcast_to take their shape as a list of dimensions, and an axis or
+		// a count is an ordinary number. Argument 0 is the tensor in every one
+		// of these, and matmul's second operand is one too.
+		n := 1
+		if name == "matmul" || name == "dot" || name == "linear" {
+			n = 2
+		}
+		for i := 0; i < n && i < len(argTypes); i++ {
+			if isDefiniteNonTensor(argTypes[i]) {
+				c.report(ex.Line, "%s expects a tensor, but argument %d is %s", name, i+1, c.typeString(argTypes[i]))
+				return tUnknown{}
+			}
+		}
+	}
 	switch name {
 	case "relu", "abs":
 		// Shape and unit preserved.
@@ -2193,7 +2241,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
-	case "grad", "grads", "value_and_grad", "jacobian", "hessian":
+	case "grad", "grads", "value_and_grad", "jacobian", "hessian", "jvp", "vjp", "hvp":
 		// These return values whose shape depends on runtime data; treat the
 		// result as unknown so downstream code is not falsely flagged.
 		return tUnknown{}
@@ -2547,8 +2595,44 @@ func (c *checker) inferConcat(ex *ast.Call, argTypes []Type) Type {
 }
 
 func (c *checker) reportAxis(ex *ast.Call, t tTensor) {
+	// A scalar has no axes at all, so the "numbered 0 to -1" the general form
+	// would produce is nonsense. It is also the case the axis checks used to
+	// skip entirely -- each guarded on rank > 0 before validating -- so
+	// `sum(1.0, 0)` reached the runtime.
+	if len(t.dims) == 0 {
+		c.report(ex.Line, "a scalar has no axes, so there is no axis %s to reduce over",
+			axisText(ex))
+		return
+	}
 	c.report(ex.Line, "axis out of range for %s: it has %d %s, numbered 0 to %d",
 		dimsString(t), len(t.dims), plural(len(t.dims), "axis", "axes"), len(t.dims)-1)
+}
+
+// axisText renders the axis argument as written, for the scalar diagnostic.
+func axisText(ex *ast.Call) string {
+	if len(ex.Args) > 1 {
+		if n, ok := constInt(ex.Args[1]); ok {
+			return fmt.Sprintf("%d", n)
+		}
+	}
+	return "there"
+}
+
+// rank0Axis reports an axis given for a scalar, which has none. Returns true
+// when it reported, so the caller stops.
+func (c *checker) rank0Axis(ex *ast.Call, argTypes []Type) bool {
+	if len(argTypes) < 2 {
+		return false
+	}
+	t, ok := argTypes[0].(tTensor)
+	if !ok || len(t.dims) != 0 {
+		return false
+	}
+	if _, isConst := constInt(ex.Args[1]); !isConst {
+		return false
+	}
+	c.reportAxis(ex, t)
+	return true
 }
 
 // dimsBroadcastable reports whether src, right-aligned against target, can
@@ -2585,6 +2669,9 @@ func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
 		return tTensor{dims: []int{}, unit: u}
 	}
 	if len(argTypes) == 2 {
+		if c.rank0Axis(ex, argTypes) {
+			return tUnknown{}
+		}
 		if t, ok := argTypes[0].(tTensor); ok && len(t.dims) > 0 {
 			if ax, ok := constInt(ex.Args[1]); ok {
 				if ax < 0 {
@@ -2867,6 +2954,16 @@ func (c *checker) unorderable(t Type) (string, bool) {
 	return "", false
 }
 
+// isDefiniteNonRecord reports whether a type certainly has no fields. A tensor
+// is left out on purpose: `t.to(f32)` is a field access syntactically.
+func isDefiniteNonRecord(t Type) bool {
+	switch t.(type) {
+	case tInt, tStr, tBool, tBytes, tUnit, tArr, tDict, tEnum, tList:
+		return true
+	}
+	return false
+}
+
 func isDefiniteNonTensor(t Type) bool {
 	switch t.(type) {
 	case tBool, tStr, tUnit, tList, tRecord, tFn, tBuiltin, tArr, tDict, tEnum, tBytes, tCtor, tFnType:
@@ -2983,6 +3080,20 @@ func constIntElems(elems []ast.Expr) ([]int, bool) {
 	return dims, true
 }
 
+// tensorOnlyBuiltins are the builtins whose arguments the runtime requires to
+// be tensors or numbers. Deliberately a short, checked list rather than
+// everything: len, map, fold, concat, append, sort, zip, enumerate and the rest
+// take lists on purpose, and reporting those would be the false positive that
+// makes a checker worth turning off.
+var tensorOnlyBuiltins = map[string]bool{
+	"sum": true, "mean": true, "prod": true, "median": true, "max": true, "min": true,
+	"argmax": true, "argmin": true, "exp": true, "log": true, "sin": true, "cos": true,
+	"tanh": true, "sigmoid": true, "sqrt": true, "square": true, "abs": true, "relu": true,
+	"softmax": true, "logsumexp": true, "transpose": true, "reshape": true, "shape": true,
+	"matmul": true, "dot": true, "linear": true, "broadcast_to": true, "cumsum": true,
+	"cumprod": true, "flip": true, "roll": true, "diff": true,
+}
+
 var builtinNames = map[string]bool{
 	"print": true, "relu": true, "exp": true, "log": true, "sin": true,
 	"cos": true, "tanh": true, "sigmoid": true, "sqrt": true, "sum": true, "prod": true, "median": true,
@@ -3003,6 +3114,7 @@ var builtinNames = map[string]bool{
 	"conv2d": true, "maxpool2d": true, "save": true, "load": true,
 	"gather": true, "permutation": true, "int": true,
 	"floor": true, "ceil": true, "round": true, "jacobian": true, "hessian": true,
+	"jvp": true, "vjp": true, "hvp": true,
 	// Bitwise ops on I64. `and`/`or` are also the boolean keywords, but a call by
 	// that name is the bitwise builtin; `bnot` is bitwise complement.
 	"exit": true, "arr_of_tensor": true, "all_finite": true, "file_size": true, "numel": true,
@@ -3074,7 +3186,8 @@ var builtinArity = map[string]int{
 	"enumerate": 1, "env": 1, "eye": 1, "f64_bits": 1, "f64_from_bits": 1,
 	"f64_hex": 1, "f64_of_i64": 1, "f64_signbit": 1, "f64_to_str": 1,
 	"gbm_describe": 1, "grad": 1, "grads": 1, "hessian": 1, "dtype": 1, "i64_of_f64": 1,
-	"i64_of_str": 1, "int": 1, "item": 1, "jacobian": 1, "len": 1, "list_dir": 1,
+	"i64_of_str": 1, "int": 1, "item": 1, "jacobian": 1, "jvp": 1, "vjp": 1, "hvp": 1,
+	"len": 1, "list_dir": 1,
 	"load": 1, "load_value": 1, "module_source": 1, "nbytes": 1, "num_to_text": 1,
 	"permutation": 1, "pop": 1, "read_csv": 1, "read_file": 1, "read_frame": 1,
 	"rng_perm": 1, "rng_seed": 1, "rng_open": 1, "rng_close": 1, "rng_u53": 1, "rng_f64": 1, "rng_norm": 1, "scalar": 1, "seed": 1, "shape": 1, "str": 1,

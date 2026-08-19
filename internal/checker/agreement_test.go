@@ -159,3 +159,64 @@ func TestTheRepositorysOwnSourcesCheckClean(t *testing.T) {
 		t.Fatalf("only %d files checked; the walk is not finding the sources", checked)
 	}
 }
+
+// The five findings of the 1.6.4 soundness pass, each a program the checker
+// had every fact it needed to judge and did not.
+
+// `[]` evaluates to an empty list, not a tensor of shape [0]. Typing it as a
+// tensor made the checker confidently wrong at the dimension-0 boundary, which
+// is exactly where a shape checker is supposed to earn its keep.
+func TestAnEmptyLiteralIsAList(t *testing.T) {
+	for _, src := range []string{
+		"print(sum([]))",
+		"print(mean([]))",
+		"print(exp([]))",
+		"print(shape([]))",
+	} {
+		noFalseNegative(t, src)
+	}
+}
+
+// A tensor builtin still takes its shape as a list of dimensions, and its axis
+// as a number. Reporting those would be the false positive that makes a checker
+// worth turning off, and it did: std/nn.tw and five other files tripped it.
+func TestTensorBuiltinsStillTakeListShapes(t *testing.T) {
+	for _, src := range []string{
+		"print(reshape(zeros(2, 3), list(3, 2)))",
+		"print(broadcast_to(zeros(1, 3), list(2, 3)))",
+		"print(reshape(zeros(2, 3), 3, 2))",
+		"print(sum(zeros(2, 3), 1))",
+	} {
+		noFalsePositive(t, src)
+	}
+}
+
+// A scalar has no axes. Each axis check guarded on rank > 0 before validating,
+// so the rank-0 case was the one branch that fell off the end.
+func TestAnAxisOnAScalarIsReported(t *testing.T) {
+	wantOne(t, "let r = sum(1.0, 0)", "a scalar has no axes")
+	wantOne(t, "let r = mean(2.0, 1)", "a scalar has no axes")
+	wantNone(t, "let r = sum(3.0)")
+}
+
+// Reading a field of something that cannot have one.
+func TestAFieldOfANonRecordIsReported(t *testing.T) {
+	wantOne(t, "mode systems\nfn f() -> I64 {\n  let x: I64 = 5\n  x.foo\n}", `cannot read field "foo" of I64`)
+	wantOne(t, "mode systems\nfn f(s: Str) -> Str = s.len", `cannot read field "len" of Str`)
+}
+
+// `a.push(v)` is uniform call syntax for `push(a, v)` and works on any value,
+// so a field in callee position is a function name and not a field at all.
+// Reporting it broke warp's suite, which is how it was caught.
+func TestUniformCallSyntaxIsNotAFieldRead(t *testing.T) {
+	noFalsePositive(t, "mode systems\nfn main() {\n  let a: Arr[F64] = arr_new()\n  a.push(1.5)\n  print(len(a))\n}")
+}
+
+// `slice` is a Str slice and only a Str. The checker typed an Arr argument as
+// an Arr result, which propagated a confident wrong type, so the definite
+// mismatch never surfaced downstream either.
+func TestSliceIsTypedAsTheRuntimeImplementsIt(t *testing.T) {
+	wantOne(t, "mode systems\nfn f(a: Arr[Str]) -> Arr[Str] = slice(a, 0, 1)",
+		"returns Str but its signature declares Arr[Str]")
+	wantNone(t, "mode systems\nfn f(s: Str) -> Str = slice(s, 0, 1)")
+}

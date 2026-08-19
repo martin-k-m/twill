@@ -89,16 +89,31 @@ func (c *checker) loadImportedEnums(prog *ast.Program, path string, seen map[str
 // reached through an import. A case name that two enums share is ambiguous as a
 // bare name, and a match that uses one is left unjudged rather than judged
 // against whichever was seen last.
-func (c *checker) registerEnum(ed *ast.EnumDecl) {
-	if _, already := c.enums[ed.Name]; already {
+func (c *checker) registerEnum(ed *ast.EnumDecl) { c.registerEnumFrom(ed, false) }
+
+// registerEnumFrom records an enum's cases. `local` marks a declaration in the
+// file being checked, which claims its variant names outright: a name is
+// ambiguous only between two enums the file merely imported.
+//
+// Without that, importing any module that happened to declare a variant name
+// your own enum also uses turned off exhaustive matching for your enum, with no
+// diagnostic. Imports are registered first, so the collision poisoned the local
+// declaration rather than the other way round, which is the failure this file's
+// header comment was written to prevent.
+func (c *checker) registerEnumFrom(ed *ast.EnumDecl, local bool) {
+	if _, already := c.enums[ed.Name]; already && !local {
 		return
 	}
 	names := make([]string, 0, len(ed.Variants))
 	for _, v := range ed.Variants {
 		names = append(names, v.Name)
-		if owner, dup := c.variantOwner[v.Name]; dup && owner != ed.Name {
+		owner, dup := c.variantOwner[v.Name]
+		switch {
+		case local:
+			c.variantOwner[v.Name] = ed.Name
+		case dup && owner != ed.Name:
 			c.variantOwner[v.Name] = ""
-		} else {
+		default:
 			c.variantOwner[v.Name] = ed.Name
 		}
 	}
