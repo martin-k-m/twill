@@ -573,6 +573,10 @@ var nonDifferentiable = map[string]string{
 	// Not an operator: it moves a value and its graph node into another Tensor
 	// object, for the tracer. It computes nothing, so there is nothing to check.
 	"Adopt": "moves a value between Tensor objects",
+	// Deliberately has no gradient, and that is the whole operation: it copies
+	// the values out of the graph so a backward pass reaching them stops. A
+	// gradient check would assert the derivative it exists to remove.
+	"Detach": "removes a value from the graph, which is the point",
 	// Index-valued: the output is a position, which is integer and locally
 	// constant, so its derivative is zero almost everywhere and undefined at the
 	// ties. twill returns no gradient rather than a meaningless zero.

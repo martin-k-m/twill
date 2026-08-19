@@ -227,6 +227,29 @@ func (t *Tensor) Backward() error {
 }
 
 // track1 wires a single-input op into the autodiff graph when needed.
+// Detach copies a tensor's values out of the graph: same numbers, same shape,
+// same dtype, no history. A gradient reaching it stops there.
+//
+// It is what a stabilisation needs when the rewrite it performs is not an exact
+// identity. std/nn's rms_norm rescales before squaring and gets away without
+// this because its reassociation is exact, so the extra terms cancel; a
+// rescaling that merely improves conditioning does not cancel, and
+// differentiating through it gives the derivative of the trick rather than of
+// the function. It is also how a straight-through estimator, a target network
+// and an exponential moving average are each written.
+//
+// The values are copied rather than shared, because a detached tensor that
+// aliased its source would let a later in-place write change a value the
+// forward pass had already used.
+func Detach(a *Tensor) *Tensor {
+	d := make([]float64, len(a.Data))
+	copy(d, a.Data)
+	sh := make([]int, len(a.Shape))
+	copy(sh, a.Shape)
+	out := &Tensor{Data: d, Shape: sh}
+	return out.WithDType(a.DType())
+}
+
 func track1(out, a *Tensor, backward func()) *Tensor {
 	if a.RequiresGrad {
 		out.RequiresGrad = true

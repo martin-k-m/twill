@@ -2411,6 +2411,14 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   }
   # Shape and unit preserved. So is the dtype: relu and clip preserve
   # integrality and keep it (tensor.unary_result_dtype).
+  # Shape, unit and dtype ride through: stop_grad changes what a value
+  # remembers, not what it is.
+  if bytes.equal(name, "stop_grad") {
+    match arg_tensor(arg_types, 0) {
+      Some(t) => return TTensor(t),
+      None => return TUnknown,
+    }
+  }
   if in_set(name, "relu clip") {
     match arg_tensor(arg_types, 0) {
       Some(t) => return TTensor(t),
