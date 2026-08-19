@@ -230,6 +230,156 @@ fn the_activations_agree_with_their_definitions() {
   h.check("softsign(1) is a half", h.near(item(nn.softsign(1.0)), 0.5))
 }
 
+
+fn rms_norm_scales_without_centring() {
+  h.test("rms_norm scales without centring")
+  # x = [1, 2, 3, 4]. mean(x^2) = (1 + 4 + 9 + 16)/4 = 7.5, so the divisor is
+  # sqrt(7.5) = 2.7386127875258306 and y = x / 2.7386... At eps = 0 exactly.
+  let p = nn.rms_norm_params(4)
+  let y = nn.rms_norm(p, [[1.0, 2.0, 3.0, 4.0]], 0.0)
+  h.check("y is x over the root mean square",
+          h.near_all(y, [[0.3651483716701107, 0.7302967433402214,
+                          1.0954451150103321, 1.4605934866804428]]))
+  # The defining difference from layernorm: no mean is removed, so the output of
+  # a row that is already centred-free keeps its sign structure and its mean is
+  # NOT zero. mean(y) = 0.9128709291752769 here, comfortably not zero.
+  h.check("the mean is not removed", h.truthy(item(abs(mean(y))) > 0.5))
+  # And the norm really is unit-RMS after scaling: mean(y^2) = 1.
+  h.check("the result has unit mean square", h.near(item(mean(square(y))), 1.0))
+  # gamma multiplies the normalised value, so doubling gamma doubles the output.
+  let g2 = { gamma: ones(4) * 2.0 }
+  h.check("gamma scales the output",
+          h.near_all(nn.rms_norm(g2, [[1.0, 2.0, 3.0, 4.0]], 0.0), y * 2.0))
+  h.check("it preserves shape on a batch",
+          h.shaped(nn.rms_norm(nn.rms_norm_params(6), randn(5, 6), 0.00001),
+                   list(5, 6)))
+}
+
+fn rms_norm_survives_activations_that_would_overflow_a_square() {
+  h.test("rms_norm survives activations that would overflow a square")
+  # 1e200 squared is 1e400, which is not a finite double. The naive spelling
+  # x / sqrt(mean(x^2) + eps) therefore divides by infinity and returns zeros --
+  # silently, which is worse than a NaN because a zeroed activation looks like a
+  # dead layer rather than like an overflow. The rescaled form returns the same
+  # answer it would for [1, 2, 3, 4], because RMS normalisation is scale-free.
+  let p = nn.rms_norm_params(4)
+  let big = [[1.0e200, 2.0e200, 3.0e200, 4.0e200]]
+  let want = nn.rms_norm(p, [[1.0, 2.0, 3.0, 4.0]], 0.0)
+  h.check("a 1e200 row still normalises",
+          h.close_all(nn.rms_norm(p, big, 0.00001), want, 0.000001))
+  # Confirm the premise rather than asserting it: the naive form does fail here.
+  h.check("while the naive square really does overflow",
+          h.near(item(max(abs(big / sqrt(mean(square(big), 1) + 0.00001)))), 0.0))
+  # A row of exact zeros divides by sqrt(eps), not by zero, so it is finite.
+  let z = nn.rms_norm(p, zeros(1, 4), 0.00001)
+  h.check("an all-zero row is finite", h.truthy(item(max(abs(z))) == 0.0))
+  h.check("and is not NaN", h.truthy(h.is_nan(item(sum(z))) == false))
+}
+
+fn rope_is_a_rotation_that_encodes_relative_position() {
+  h.test("rope is a rotation that encodes relative position")
+  # At position 0 every angle is 0, so cos is 1, sin is 0, and the rotation is
+  # the identity. That is the cheapest possible check that the tables are built
+  # the right way round.
+  let tb = nn.rope_tables(4, 8, 10000.0)
+  h.check("the tables are [T, dh/2]", h.shaped(tb[0], list(4, 4)))
+  h.check("cos at position 0 is all ones", h.near_all(tb[0][0], ones(4)))
+  h.check("sin at position 0 is all zeros", h.near_all(tb[1][0], zeros(4)))
+  let x = randn(2, 4, 8)
+  let y = nn.rope(x, tb[0], tb[1])
+  h.check("it preserves shape", h.shaped(y, list(2, 4, 8)))
+  # A rotation preserves length. Summing the squares over the head axis must
+  # give back exactly what went in, for every head and every position.
+  h.check("it preserves the norm of every head vector",
+          h.close_all(sum(square(y), 2), sum(square(x), 2), 0.000000001))
+  h.check("and position 0 is left alone", h.near_all(y[0][0], x[0][0]))
+}
+
+fn rope_makes_the_query_key_product_depend_only_on_the_gap() {
+  h.test("rope makes the query key product depend only on the gap")
+  # THE property the whole scheme exists for. Rotate one fixed query by t and
+  # one fixed key by s; the dot product must be a function of t - s alone. So
+  # the gaps (5,3), (9,7) and (2,0) -- all gap 2 -- must agree exactly, while a
+  # different gap must not.
+  let dh = 8
+  let q = randn(1, 1, dh)
+  let k = randn(1, 1, dh)
+  let d53 = item(sum(rot_at(q, 5, dh) * rot_at(k, 3, dh), 2))
+  let d97 = item(sum(rot_at(q, 9, dh) * rot_at(k, 7, dh), 2))
+  let d20 = item(sum(rot_at(q, 2, dh) * rot_at(k, 0, dh), 2))
+  h.check("gap 2 at positions 5,3 and 9,7 agree", h.close(d53, d97, 0.00000001))
+  h.check("and agree with the same gap at 2,0", h.close(d53, d20, 0.00000001))
+  let d14 = item(sum(rot_at(q, 1, dh) * rot_at(k, 4, dh), 2))
+  h.check("a different gap gives a different product",
+          h.truthy(abs(d53 - d14) > 0.001))
+  # The convention is half-split, not interleaved: the first half of the head
+  # rotates against the second half. So with a head that is 1 in slot 0 and 0
+  # everywhere else, rotating puts cos in slot 0 and sin in slot dh/2 -- NOT in
+  # slot 1, which is where the interleaved convention would put it.
+  # Built flat and reshaped rather than with `e[0][0][0] = 1.0`, which is a
+  # silent no-op on a rank-3 tensor (chained index assignment writes nothing
+  # above rank 1 and does not report it).
+  let flat = zeros(dh)
+  flat[0] = 1.0
+  let e = reshape(flat, 1, 1, dh)
+  let tb = nn.rope_tables_from(1, 1, dh, 10000.0)
+  let re = nn.rope(e, tb[0], tb[1])
+  h.check("slot 0 holds cos(theta_0) = cos(1)",
+          h.close(item(re[0][0][0]), 0.5403023058681398, 0.000000001))
+  h.check("its partner is slot dh/2, which holds sin(1) -- half-split, not interleaved",
+          h.close(item(re[0][0][4]), 0.8414709848078965, 0.000000001))
+  h.check("and slot 1 is untouched, as interleaving would not leave it",
+          h.near(item(re[0][0][1]), 0.0))
+}
+
+fn rot_at(v, pos, dh) {
+  let t = nn.rope_tables_from(pos, 1, dh, 10000.0)
+  nn.rope(v, t[0], t[1])
+}
+
+fn rope_attention_is_still_causal_and_still_differentiates() {
+  h.test("rope attention is still causal and still differentiates")
+  let X = randn(4, 8)
+  let p = nn.attention_params(8, "xavier")
+  let out = nn.attention_causal_rope(p, X, 2, 10000.0)
+  h.check("the output is [T, dim]", h.shaped(out, list(4, 8)))
+  # Adding the rotation must not have broken the mask: row 0 sees position 0
+  # only, so changing a later token cannot move it.
+  let Y = concat(list(X[0:3], randn(1, 8)), 0)
+  let out2 = nn.attention_causal_rope(p, Y, 2, 10000.0)
+  h.check("row 0 is invariant to a later token", h.near_all(out[0], out2[0]))
+  h.check("row 2 is invariant to a later token", h.near_all(out[2], out2[2]))
+  h.check("but the last row moves", h.truthy(item(max(abs(out[3] - out2[3]))) > 0.0))
+  # The gradient has to reach Wq and Wk *through* the rotation, which is the
+  # thing a wrong split/concat pairing would silently break.
+  let g = grad(fn(w) = sum(nn.attention_causal_rope(w, X, 2, 10000.0)))(p)
+  h.check("the gradient reaches Wq through the rotation",
+          h.truthy(item(max(abs(g.Wq))) > 0.0))
+  h.check("and reaches Wk", h.truthy(item(max(abs(g.Wk))) > 0.0))
+}
+
+fn the_gated_activations_agree_with_their_definitions() {
+  h.test("the gated activations agree with their definitions")
+  # glu(v, g) = v * sigmoid(g). At g = 0 sigmoid is exactly 1/2, so the value
+  # is halved, which is the easiest exact case there is.
+  h.check("glu at a zero gate halves the value",
+          h.near(item(nn.glu(4.0, 0.0)), 2.0))
+  # swiglu(v, g) = v * g * sigmoid(g). At g = 0 that is 0 regardless of v.
+  h.check("swiglu at a zero gate closes completely",
+          h.near(item(nn.swiglu(4.0, 0.0)), 0.0))
+  # silu(1) = 1 * sigmoid(1) = 0.7310585786300049, so swiglu(2, 1) is twice it.
+  h.check("swiglu is value times silu of the gate",
+          h.close(item(nn.swiglu(2.0, 1.0)), 1.4621171572600098, 0.000000001))
+  # geglu(2, 0) = 2 * gelu(0) = 0.
+  h.check("geglu at a zero gate is zero", h.near(item(nn.geglu(2.0, 0.0)), 0.0))
+  # A large positive gate lets silu through nearly unchanged, so the gate can
+  # amplify -- the difference from glu, whose sigmoid gate caps at 1.
+  h.check("a large gate amplifies under swiglu, which glu cannot do",
+          h.truthy(item(nn.swiglu(1.0, 10.0)) > 9.9))
+  h.check("while glu saturates at the value",
+          h.truthy(item(nn.glu(1.0, 10.0)) < 1.0))
+}
+
 dense_is_an_affine_map()
 the_named_initialisers_have_the_scales_they_claim()
 layernorm_centres_and_scales_each_example()
@@ -241,4 +391,10 @@ a_sequential_network_forwards_and_differentiates()
 the_shape_helpers_do_what_their_names_say()
 log_softmax_normalises_on_the_axis_it_was_given()
 the_activations_agree_with_their_definitions()
+rms_norm_scales_without_centring()
+rms_norm_survives_activations_that_would_overflow_a_square()
+rope_is_a_rotation_that_encodes_relative_position()
+rope_makes_the_query_key_product_depend_only_on_the_gap()
+rope_attention_is_still_causal_and_still_differentiates()
+the_gated_activations_agree_with_their_definitions()
 h.report("nn_test")

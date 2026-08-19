@@ -1,0 +1,179 @@
+# sample.tw: turning a row of logits into a token.
+#
+# Import it with:  import "std/sample" as sample
+#
+# `generate` in std/transformer takes the argmax, which is the right default for
+# a test -- the same prompt gives the same continuation, so a generation can be
+# asserted on -- and the wrong one for anything a person reads. Greedy decoding
+# from a language model produces text that repeats, because the single most
+# likely next token is very often the one that just occurred, and there is no
+# mechanism in argmax that can ever break the loop.
+#
+# What is here is the standard set of fixes, as separate functions over a logits
+# vector rather than as flags on one big `sample` call. Each takes [vocab]
+# logits and returns [vocab] logits, so they compose by nesting, and any of them
+# can be tested on its own against a vector written out by hand. `sample_token`
+# at the bottom composes them in the conventional order for a caller who just
+# wants a token.
+#
+# WHY THE RNG IS AN ARGUMENT
+#
+# These draw from `std/random`, whose generators are values, not a global
+# stream. That is the whole point of sampling being reproducible: a caller holds
+# an `Rng` from `new_rng(seed)`, threads it through the generation loop, and gets
+# the same text every run, on every platform, regardless of what else in the
+# program draws random numbers. The builtin `rand` would not give that -- it is
+# one stream for the process, so adding a dropout layer somewhere else silently
+# changes the story the model tells.
+#
+# Note that `std/random` is a `mode systems` module and this one is not. The
+# import works and the generator threads through unchanged; only the `Rng` value
+# crosses the boundary.
+
+import "std/random" as rnd
+
+# The value used to mask a rejected token, matching `nn.causal_mask`. It is a
+# large negative number and not -inf for the same reason: exp(-1e9) is zero to
+# every digit a float carries, while -inf would put 0 * -inf into any backward
+# pass that touched this and make it NaN. Nothing here is differentiated today,
+# but a masked logit that is merely very unlikely rather than structurally
+# impossible is the safer object to hand back.
+let REJECTED = -1000000000.0
+
+# -- Temperature -------------------------------------------------------------
+#
+# Divide the logits before the softmax. Because softmax is exponential, dividing
+# by t < 1 spreads the probabilities apart (the model becomes more confident and
+# more repetitive) and dividing by t > 1 pulls them together (more surprising,
+# and past about 1.3 more incoherent). t = 1 is the distribution the model
+# actually learned, and it is worth knowing that this is the only setting that
+# is not a distortion.
+#
+# `temp` must be positive. At exactly zero this is a division by zero rather
+# than the greedy limit it approaches, so the greedy case is handled by name in
+# `sample_token` instead of by letting a zero fall through here.
+fn temperature(logits, temp) = logits / temp
+
+# -- Top-k -------------------------------------------------------------------
+#
+# Keep the k highest logits and reject the rest. The oldest of the truncation
+# schemes and still a reasonable one: it puts a hard floor under how bad a token
+# can be, which is what stops the rare catastrophic draw from the long tail that
+# derails a whole continuation.
+#
+# Implemented as a threshold rather than as a scatter of the top k back into
+# place, because Twill has no scatter. `topk` returns the k largest in
+# descending order, so its last element is the k-th largest, and keeping
+# everything at or above it keeps exactly the top k. Ties at the boundary keep
+# more than k, which is what the mainstream implementations also do -- the
+# alternative is breaking a tie between two equally likely tokens by their
+# index, which is arbitrary in a way that pretending they are both in the set
+# is not.
+#
+# k <= 0 or k >= vocab is a no-op, so a caller can pass 0 for "off" rather than
+# branching around the call.
+fn top_k_filter(logits, k) {
+  let n = len(logits)
+  if k <= 0 { logits }
+  else if k >= n { logits }
+  else {
+    let kth = topk(logits, k, 0)[k - 1]
+    where(greater_equal(logits, kth), logits, REJECTED)
+  }
+}
+
+# -- Top-p, or nucleus -------------------------------------------------------
+#
+# Keep the smallest set of tokens whose probabilities sum to at least p, and
+# reject the rest (Holtzman et al., 2020).
+#
+# The argument against top-k that this answers: a fixed k is wrong at both ends
+# of the same generation. After "the capital of France is" the model is nearly
+# certain and k = 50 admits 49 tokens that are all wrong; mid-sentence in open
+# prose a thousand tokens are genuinely plausible and k = 50 cuts off most of a
+# legitimate distribution. Nucleus sampling makes the size of the candidate set
+# follow the confidence the model itself reports, which is the quantity that was
+# varying all along.
+#
+# Sort the probabilities descending, scan the cumulative sum, and find the first
+# position where it reaches p. `sum(less(c, p))` counts the positions strictly
+# below p, which is exactly the index of that first position, and it does the
+# search without a loop. That index is clamped to the last element so a p at or
+# above 1 keeps everything rather than running off the end.
+#
+# Then threshold on the probability at that position, the same trick top-k uses,
+# so tokens tied with the boundary token are kept. At least one token always
+# survives: when the very first cumulative entry already reaches p the count is
+# zero, the threshold is the largest probability, and the argmax is kept.
+#
+# p >= 1 is a no-op. p <= 0 leaves only the most likely token, which is greedy.
+fn top_p_filter(logits, p) {
+  let n = len(logits)
+  if p >= 1.0 { logits }
+  else {
+    let probs = softmax(logits, 0)
+    let ordered = sort(probs, 0, 1)
+    let cum = cumsum(ordered, 0)
+    let below = int(item(sum(less(cum, p), 0)))
+    let cut = if below >= n { n - 1 } else { below }
+    let thresh = item(ordered[cut])
+    where(greater_equal(probs, thresh), logits, REJECTED)
+  }
+}
+
+# -- Drawing -----------------------------------------------------------------
+
+# A categorical draw from a [vocab] probability vector, returning the index.
+#
+# Inverse-CDF: take a uniform u in [0, 1), and return the first index whose
+# cumulative probability exceeds it. `sum(less(cum, u))` counts the entries
+# whose running total is still at or below u, which is that index, so the search
+# is one scan and one reduction rather than a loop over the vocabulary.
+#
+# The clamp on the result is not decoration. The cumulative sum of a softmax
+# ends at 1 only up to rounding, and when it ends at 0.99999999 a u above that
+# counts every entry and gives an index one past the end. It happens about once
+# in a hundred million draws, which is often enough to matter in a long
+# generation and rare enough to be unreproducible if it were left to crash.
+fn categorical(r, probs) {
+  let n = len(probs)
+  let u = rnd.uniform(r)
+  let idx = int(item(sum(less(cumsum(probs, 0), u), 0)))
+  if idx >= n { n - 1 } else { idx }
+}
+
+# A categorical draw straight from logits.
+#
+# The softmax here is the builtin, which subtracts the row maximum before
+# exponentiating. That matters more for sampling than anywhere else in the
+# library, because a filtered logits vector deliberately contains -1e9 entries
+# next to ordinary ones: `exp` of the raw values would be `exp(-1e9)` = 0
+# alongside `exp(20)`, and a model whose logits have drifted to a few hundred
+# would give `inf / inf` = NaN and then an index of zero, which reads as the
+# model having strong opinions about token 0.
+fn sample_logits(r, logits) = categorical(r, softmax(logits, 0))
+
+# The greedy choice, for completeness and so `sample_token` has something to
+# return at temperature zero.
+fn greedy(logits) = int(item(argmax(logits, 0)))
+
+# -- The composition ---------------------------------------------------------
+#
+# Temperature, then top-k, then top-p, then draw. That order is the one every
+# mainstream implementation uses and it is not arbitrary: temperature has to
+# come first because it changes the probabilities that top-p is measuring, and
+# applying it afterwards would mean the nucleus was chosen from a distribution
+# the model is not actually sampling from. Top-k before top-p is a cheap
+# pre-truncation of the tail that top-p would mostly discard anyway.
+#
+# The disabling values are the identity ones, so a caller names only what they
+# want: `sample_token(r, row, 1.0, 0, 1.0)` is an honest draw from the model,
+# `sample_token(r, row, 0.0, 0, 1.0)` is greedy, and
+# `sample_token(r, row, 0.8, 40, 0.95)` is roughly what a chat model ships with.
+fn sample_token(r, logits, temp, k, p) {
+  if temp <= 0.0 {
+    greedy(logits)
+  } else {
+    sample_logits(r, top_p_filter(top_k_filter(temperature(logits, temp), k), p))
+  }
+}

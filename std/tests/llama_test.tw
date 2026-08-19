@@ -1,0 +1,208 @@
+# llama_test.tw: std/llama.
+#
+# Run with:  twill std/tests/llama_test.tw
+#
+# The pieces the modern block is built from -- rms_norm, rope, swiglu -- are
+# checked in nn_test on inputs small enough to work out by hand. These tests
+# cover what this module adds on top of them: that the parameter tree is the
+# size arithmetic says it is, that the four departures from the GPT block are
+# actually present rather than merely intended, that the whole stack
+# differentiates, and that it learns.
+
+import "std/llama" as llama
+import "std/transformer" as tf
+import "std/gradcheck" as gc
+import "std/random" as rnd
+import "harness.tw" as h
+
+seed(17)
+
+fn the_feed_forward_width_follows_the_two_thirds_rule() {
+  h.test("the feed forward width follows the two thirds rule")
+  # A gated feed-forward has three matrices where a plain one has two, so the
+  # hidden width is cut to 8*dim/3 to land back on the same parameter count.
+  # 8*64/3 = 170.67, truncated to 170.
+  h.check("dim 64 gives 170 with no rounding", tf.swiglu_hidden(64, 1) == 170)
+  # The published Llama-2 widths are the real test of the formula, including
+  # that the rounding-up to a multiple happens after the 2/3 and not before.
+  # 8*4096/3 = 10922, rounded up to a multiple of 256, is 11008.
+  h.check("dim 4096 rounded to 256 is Llama-2 7B's 11008",
+          tf.swiglu_hidden(4096, 256) == 11008)
+  # 8*5120/3 = 13653, rounded up to a multiple of 256, is 13824.
+  h.check("dim 5120 rounded to 256 is Llama-2 13B's 13824",
+          tf.swiglu_hidden(5120, 256) == 13824)
+  h.check("the result is always a multiple of what was asked",
+          tf.swiglu_hidden(4096, 256) % 256 == 0)
+  # And the point of the 2/3: three matrices at the reduced width cost about
+  # what two at 4*dim cost. dim 48 gives hidden 128, so gated is 3*128*48 =
+  # 18432 and plain (weights only) is 2*4*48*48 = 18432. Exactly equal here
+  # because 8*48/3 divides cleanly.
+  let gated = tf.swiglu_ff_params(48, tf.swiglu_hidden(48, 1), "xavier")
+  h.check("so the gated block costs what the plain one does",
+          tf.num_params(gated) == 18432)
+}
+
+fn the_parameter_tree_is_the_sum_of_its_pieces() {
+  h.test("the parameter tree is the sum of its pieces")
+  # config(vocab=3, dim=6, heads=2, depth=1, max_T=5). hidden = 8*6/3 = 16.
+  # By hand:
+  #   tok.W     [3,6]                        = 18
+  #   block: attn_norm gamma [6]             =  6
+  #          attn 4 * [6,6]                  = 144
+  #          ffn_norm gamma [6]              =  6
+  #          ff w_gate[16,6] w_up[16,6]      = 192
+  #             w_down[6,16]                 =  96
+  #          block total                     = 444
+  #   norm.gamma [6]                         =  6
+  #   output.W  [3,6]                        = 18
+  #   total 18 + 444 + 6 + 18                = 486
+  let cfg = llama.config(3, 6, 2, 1, 5)
+  h.check("the hidden width is 16", cfg.hidden == 16)
+  let p = llama.llama_params(cfg, "xavier")
+  h.check("num_params walks every leaf", llama.num_params(p) == 486)
+  # There is no positional table, which is the structural claim rope makes. A
+  # GPT of the same shape has one, and that is the difference in the counts.
+  h.check("and there is no positional table in the tree",
+          h.truthy(tf.num_params(p) == 486))
+}
+
+fn the_four_departures_from_the_gpt_block_are_present() {
+  h.test("the four departures from the gpt block are present")
+  let cfg = llama.config(3, 6, 2, 1, 5)
+  let p = llama.llama_params(cfg, "xavier")
+  let b = p.blocks[0]
+  # RMSNorm, not LayerNorm: a scale and no shift.
+  h.check("the norms have a gamma", h.shaped(b.attn_norm.gamma, list(6)))
+  h.check("and the block norm is unit-initialised",
+          h.near_all(b.attn_norm.gamma, ones(6)))
+  # SwiGLU, not a two-layer MLP: three bare weights, no biases.
+  h.check("the feed-forward has a gate weight", h.shaped(b.ff.w_gate, list(16, 6)))
+  h.check("an up weight", h.shaped(b.ff.w_up, list(16, 6)))
+  h.check("and a down weight", h.shaped(b.ff.w_down, list(6, 16)))
+  # An untied head, unlike std/transformer which reads the embedding twice.
+  h.check("the output head is its own matrix", h.shaped(p.output.W, list(3, 6)))
+  h.check("and is not the embedding table",
+          h.truthy(item(max(abs(p.output.W - p.tok.W))) > 0.0))
+}
+
+fn a_block_preserves_the_residual_stream_shape() {
+  h.test("a block preserves the residual stream shape")
+  # Every block is a map [T, dim] -> [T, dim]; that is what lets them stack.
+  let X = randn(5, 8)
+  let bp = llama.block_params(8, 2, llama.config(2, 8, 2, 1, 5).hidden, "xavier")
+  h.check("block output matches its input shape",
+          h.shaped(llama.block(bp, X, 2, 0.00001, 10000.0), list(5, 8)))
+}
+
+fn the_logits_are_shaped_right_and_a_position_cannot_see_the_future() {
+  h.test("the logits are shaped right and a position cannot see the future")
+  let cfg = llama.config(6, 8, 2, 2, 10)
+  let p = llama.llama_params(cfg, "xavier")
+  h.check("logits are [T, vocab]",
+          h.shaped(llama.llama_logits(p, tensor([0, 3, 5, 1]), cfg), list(4, 6)))
+  # The defining property of a causal decoder, and worth re-checking here rather
+  # than trusting nn_test: rope rewrites the queries and keys, and a rotation
+  # applied on the wrong axis is exactly the kind of mistake that would leak
+  # information across positions while leaving every shape correct.
+  let a = llama.llama_logits(p, tensor([2, 4, 1]), cfg)
+  let b = llama.llama_logits(p, tensor([2, 4, 5]), cfg)
+  h.check("row 0 is invariant to a later token", h.near_all(a[0], b[0]))
+  h.check("row 1 is invariant to a later token", h.near_all(a[1], b[1]))
+  h.check("but the last row is not", h.truthy(item(max(abs(a[2] - b[2]))) > 0.0))
+}
+
+fn position_is_carried_by_rotation_and_not_by_the_stream() {
+  h.test("position is carried by rotation and not by the stream")
+  # A GPT adds a positional vector to the embedding, so the same token at two
+  # positions enters the stack as two different vectors. This model adds
+  # nothing: position exists only as a rotation of the queries and keys inside
+  # attention, and the values are deliberately not rotated.
+  #
+  # That has a consequence worth pinning down, because it surprises people and
+  # because it is the sharpest observable difference between the two schemes. A
+  # sequence of one repeated token produces *identical* rows at every position.
+  # The values are all the same vector, so any weighted average of them is that
+  # same vector, whatever the rotation did to the attention weights. A learned
+  # positional table would not do this -- it would perturb each row differently
+  # -- and a model that needs to count repetitions cannot do it with RoPE alone.
+  let cfg = llama.config(5, 8, 2, 1, 10)
+  let p = llama.llama_params(cfg, "xavier")
+  let same = llama.llama_logits(p, tensor([3, 3, 3]), cfg)
+  h.check("a repeated token gives identical rows, since values are not rotated",
+          h.near_all(same[0], same[1]))
+  h.check("and identically again at the third position", h.near_all(same[1], same[2]))
+  # Position is nonetheless encoded, which the previous check on its own does
+  # not show. Hold the query token fixed at the end and swap two *distinct*
+  # earlier tokens: the causal window sees the same set of tokens either way, so
+  # attention with no position information at all would give the same answer.
+  # RoPE rotates them by different angles, so the last row must move.
+  let a = llama.llama_logits(p, tensor([1, 2, 0]), cfg)
+  let b = llama.llama_logits(p, tensor([2, 1, 0]), cfg)
+  h.check("but reordering two context tokens moves the last row",
+          h.truthy(item(max(abs(a[2] - b[2]))) > 0.001))
+}
+
+fn the_whole_model_gradient_is_the_derivative() {
+  h.test("the whole model gradient is the derivative")
+  # Every leaf of the tree checked against a central difference. This is the
+  # test that would catch a wrong rope pairing, a mis-transposed swiglu weight,
+  # or a normalisation whose rescaling did not cancel: all three train, and all
+  # three train to a worse loss with no other symptom.
+  let cfg = llama.config(4, 8, 2, 1, 8)
+  let p = llama.llama_params(cfg, "xavier")
+  let r = gc.check_tree(fn(w) = llama.llama_loss(w, tensor([0, 1, 2, 3]),
+                                                 tensor([1, 2, 3, 0]), cfg), p)
+  h.check("every leaf agrees with the difference quotient", r.ok)
+  # The measured worst-leaf error, reported so a regression shows up as a number
+  # rather than as a boolean that used to be true.
+  h.check("and the worst leaf is under 1e-7", h.truthy(r.error < 0.0000001))
+}
+
+fn the_stack_learns_a_pattern_and_generates_it_back() {
+  h.test("the stack learns a pattern and generates it back")
+  import "std/optim" as optim
+  let cfg = llama.config(5, 16, 2, 2, 8)
+  let p = llama.llama_params(cfg, "xavier")
+  let xs = list(tensor([0, 1, 2, 3, 4, 0, 1]))
+  let ys = list(tensor([1, 2, 3, 4, 0, 1, 2]))
+  let before = item(llama.llama_loss_batch(p, xs, ys, cfg))
+  let m = optim.zeros_like(p)
+  let v = optim.zeros_like(p)
+  for step in range(60) {
+    let g = grad(fn(w) = llama.llama_loss_batch(w, xs, ys, cfg))(p)
+    let out = optim.adam_step(p, g, m, v, step + 1, 0.02, 0.9, 0.999, 0.00000001)
+    p = out[0]
+    m = out[1]
+    v = out[2]
+  }
+  let after = item(llama.llama_loss_batch(p, xs, ys, cfg))
+  h.check("the loss falls under training", after < before)
+  h.check("and reaches near zero on a memorisable pattern", after < 0.05)
+  # Greedy generation must then reproduce the cycle: after [0,1,2] comes 3,4,0,1.
+  h.check("greedy generation reproduces the learned cycle",
+          h.near_all(llama.generate(p, tensor([0, 1, 2]), 4, cfg),
+                     tensor([0, 1, 2, 3, 4, 0, 1])))
+  # And sampling at temperature 0 must agree with greedy exactly, which is the
+  # seam between this module and std/sample.
+  let r = rnd.new_rng(1)
+  h.check("sampling at temperature 0 agrees with greedy",
+          h.near_all(llama.generate_sampled(p, tensor([0, 1, 2]), 4, cfg, r, 0.0, 0, 1.0),
+                     tensor([0, 1, 2, 3, 4, 0, 1])))
+  # On a model this confident, low-temperature nucleus sampling should also
+  # land on the cycle, and must be reproducible from the seed.
+  let r1 = rnd.new_rng(99)
+  let r2 = rnd.new_rng(99)
+  h.check("and sampled generation is reproducible from a seed",
+          h.near_all(llama.generate_sampled(p, tensor([0, 1]), 5, cfg, r1, 0.7, 3, 0.9),
+                     llama.generate_sampled(p, tensor([0, 1]), 5, cfg, r2, 0.7, 3, 0.9)))
+}
+
+the_feed_forward_width_follows_the_two_thirds_rule()
+the_parameter_tree_is_the_sum_of_its_pieces()
+the_four_departures_from_the_gpt_block_are_present()
+a_block_preserves_the_residual_stream_shape()
+the_logits_are_shaped_right_and_a_position_cannot_see_the_future()
+position_is_carried_by_rotation_and_not_by_the_stream()
+the_whole_model_gradient_is_the_derivative()
+the_stack_learns_a_pattern_and_generates_it_back()
+h.report("llama_test")

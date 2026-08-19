@@ -1665,6 +1665,17 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 		}
 		rec.Set(t.Name, v)
 	case *ast.Index:
+		// `m[i][j] = v` on a tensor of rank 2 or more, resolved to one write
+		// into the tensor itself.
+		//
+		// Indexing a tensor row hands back a copy, not a view, so the ordinary
+		// path below wrote into that copy and the assignment vanished: no
+		// change, no error, nothing. A list of lists is unaffected because a
+		// list is a handle and the inner one is shared, which is why this was
+		// only ever wrong for tensors.
+		if ip.assignNestedTensor(t, v, env) {
+			return
+		}
 		obj := ip.evalExpr(t.Target, env)
 		idxVal := ip.forced(ip.evalExpr(t.Index, env))
 		// A dictionary is subscripted by its key, `counts[tok] = n`, which is how
@@ -1703,6 +1714,66 @@ func (ip *Interp) assignTo(target ast.Expr, v value.Value, env *value.Env, line 
 		}
 	default:
 		ip.panicf(line, "cannot assign to this expression")
+	}
+}
+
+// assignNestedTensor handles `m[i][j]... = v` where the chain bottoms out at a
+// tensor, writing the one element the indices name. It reports whether it
+// handled the assignment; a single index, or a chain over anything that is not
+// a tensor, is left to the ordinary path.
+func (ip *Interp) assignNestedTensor(target *ast.Index, v value.Value, env *value.Env) bool {
+	base, idxExprs := indexChain(target)
+	if len(idxExprs) < 2 {
+		return false
+	}
+	t, isTensor := ip.evalExpr(base, env).(*tensor.Tensor)
+	if !isTensor {
+		return false
+	}
+	if len(idxExprs) > len(t.Shape) {
+		ip.panicf(target.Line, "%d indices for a tensor of rank %d", len(idxExprs), len(t.Shape))
+	}
+	// Row-major: each index steps by the product of the dimensions below it.
+	offset, stride := 0, 1
+	for _, d := range t.Shape[len(idxExprs):] {
+		stride *= d
+	}
+	for k := len(idxExprs) - 1; k >= 0; k-- {
+		n, ok := rank0Number(ip.forced(ip.evalExpr(idxExprs[k], env)))
+		if !ok {
+			ip.panicf(target.Line, "index must be a scalar number")
+		}
+		i := int(n)
+		if i < 0 || i >= t.Shape[k] {
+			ip.panicf(target.Line, "index %d out of range for axis %d of length %d", i, k, t.Shape[k])
+		}
+		offset += i * stride
+		stride *= t.Shape[k]
+	}
+	// A full index names one element; a partial one names a row, which would be
+	// a bulk write this does not do.
+	if len(idxExprs) != len(t.Shape) {
+		ip.panicf(target.Line, "assigning to a row needs %d indices, got %d", len(t.Shape), len(idxExprs))
+	}
+	x, ok := rank0Number(v)
+	if !ok {
+		ip.panicf(target.Line, "can only assign a scalar to a tensor element")
+	}
+	t.Data[offset] = x
+	return true
+}
+
+// indexChain flattens `m[i][j][k]` into its base expression and the indices in
+// written order.
+func indexChain(e ast.Expr) (ast.Expr, []ast.Expr) {
+	var idxs []ast.Expr
+	for {
+		ix, ok := e.(*ast.Index)
+		if !ok {
+			return e, idxs
+		}
+		idxs = append([]ast.Expr{ix.Index}, idxs...)
+		e = ix.Target
 	}
 }
 

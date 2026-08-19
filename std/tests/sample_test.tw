@@ -1,0 +1,210 @@
+# sample_test.tw: std/sample.
+#
+# Run with:  twill std/tests/sample_test.tw
+#
+# The filters are tested on a five-element logits vector whose softmax is
+# written out once below and referred to throughout, so every expected set of
+# survivors is derived rather than observed. The draws are tested two ways: that
+# a fixed seed gives a fixed answer, which is the module's whole promise, and
+# that a large sample matches the distribution it claims to be drawing from.
+
+import "std/sample" as s
+import "std/random" as rnd
+import "harness.tw" as h
+
+# The reference vector. softmax([1, 3, 2, 0.5, -1]) is
+#
+#   index   logit   probability
+#     0      1.0     0.08439391
+#     1      3.0     0.62359086     <- largest
+#     2      2.0     0.22940609     <- second
+#     3      0.5     0.05118700
+#     4     -1.0     0.01142214
+#
+# Descending, the cumulative masses are 0.6236, 0.8530, 0.9374, 0.9886, 1.0.
+let LOGITS = tensor([1.0, 3.0, 2.0, 0.5, -1.0])
+let REJECTED = -1000000000.0
+
+fn temperature_sharpens_and_flattens() {
+  h.test("temperature sharpens and flattens")
+  # Division, so t = 0.5 doubles every logit.
+  h.check("t = 0.5 doubles the logits",
+          h.near_all(s.temperature(LOGITS, 0.5), LOGITS * 2.0))
+  h.check("t = 1 is the identity", h.near_all(s.temperature(LOGITS, 1.0), LOGITS))
+  # Low temperature concentrates mass on the argmax; high temperature spreads
+  # it. The argmax probability is 0.6236 at t = 1.
+  let cold = item(max(softmax(s.temperature(LOGITS, 0.25), 0)))
+  let hot = item(max(softmax(s.temperature(LOGITS, 4.0), 0)))
+  h.check("a cold temperature concentrates on the top token", h.truthy(cold > 0.98))
+  h.check("a hot temperature flattens towards uniform", h.truthy(hot < 0.32))
+  h.check("and cold is sharper than hot", h.truthy(cold > hot))
+}
+
+fn top_k_keeps_exactly_the_k_largest() {
+  h.test("top k keeps exactly the k largest")
+  # The two largest logits are at indices 1 (3.0) and 2 (2.0).
+  let f2 = s.top_k_filter(LOGITS, 2)
+  h.check("the top two survive unchanged",
+          h.truthy(item(f2[1]) == 3.0 and item(f2[2]) == 2.0))
+  h.check("and the other three are rejected",
+          h.truthy(item(f2[0]) == REJECTED and item(f2[3]) == REJECTED
+                   and item(f2[4]) == REJECTED))
+  # Counting survivors is the shape-independent way to say "exactly k".
+  h.check("exactly two survive",
+          h.near(item(sum(greater(f2, REJECTED), 0)), 2.0))
+  h.check("k = 1 leaves only the argmax",
+          h.near(item(sum(greater(s.top_k_filter(LOGITS, 1), REJECTED), 0)), 1.0))
+  # The disabling values are no-ops rather than errors, so a caller can pass 0.
+  h.check("k = 0 is a no-op", h.near_all(s.top_k_filter(LOGITS, 0), LOGITS))
+  h.check("k at or above the vocabulary is a no-op",
+          h.near_all(s.top_k_filter(LOGITS, 5), LOGITS))
+  h.check("and so is k beyond it", h.near_all(s.top_k_filter(LOGITS, 99), LOGITS))
+  # A rejected logit must survive a softmax as a zero, not as a NaN.
+  h.check("the rejected mass softmaxes to zero",
+          h.near(item(softmax(f2, 0)[0]), 0.0))
+}
+
+fn top_p_keeps_the_smallest_set_reaching_p() {
+  h.test("top p keeps the smallest set reaching p")
+  # p = 0.70. Descending cumulative mass is 0.6236 then 0.8530, so one token is
+  # not enough and two are: indices 1 and 2 survive.
+  let f = s.top_p_filter(LOGITS, 0.70)
+  h.check("two tokens are needed to reach 0.70",
+          h.near(item(sum(greater(f, REJECTED), 0)), 2.0))
+  h.check("and they are the two most likely",
+          h.truthy(item(f[1]) == 3.0 and item(f[2]) == 2.0))
+  # p = 0.60 is reached by the first token alone (0.6236 > 0.60).
+  h.check("p = 0.60 needs only the argmax",
+          h.near(item(sum(greater(s.top_p_filter(LOGITS, 0.60), REJECTED), 0)), 1.0))
+  # p = 0.99 needs all five, since four give only 0.9886.
+  h.check("p = 0.99 needs all five",
+          h.near(item(sum(greater(s.top_p_filter(LOGITS, 0.99), REJECTED), 0)), 5.0))
+  # p = 0.95 is reached by four (0.9374 < 0.95 <= 0.9886).
+  h.check("p = 0.95 needs four",
+          h.near(item(sum(greater(s.top_p_filter(LOGITS, 0.95), REJECTED), 0)), 4.0))
+  h.check("p = 1 is a no-op", h.near_all(s.top_p_filter(LOGITS, 1.0), LOGITS))
+  # The guarantee that keeps this from ever returning an empty set: even at
+  # p = 0 the argmax survives, so there is always something to draw.
+  h.check("p = 0 still leaves the argmax and nothing else",
+          h.near(item(sum(greater(s.top_p_filter(LOGITS, 0.0), REJECTED), 0)), 1.0))
+}
+
+fn the_filters_compose() {
+  h.test("the filters compose")
+  # top-k to 3 leaves indices 1, 2, 0 (probs 0.6236, 0.2294, 0.0844). Renormal-
+  # ised those are 0.6653, 0.2447, 0.0900, whose descending cumulative masses
+  # are 0.6653 and 0.9100. So a following p = 0.70 keeps two.
+  let both = s.top_p_filter(s.top_k_filter(LOGITS, 3), 0.70)
+  h.check("k = 3 then p = 0.70 leaves two",
+          h.near(item(sum(greater(both, REJECTED), 0)), 2.0))
+  h.check("and they are the top two", h.truthy(item(both[1]) == 3.0 and item(both[2]) == 2.0))
+}
+
+fn drawing_is_reproducible_from_a_seed() {
+  h.test("drawing is reproducible from a seed")
+  # The point of taking an Rng rather than using the global stream: two
+  # generators from the same seed give the same tokens, in the same order.
+  let a = rnd.new_rng(1234)
+  let b = rnd.new_rng(1234)
+  let same = true
+  for i in range(30) {
+    if s.sample_token(a, LOGITS, 1.0, 0, 1.0) != s.sample_token(b, LOGITS, 1.0, 0, 1.0) {
+      same = false
+    }
+  }
+  h.check("two generators from one seed agree for thirty draws", same)
+  # And a different seed does not simply repeat the same stream.
+  let c = rnd.new_rng(1234)
+  let d = rnd.new_rng(9999)
+  let differed = false
+  for i in range(30) {
+    if s.sample_token(c, LOGITS, 1.0, 0, 1.0) != s.sample_token(d, LOGITS, 1.0, 0, 1.0) {
+      differed = true
+    }
+  }
+  h.check("a different seed gives a different stream", differed)
+}
+
+fn a_draw_follows_the_distribution_it_claims() {
+  h.test("a draw follows the distribution it claims")
+  # 8000 draws. The standard error on a probability near 0.62 is
+  # sqrt(0.62*0.38/8000) = 0.0054, so a 0.02 tolerance is about four sigma:
+  # tight enough to catch an off-by-one in the inverse-CDF scan and loose
+  # enough not to fail on noise.
+  let r = rnd.new_rng(7)
+  let counts = zeros(5)
+  for i in range(8000) {
+    let t = s.sample_token(r, LOGITS, 1.0, 0, 1.0)
+    counts[t] = counts[t] + 1.0
+  }
+  let freq = counts / 8000.0
+  h.check("the empirical frequencies match the softmax",
+          h.close_all(freq, softmax(LOGITS, 0), 0.02))
+  h.check("every token is reachable", h.truthy(item(min(counts)) > 0.0))
+  # Under top-k = 2 only indices 1 and 2 may ever appear, which is a hard
+  # guarantee rather than a statistical one.
+  let r2 = rnd.new_rng(7)
+  let seen_other = false
+  for i in range(500) {
+    let t = s.sample_token(r2, LOGITS, 1.0, 2, 1.0)
+    if t != 1 and t != 2 { seen_other = true }
+  }
+  h.check("top k = 2 never draws a rejected token", seen_other == false)
+}
+
+fn temperature_zero_is_greedy_and_draws_nothing() {
+  h.test("temperature zero is greedy and draws nothing")
+  h.check("greedy picks the argmax", s.greedy(LOGITS) == 1)
+  let r = rnd.new_rng(5)
+  h.check("temperature 0 is greedy", s.sample_token(r, LOGITS, 0.0, 0, 1.0) == 1)
+  # It must not consume from the generator, or a caller who switches to greedy
+  # would shift every later draw in the program.
+  let a = rnd.new_rng(5)
+  let b = rnd.new_rng(5)
+  s.sample_token(a, LOGITS, 0.0, 0, 1.0)
+  h.check("and leaves the generator where it found it",
+          h.near(rnd.uniform(a), rnd.uniform(b)))
+}
+
+fn sampling_is_stable_at_extreme_logits() {
+  h.test("sampling is stable at extreme logits")
+  # A model whose logits have drifted to a few hundred is not broken, but
+  # exp(600) is infinite. The builtin softmax subtracts the row maximum, so the
+  # draw must still land on the largest rather than returning NaN and index 0.
+  let huge = tensor([600.0, 601.0, 599.0])
+  h.check("a huge softmax is finite and normalised",
+          h.near(item(sum(softmax(huge, 0), 0)), 1.0))
+  let r = rnd.new_rng(3)
+  let ok = true
+  for i in range(200) {
+    let t = s.sample_token(r, huge, 1.0, 0, 1.0)
+    if t < 0 or t > 2 { ok = false }
+  }
+  h.check("draws from huge logits stay in range", ok)
+  # The other end: a row that is entirely rejected except for one token still
+  # has to produce that token, not a NaN.
+  let masked = tensor([-1000000000.0, 5.0, -1000000000.0])
+  let r2 = rnd.new_rng(4)
+  h.check("a fully masked row draws the survivor",
+          s.sample_token(r2, masked, 1.0, 0, 1.0) == 1)
+  # And a flat row must be genuinely uniform rather than always index 0.
+  let flat = zeros(4)
+  let r3 = rnd.new_rng(8)
+  let hits = zeros(4)
+  for i in range(2000) {
+    let t = s.sample_token(r3, flat, 1.0, 0, 1.0)
+    hits[t] = hits[t] + 1.0
+  }
+  h.check("a flat distribution draws uniformly",
+          h.close_all(hits / 2000.0, ones(4) * 0.25, 0.03))
+}
+
+temperature_sharpens_and_flattens()
+top_k_keeps_exactly_the_k_largest()
+top_p_keeps_the_smallest_set_reaching_p()
+the_filters_compose()
+drawing_is_reproducible_from_a_seed()
+a_draw_follows_the_distribution_it_claims()
+temperature_zero_is_greedy_and_draws_nothing()
+sampling_is_stable_at_extreme_logits()
+h.report("sample_test")
