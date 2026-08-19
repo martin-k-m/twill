@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.6.3] - 2026-08-19
+
+Three silent wrong answers in the self-hosted evaluator, all one cause, and the
+one the source had already written down as waiting on it.
+
+### Fixed
+
+- **Control flow crosses an expression boundary.** The self-hosted evaluator
+  reports each step's outcome as a `Flow` value rather than unwinding with a
+  panic the way the bootstrap does -- deliberately, because a panic used as
+  normal control flow is what `docs/self-hosting.md` narrowed `abort` to
+  exclude. But every expression boundary collapsed that `Flow` to a plain
+  value, and an `if` is an expression, so:
+
+  `if c { return 9 }` computed the 9 and threw it away, and the function
+  carried on to return something else. `if c { break }` never left its loop.
+  And a failing `?` became the expression's value, so a function whose first
+  step failed ran to the end with an `Err` bound to a variable that was
+  supposed to hold an `I64`.
+
+  Statement-position `if` and `match` now execute rather than evaluate, through
+  `exec_if` and `exec_match_stmt`, which hand the `Flow` on. A failing `?`
+  parks its failure and the next statement boundary turns it into a return --
+  the same unwinding the bootstrap's panic does, expressed as a value.
+
+  The three were the worst kind of defect a second implementation of a language
+  can have: not a refusal, but a different answer, quietly.
+
+  `src/eval.tw`'s own comment on `?` named this fix and said the feature was
+  waiting on it.
+
+- Four differential tests pin all three, comparing the two engines through
+  their CLIs on `return` and `break` inside an `if`, `return` inside a match
+  arm, and `?` failing at the top of a body, inside an `if` and inside a loop.
+
 ## [1.6.2] - 2026-08-19
 
 Six bugs, found by two techniques that the repository had never applied to

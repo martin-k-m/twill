@@ -637,3 +637,120 @@ func TestSelfHostedSystemsModeWithoutAMain(t *testing.T) {
 		}
 	}
 }
+
+// Control flow crossing an expression boundary. The self-hosted evaluator
+// reports each step's outcome as a Flow value rather than unwinding with a
+// panic the way the bootstrap does, and every expression boundary used to
+// collapse that Flow to a plain value -- so a `return` inside an `if` computed
+// its value and threw it away, a `break` inside an `if` never left its loop,
+// and a failing `?` became the expression's value and the function carried on.
+// All three are silent wrong answers, which is the worst thing a second
+// implementation of a language can produce.
+
+func TestSelfHostedReturnInsideAnIf(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `mode systems
+fn f() -> I64 {
+  if true { return 9 }
+  0
+}
+fn main() { print(f()) }
+`)
+	if goOut != "9" || selfOut != goOut {
+		t.Fatalf("go = %q, self = %q, want both %q", goOut, selfOut, "9")
+	}
+}
+
+func TestSelfHostedBreakInsideAnIf(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `mode systems
+fn main() {
+  let i: I64 = 0
+  while i < 3 {
+    if i == 1 { break }
+    print(i)
+    i = i + 1
+  }
+  print("done")
+}
+`)
+	if goOut != "0done" || selfOut != goOut {
+		t.Fatalf("go = %q, self = %q, want both %q", goOut, selfOut, "0done")
+	}
+}
+
+// `?` returns the failure from the enclosing function, from wherever it is
+// written: at the top of a body, inside an `if`, and inside a loop.
+func TestSelfHostedTryPropagates(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `mode systems
+fn ok1() -> Res[I64, Str] { Ok(7) }
+fn bad() -> Res[I64, Str] { Err("no") }
+fn nothing() -> Opt[I64] { None }
+fn chain() -> Res[I64, Str] {
+  let a: I64 = ok1()?
+  let b: I64 = ok1()?
+  Ok(a + b)
+}
+fn stops() -> Res[I64, Str] {
+  let a: I64 = ok1()?
+  let b: I64 = bad()?
+  print("must not print")
+  Ok(a + b)
+}
+fn inif(c: Bool) -> Res[I64, Str] {
+  if c {
+    let v: I64 = bad()?
+    return Ok(v)
+  }
+  Ok(1)
+}
+fn inloop() -> Res[I64, Str] {
+  let i: I64 = 0
+  while i < 3 {
+    let v: I64 = bad()?
+    i = i + 1
+  }
+  Ok(i)
+}
+fn opt() -> Opt[I64] {
+  let v: I64 = nothing()?
+  Some(v + 1)
+}
+fn main() {
+  match chain() { Ok(v) => print("chain", v), Err(e) => print("chain err", e) }
+  match stops() { Ok(v) => print("stops", v), Err(e) => print("stops err", e) }
+  match inif(true) { Ok(v) => print("inif", v), Err(e) => print("inif err", e) }
+  match inloop() { Ok(v) => print("inloop", v), Err(e) => print("inloop err", e) }
+  match opt() { Some(v) => print("opt", v), None => print("opt none") }
+}
+`)
+	if selfOut != goOut {
+		t.Fatalf("go = %q, self = %q", goOut, selfOut)
+	}
+	for _, want := range []string{"chain 14", "stops err no", "inif err no", "inloop err no", "opt none"} {
+		if !strings.Contains(goOut, want) {
+			t.Errorf("output %q is missing %q", goOut, want)
+		}
+	}
+	if strings.Contains(goOut, "must not print") {
+		t.Error("a failing `?` did not stop the function")
+	}
+}
+
+// A `return` from inside a match arm reaches the function, and the arm's own
+// value is still its value when it does not return.
+func TestSelfHostedReturnInsideAMatchArm(t *testing.T) {
+	goOut, selfOut := runBothWaysAsCLI(t, `mode systems
+fn f(o: Opt[I64]) -> I64 {
+  match o {
+    Some(v) => {
+      if v > 0 { return v * 10 }
+      6
+    },
+    None => 7,
+  }
+}
+fn main() { print(f(Some(4)), f(Some(0)), f(None)) }
+`)
+	if goOut != "40 6 7" || selfOut != goOut {
+		t.Fatalf("go = %q, self = %q, want both %q", goOut, selfOut, "40 6 7")
+	}
+}

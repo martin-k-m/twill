@@ -460,7 +460,17 @@ fn exec_stmt(s: ast.Stmt, env: Env) -> Res[Flow, RuntimeError] {
     # A unit declaration is erased at run time: units are a static check and
     # carry no representation in a value.
     SUnitDecl(_) => Ok(Normal(VUnit)),
-    SExpr(st) => Ok(Normal(eval_expr(st.x, env)?)),
+    # An `if` or a `match` in statement position is executed rather than
+    # evaluated, so a `return`, `break` or `continue` inside one reaches the
+    # loop or the function it belongs to. Going through eval_expr collapses the
+    # Flow to a value (see eval_if), which meant `if c { return 9 }` computed 9
+    # and threw it away, and `if c { break }` never left the loop.
+    SExpr(st) => match st.x {
+      EIf(x) => exec_if(x, env),
+      EMatch(x) => exec_match_stmt(x, env),
+      EBlock(b) => exec_block(b, new_env(Some(env))),
+      _ => Ok(Normal(eval_expr(st.x, env)?)),
+    },
     SBlock(b) => exec_block(b, new_env(Some(env))),
     SBreak(_) => Ok(BreakF),
     SContinue(_) => Ok(ContinueF),
@@ -473,6 +483,12 @@ fn exec_block(b: ast.Block, scope: Env) -> Res[Flow, RuntimeError] {
   let last: Value = VUnit
   for s in b.body {
     let f: Flow = exec_stmt(s, scope)?
+    # A `?` that failed anywhere inside that statement returns from the
+    # enclosing function, and this is the nearest boundary that can say so.
+    match take_pending_try() {
+      Some(failure) => return Ok(Returned(failure)),
+      None => unit,
+    }
     match f {
       Returned(v) => return Ok(Returned(v)),
       BreakF => return Ok(BreakF),
@@ -1013,6 +1029,32 @@ fn is_f64_anno(type_name: Str, u: Opt[ast.UnitAnno]) -> Bool {
 # at the top of a file that there is no function to return the failure from.
 let CALL_DEPTH: Arr[I64] = [0]
 
+# The failure a `?` is carrying out of the function, when one is in flight.
+#
+# `?` returns the failure from the enclosing function, and an expression here
+# has nowhere to put a Flow: eval_expr yields a Value, so eval_try could only
+# hand the failure back as the expression's value and the function carried on.
+# That was the documented gap this file's `?` comment named.
+#
+# So the failure is parked here and collected at the next statement boundary,
+# which is the nearest place that can turn it into a `Returned`. That is what
+# the Go bootstrap's panic does, minus the panic: the same unwinding, expressed
+# as a value, because a panic in normal control flow is what
+# docs/self-hosting.md narrowed `abort` to exclude. Empty means nothing is in
+# flight, and it is emptied by whoever collects it.
+let TRY_PENDING: Arr[Value] = arr_new()
+
+# The failure in flight, if there is one, taking it. Called at every statement
+# boundary; nothing else should read the slot.
+fn take_pending_try() -> Opt[Value] {
+  if len(TRY_PENDING) == 0 {
+    return None
+  }
+  let v: Value = TRY_PENDING[0]
+  arr_clear(TRY_PENDING)
+  Some(v)
+}
+
 # anno_head returns the constructor at the head of a type annotation, so that
 # "Arr[Str]" gives "Arr" and "Dict[Str, I64]" gives "Dict".
 fn anno_head(type_name: Str) -> Str {
@@ -1250,6 +1292,11 @@ fn eval_try(x: ast.Try, env: Env) -> Res[Value, RuntimeError] {
           return Err(runtime_error(x.line, bytes.concat("`?` outside a function: the value was ",
             format_value(v))))
         }
+        # Park the failure for the next statement boundary to turn into a
+        # return, and hand it back as this expression's value so the rest of
+        # the statement can finish evaluating harmlessly before it is
+        # collected.
+        push(TRY_PENDING, v)
         Ok(v)
       }
     },
@@ -1303,6 +1350,45 @@ fn eval_match(x: ast.Match, env: Env) -> Res[Value, RuntimeError] {
   Err(runtime_error(x.line, bytes.concat("no match arm for ", format_value(subj))))
 }
 
+# The flow-preserving twin of eval_match, for a `match` in statement position,
+# so a `return` or a `break` in an arm reaches the function or the loop it
+# belongs to rather than becoming the arm's value. It repeats eval_match's arm
+# selection because the two differ only in the last line, and threading a flag
+# through would make the common path read worse than the duplication does.
+fn exec_match_stmt(x: ast.Match, env: Env) -> Res[Flow, RuntimeError] {
+  let subj: Value = eval_expr(x.subject, env)?
+  let is_variant: Bool = false
+  let subj_name: Str = ""
+  let subj_has_payload: Bool = false
+  let subj_payload: Opt[Value] = None
+  match subj {
+    VVariant(v) => {
+      is_variant = true
+      subj_name = v.name
+      subj_has_payload = v.has_payload
+      subj_payload = v.payload
+    },
+    _ => unit,
+  }
+  let i: I64 = 0
+  while i < len(x.arms) {
+    let arm: ast.MatchArm = x.arms[i]
+    let pat: ast.MatchPattern = arm.pattern
+    if pat.wildcard or (is_variant and bytes.equal(pat.variant, subj_name)) {
+      let scope: Env = new_env(Some(env))
+      if len(pat.binding) > 0 and is_variant and subj_has_payload {
+        match subj_payload {
+          Some(pv) => env_define(scope, pat.binding, pv),
+          None => unit,
+        }
+      }
+      return exec_stmt(arm.body, scope)
+    }
+    i = i + 1
+  }
+  Err(runtime_error(x.line, bytes.concat("no match arm for ", format_value(subj))))
+}
+
 # Field access on an already-evaluated target, shared by eval_expr and
 # eval_call. eval_call evaluates the target itself so that `t.to(f32)` can be
 # recognised before field access refuses a tensor, and without evaluating the
@@ -1322,6 +1408,21 @@ fn field_value(target: Value, name: Str, line: I64) -> Res[Value, RuntimeError] 
 # An `if` used as an expression takes the value of whichever block ran. With no
 # else and a false condition it is unit, which is why `let x = if c { 1 }` is
 # legal and rarely what anyone means.
+# The flow-preserving twin of eval_if, for an `if` in statement position. The
+# two differ only in what they do with the branch's Flow: this one hands it on,
+# eval_if collapses it to a value because an expression has nowhere to put it.
+fn exec_if(x: ast.IfExpr, env: Env) -> Res[Flow, RuntimeError] {
+  let c: Value = eval_expr(x.cond, env)?
+  if truthy(c, x.line)? {
+    return exec_block(x.then_block, new_env(Some(env)))
+  }
+  match x.else_branch {
+    ElseBlock(b) => exec_block(b, new_env(Some(env))),
+    ElseIf(alt) => exec_if(alt, env),
+    NoElse => Ok(Normal(VUnit)),
+  }
+}
+
 fn eval_if(x: ast.IfExpr, env: Env) -> Res[Value, RuntimeError] {
   let c: Value = eval_expr(x.cond, env)?
   if truthy(c, x.line)? {
