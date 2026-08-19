@@ -586,15 +586,13 @@ func systemsBuiltinResult(name string, args []Type) (Type, bool) {
 	case "arr", "arr_new", "arr_of_tensor":
 		return tArr{}, true
 	case "slice":
-		// slice(x, a, b) is a copy of x's range, so it is whatever x was: a Str
-		// slices to a Str and an Arr to an Arr.
-		switch a := arg(0).(type) {
-		case tStr:
-			return tStr{}, true
-		case tArr:
-			return a, true
-		}
-		return nil, false
+		// slice(x, a, b) is a Str slice, and only a Str: the builtin rejects
+		// anything else. The checker used to type an Arr argument as an Arr
+		// result, on the reasoning that a slice is whatever it sliced -- which
+		// is a reasonable design and not the one that was implemented, so it
+		// propagated a confident wrong type and the definite mismatch never
+		// surfaced anywhere downstream either.
+		return tStr{}, true
 	case "dict_new":
 		return tDict{}, true
 	case "dict_keys":
