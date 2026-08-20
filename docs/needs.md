@@ -137,19 +137,29 @@ and returns a float.
 
 ## NEEDS-3: `enum` with payloads and exhaustive `match`
 
-**Status:** done for variant patterns (2026-08, 1.6); the pattern language
-itself is still narrow. An `enum` with payloads is declared, constructed and
-matched, and the checker reports the four things this entry wanted: a missing
-variant by name (`match on C is not exhaustive: missing B`), a duplicate arm, an
-arm after `_`, a `_` that covers nothing, and, one more than was asked for, arms
-that mix two enums.
+**Status:** done (2026-08, 1.7), on both implementations. 1.6 did the
+exhaustiveness half; 1.7 did the pattern language, which is what the paragraph
+below used to say was missing.
 
-What is **not** there, and is worth naming because the entry reads as though
-exhaustiveness were the whole job: a pattern may only be a variant name with
-optional binders. A literal pattern (`3 => ...`) is a syntax error, a nested
-pattern (`Ok(Some(v))`) is a syntax error, and there are no guards
-(`A(n) if n > 0`). Every one of those is what a compiler written in twill wants
-next, so this entry is done and its successor is not filed.
+An `enum` with payloads is declared, constructed and matched, and the checker
+reports a missing variant by name, a duplicate arm, an arm after a catch-all, a
+catch-all that covers nothing, and arms that mix two enums. A pattern is now a
+tree: nested patterns (`Ok(Some(v))`), literal patterns (`3`, `"hi"`, `true`,
+`-1`) and guards (`Some(n) if n > 0`) all parse, check and run. A lower-case
+name binds instead of naming a case, so a catch-all can say what it caught; an
+upper-case name is a case, which is the rule that tells the two apart.
+
+Exhaustiveness recurses to match: `Some(Ok(v))`, `Some(Err(e))` and `None`
+cover an `Opt[Res[..]]`, and dropping one names what gets through
+(`missing Some(Err)`). An arm counts only when nothing but the value's shape
+decides whether it runs, so a guarded arm and a narrower nested one prove
+nothing -- which is stricter than 1.6 was, and correct, since neither of those
+covers the case it appears to.
+
+*Previously, and now wrong:* "a pattern may only be a variant name with optional
+binders. A literal pattern is a syntax error, a nested pattern is a syntax
+error, and there are no guards. Every one of those is what a compiler written in
+twill wants next."
 
 Tagged unions, matched by pattern, exhaustiveness enforced as an error. The AST
 is forty variants and the token kind is seven; `src/lex.tw:29` spells the token
@@ -165,14 +175,34 @@ is precisely the property the twill version is meant to gain.
 
 ## NEEDS-4: generics: `Arr[T]`, `Dict[K,V]`, `Opt[T]`, `Res[T,E]`
 
-**Status:** the annotations are now real types (2026-08, 1.6); generic
-*declarations* and monomorphization remain, and this is the largest open
-language question in the file. 1.6 turned `Arr[T]`, `Dict[K, V]`, `Opt[T]` and
-`Res[T, E]` from tolerated text into types the checker enforces at bindings,
-arguments, returns, struct fields and enum payloads. What still does not exist
-is any way to write your own: `struct Box[T] { ... }` and `enum MyOpt[T] { ... }`
-are both a syntax error at the `[`. So the four built-in generics are generic
-and nothing else can be.
+**Status:** done (2026-08, 1.7), on both implementations. This entry was the
+largest open language question in the file for months, and the paragraph below
+it is what it said while it was open, kept because a reader who finds the old
+advice needs to be told it is old.
+
+1.6 turned `Arr[T]`, `Dict[K, V]`, `Opt[T]` and `Res[T, E]` from tolerated text
+into types the checker enforces. 1.7 lets a program declare its own:
+`struct Box[T]`, `enum Tree[T]` and `fn first[T](xs: Arr[T]) -> T` all parse,
+check and run.
+
+**Monomorphization was not needed and is not there.** That is the part of this
+entry's original advice that turned out to be wrong, and it is worth writing
+down why. The runtime is a tree walker over dynamically typed values: the same
+code runs whatever T is, and specialising it per instantiation would produce
+identical copies. So the parameters have to reach exactly one place, the types
+the checker judges against, and generics here are substitution and nothing else
+-- `substParams` in `internal/checker/systems.go` and `subst_params` in
+`src/check.tw`, about eighty lines each. NEEDS-90's termination worry, which
+existed because monomorphization was assumed, therefore does not arise.
+
+What is checked: a `Box[I64]`'s field is an I64; a `Tree[Str]` matched with
+`Leaf(v)` binds v as a Str; substitution goes under the constructors a parameter
+is written inside, so a payload declared `Arr[T]` in a `Tree[I64]` is an
+`Arr[I64]`; and two uses of one declaration are different types when their
+arguments differ. Arguments are inferred from the value rather than written at
+the use site, since there is nowhere to write them. An unbound parameter judges
+nothing, so a bare `Box` says what it said before 1.7. No bounds and no traits,
+as this entry always said.
 
 *(Original status: generic type annotations parse and check (2026-08-09);
 generic type declarations and real monomorphization remain.)*
@@ -3363,17 +3393,27 @@ gradient is now refused wherever it is written rather than only as a literal
 differentiable rather than returning a zero gradient. `std/gradcheck.tw` is the
 finite-difference checker that makes both testable from twill.
 
+## What 1.7 closed
+
+- **NEEDS-3, the pattern language.** Nested patterns, literal patterns and
+  guards, with exhaustiveness rewritten to recurse and to count only the arms
+  whose running depends on the value's shape.
+- **NEEDS-4, user-defined generics.** `struct Box[T]`, `enum Tree[T]`,
+  `fn first[T]`, checked by substitution at use sites. No monomorphization,
+  because a tree walker over dynamically typed values does not need one -- which
+  also answers NEEDS-90 by removing the thing that raised it.
+
+Both on the Go bootstrap and in `src/` together, verified by comparing the two
+checkers character for character over 404 files.
+
 ## What is still open after 1.6
 
 ### Language
 
-- **User-defined generics (NEEDS-4).** The largest one. `Arr`, `Dict`, `Opt` and
-  `Res` are generic and checked; `struct Box[T]` and `enum MyOpt[T]` are a
-  syntax error at the `[`. No monomorphization exists, which is also why
-  NEEDS-90's termination worry has not had to be answered.
-- **The pattern language (NEEDS-3).** A pattern is a variant name and binders.
-  Literal patterns (`3 => ...`), nested patterns (`Ok(Some(v))`) and guards are
-  all syntax errors. A compiler written in twill wants all three.
+*(The two entries that stood at the top of this list until 1.7 -- user-defined
+generics, NEEDS-4, and the pattern language, NEEDS-3 -- are both closed. What
+1.7 closed is its own section below.)*
+
 - **Lazy iteration (NEEDS-96).** No generator, no `yield`, no lazy sequence.
   `epoch_batches` materialises every batch of an epoch, and `std/io` cannot
   stream a file larger than memory. This is a real limit on dataset size rather

@@ -329,9 +329,10 @@ fn parse_let(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
 fn parse_fn_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let line: I64 = next_tok(p).line
   let name: Str = expect_ident(p)?
+  let type_params: Arr[Str] = parse_type_params(p)?
   let sig: Signature = parse_signature(p)?
   let body: ast.Expr = parse_fn_body(p)?
-  Ok(SFn(ast.fn_decl(p.ids, name, sig.params, sig.ret, sig.ret_unit, sig.ret_type, body, line)))
+  Ok(SFn(ast.fn_decl(p.ids, name, type_params, sig.params, sig.ret, sig.ret_unit, sig.ret_type, body, line)))
 }
 
 fn parse_while(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
@@ -408,6 +409,24 @@ fn parse_type_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   Ok(ast.type_decl(p.ids, name, fields, line))
 }
 
+# parse_type_params parses the `[T, U]` a declaration may carry after its name.
+# It returns an empty list when there is none, which is the shape of every
+# declaration written before 1.7. The names are ordinary identifiers; what makes
+# one a type parameter is being listed here, and it is in scope for the
+# declaration only.
+fn parse_type_params(p: Parser) -> Res[Arr[Str], lex.SyntaxError] {
+  let names: Arr[Str] = arr_new()
+  if not check(p, "[") { return Ok(names) }
+  next_tok(p)
+  while true {
+    push(names, expect_ident(p)?)
+    if accept(p, ",") { continue }
+    expect(p, "]")?
+    break
+  }
+  Ok(names)
+}
+
 # parse_enum_decl parses `enum Name { Case, Case(Payload), ... }`. A case is a
 # name with an optional single payload type in parentheses; cases are separated
 # by commas and a trailing comma is allowed. The payload type is read with
@@ -415,6 +434,7 @@ fn parse_type_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
 fn parse_enum_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let line: I64 = next_tok(p).line
   let name: Str = expect_ident(p)?
+  let type_params: Arr[Str] = parse_type_params(p)?
   expect(p, "{")?
   let variants: Arr[ast.EnumVariant] = arr_new()
   while not check(p, "}") and not at_end(p) {
@@ -432,7 +452,7 @@ fn parse_enum_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     }
   }
   expect(p, "}")?
-  Ok(ast.enum_decl(p.ids, name, variants, line))
+  Ok(ast.enum_decl(p.ids, name, type_params, variants, line))
 }
 
 # parse_struct_decl parses `struct Name { field: Type, ... }`. A field's type is
@@ -441,6 +461,7 @@ fn parse_enum_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
 fn parse_struct_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let line: I64 = next_tok(p).line
   let name: Str = expect_ident(p)?
+  let type_params: Arr[Str] = parse_type_params(p)?
   expect(p, "{")?
   let fields: Arr[ast.StructField] = arr_new()
   while not check(p, "}") and not at_end(p) {
@@ -453,7 +474,7 @@ fn parse_struct_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
     }
   }
   expect(p, "}")?
-  Ok(ast.struct_decl(p.ids, name, fields, line))
+  Ok(ast.struct_decl(p.ids, name, type_params, fields, line))
 }
 
 # ---- expressions -----------------------------------------------------------
@@ -742,9 +763,15 @@ fn parse_match(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
   let arms: Arr[ast.MatchArm] = arr_new()
   while not check(p, "}") and not at_end(p) {
     let pat: ast.MatchPattern = parse_pattern(p)?
+    # A guard is `if cond` between the pattern and the arrow.
+    let guard: Arr[ast.Expr] = arr_new()
+    if check(p, "if") {
+      next_tok(p)
+      push(guard, parse_expr(p)?)
+    }
     expect(p, "=>")?
     let body: ast.Stmt = parse_stmt(p)?
-    push(arms, ast.MatchArm { pattern: pat, body: body })
+    push(arms, ast.MatchArm { pattern: pat, body: body, guard: guard })
     if not accept(p, ",") {
       break
     }
@@ -753,36 +780,99 @@ fn parse_match(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
   Ok(ast.match_expr(p.ids, subject, arms, line))
 }
 
-# parse_pattern parses a match arm's pattern: `_` (wildcard), a variant name, or
-# a variant name with a single binding, `Some(x)`. A binding of `_` discards the
-# payload, which is recorded as an empty binding.
+# parse_pattern parses a match arm's pattern. A pattern is one of:
+#
+#   _              matches anything, binds nothing
+#   name           matches anything, binds it
+#   3, "s", true   matches by equality
+#   Variant        matches the case, whatever it carries
+#   Variant(pat)   matches the case and matches its payload against pat
+#
+# and the last nests, so `Ok(Some(v))` and `Err(-1)` are patterns. The rule that
+# tells a variant from a binder is the initial letter: `Some` names a case,
+# `some` binds. Every variant in the language and its libraries is upper-case
+# initial, and a lower-case one would previously have been read as a case that
+# no enum declares, which the checker refused to judge.
 fn parse_pattern(p: Parser) -> Res[ast.MatchPattern, lex.SyntaxError] {
   let t: lex.Token = peek(p, 0)
-  if t.kind == lex.KIND_IDENT and bytes.equal(t.value, "_") {
-    next_tok(p)
-    return Ok(ast.MatchPattern { variant: "", binding: "", wildcard: true, line: t.line })
+  if pattern_starts_literal(p, t) {
+    let lit: ast.Expr = parse_pattern_literal(p)?
+    let one: Arr[ast.Expr] = arr_new()
+    push(one, lit)
+    return Ok(ast.MatchPattern { kind: ast.PAT_LITERAL, variant: "", binding: "", sub: [], lit: one, line: t.line })
   }
   let name: Str = expect_ident(p)?
-  # A variant may be written with its type in front, `Opt.None`, the same way it
-  # is written where a value is constructed. The qualifier only says which enum
-  # the variant belongs to, and variants are resolved by name, so it is read and
-  # dropped -- `Opt.None` and `None` are the same pattern.
-  if accept(p, ".") {
-    name = expect_ident(p)?
-  }
-  let binding: Str = ""
-  if accept(p, "(") {
-    let bt: lex.Token = peek(p, 0)
-    if bt.kind != lex.KIND_IDENT {
-      return Err(err_at(bt, "expected a binding name in the pattern"))
-    }
+  # A variant may be written with something in front, `Opt.None` or
+  # `ast.EBool(b)`, the same way it is written where a value is constructed. The
+  # qualifier only says where the variant comes from, and variants are resolved
+  # by name, so it is read and dropped. This runs before the case rule below,
+  # because the qualifier is a type name or a module alias and either may be
+  # lower-case: what decides is the name after the dot.
+  if check(p, ".") {
     next_tok(p)
-    if not bytes.equal(bt.value, "_") {
-      binding = bt.value
+    name = expect_ident(p)?
+  } else if not starts_upper(name) {
+    if check(p, "(") {
+      return Err(err_at(peek(p, 0), bytes.concat(name, " is a binding, not a variant: a case name starts with a capital letter")))
     }
+    if bytes.equal(name, "_") {
+      return Ok(ast.pat_bind("", t.line))
+    }
+    return Ok(ast.pat_bind(name, t.line))
+  }
+  let sub: Arr[ast.MatchPattern] = arr_new()
+  if accept(p, "(") {
+    push(sub, parse_pattern(p)?)
     expect(p, ")")?
   }
-  Ok(ast.MatchPattern { variant: name, binding: binding, wildcard: false, line: t.line })
+  Ok(ast.MatchPattern { kind: ast.PAT_VARIANT, variant: name, binding: "", sub: sub, lit: [], line: t.line })
+}
+
+# pattern_starts_literal reports whether the token begins one of the literal
+# forms a pattern may match by equality. A leading `-` belongs to the number:
+# `Err(-1)` is one pattern, not a negation applied to one.
+fn pattern_starts_literal(p: Parser, t: lex.Token) -> Bool {
+  if t.kind == lex.KIND_NUMBER { return true }
+  if t.kind == lex.KIND_STRING { return true }
+  if t.kind == lex.KIND_KEYWORD and (bytes.equal(t.value, "true") or bytes.equal(t.value, "false")) { return true }
+  bytes.equal(t.value, "-") and peek(p, 1).kind == lex.KIND_NUMBER
+}
+
+# parse_pattern_literal reads that literal, keeping the digits as written so an
+# I64 above 2^53 compares exactly rather than through an f64.
+fn parse_pattern_literal(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  if bytes.equal(t.value, "-") and peek(p, 1).kind == lex.KIND_NUMBER {
+    next_tok(p)
+    let n: lex.Token = peek(p, 0)
+    let num: ast.Expr = parse_pattern_number(p)?
+    return Ok(ast.unary(p.ids, "-", num, n.line))
+  }
+  if t.kind == lex.KIND_NUMBER {
+    return parse_pattern_number(p)
+  }
+  if t.kind == lex.KIND_STRING {
+    next_tok(p)
+    return Ok(ast.string_lit(p.ids, t.value, t.line))
+  }
+  next_tok(p)
+  Ok(ast.bool_lit(p.ids, bytes.equal(t.value, "true"), t.line))
+}
+
+fn parse_pattern_number(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {
+  let t: lex.Token = peek(p, 0)
+  next_tok(p)
+  match flt.f64_of_str(t.value) {
+    Some(v) => Ok(ast.number_lit(p.ids, v, t.value, t.line)),
+    None => Err(err_at(t, bytes.concat("invalid number ", quoted(t.value)))),
+  }
+}
+
+# starts_upper is the variant-versus-binder rule, applied to the first
+# character. Names in twill are ASCII identifiers.
+fn starts_upper(name: Str) -> Bool {
+  if len(name) == 0 { return false }
+  lex.is_upper(name[0])
 }
 
 fn parse_lambda(p: Parser) -> Res[ast.Expr, lex.SyntaxError] {

@@ -1318,10 +1318,11 @@ fn eval_try(x: ast.Try, env: Env) -> Res[Value, RuntimeError] {
 }
 
 # `match subject { pattern => body, ... }`. The subject is evaluated once, then
-# arms are tried in order: an arm matches when its pattern is a `_` wildcard, or
-# when the subject is a variant whose tag equals the pattern's variant name. The
-# payload is bound where the pattern names it (`Some(v)`), and the arm body runs
-# as a statement in a child scope.
+# arms are tried in order, and an arm is taken when its pattern fits the value
+# and its guard, if it has one, is true. A pattern is a tree -- `_`, a binder, a
+# literal, a case, or a case carrying another pattern -- so `Ok(Some(v))` and
+# `Err(-1)` select an arm and bind through the payload. The arm body runs as a
+# statement in a child scope holding the pattern's bindings.
 #
 # The body's Flow is collapsed with flow_value, the same way eval_if collapses a
 # block's, so a `return` in an arm yields its value here rather than unwinding
@@ -1329,38 +1330,69 @@ fn eval_try(x: ast.Try, env: Env) -> Res[Value, RuntimeError] {
 # expression position (see the EBlock and eval_if arms), and match follows it.
 fn eval_match(x: ast.Match, env: Env) -> Res[Value, RuntimeError] {
   let subj: Value = eval_expr(x.subject, env)?
-  let is_variant: Bool = false
-  let subj_name: Str = ""
-  let subj_has_payload: Bool = false
-  let subj_payload: Opt[Value] = None
-  match subj {
-    VVariant(v) => {
-      is_variant = true
-      subj_name = v.name
-      subj_has_payload = v.has_payload
-      subj_payload = v.payload
-    },
-    _ => unit,
-  }
   let i: I64 = 0
   while i < len(x.arms) {
     let arm: ast.MatchArm = x.arms[i]
-    let pat: ast.MatchPattern = arm.pattern
-    if pat.wildcard or (is_variant and bytes.equal(pat.variant, subj_name)) {
-      let scope: Env = new_env(Some(env))
-      # Bind the payload where the pattern names it: `Some(v)` puts the carried
-      # value in `v`. A `_` binding, or a payload-less case, binds nothing.
-      if len(pat.binding) > 0 and is_variant and subj_has_payload {
-        match subj_payload {
-          Some(pv) => env_define(scope, pat.binding, pv),
-          None => unit,
-        }
-      }
+    # Each arm gets its own scope, and the pattern binds into it as it matches:
+    # `Ok(Some(v))` puts the innermost payload in `v`. A failed match leaves the
+    # scope to be discarded, so a partially bound arm cannot leak a name into
+    # the next one.
+    let scope: Env = new_env(Some(env))
+    if arm_matches(arm, subj, scope)? {
       return Ok(flow_value(exec_stmt(arm.body, scope)?))
     }
     i = i + 1
   }
   Err(runtime_error(x.line, bytes.concat("no match arm for ", format_value(subj))))
+}
+
+# arm_matches decides whether one arm takes the subject, defining the pattern's
+# bindings in scope as it goes. The guard sees those bindings and is the last
+# word: a false guard falls through to the arms below.
+fn arm_matches(arm: ast.MatchArm, subj: Value, scope: Env) -> Res[Bool, RuntimeError] {
+  if not match_pattern(arm.pattern, subj, scope)? {
+    return Ok(false)
+  }
+  if len(arm.guard) == 0 {
+    return Ok(true)
+  }
+  let g: Value = eval_expr(arm.guard[0], scope)?
+  truthy(g, arm.pattern.line)
+}
+
+# match_pattern matches one pattern against one value, defining the pattern's
+# bindings in scope, and reports whether the value fits. Bindings are written
+# even on the way to a failure, which is safe because the caller gives every arm
+# a fresh scope and throws it away when this returns false.
+fn match_pattern(pat: ast.MatchPattern, v: Value, scope: Env) -> Res[Bool, RuntimeError] {
+  if pat.kind == ast.PAT_BINDING {
+    if len(pat.binding) > 0 {
+      env_define(scope, pat.binding, v)
+    }
+    return Ok(true)
+  }
+  if pat.kind == ast.PAT_LITERAL {
+    # The literal is a closed expression -- a number, a string, a boolean, or a
+    # negated number -- so it needs no scope of its own, and it is compared with
+    # the same equality `==` gives.
+    let lit: Value = eval_expr(pat.lit[0], scope)?
+    return Ok(deep_equal(lit, v))
+  }
+  match v {
+    VVariant(var) => {
+      if not bytes.equal(var.name, pat.variant) { return Ok(false) }
+      # A pattern naming the case alone matches it whatever it carries, which is
+      # how a payload-less case is written too.
+      if len(pat.sub) == 0 { return Ok(true) }
+      match var.payload {
+        # A pattern asking about a payload that is not there matches nothing,
+        # rather than matching a unit that was never written.
+        None => Ok(false),
+        Some(pv) => match_pattern(pat.sub[0], pv, scope),
+      }
+    },
+    _ => Ok(false),
+  }
 }
 
 # The flow-preserving twin of eval_match, for a `match` in statement position,
@@ -1370,31 +1402,11 @@ fn eval_match(x: ast.Match, env: Env) -> Res[Value, RuntimeError] {
 # through would make the common path read worse than the duplication does.
 fn exec_match_stmt(x: ast.Match, env: Env) -> Res[Flow, RuntimeError] {
   let subj: Value = eval_expr(x.subject, env)?
-  let is_variant: Bool = false
-  let subj_name: Str = ""
-  let subj_has_payload: Bool = false
-  let subj_payload: Opt[Value] = None
-  match subj {
-    VVariant(v) => {
-      is_variant = true
-      subj_name = v.name
-      subj_has_payload = v.has_payload
-      subj_payload = v.payload
-    },
-    _ => unit,
-  }
   let i: I64 = 0
   while i < len(x.arms) {
     let arm: ast.MatchArm = x.arms[i]
-    let pat: ast.MatchPattern = arm.pattern
-    if pat.wildcard or (is_variant and bytes.equal(pat.variant, subj_name)) {
-      let scope: Env = new_env(Some(env))
-      if len(pat.binding) > 0 and is_variant and subj_has_payload {
-        match subj_payload {
-          Some(pv) => env_define(scope, pat.binding, pv),
-          None => unit,
-        }
-      }
+    let scope: Env = new_env(Some(env))
+    if arm_matches(arm, subj, scope)? {
       return exec_stmt(arm.body, scope)
     }
     i = i + 1

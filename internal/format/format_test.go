@@ -148,3 +148,33 @@ func TestFormatKeepsParenthesesAPostfixNeeds(t *testing.T) {
 		}
 	}
 }
+
+// A printer with no case for a declaration's type parameters deletes them,
+// which turns a generic program into one that means something else -- the same
+// failure `unit USD` had in 1.6. Both halves of the round trip are checked:
+// the parameters survive, and the pattern language's nesting and guards do too.
+func TestTypeParametersSurviveFormatting(t *testing.T) {
+	src := "mode systems\nstruct Pair[A, B] { first: A, second: B }\nenum Tree[T] { Leaf(T), Empty }\nfn swap[A, B](p: Pair[A, B]) -> Pair[B, A] = Pair { first: p.second, second: p.first }\n"
+	got, err := format.Source(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"struct Pair[A, B]", "enum Tree[T]", "fn swap[A, B]"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatted output lost %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestPatternsSurviveFormatting(t *testing.T) {
+	src := "mode systems\nfn f(o: Opt[Res[I64, Str]]) -> Str {\n  match o { Some(Ok(3)) => \"three\", Some(Ok(n)) if n > 0 => \"pos\", Some(Ok(n)) => \"ok\", Some(Err(e)) => e, None => \"none\" }\n}\n"
+	got, err := format.Source(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Some(Ok(3))", "Some(Ok(n)) if n > 0", "Some(Err(e))"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatted output lost %q:\n%s", want, got)
+		}
+	}
+}

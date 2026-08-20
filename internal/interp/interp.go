@@ -868,17 +868,19 @@ func (ip *Interp) evalExpr(e ast.Expr, env *value.Env) value.Value {
 		return value.TheUnit
 	case *ast.Match:
 		subj := ip.evalExpr(ex.Subject, env)
-		variant, isVariant := subj.(*value.Variant)
 		for _, arm := range ex.Arms {
-			if !arm.Pattern.Wildcard && !(isVariant && arm.Pattern.Variant == variant.Name) {
+			// Each arm gets its own scope, and the pattern binds into it as it
+			// matches: `Ok(Some(v))` puts the innermost payload in `v`. A
+			// failed match leaves the scope to be discarded, so a partially
+			// bound arm cannot leak a name into the next one.
+			armEnv := value.NewEnv(env)
+			if !ip.matchPattern(arm.Pattern, subj, armEnv) {
 				continue
 			}
-			armEnv := value.NewEnv(env)
-			// Bind the payload where the pattern names it: `Some(v)` puts the
-			// carried value in `v` for the arm's body. A `_` binding, or a
-			// payload-less case, binds nothing.
-			if arm.Pattern.Binding != "" && isVariant && variant.HasPayload {
-				armEnv.Define(arm.Pattern.Binding, variant.Payload)
+			// The guard sees the bindings, and is the last word on whether the
+			// arm runs: a false guard falls through to the arms below.
+			if arm.Guard != nil && !ip.truthy(func() value.Value { return ip.evalExpr(arm.Guard, armEnv) }) {
+				continue
 			}
 			return ip.execStmt(arm.Body, armEnv)
 		}
@@ -1390,6 +1392,51 @@ func (ip *Interp) evalCall(ex *ast.Call, env *value.Env) value.Value {
 		}
 	}
 	return ip.Apply(callee, ip.evalArgs(ex.Args, env), ex.Line)
+}
+
+// matchPattern matches one pattern against one value, defining the pattern's
+// bindings in env as it goes. It reports whether the value fits.
+//
+// The bindings are written into env even on the way to a failure, which is
+// safe because the caller gives every arm a fresh scope and throws it away
+// when this returns false.
+func (ip *Interp) matchPattern(pat ast.MatchPattern, v value.Value, env *value.Env) bool {
+	switch pat.Kind {
+	case ast.PatBinding:
+		if pat.Binding != "" {
+			env.Define(pat.Binding, v)
+		}
+		return true
+	case ast.PatLiteral:
+		return ip.patternLiteralEquals(pat, v)
+	case ast.PatVariant:
+		variant, ok := v.(*value.Variant)
+		if !ok || variant.Name != pat.Variant {
+			return false
+		}
+		if pat.Sub == nil {
+			// `Some` with no parentheses matches the case and ignores what it
+			// carries, which is how a payload-less case is written too.
+			return true
+		}
+		if !variant.HasPayload {
+			// A pattern asking about a payload that is not there matches
+			// nothing, rather than matching a unit that was never written.
+			return false
+		}
+		return ip.matchPattern(*pat.Sub, variant.Payload, env)
+	}
+	return false
+}
+
+// patternLiteralEquals compares a value against a literal written in a
+// pattern. It is the same equality `==` gives, evaluated through the ordinary
+// path so that an I64 written in a pattern compares exactly and a numeric
+// literal compares against a tensor scalar the way the rest of the language
+// does.
+func (ip *Interp) patternLiteralEquals(pat ast.MatchPattern, v value.Value) bool {
+	lit := ip.evalExpr(pat.Lit, ip.Global)
+	return ip.compare("==", lit, v, pat.Line)
 }
 
 // qualifiedVariant resolves `Enum.Variant` to the variant itself. The qualifier

@@ -1,5 +1,91 @@
 # Changelog
 
+## [1.7.0] - 2026-08-20
+
+The two things the language was missing from the middle. 1.5 made the ecosystem
+run and 1.6 stopped the language having holes in it; this one closes the two
+entries `docs/needs.md` had been calling the largest open questions, and it
+closes them on both implementations rather than on the bootstrap alone.
+
+### Added
+
+- **The pattern language (NEEDS-3).** A pattern used to be a variant name and at
+  most one binder. It is now a tree, and three things are written that could not
+  be written before:
+
+  - **Nested patterns.** `Ok(Some(v))`, `Some(Err(e))`, `Leaf(Branch(xs))`. The
+    payload of a case is itself a pattern, and it nests as far as the value
+    does.
+  - **Literal patterns.** `3 => ...`, `"hi" => ...`, `true => ...`, `Err(-1)`.
+    A literal matches by the same equality `==` gives, which means a `match`
+    over numbers or strings needs no enum written around it.
+  - **Guards.** `Some(v) if v > 10 => ...`. The guard sees the pattern's
+    bindings and is the last word on whether the arm runs; a false guard falls
+    through to the arms below rather than failing the match.
+
+  A lower-case name now binds the value it matches instead of naming a case, so
+  `other => ...` is a `_` that says what it caught. An upper-case name is a
+  case. That rule is what lets `Some(x)` read x as a binder and `Ok(None)` read
+  None as a case, and every enum variant in the language and its libraries is
+  upper-case initial, so no existing program changes meaning. A lower-case name
+  applied to a payload is refused by name: `some(v)` says that a case name
+  starts with a capital letter.
+
+  Exhaustiveness was rewritten to match, and it is more precise than it was
+  rather than merely still true. It now recurses: `Some(Ok(v))`, `Some(Err(e))`
+  and `None` together cover an `Opt[Res[..]]`, and dropping the `Err` arm names
+  the value that gets through -- `missing Some(Err)` -- instead of saying the
+  match is fine. The rule underneath is that an arm counts only when nothing but
+  the value's shape decides whether it runs, so a guarded arm and a narrower
+  nested one prove nothing, and a position holding only literals is left
+  unjudged unless it is a Bool, which two literals do exhaust.
+
+- **User-defined generics (NEEDS-4).** `struct Box[T]`, `enum Tree[T]` and
+  `fn first[T](xs: Arr[T]) -> T` parse, check and run. `Arr`, `Dict`, `Opt` and
+  `Res` have been generic and checked since 1.5; a declaration in a twill
+  program could not be, and `[` after the name was a syntax error.
+
+  There is no monomorphization, and none is needed: the runtime is the same code
+  whatever T is, so the parameters have to reach the types the checker judges
+  against and nothing else. They do reach them. A `Box[I64]`'s field is an I64,
+  not an unknown; a `Tree[Str]` matched with `Leaf(v)` binds v as a Str;
+  substitution goes under the constructors a parameter is written inside, so a
+  payload declared `Arr[T]` in a `Tree[I64]` is an `Arr[I64]`; and two uses of
+  one declaration are different types when their arguments differ, so a
+  `Box[Str]` is refused where a `Box[I64]` was declared. Non-generic structs
+  still compare by name exactly as before.
+
+  A value's arguments are read back out of what it is built from rather than
+  written at the use site, because there is nowhere to write them: `Leaf(n)`
+  with an I64 n is a `Tree[I64]`, and `Pair { first: b, second: a }` in a
+  `swap[A, B]` is a `Pair[B, A]`. A parameter the use site left unbound
+  substitutes to an unknown and judges nothing, so a bare `Box` says exactly
+  what it said before 1.7.
+
+### Fixed
+
+- **`twill fmt` would have deleted every type parameter.** A printer with no
+  case for `[T, U]` does not fail, it silently emits `struct Box { value: T }`
+  -- a program that no longer parses, written over the original under
+  `--write`. This is the third time a formatter gap has been found this way
+  (`unit USD` in 1.6, the parentheses a postfix needs in 1.6.2), so both
+  printers now have the case and a round-trip test asserts the parameters and
+  the new pattern forms both survive.
+
+- **A module-qualified pattern kept working.** `ast.EBool(b)` resolves its
+  qualifier before the new upper-case rule is applied, because the qualifier is
+  a module alias or a type name and either may be lower-case: what decides is
+  the name after the dot. Without that ordering the self-hosted checker, which
+  is written in that style throughout, stopped parsing.
+
+### Parity
+
+Both features landed on the Go bootstrap and in `src/` together, which is the
+check this project exists to be able to make. The two checkers were compared
+character for character on 404 files -- all of `std`, `src`, `examples` and
+`testdata/cases` -- and agree on every one, and the two formatters produce the
+same bytes for the new syntax.
+
 ## [1.6.7] - 2026-08-20
 
 ### Added

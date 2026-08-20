@@ -44,6 +44,14 @@ type tEnum struct {
 	args []Type
 }
 
+// tParam is a declaration's type parameter -- the T in `struct Box[T]` --
+// standing for a type the declaration does not name. It survives only inside
+// the declaration it belongs to: at a use site the parameters are substituted
+// for the arguments written there, so a Box[I64]'s value field is an I64 and
+// never a tParam. One reaching a judgement means the use site did not say what
+// T is, and it judges nothing, the way an unknown does.
+type tParam struct{ name string }
+
 // tCtor is a payload-carrying variant constructor as a value: calling it
 // yields the enum. `Some` before its argument is one.
 type tCtor struct {
@@ -63,6 +71,7 @@ func (tInt) isType()    {}
 func (tBytes) isType()  {}
 func (tArr) isType()    {}
 func (tDict) isType()   {}
+func (tParam) isType()  {}
 func (tEnum) isType()   {}
 func (tCtor) isType()   {}
 func (tFnType) isType() {}
@@ -187,13 +196,23 @@ func (c *checker) namedType(name string, args []Type) Type {
 		}
 		return nil
 	}
+	// A type parameter of the declaration being read wins over everything: `T`
+	// inside `struct Box[T]` is the parameter, not a type called T.
+	if c.activeParams[name] {
+		return tParam{name: name}
+	}
 	// A declaration in the file wins over a built-in name: the self-hosted
 	// tensor engine declares its own `struct Tensor`.
 	if _, isEnum := c.enums[name]; isEnum {
 		return tEnum{name: name, args: args}
 	}
 	if rec, isRecord := c.types[name]; isRecord {
-		return rec
+		// A generic struct written with arguments -- `Box[I64]` -- is that
+		// struct with its parameters replaced, so the field types the use site
+		// sees are the ones it asked for.
+		out := substParams(rec, c.paramBindings(name, args)).(tRecord)
+		out.args = args
+		return out
 	}
 	switch name {
 	case "I64", "Byte":
@@ -228,6 +247,8 @@ func (c *checker) namedType(name string, args []Type) Type {
 // mode.
 func (c *checker) typeString(t Type) string {
 	switch v := t.(type) {
+	case tParam:
+		return v.name
 	case tInt:
 		return "I64"
 	case tTensor:
@@ -275,7 +296,14 @@ func (c *checker) typeString(t Type) string {
 		return "the constructor " + v.variant
 	case tRecord:
 		if v.name != "" {
-			return v.name
+			if len(v.args) == 0 {
+				return v.name
+			}
+			parts := make([]string, len(v.args))
+			for i, a := range v.args {
+				parts[i] = c.typeString(a)
+			}
+			return v.name + "[" + strings.Join(parts, ", ") + "]"
 		}
 		return "a record"
 	case tFn, tBuiltin, tFnType:
@@ -295,6 +323,17 @@ func assignable(want, got Type) bool {
 		return true
 	}
 	if _, unk := got.(tUnknown); unk {
+		return true
+	}
+	// A type parameter that reached here was not substituted, which means the
+	// use site did not say what it stands for. It judges nothing, the same way
+	// an unknown does; the alternative would be to refuse every generic
+	// declaration whose caller left an argument off.
+	if wp, ok := want.(tParam); ok {
+		gp, same := got.(tParam)
+		return !same || wp.name == gp.name
+	}
+	if _, ok := got.(tParam); ok {
 		return true
 	}
 	// A constructor or a function value stands wherever a function is expected;
@@ -372,7 +411,19 @@ func assignable(want, got Type) bool {
 			return false
 		}
 		if w.name != "" && g.name != "" {
-			return w.name == g.name
+			if w.name != g.name {
+				return false
+			}
+			// Two uses of the same generic struct are the same type only if
+			// they were given the same arguments: a Box[Str] is not a Box[I64].
+			// An argument that was not written is nil and judges nothing, so a
+			// bare `Box` still stands for any of them.
+			for i := range w.args {
+				if i < len(g.args) && !assignable(w.args[i], g.args[i]) {
+					return false
+				}
+			}
+			return true
 		}
 		return true
 	case tFnType:
@@ -472,12 +523,121 @@ func (c *checker) structFieldTypes(prog *ast.Program) {
 		if !ok {
 			continue
 		}
+		done := c.withParams(sd.TypeParams)
 		fields := map[string]Type{}
 		for _, f := range sd.Fields {
 			fields[f.Name] = c.parseType(f.Type)
 		}
+		done()
 		c.types[sd.Name] = tRecord{fields: fields, name: sd.Name}
 		c.structDecls[sd.Name] = sd
+	}
+}
+
+// paramBindings pairs a declaration's type parameters with the arguments a use
+// site supplied. An argument that was not written leaves that parameter
+// unbound, and an unbound parameter substitutes to an unknown, which judges
+// nothing -- `Box` on its own says no more than it did before 1.7.
+func (c *checker) paramBindings(decl string, args []Type) map[string]Type {
+	params := c.typeParams[decl]
+	if len(params) == 0 {
+		return nil
+	}
+	binding := make(map[string]Type, len(params))
+	for i, p := range params {
+		if i < len(args) && args[i] != nil {
+			binding[p] = args[i]
+		} else {
+			binding[p] = tUnknown{}
+		}
+	}
+	return binding
+}
+
+// substParams replaces type parameters throughout a type. It is the whole of
+// what generics do here: there is no monomorphization, because the runtime is
+// the same code whatever T is, so a use site's arguments only ever have to
+// reach the types the checker judges against.
+func substParams(t Type, binding map[string]Type) Type {
+	if len(binding) == 0 {
+		return t
+	}
+	switch v := t.(type) {
+	case tParam:
+		if sub, ok := binding[v.name]; ok {
+			return sub
+		}
+		return v
+	case tArr:
+		return tArr{elem: substParams(v.elem, binding)}
+	case tDict:
+		return tDict{key: substParams(v.key, binding), val: substParams(v.val, binding)}
+	case tEnum:
+		args := make([]Type, len(v.args))
+		for i, a := range v.args {
+			args[i] = substParams(a, binding)
+		}
+		return tEnum{name: v.name, args: args}
+	case tRecord:
+		fields := make(map[string]Type, len(v.fields))
+		for name, ft := range v.fields {
+			fields[name] = substParams(ft, binding)
+		}
+		args := make([]Type, len(v.args))
+		for i, a := range v.args {
+			args[i] = substParams(a, binding)
+		}
+		return tRecord{fields: fields, name: v.name, args: args}
+	case tFnType:
+		params := make([]Type, len(v.params))
+		for i, pt := range v.params {
+			params[i] = substParams(pt, binding)
+		}
+		return tFnType{params: params, ret: substParams(v.ret, binding)}
+	}
+	return t
+}
+
+// inferParams reads a use site's type arguments back out of a value: given the
+// declared payload `T` and an actual `I64`, it learns T is I64, which is how
+// `Leaf(7)` becomes a `Tree[I64]` without the program writing the argument. It
+// matches structurally and gives up quietly where it cannot tell, since a
+// wrong guess here would be a confident wrong type downstream.
+func inferParams(declared, actual Type, binding map[string]Type) {
+	switch d := declared.(type) {
+	case tParam:
+		if _, already := binding[d.name]; !already {
+			binding[d.name] = actual
+		}
+	case tArr:
+		if a, ok := actual.(tArr); ok && a.elem != nil && d.elem != nil {
+			inferParams(d.elem, a.elem, binding)
+		}
+	case tDict:
+		if a, ok := actual.(tDict); ok {
+			if d.key != nil && a.key != nil {
+				inferParams(d.key, a.key, binding)
+			}
+			if d.val != nil && a.val != nil {
+				inferParams(d.val, a.val, binding)
+			}
+		}
+	case tRecord:
+		if a, ok := actual.(tRecord); ok && a.name == d.name {
+			for i := range d.args {
+				if i < len(a.args) && d.args[i] != nil && a.args[i] != nil {
+					inferParams(d.args[i], a.args[i], binding)
+				}
+			}
+		}
+	case tEnum:
+		if a, ok := actual.(tEnum); ok && a.name == d.name {
+			for i := range d.args {
+				if i < len(a.args) && d.args[i] != nil && a.args[i] != nil {
+					inferParams(d.args[i], a.args[i], binding)
+				}
+			}
+		}
 	}
 }
 
@@ -522,6 +682,22 @@ func (c *checker) callCtor(ctor tCtor, line int, args []Type, argExprs []ast.Exp
 	}
 	if ctor.payload != nil {
 		what := fmt.Sprintf("the payload of %s", ctor.variant)
+		params := c.typeParams[ctor.enum]
+		if len(params) > 0 {
+			// `Leaf(7)` is a `Tree[I64]`: the argument is read back out of the
+			// payload rather than written at the call, which is the only way a
+			// constructor can produce a generic value at all. A parameter the
+			// payload does not mention stays unknown.
+			binding := map[string]Type{}
+			inferParams(ctor.payload, args[0], binding)
+			inferred := make([]Type, len(params))
+			for i, p := range params {
+				if t, ok := binding[p]; ok {
+					inferred[i] = t
+				}
+			}
+			return tEnum{name: ctor.enum, args: inferred}
+		}
 		if c.checkAssignable(line, what, ctor.payload, args[0]) && len(argExprs) == 1 {
 			c.fractionalLiteralAtInt(line, what, ctor.payload, argExprs[0])
 		}
@@ -529,12 +705,30 @@ func (c *checker) callCtor(ctor tCtor, line int, args []Type, argExprs []ast.Exp
 	return tEnum{name: ctor.enum}
 }
 
+// bindPattern defines every name a pattern introduces, typed as far down the
+// tree as the subject's type is known. `Ok(Some(v))` types v from the payload
+// of Ok and then the payload of Some; where either step is unknown the rest of
+// the tree is unknown too, which is the checker's usual "judge nothing you
+// cannot prove".
+func (c *checker) bindPattern(pat ast.MatchPattern, subject Type, env *checkEnv) {
+	switch pat.Kind {
+	case ast.PatBinding:
+		if pat.Binding != "" {
+			env.define(pat.Binding, subject)
+		}
+	case ast.PatVariant:
+		if pat.Sub != nil {
+			c.bindPattern(*pat.Sub, c.matchBindingType(subject, pat.Variant), env)
+		}
+	}
+}
+
 // matchBindingType is the type a pattern's binding takes: the subject's
 // payload for that case, when the subject's type is known.
-func (c *checker) matchBindingType(subject Type, pat ast.MatchPattern) Type {
+func (c *checker) matchBindingType(subject Type, variant string) Type {
 	en, ok := subject.(tEnum)
 	if !ok {
-		if t := c.variantPayloadType(pat.Variant); t != nil {
+		if t := c.variantPayloadType(variant); t != nil {
 			return t
 		}
 		return tUnknown{}
@@ -546,15 +740,19 @@ func (c *checker) matchBindingType(subject Type, pat ast.MatchPattern) Type {
 		}
 	case "Res":
 		i := 0
-		if pat.Variant == "Err" {
+		if variant == "Err" {
 			i = 1
 		}
 		if len(en.args) > i && en.args[i] != nil {
 			return en.args[i]
 		}
 	default:
-		if t := c.variantPayloadType(pat.Variant); t != nil {
-			return t
+		if t := c.variantPayloadType(variant); t != nil {
+			// A user enum's payload may be written in the enum's own type
+			// parameters, so what the arm binds is those replaced by whatever
+			// the subject's type supplied: matching an `Tree[I64]` binds an
+			// I64, and matching a `Tree[Str]` a Str, from one declaration.
+			return substParams(t, c.paramBindings(en.name, en.args))
 		}
 	}
 	return tUnknown{}

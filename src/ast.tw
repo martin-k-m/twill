@@ -206,17 +206,60 @@ struct Try { id: I64, expr: Expr, line: I64 }
 struct MatchArm {
   pattern: MatchPattern,
   body: Stmt,
+  # guard is the `if cond` a pattern may carry: the arm matches only when the
+  # pattern fits AND the guard is true, with the pattern's bindings in scope for
+  # it. The array holds one expression or none, which is how an optional node is
+  # written here. A guarded arm proves nothing about exhaustiveness, because
+  # whether it runs is not a property of the value's shape.
+  guard: Arr[Expr],
 }
 
-# MatchPattern is `Variant`, `Variant(binding)`, or `_`. binding is "" when the
-# variant carries no payload or the payload is ignored (`_`); wildcard is the
-# `_` arm, which matches any subject.
+# The three things a pattern can be. They nest: a variant's payload is itself a
+# pattern, so `Ok(Some(v))` and `Ok(3)` are a PAT_VARIANT whose sub is a
+# PAT_VARIANT and a PAT_LITERAL.
+#
+# PAT_VARIANT is `Name` or `Name(sub)`. An identifier starting with an
+# upper-case letter is read as a variant; that rule is what keeps `Some(x)` from
+# reading x as a nullary variant and `Ok(None)` from reading None as a binder.
+let PAT_VARIANT: I64 = 0
+# PAT_BINDING is a lower-case identifier, which binds the value it matches, or
+# `_`, which matches without binding. binding is "" for `_`.
+let PAT_BINDING: I64 = 1
+# PAT_LITERAL is a number, string or boolean written in the pattern, matched by
+# equality. It is refutable, so it never proves a variant handled.
+let PAT_LITERAL: I64 = 2
+
+# MatchPattern is one pattern, and it is a tree: `_`, a binder, a literal, a
+# variant, or a variant carrying another pattern. `sub` and `lit` hold one node
+# or none for the same reason `guard` above does -- the language has no null
+# reference, and a struct recurses through an array.
 struct MatchPattern {
+  kind: I64,
   variant: Str,
   binding: Str,
-  wildcard: Bool,
+  sub: Arr[MatchPattern],
+  lit: Arr[Expr],
   line: I64,
 }
+
+# pat_catch_all reports whether the pattern matches every value, whether or not
+# it names what it matched. `_` and a bare binder both end a match.
+fn pat_catch_all(p: MatchPattern) -> Bool = p.kind == PAT_BINDING
+
+# pat_covers_case reports whether a variant pattern handles the whole of the
+# case it names -- `Some`, `Some(v)` and `Some(_)` do, `Some(3)` and
+# `Some(Ok(v))` do not, because each leaves other payloads of the same case
+# unmatched. Whether those narrower arms together cover the case is a question
+# about the whole set of arms, and the checker answers it there.
+fn pat_covers_case(p: MatchPattern) -> Bool {
+  if p.kind != PAT_VARIANT { return false }
+  if len(p.sub) == 0 { return true }
+  pat_catch_all(p.sub[0])
+}
+
+# pat_bind is the constructor for a binder; "" makes it `_`.
+fn pat_bind(name: Str, line: I64) -> MatchPattern =
+  MatchPattern { kind: PAT_BINDING, variant: "", binding: name, sub: [], lit: [], line: line }
 
 enum Expr {
   ENumber(NumberLit),
@@ -255,6 +298,9 @@ struct Let {
 struct FnDecl {
   id: I64,
   name: Str,
+  # The names in `fn first[T](xs: Arr[T]) -> T`. They are in scope for the
+  # signature and the body, and stand for a type the caller chooses.
+  type_params: Arr[Str],
   params: Arr[Param],
   ret: Opt[ShapeAnno],
   ret_unit: Opt[UnitAnno],
@@ -300,13 +346,18 @@ struct EnumVariant {
 # EnumDecl declares a sum type: `enum Name { Case, Case(Payload), ... }`. Each
 # case is a variant with an optional single payload. It is the base the Res/Opt
 # family is built on.
-struct EnumDecl { id: I64, name: Str, variants: Arr[EnumVariant], line: I64 }
+# type_params are the names in `enum MyOpt[T]`. They stand for types the
+# declaration does not name, and a payload whose type is one of them takes
+# whatever the use site supplies. Empty for a declaration without them, which is
+# every declaration written before 1.7.
+struct EnumDecl { id: I64, name: Str, type_params: Arr[Str], variants: Arr[EnumVariant], line: I64 }
 
 # StructDecl declares a record type: `struct Name { field: Type, ... }`. Field
 # types are advisory text; records are structural, so the declaration names a
 # type without constraining how a record is built.
 struct StructField { name: Str, type_name: Str }
-struct StructDecl { id: I64, name: Str, fields: Arr[StructField], line: I64 }
+# type_params are the names in `struct Box[T, U]`; see EnumDecl.
+struct StructDecl { id: I64, name: Str, type_params: Arr[Str], fields: Arr[StructField], line: I64 }
 
 struct ExprStmt { id: I64, x: Expr, line: I64 }
 
@@ -512,10 +563,10 @@ fn if_expr(ids: NodeIds, cond: Expr, then_block: Block, else_branch: Else, line:
 fn let_stmt(ids: NodeIds, name: Str, unit: Opt[UnitAnno], type_name: Str, value: Expr, line: I64) -> Stmt =
   SLet(Let { id: fresh(ids), name: name, unit: unit, type_name: type_name, value: value, line: line })
 
-fn fn_decl(ids: NodeIds, name: Str, params: Arr[Param], ret: Opt[ShapeAnno],
+fn fn_decl(ids: NodeIds, name: Str, type_params: Arr[Str], params: Arr[Param], ret: Opt[ShapeAnno],
            ret_unit: Opt[UnitAnno], ret_type: Str, body: Expr, line: I64) -> FnDecl =
-  FnDecl { id: fresh(ids), name: name, params: params, ret: ret, ret_unit: ret_unit,
-           ret_type: ret_type, body: body, line: line }
+  FnDecl { id: fresh(ids), name: name, type_params: type_params, params: params, ret: ret,
+           ret_unit: ret_unit, ret_type: ret_type, body: body, line: line }
 
 fn assign_stmt(ids: NodeIds, target: Expr, value: Expr, line: I64) -> Stmt =
   SAssign(Assign { id: fresh(ids), target: target, value: value, line: line })
@@ -544,11 +595,11 @@ fn unit_decl(ids: NodeIds, name: Str, line: I64) -> Stmt =
 fn type_decl(ids: NodeIds, name: Str, fields: Arr[TypeField], line: I64) -> Stmt =
   STypeDecl(TypeDecl { id: fresh(ids), name: name, fields: fields, line: line })
 
-fn enum_decl(ids: NodeIds, name: Str, variants: Arr[EnumVariant], line: I64) -> Stmt =
-  SEnum(EnumDecl { id: fresh(ids), name: name, variants: variants, line: line })
+fn enum_decl(ids: NodeIds, name: Str, type_params: Arr[Str], variants: Arr[EnumVariant], line: I64) -> Stmt =
+  SEnum(EnumDecl { id: fresh(ids), name: name, type_params: type_params, variants: variants, line: line })
 
-fn struct_decl(ids: NodeIds, name: Str, fields: Arr[StructField], line: I64) -> Stmt =
-  SStruct(StructDecl { id: fresh(ids), name: name, fields: fields, line: line })
+fn struct_decl(ids: NodeIds, name: Str, type_params: Arr[Str], fields: Arr[StructField], line: I64) -> Stmt =
+  SStruct(StructDecl { id: fresh(ids), name: name, type_params: type_params, fields: fields, line: line })
 
 fn match_expr(ids: NodeIds, subject: Expr, arms: Arr[MatchArm], line: I64) -> Expr =
   EMatch(Match { id: fresh(ids), subject: subject, arms: arms, line: line })

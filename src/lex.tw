@@ -121,6 +121,10 @@ let PUNCT_CHARS: Str = "()[]{},:;."
 
 fn is_digit(c: I64) -> Bool = c >= C_ZERO and c <= C_NINE
 
+# is_upper is the pattern parser's variant-versus-binder rule, applied to one
+# character: a case name starts with a capital letter, a binder does not.
+fn is_upper(c: I64) -> Bool = c >= C_UPPER_A and c <= C_UPPER_Z
+
 fn is_ident_start(c: I64) -> Bool =
   c == C_UNDERSCORE or (c >= C_LOWER_A and c <= C_LOWER_Z) or (c >= C_UPPER_A and c <= C_UPPER_Z)
 

@@ -196,3 +196,65 @@ func TestAFunctionThatReturnsProperlyIsQuiet(t *testing.T) {
 		wantNone(t, src)
 	}
 }
+
+// The pattern language (NEEDS-3, 1.7). A pattern nests, may be a literal, and
+// may carry a guard, and each of those changes what the arm proves. The rule
+// the tests below pin is that an arm counts towards exhaustiveness only when
+// nothing but the value's shape decides whether it runs: a guard is a
+// condition this checker cannot evaluate, and a literal or a narrower nested
+// pattern leaves the rest of its case unmatched.
+
+const nestedOpt = "mode systems\n"
+
+func TestNestedPatternsAreExhaustiveTogether(t *testing.T) {
+	wantNone(t, nestedOpt+"fn f(o: Opt[Res[I64, Str]]) -> Str {\n  match o { Some(Ok(n)) => \"ok\", Some(Err(e)) => e, None => \"none\" }\n}")
+}
+
+func TestNestedPatternNamesTheCaseThatGetsThrough(t *testing.T) {
+	wantOne(t, nestedOpt+"fn f(o: Opt[Res[I64, Str]]) -> Str {\n  match o { Some(Ok(n)) => \"ok\", None => \"none\" }\n}",
+		"match on Opt is not exhaustive: missing Some(Err)")
+}
+
+func TestLiteralPatternDoesNotCoverItsCase(t *testing.T) {
+	wantOne(t, nestedOpt+"fn f(o: Opt[I64]) -> Str {\n  match o { Some(3) => \"three\", None => \"none\" }\n}",
+		"match on Opt is not exhaustive: missing Some(...)")
+}
+
+func TestLiteralAndBinderTogetherCoverTheCase(t *testing.T) {
+	wantNone(t, nestedOpt+"fn f(o: Opt[I64]) -> Str {\n  match o { Some(3) => \"three\", Some(v) => \"other\", None => \"none\" }\n}")
+}
+
+func TestGuardedArmProvesNothing(t *testing.T) {
+	wantOne(t, nestedOpt+"fn f(o: Opt[I64]) -> Str {\n  match o { Some(v) if v > 3 => \"big\", None => \"none\" }\n}",
+		"match on Opt is not exhaustive: missing Some")
+}
+
+func TestGuardedArmFollowedByTheSameCaseIsFine(t *testing.T) {
+	wantNone(t, nestedOpt+"fn f(o: Opt[I64]) -> Str {\n  match o { Some(v) if v > 3 => \"big\", Some(v) => \"small\", None => \"none\" }\n}")
+}
+
+func TestBinderIsACatchAll(t *testing.T) {
+	wantOne(t, verdict+"fn f(v: Verdict) -> I64 {\n  match v { x => 1, Faster => 2 }\n}",
+		"unreachable match arm: Faster comes after `x`")
+}
+
+// A guarded catch-all does not end the match, so the arm after it is reachable
+// and the match is still incomplete without one that is.
+func TestGuardedCatchAllDoesNotEndTheMatch(t *testing.T) {
+	wantOne(t, verdict+"fn f(v: Verdict) -> I64 {\n  match v { x if true => 1, Faster => 2 }\n}",
+		"match on Verdict is not exhaustive: missing Slower, Same, Noisy, New")
+}
+
+// The binding a nested pattern introduces is typed through both payloads, so a
+// use of it that does not fit is caught rather than waved through as unknown.
+func TestNestedBindingIsTyped(t *testing.T) {
+	wantOne(t, nestedOpt+"fn f(o: Opt[Res[I64, Str]]) -> Str {\n  match o { Some(Ok(n)) => { let s: Str = n; s }, Some(Err(e)) => e, None => \"none\" }\n}",
+		"\"s\" is declared Str but the value is I64")
+}
+
+// Two Bool literals do cover their position: it is the one domain a finite set
+// of literals can exhaust, and reporting it as incomplete would be a false
+// positive on a correct program.
+func TestBoolLiteralsCoverTheirPosition(t *testing.T) {
+	wantNone(t, nestedOpt+"fn f(o: Opt[Bool]) -> Str {\n  match o { Some(true) => \"t\", Some(false) => \"f\", None => \"none\" }\n}")
+}
