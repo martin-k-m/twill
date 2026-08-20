@@ -1041,3 +1041,42 @@ print(grads(fn(p, q) = sum(p * q))(c, c))
 		t.Errorf("output %q does not carry a gradient for both aliased parameters", goOut)
 	}
 }
+
+// The dtype widening warning (NEEDS-113) was the last thing the self-hosted
+// checker knew that the bootstrap did not: `bf16 * scalar(2.0)` is f64, a
+// correct answer that undoes the reason the operand was narrow. Both checkers
+// must now reach the same verdict on it, and — the harder half — must stay
+// silent on everything that is not a lossy widening, so that a program which
+// never wrote a dtype gains no diagnostics.
+func TestSelfHostedCheckDTypeWidening(t *testing.T) {
+	bad := []string{
+		// A narrow float widened by a wider one, through a maker and through a cast.
+		"mode systems\nfn f() {\n  let w = zeros(2, 3, bf16)\n  let y = w * scalar(2.0)\n}\n",
+		"mode systems\nfn f() {\n  let a = zeros(2, 3).to(f16)\n  let b = zeros(2, 3).to(f32)\n  let y = a + b\n}\n",
+	}
+	for _, src := range bad {
+		if code := runSelfHostedCheck(t, src); code != 1 {
+			t.Errorf("check of %q exited %d, want 1", src, code)
+		}
+	}
+	good := []string{
+		// Same dtype: not a widening.
+		"mode systems\nfn f() {\n  let a = zeros(2, 3, bf16)\n  let b = ones(2, 3).to(bf16)\n  let y = a * b\n}\n",
+		// f16 meeting bf16 promotes past both to f32, so neither was the wider one.
+		"mode systems\nfn f() {\n  let a = zeros(2, 3, f16)\n  let b = zeros(2, 3, bf16)\n  let y = a * b\n}\n",
+		// An integer meeting a float keeps the float: the lattice doing its job.
+		"mode systems\nfn f() {\n  let a = zeros(2, 3, i8)\n  let b = zeros(2, 3, bf16)\n  let y = a * b\n}\n",
+		// No dtype anywhere. A bare literal deliberately has none, so this is
+		// the promise that dtype-free programs gain nothing.
+		"mode systems\nfn f() {\n  let a = zeros(2, 3)\n  let y = a * ones(2, 3) + 1.0\n}\n",
+		// A maker keeps every argument before its dtype as shape: the two
+		// checkers used to disagree here because the self-hosted one stripped
+		// the trailing name twice and read zeros(2, 3, bf16) as [2].
+		"mode systems\nfn f() {\n  let a = zeros(2, 3, bf16)\n  let b = ones(2, 3, bf16)\n  let y = a * b\n}\n",
+	}
+	for _, src := range good {
+		if code := runSelfHostedCheck(t, src); code != 0 {
+			t.Errorf("check of %q exited %d, want 0", src, code)
+		}
+	}
+}

@@ -285,7 +285,113 @@ type unitMap map[string]int
 type tTensor struct {
 	dims []int
 	unit unitMap
+	// dtp is the element dtype, stored as code+1 so that the ZERO VALUE means
+	// "not known" -- which is what every one of the many bare tTensor{dims:...}
+	// literals in this file should say, and what src/check.tw spells DT_UNKNOWN.
+	// Read it with dtype() and set it with withDType(); never touch it directly.
+	dtp uint8
 }
+
+// dtUnknown is src/check.tw's DT_UNKNOWN: the checker could not name the dtype.
+// Everything degrades to it rather than guessing, because a wrong dtype here
+// would report a widening the program does not have.
+const dtUnknown tensor.DType = -1
+
+// dtype reads the element dtype, or dtUnknown.
+func (t tTensor) dtype() tensor.DType {
+	if t.dtp == 0 {
+		return dtUnknown
+	}
+	return tensor.DType(t.dtp - 1)
+}
+
+// withDType returns the tensor type with its dtype replaced. An unknown dtype
+// clears the field, so "unknown" has exactly one representation.
+func (t tTensor) withDType(dt tensor.DType) tTensor {
+	if dt == dtUnknown {
+		t.dtp = 0
+		return t
+	}
+	t.dtp = uint8(dt) + 1
+	return t
+}
+
+// argDType is the dtype of an argument that is a tensor, or dtUnknown. Several
+// rearrangement builtins need exactly that and nothing else about it.
+func argDType(argTypes []Type, i int) tensor.DType {
+	if i < len(argTypes) {
+		if t, ok := argTypes[i].(tTensor); ok {
+			return t.dtype()
+		}
+	}
+	return dtUnknown
+}
+
+// dtypeKnown mirrors src/check.tw's dtype_known.
+func dtypeKnown(dt tensor.DType) bool { return dt >= 0 }
+
+// setDType puts a dtype on a type when it is a tensor, and passes anything else
+// through untouched. Mirrors src/check.tw set_dtype.
+func setDType(res Type, dt tensor.DType) Type {
+	if t, ok := res.(tTensor); ok {
+		return t.withDType(dt)
+	}
+	return res
+}
+
+// promoteDType is the widen-only lattice, degrading to unknown when either side
+// is. Mirrors src/check.tw promote_dtype.
+func promoteDType(a, b tensor.DType) tensor.DType {
+	if !dtypeKnown(a) || !dtypeKnown(b) {
+		return dtUnknown
+	}
+	return tensor.Promote(a, b)
+}
+
+// promoteAndWarn is promoteDType plus the one warning this checker emits: a
+// narrow float silently widened by a wider one. `bf16_weights + f64_bias` is
+// f64, which is a perfectly correct answer that undoes the reason the weights
+// were narrow, and the checker is the only place it can be seen before it runs
+// (NEEDS-113).
+//
+// Only a float widened by a wider float qualifies. An integer meeting a float
+// keeps the float unchanged, which is the lattice doing its job, and f16
+// meeting bf16 promotes past both to f32, where neither operand was the wider
+// one. Both stay silent. Byte-identical to src/check.tw promote_and_warn.
+func (c *checker) promoteAndWarn(line int, a, b tensor.DType) tensor.DType {
+	dt := promoteDType(a, b)
+	if !dtypeKnown(dt) || a == b {
+		return dt
+	}
+	if !tensor.IsFloatDType(a) || !tensor.IsFloatDType(b) {
+		return dt
+	}
+	if dt != a && dt != b {
+		return dt
+	}
+	narrow := a
+	if dt == a {
+		narrow = b
+	}
+	c.report(line, "dtype widening: %s and %s promote to %s, which undoes the reason the %s operand is narrow",
+		tensor.DTypeName(a), tensor.DTypeName(b), tensor.DTypeName(dt), tensor.DTypeName(narrow))
+	return dt
+}
+
+// floatResultDType is the dtype of an operation that cannot return an integer:
+// exp, sqrt, mean and their kin. The runtime promotes an integer input to f32.
+// The checker instead declines to know it: claiming f32 would be true, and it
+// would also let the widening warning fire on a program that never wrote a
+// dtype, through a chain like exp(argmax(x)) meeting an ordinary f64. Zero new
+// diagnostics on dtype-free programs is the harder promise, so an integer input
+// degrades to unknown. Mirrors src/check.tw float_result_dtype.
+func floatResultDType(dt tensor.DType) tensor.DType {
+	if !dtypeKnown(dt) || tensor.IsIntDType(dt) {
+		return dtUnknown
+	}
+	return dt
+}
+
 type tUnknown struct{}
 type tBool struct{}
 type tStr struct{}
@@ -1141,7 +1247,11 @@ func (c *checker) inferTensorLit(ex *ast.TensorLit) Type {
 		c.report(ex.Line, "ragged tensor literal: rows have inconsistent lengths")
 		return tUnknown{}
 	}
-	return tTensor{dims: dims}
+	// A tensor literal is f64, the documented default (docs/dtypes.md): narrow
+	// dtypes are always asked for and never inferred. A BARE number literal is
+	// deliberately not given one -- its eventual dtype is still an open
+	// question -- which is why `w * 2.0` is silent and `w * scalar(2.0)` is not.
+	return tTensor{dims: dims}.withDType(tensor.DTF64)
 }
 
 func (c *checker) inferUnary(ex *ast.Unary, env *checkEnv) Type {
@@ -1247,6 +1357,13 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 		return tUnknown{}
 	}
 
+	// The dtype the runtime would produce, and the widening warning when a
+	// narrow float meets a wider one. Every remaining operator goes through
+	// tensor.Promote at run time, `^` included; comparisons produced bool above
+	// and never reach this. Computed before the shape rules so the two checkers
+	// emit their diagnostics in the same order.
+	dt := c.promoteAndWarn(ex.Line, lt.dtype(), rt.dtype())
+
 	switch op {
 	case "@":
 		res, msg := matmulResult(lt, rt)
@@ -1254,9 +1371,9 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 			c.report(ex.Line, "%s", msg)
 			return tUnknown{}
 		}
-		return withUnit(res, unitMul(lt.unit, rt.unit))
+		return setDType(withUnit(res, unitMul(lt.unit, rt.unit)), dt)
 	case "^":
-		return c.powUnit(lt, ex)
+		return setDType(c.powUnit(lt, ex), dt)
 	default: // + - * / %
 		res, msg := elementwiseResult(lt, rt)
 		if msg != "" {
@@ -1266,7 +1383,7 @@ func (c *checker) inferBinary(ex *ast.Binary, env *checkEnv) Type {
 		if intResult {
 			return tInt{}
 		}
-		return withUnit(res, c.arithUnit(op, lt, rt, ex.Line))
+		return setDType(withUnit(res, c.arithUnit(op, lt, rt, ex.Line)), dt)
 	}
 }
 
@@ -1338,9 +1455,10 @@ func (c *checker) inferIndex(ex *ast.Index, env *checkEnv) Type {
 			}
 		}
 		if len(v.dims) == 1 {
-			return tTensor{dims: []int{}, unit: v.unit}
+			return tTensor{dims: []int{}, unit: v.unit}.withDType(v.dtype())
 		}
-		return tTensor{dims: v.dims[1:], unit: v.unit}
+		// Indexing selects, so the element type is the one it selected from.
+		return tTensor{dims: v.dims[1:], unit: v.unit}.withDType(v.dtype())
 	case tList:
 		return tUnknown{}
 	case tArr:
@@ -1442,13 +1560,11 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 	// type, which the shape checker does not track, not the shape -- and so the
 	// arity check counts the arguments the maker actually received.
 	callEx := ex
+	ctorDType := dtUnknown
 	if b, ok := callee.(tBuiltin); ok && dtypeMakerNames[b.name] && len(ex.Args) > 0 {
-		if id, ok := ex.Args[len(ex.Args)-1].(*ast.Ident); ok {
-			if _, bound := env.get(id.Name); !bound {
-				if _, isDType := tensor.DTypeOfName(id.Name); isDType {
-					callEx = &ast.Call{Callee: ex.Callee, Args: ex.Args[:len(ex.Args)-1], Line: ex.Line}
-				}
-			}
+		if dt := dtypeToken(env, ex.Args[len(ex.Args)-1]); dtypeKnown(dt) {
+			ctorDType = dt
+			callEx = &ast.Call{Callee: ex.Callee, Args: ex.Args[:len(ex.Args)-1], Line: ex.Line}
 		}
 	}
 	argTypes := make([]Type, len(callEx.Args))
@@ -1466,7 +1582,11 @@ func (c *checker) inferCall(ex *ast.Call, env *checkEnv) Type {
 			}
 			return t
 		}
-		return c.inferBuiltinCall(fn.name, callEx, argTypes)
+		// The maker's trailing dtype is passed in rather than stamped on the
+		// result, because only the constructor cases should take it: stamping
+		// every builtin's result would overwrite a dtype propagated from an
+		// argument.
+		return c.inferBuiltinCall(fn.name, callEx, argTypes, ctorDType)
 	case tFn:
 		return c.inferUserCall(fn, callEx, argTypes)
 	case tCtor:
@@ -1514,13 +1634,37 @@ func (c *checker) inferCast(ex *ast.Call, env *checkEnv) (Type, bool) {
 	if _, bound := env.get(id.Name); bound {
 		return nil, false
 	}
-	if _, isDType := tensor.DTypeOfName(id.Name); !isDType {
+	dt, isDType := tensor.DTypeOfName(id.Name)
+	if !isDType {
 		return nil, false
 	}
 	if t, ok := c.inferExpr(fld.Target, env).(tTensor); ok {
-		return tTensor{dims: t.dims, unit: t.unit}, true
+		return tTensor{dims: t.dims, unit: t.unit}.withDType(dt), true
 	}
 	return tUnknown{}, true
+}
+
+// dtypeToken is the dtype an argument names, or dtUnknown when it does not name
+// one. It is the checker's copy of the interpreter's contextual rule and reads a
+// name as a dtype under exactly the same three conditions: the argument is a
+// bare identifier, it is one of the seven names, and the environment does not
+// bind it. That last condition is what keeps `f32` an ordinary identifier
+// everywhere it holds a value, so `let f32 = x; zeros(f32)` is a shape and not a
+// dtype -- matching how the program will actually run. Mirrors src/check.tw
+// dtype_token.
+func dtypeToken(env *checkEnv, e ast.Expr) tensor.DType {
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return dtUnknown
+	}
+	if _, bound := env.get(id.Name); bound {
+		return dtUnknown
+	}
+	dt, isDType := tensor.DTypeOfName(id.Name)
+	if !isDType {
+		return dtUnknown
+	}
+	return dt
 }
 
 // paramType gives a parameter's type from its annotation alone (for checking a
@@ -2021,7 +2165,14 @@ func substitute(dims []ast.Dim, subst map[string]int) []int {
 	return out
 }
 
-func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) Type {
+// inferBuiltinCall types a builtin call. ctorDType is the dtype a constructor's
+// trailing name asked for, or dtUnknown; a constructor without one builds f64,
+// the documented default (docs/dtypes.md).
+func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type, dt tensor.DType) Type {
+	ctorDType := tensor.DTF64
+	if dtypeKnown(dt) {
+		ctorDType = dt
+	}
 	// Every builtin registered with a fixed arity rejects the wrong argument
 	// count at runtime; that is decidable here, and a call reaches this function
 	// only when the name is the real builtin (a same-named user function resolves
@@ -2062,11 +2213,20 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			}
 		}
 		return tUnknown{}
-	case "relu", "abs":
-		// Shape and unit preserved.
+	case "relu":
+		// Shape, unit and dtype preserved.
 		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
 				return t
+			}
+		}
+		return tUnknown{}
+	case "abs":
+		// abs preserves shape and unit, but not an integer dtype; see
+		// floatResultDType for why that is unknown here rather than f32.
+		if len(argTypes) >= 1 {
+			if t, ok := argTypes[0].(tTensor); ok {
+				return t.withDType(floatResultDType(t.dtype()))
 			}
 		}
 		return tUnknown{}
@@ -2082,7 +2242,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				if len(t.unit) != 0 {
 					c.report(ex.Line, "%s expects a dimensionless argument but got unit %s", name, unitString(t.unit))
 				}
-				return tTensor{dims: t.dims} // result is dimensionless
+				// result is dimensionless
+				return tTensor{dims: t.dims}.withDType(floatResultDType(t.dtype()))
 			}
 		}
 		return tUnknown{}
@@ -2093,14 +2254,16 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				if !ok {
 					c.report(ex.Line, "sqrt of unit %s is not a whole unit", unitString(t.unit))
 				}
-				return tTensor{dims: t.dims, unit: u}
+				return tTensor{dims: t.dims, unit: u}.withDType(floatResultDType(t.dtype()))
 			}
 		}
 		return tUnknown{}
 	case "square":
 		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
-				return tTensor{dims: t.dims, unit: unitPow(t.unit, 2)}
+				// A square is a product of the value with itself, so it keeps an
+				// integer dtype rather than becoming a float.
+				return tTensor{dims: t.dims, unit: unitPow(t.unit, 2)}.withDType(t.dtype())
 			}
 		}
 		return tUnknown{}
@@ -2120,7 +2283,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "len":
 		return scalar()
 	case "sum", "mean", "max", "min", "prod", "median":
-		return c.reduceResult(ex, argTypes)
+		return c.reduceResult(name, ex, argTypes)
 	case "argmax", "argmin", "logsumexp":
 		return c.axisReduceResult(ex, argTypes)
 	case "maximum", "minimum", "greater", "less", "greater_equal", "less_equal", "equal":
@@ -2182,7 +2345,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 						}
 					}
 				}
-				return tTensor{dims: dims}
+				// Rearrangement: the element type is untouched.
+				return tTensor{dims: dims}.withDType(argDType(argTypes, 0))
 			}
 		}
 		return tUnknown{}
@@ -2253,7 +2417,8 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 	case "write_frame":
 		return tUnit{}
 	case "scalar":
-		return scalar()
+		// scalar(x) really is f64 (tensor.tw), unlike a bare literal.
+		return scalar().withDType(tensor.DTF64)
 	case "pow":
 		if len(argTypes) >= 1 {
 			if t, ok := argTypes[0].(tTensor); ok {
@@ -2326,7 +2491,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				for i := range t.dims {
 					rev[i] = t.dims[len(t.dims)-1-i]
 				}
-				return tTensor{dims: rev}
+				return tTensor{dims: rev}.withDType(t.dtype())
 			}
 			axes := make([]int, 0, len(ex.Args)-1)
 			for _, a := range ex.Args[1:] {
@@ -2357,7 +2522,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 					seen[ax] = true
 					perm[i] = t.dims[ax]
 				}
-				return tTensor{dims: perm}
+				return tTensor{dims: perm}.withDType(t.dtype())
 			} else if len(t.dims) > 0 {
 				// A permutation must name every axis exactly once, so a count
 				// other than the rank is a certain error the runtime raises.
@@ -2371,7 +2536,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 			if c.reportNegDim(ex.Line, name, dims) {
 				return tUnknown{}
 			}
-			return tTensor{dims: dims}
+			return tTensor{dims: dims}.withDType(ctorDType)
 		}
 		return tUnknown{}
 	case "fill":
@@ -2380,7 +2545,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				if c.reportNegDim(ex.Line, name, dims) {
 					return tUnknown{}
 				}
-				return tTensor{dims: dims}
+				return tTensor{dims: dims}.withDType(ctorDType)
 			}
 		}
 		return tUnknown{}
@@ -2390,7 +2555,7 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				if c.reportNegDim(ex.Line, name, []int{n}) {
 					return tUnknown{}
 				}
-				return tTensor{dims: []int{n, n}}
+				return tTensor{dims: []int{n, n}}.withDType(ctorDType)
 			}
 		}
 		return tUnknown{}
@@ -2402,15 +2567,15 @@ func (c *checker) inferBuiltinCall(name string, ex *ast.Call, argTypes []Type) T
 				if c.reportNegDim(ex.Line, name, []int{n}) {
 					return tUnknown{}
 				}
-				return tTensor{dims: []int{n}}
+				return tTensor{dims: []int{n}}.withDType(ctorDType)
 			}
 		}
-		return tTensor{dims: []int{-1}}
+		return tTensor{dims: []int{-1}}.withDType(ctorDType)
 	case "arange":
 		// A 1-D tensor whose length depends on the start, stop and step values,
 		// which the checker does not evaluate, so the rank is known and the size
 		// is not.
-		return tTensor{dims: []int{-1}}
+		return tTensor{dims: []int{-1}}.withDType(ctorDType)
 	case "range", "list", "map", "zip", "permutation":
 		return tList{}
 	case "print":
@@ -2858,13 +3023,21 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
+func (c *checker) reduceResult(name string, ex *ast.Call, argTypes []Type) Type {
 	var u unitMap // reductions preserve the input's unit
+	rdt := dtUnknown
 	if t, ok := argTypes[0].(tTensor); ok {
 		u = t.unit
+		rdt = t.dtype()
+	}
+	// A sum, a max or a prod stores the input's dtype. A mean or a median need
+	// not be an integer (tensor.reduceResultDType), and floatResultDType says
+	// why an integer input degrades to unknown rather than claiming f32.
+	if name == "mean" || name == "median" {
+		rdt = floatResultDType(rdt)
 	}
 	if len(argTypes) == 1 {
-		return tTensor{dims: []int{}, unit: u}
+		return tTensor{dims: []int{}, unit: u}.withDType(rdt)
 	}
 	if len(argTypes) == 2 {
 		if c.rank0Axis(ex, argTypes) {
@@ -2876,7 +3049,7 @@ func (c *checker) reduceResult(ex *ast.Call, argTypes []Type) Type {
 					ax += len(t.dims)
 				}
 				if ax >= 0 && ax < len(t.dims) {
-					return tTensor{dims: removeDim(t.dims, ax), unit: u}
+					return tTensor{dims: removeDim(t.dims, ax), unit: u}.withDType(rdt)
 				}
 				c.reportAxis(ex, t)
 			}

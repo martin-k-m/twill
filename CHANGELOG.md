@@ -1,5 +1,49 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **The Go checker knows dtypes, and reports a lossy widening.** `src/check.tw`
+  has carried a dtype on its tensor type since the dtype work landed and emits
+  one warning -- a narrow float silently widened by a wider one, which is a
+  perfectly correct answer that undoes the reason the operand was narrow
+  (NEEDS-113). `internal/checker` had one numeric type and reported nothing, so
+  the two checkers disagreed on every program that wrote a dtype.
+
+  They now agree character for character:
+
+  ```
+  weights.tw:4: shape error: dtype widening: bf16 and f64 promote to f64, which
+  undoes the reason the bf16 operand is narrow
+  ```
+
+  The dtype is stored as code+1 so the zero value means "not known", which is
+  what each of the sixty-odd bare `tTensor{dims: ...}` literals in that file
+  should say. It enters at a cast or a constructor's trailing name, defaults to
+  f64 for a constructor without one and for a tensor literal, and rides through
+  rearrangement, indexing, reductions and the unary operations on the rules the
+  self-hosted checker already used.
+
+  The hard half was reporting nothing else. A bare number literal deliberately
+  carries no dtype -- only `scalar(x)` and a tensor literal are f64 -- and a
+  float-only operation on an integer input degrades to unknown rather than
+  claiming f32, so no chain of ordinary arithmetic can reach the warning. Both
+  checkers were compared over 405 files of `std`, `src`, `examples` and
+  `testdata/cases`: identical output, and not one new diagnostic on a program
+  that never mentioned a dtype.
+
+### Fixed
+
+- **The self-hosted checker read `zeros(2, 3, bf16)` as shape `[2]`.**
+  `infer_call` strips a constructor's trailing dtype name and passes it along
+  separately; the constructor branch then stripped it a second time, taking a
+  real dimension with it. The checker reported a shape the runtime does not
+  build, so a correct program was told its shapes could not broadcast. The list
+  form `zeros([2, 3], bf16)` lost its only argument and degraded to unknown
+  instead, which is why this went unseen. Found by putting the two checkers
+  side by side on dtype programs, which is what the new diagnostic needed.
+
 ## [1.7.0] - 2026-08-20
 
 The two things the language was missing from the middle. 1.5 made the ecosystem

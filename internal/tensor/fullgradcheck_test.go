@@ -603,6 +603,7 @@ var nonDifferentiable = map[string]string{
 	"AccDType":  "dtype arithmetic",
 	"DTypeName": "dtype arithmetic", "DTypeOfName": "dtype arithmetic",
 	"RoundToDType": "dtype arithmetic", "ShortestForDType": "formatting",
+	"IsFloatDType": "dtype arithmetic", "IsIntDType": "dtype arithmetic",
 	// Second-order machinery, checked against finite differences in jet_test.go.
 	"Hessian": "second-order; checked in jet_test.go",
 	// Forward-mode machinery rather than operators: Directional runs one jet

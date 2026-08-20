@@ -4219,11 +4219,18 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
   if bytes.equal(name, "transpose") { return transpose_result(c, ex, arg_types) }
   # A constructor without a dtype argument builds f64, the documented default
   # (docs/dtypes.md). With one, it builds what was named.
+  #
+  # `ex` arrives ALREADY STRIPPED of the trailing dtype -- infer_call removes it
+  # before inferring the argument types, and passes what it found as `dt`. This
+  # used to call drop_last_arg here as well, which took a second argument off:
+  # `zeros(2, 3, bf16)` became `zeros(2)` and the checker reported the shape as
+  # [2] where the runtime builds [2, 3], so a correct program was told its
+  # shapes did not broadcast. The list form `zeros([2, 3], bf16)` lost its only
+  # argument instead and degraded to unknown, which is why this hid.
   let ctor_dt: I64 = tensor.DT_F64
   let ctor_args: Arr[ast.Expr] = ex.args
   if dtype_known(dt) {
     ctor_dt = dt
-    ctor_args = drop_last_arg(ex.args)
   }
   if in_set(name, "zeros ones randn rand") {
     let s: Dims = const_shape(ctor_args, 0)
