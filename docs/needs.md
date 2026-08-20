@@ -3225,17 +3225,37 @@ underflow in a way float64 would notice.
 
 ## NEEDS-113: dtype in the static checker
 
-**Status:** done in twill (commit `79bc6ac`); the Go checker has not followed.
-`src/check.tw` carries a dtype on its tensor type, applies `tensor.promote` at
-binary nodes, and emits the one widening warning. Unknown is the default, so a
-dtype-free program draws no new diagnostic. No new primitive.
+**Status:** done on BOTH checkers (2026-08). `src/check.tw` carried a dtype on
+its tensor type from commit `79bc6ac`; `internal/checker` now does too, and the
+two agree character for character.
 
-The bootstrap's *runtime* promotes correctly (verified 2026-08: an f16 tensor
-plus a bf16 tensor is f32, which is the first of the three cases below), and
-`internal/checker` still has one numeric type, so the third case, the silent
-widening of narrow weights by a wide bias, is caught by the twill checker and
-not by `twill check`. That is a divergence between the two checkers rather than
-a gap in either, and it is the kind the triple build is meant to surface.
+The Go side needed the type the entry asks for. `tTensor` gained a dtype stored
+as **code+1, so the zero value means "not known"** -- which is what each of the
+sixty-odd bare `tTensor{dims: ...}` literals in that file should say, and what
+`src/check.tw` spells `DT_UNKNOWN`. A dtype enters at a cast or a constructor's
+trailing name, defaults to f64 for a constructor without one and for a tensor
+literal, and rides through rearrangement, indexing, reductions and the unary
+ops on the same rules the self-hosted checker uses. `promoteAndWarn` runs at
+every binary node, before the shape rules, so both checkers emit their
+diagnostics in the same order.
+
+**The promise that made this delicate** is the second half of the entry: a
+program that never wrote a dtype must draw no new diagnostic. Two rules keep
+it. A bare number literal deliberately has NO dtype -- only `scalar(x)` and a
+tensor literal are f64 -- so `w * 2.0` is silent where `w * scalar(2.0)` is
+not. And a float-only operation on an integer input degrades to unknown rather
+than claiming f32, so a chain like `exp(argmax(x))` meeting an ordinary f64
+cannot make the warning fire. Verified over 405 files of `std`, `src`,
+`examples` and `testdata/cases`: both checkers, byte-identical, zero new
+diagnostics.
+
+**A bug this found in the self-hosted checker**, present since the dtype work
+landed and fixed here: `infer_call` strips a constructor's trailing dtype name
+and passes it separately, and the constructor branch then called
+`drop_last_arg` *again*. `zeros(2, 3, bf16)` became `zeros(2)` and the checker
+reported its shape as `[2]` where the runtime builds `[2, 3]` -- a false
+"cannot broadcast" on correct code. The list form `zeros([2, 3], bf16)` lost
+its only argument and degraded to unknown instead, which is why it hid.
 
 The checker already approximates `broadcast_shape` statically, so a shape
 mismatch is a compile error. It has no equivalent for `promote`, so nothing is
@@ -3252,11 +3272,19 @@ performance regression with a perfectly correct answer, and a checker that knows
 dtypes is the only place it can be caught. It should be a warning and not an
 error: the program means what it says.
 
-Wanted: a dtype on the checker's tensor type, `tensor.promote` applied at every
-binary node, and a diagnostic when a narrow operand is widened by a wider one.
+The first two cases above are still unreported, and deliberately: `f16 + bf16`
+promoting past both to f32 is correct and surprising but nothing was widened
+*by an operand*, and whether `i32_tensor / 2` is integer division is a question
+about the literal's dtype, which is exactly the thing left unknown to keep the
+promise above.
 
-*Go bootstrap:* `internal/checker` has one numeric type. There is nothing to
-promote.
+**Still open:** a warning currently blocks a run. Both CLIs print every
+diagnostic as `shape error:` and count it toward "N shape error(s); not
+running", and `src/check.tw` notes that main "does not yet read the severity".
+So a lossy widening -- which this entry says "should be a warning and not an
+error: the program means what it says" -- stops the program. Fixing it means
+giving the Go `Diagnostic` a severity (it has only `Msg` and `Line`) and
+teaching both CLIs to count only errors, byte-identically.
 
 ## NEEDS-114: dtype-aware printing and parsing
 

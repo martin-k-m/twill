@@ -63,6 +63,12 @@ func DTypeOfName(s string) (DType, bool) {
 func isFloatDType(dt DType) bool { return dt >= DTF16 }
 func isIntDType(dt DType) bool   { return dt <= DTI32 }
 
+// IsFloatDType and IsIntDType are the same partition for callers outside this
+// package. The checker needs it to decide which mixed operations are a lossy
+// widening worth reporting (src/check.tw promote_and_warn).
+func IsFloatDType(dt DType) bool { return isFloatDType(dt) }
+func IsIntDType(dt DType) bool   { return isIntDType(dt) }
+
 // truncTowardZero is float-to-integer truncation: toward zero, so that
 // i32(-0.5) is 0 and not -1. It matches Go's, C's, and every array library's
 // float-to-int conversion.
