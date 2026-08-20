@@ -290,9 +290,16 @@ func (s *lspServer) publish(uri string) {
 		// that is what lets a match on an enum from another module be checked
 		// for exhaustiveness.
 		for _, d := range checker.CheckFile(prog, pathOfURI(uri)) {
+			// LSP severities: 1 is Error, 2 is Warning. A dtype widening is not
+			// a mistake to fix before the program runs, so an editor should not
+			// paint it like one.
+			sev := 1
+			if !d.IsError() {
+				sev = 2
+			}
 			diags = append(diags, map[string]any{
 				"range":    lineRange(src, d.Line-1, 0),
-				"severity": 1,
+				"severity": sev,
 				"source":   "twill",
 				"message":  d.Msg,
 			})

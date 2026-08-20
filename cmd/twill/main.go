@@ -95,12 +95,13 @@ func runFile(path string, check bool) int {
 		}
 		diags := checker.CheckFile(prog, path)
 		if len(diags) > 0 {
-			for _, d := range diags {
-				fmt.Fprintf(os.Stderr, "%s:%d: shape error: %s\n", path, d.Line, d.Msg)
-				showContext(string(src), d.Line, 0)
+			printDiags(path, string(src), diags)
+			// Only an error refuses. A warning describes the program the author
+			// wrote and is printed above; the program still runs.
+			if n := checker.CountErrors(diags); n > 0 {
+				fmt.Fprintf(os.Stderr, "twill: %d shape error(s); not running (use --no-check to run anyway)\n", n)
+				return 1
 			}
-			fmt.Fprintf(os.Stderr, "twill: %d shape error(s); not running (use --no-check to run anyway)\n", len(diags))
-			return 1
 		}
 	}
 
@@ -161,11 +162,29 @@ func checkOnly(path string) int {
 		fmt.Printf("%s: no shape problems found\n", path)
 		return 0
 	}
-	for _, d := range diags {
-		fmt.Fprintf(os.Stderr, "%s:%d: shape error: %s\n", path, d.Line, d.Msg)
-		showContext(string(src), d.Line, 0)
+	printDiags(path, string(src), diags)
+	// A file whose only findings are warnings has nothing wrong with it, so the
+	// check passes. They are still printed: that is the whole point of them.
+	if checker.CountErrors(diags) > 0 {
+		return 1
 	}
-	return 1
+	return 0
+}
+
+// printDiags writes one diagnostic per line, prefixed with the file and line so
+// an editor can jump to them, each followed by the offending source line. A
+// warning says so rather than calling itself a shape error, which it is not.
+// src/main.tw's print_diags is the same function and the two must agree
+// character for character.
+func printDiags(path, src string, diags []checker.Diagnostic) {
+	for _, d := range diags {
+		label := "shape error"
+		if !d.IsError() {
+			label = "warning"
+		}
+		fmt.Fprintf(os.Stderr, "%s:%d: %s: %s\n", path, d.Line, label, d.Msg)
+		showContext(src, d.Line, 0)
+	}
 }
 
 func formatFile(path string, write bool) int {

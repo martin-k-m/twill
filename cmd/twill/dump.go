@@ -57,12 +57,13 @@ func runFileCanonical(path string, check bool) int {
 		}
 		diags := checker.CheckFile(prog, path)
 		if len(diags) > 0 {
-			for _, d := range diags {
-				fmt.Fprintf(os.Stderr, "%s:%d: shape error: %s\n", path, d.Line, d.Msg)
-				showContext(string(src), d.Line, 0)
+			printDiags(path, string(src), diags)
+			// Only an error refuses. A warning describes the program the author
+			// wrote and is printed above; the program still runs.
+			if n := checker.CountErrors(diags); n > 0 {
+				fmt.Fprintf(os.Stderr, "twill: %d shape error(s); not running (use --no-check to run anyway)\n", n)
+				return 1
 			}
-			fmt.Fprintf(os.Stderr, "twill: %d shape error(s); not running (use --no-check to run anyway)\n", len(diags))
-			return 1
 		}
 	}
 

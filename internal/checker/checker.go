@@ -15,10 +15,39 @@ import (
 	"github.com/twill-lang/twill/internal/tensor"
 )
 
+// Severity separates the findings that stop a program from the ones that only
+// describe it. Almost everything the checker reports is an error: a shape, a
+// type or a unit the program cannot have. A warning is different in kind --
+// the program means what it says and will run, it will just run in a way the
+// author probably did not intend. The values match src/check.tw's SEV_*.
+type Severity int
+
+const (
+	SevError   Severity = 0
+	SevWarning Severity = 1
+)
+
 // Diagnostic is a single shape/type finding.
 type Diagnostic struct {
-	Msg  string
-	Line int
+	Msg      string
+	Line     int
+	Severity Severity
+}
+
+// IsError reports whether a diagnostic is one that should stop the program.
+func (d Diagnostic) IsError() bool { return d.Severity == SevError }
+
+// CountErrors is how many of a run's diagnostics are errors. A caller deciding
+// whether to run the program asks this rather than len(diags), because a
+// warning is not a refusal.
+func CountErrors(diags []Diagnostic) int {
+	n := 0
+	for _, d := range diags {
+		if d.IsError() {
+			n++
+		}
+	}
+	return n
 }
 
 // Check analyses a program and returns any diagnostics found.
@@ -269,7 +298,13 @@ func (c *checker) registerType(td *ast.TypeDecl) {
 }
 
 func (c *checker) report(line int, format string, args ...any) {
-	c.diags = append(c.diags, Diagnostic{Msg: fmt.Sprintf(format, args...), Line: line})
+	c.diags = append(c.diags, Diagnostic{Msg: fmt.Sprintf(format, args...), Line: line, Severity: SevError})
+}
+
+// warn records a finding that describes the program rather than refusing it.
+// Mirrors src/check.tw's warn.
+func (c *checker) warn(line int, format string, args ...any) {
+	c.diags = append(c.diags, Diagnostic{Msg: fmt.Sprintf(format, args...), Line: line, Severity: SevWarning})
 }
 
 // --- types -----------------------------------------------------------------
@@ -373,7 +408,7 @@ func (c *checker) promoteAndWarn(line int, a, b tensor.DType) tensor.DType {
 	if dt == a {
 		narrow = b
 	}
-	c.report(line, "dtype widening: %s and %s promote to %s, which undoes the reason the %s operand is narrow",
+	c.warn(line, "dtype widening: %s and %s promote to %s, which undoes the reason the %s operand is narrow",
 		tensor.DTypeName(a), tensor.DTypeName(b), tensor.DTypeName(dt), tensor.DTypeName(narrow))
 	return dt
 }

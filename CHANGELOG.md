@@ -33,6 +33,26 @@
   `testdata/cases`: identical output, and not one new diagnostic on a program
   that never mentioned a dtype.
 
+- **A warning no longer stops the program.** The checker has always had two
+  kinds of finding -- almost everything it reports is an error, a shape or a
+  type or a unit the program cannot have, while a dtype widening describes a
+  program that means what it says and will run. Both CLIs printed them the same
+  way and counted them the same way, so the one warning refused to run the
+  program it was only commenting on. `src/check.tw` carried a `severity` field
+  and recorded that main did not read it.
+
+  It reads it now, and so does the Go bootstrap, which gained the field:
+
+  - a warning prints as `warning:` rather than `shape error:`;
+  - `run` prints it and runs the program, counting only errors in its refusal;
+  - `check` prints it and exits 0, so a warnings-only file passes a CI gate;
+  - `twill test` fails a suite only on an error;
+  - the language server publishes it as LSP severity 2 (Warning) rather than
+    painting it like a mistake to fix before running.
+
+  An error is unchanged in every respect, and the two CLIs remain
+  byte-identical on both kinds.
+
 ### Fixed
 
 - **The self-hosted checker read `zeros(2, 3, bf16)` as shape `[2]`.**
