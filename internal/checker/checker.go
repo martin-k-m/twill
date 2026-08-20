@@ -41,6 +41,8 @@ func newChecker(prog *ast.Program) *checker {
 	c.variantOwner = map[string]string{"Some": "Opt", "None": "Opt", "Ok": "Res", "Err": "Res"}
 	c.payloads = map[string]Type{"Some": nil, "Ok": nil, "Err": nil}
 	c.structDecls = map[string]*ast.StructDecl{}
+	c.typeParams = map[string][]string{}
+	c.activeParams = map[string]bool{}
 	return c
 }
 
@@ -57,6 +59,9 @@ func (c *checker) prelude(prog *ast.Program) *checkEnv {
 		case *ast.UnitDecl:
 			c.units[d.Name] = true
 		case *ast.StructDecl:
+			if len(d.TypeParams) > 0 {
+				c.typeParams[d.Name] = d.TypeParams
+			}
 			// A struct registers as a nominal record type. Its field types are
 			// parsed once every struct and enum name is known (structFieldTypes,
 			// below), since a field may name either.
@@ -134,11 +139,16 @@ func (c *checker) prelude(prog *ast.Program) *checkEnv {
 	// payload case, the enum itself for a bare one.
 	for _, s := range prog.Body {
 		if ed, ok := s.(*ast.EnumDecl); ok {
+			if len(ed.TypeParams) > 0 {
+				c.typeParams[ed.Name] = ed.TypeParams
+			}
+			done := c.withParams(ed.TypeParams)
 			for _, v := range ed.Variants {
 				if v.HasPayload {
 					c.payloads[v.Name] = c.parseType(v.Payload)
 				}
 			}
+			done()
 		}
 	}
 	c.structFieldTypes(prog)
@@ -215,6 +225,14 @@ type checker struct {
 	// checked for exhaustiveness against.
 	enums        map[string][]string
 	variantOwner map[string]string
+
+	// typeParams is the `[T, U]` a struct or enum declares, by declaration
+	// name. activeParams is the set in scope right now -- while a declaration's
+	// own field and payload types are being read, and while a generic
+	// function's signature and body are being checked -- which is what makes a
+	// bare `T` there resolve to the parameter rather than to an unknown name.
+	typeParams   map[string][]string
+	activeParams map[string]bool
 	// payloads is each payload-carrying variant's declared payload type; a
 	// payload-less variant is absent. structDecls keeps each struct's
 	// declaration for its field order.
@@ -276,6 +294,10 @@ type tList struct{ elems []Type } // nil elems: unknown contents
 type tRecord struct {
 	fields map[string]Type
 	name   string // the struct's name for a nominal type; "" for a plain record
+	// args are the type arguments a generic struct was used with: the I64 in
+	// `Box[I64]`. Empty for every non-generic struct, which is what keeps two
+	// of those comparing by name exactly as they did before 1.7.
+	args []Type
 }
 type tFn struct {
 	node    ast.Node
@@ -744,8 +766,9 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		// keeps the dialect's records-and-enums permissive.
 		for _, arm := range ex.Arms {
 			armEnv := newEnv(env)
-			if arm.Pattern.Binding != "" {
-				armEnv.define(arm.Pattern.Binding, c.matchBindingType(subject, arm.Pattern))
+			c.bindPattern(arm.Pattern, subject, armEnv)
+			if arm.Guard != nil {
+				c.inferExpr(arm.Guard, armEnv)
 			}
 			c.inferStmt(arm.Body, armEnv)
 		}
@@ -769,6 +792,30 @@ func (c *checker) inferExpr(e ast.Expr, env *checkEnv) Type {
 		return c.inferBlock(ex, newEnv(env))
 	}
 	return tUnknown{}
+}
+
+// withParams brings a declaration's type parameters into scope and returns the
+// function that takes them out again. They nest by saving what they shadow, so
+// a `T` that was already a parameter of an enclosing declaration comes back
+// afterwards rather than disappearing.
+func (c *checker) withParams(params []string) func() {
+	if len(params) == 0 {
+		return func() {}
+	}
+	shadowed := make(map[string]bool, len(params))
+	for _, p := range params {
+		shadowed[p] = c.activeParams[p]
+		c.activeParams[p] = true
+	}
+	return func() {
+		for p, was := range shadowed {
+			if was {
+				c.activeParams[p] = true
+			} else {
+				delete(c.activeParams, p)
+			}
+		}
+	}
 }
 
 // checkTryContext is the rule for `?`: it returns the failure from the
@@ -815,24 +862,42 @@ func retTypeName(retType string, u *ast.UnitAnno) string {
 // checker reports only what it can prove (docs/type-system.md, "match").
 func (c *checker) checkMatchArms(m *ast.Match) {
 	owner := ""
-	seen := map[string]bool{}
-	wildcardAt := -1
+	covered := map[string]bool{}
+	catchAllAt := -1
+	// judgeable is the set of arms exhaustiveness is computed from: the ones
+	// whose running depends on nothing but the value's shape. A guard is a
+	// condition this checker cannot evaluate, so a guarded arm is checked for
+	// reachability and then set aside.
+	var judgeable, before []ast.MatchPattern
 	for i, arm := range m.Arms {
 		pat := arm.Pattern
-		if pat.Wildcard {
-			if wildcardAt >= 0 {
-				c.report(pat.Line, "duplicate match arm: `_` appears twice")
+		if catchAllAt >= 0 {
+			c.report(pat.Line, "unreachable match arm: %s comes after %s, which already matches everything", patternText(pat), patternText(m.Arms[catchAllAt].Pattern))
+		}
+		if arm.Guard == nil {
+			if pat.CatchAll() && catchAllAt < 0 {
+				// What makes a catch-all redundant is the arms BEFORE it
+				// covering everything already; the arms after it are
+				// unreachable and prove nothing. So the tally stops here.
+				before = append([]ast.MatchPattern(nil), judgeable...)
+				catchAllAt = i
 			}
-			wildcardAt = i
+			judgeable = append(judgeable, pat)
+			if pat.CatchAll() {
+				continue
+			}
+		}
+		if pat.Kind != ast.PatVariant {
+			// A literal says nothing about which enum is being matched, and a
+			// binder under a guard covers nothing.
 			continue
 		}
-		if wildcardAt >= 0 {
-			c.report(pat.Line, "unreachable match arm: %s comes after `_`, which already matches everything", pat.Variant)
+		if arm.Guard == nil && pat.CoversCase() {
+			if covered[pat.Variant] {
+				c.report(pat.Line, "duplicate match arm: %s is already handled", pat.Variant)
+			}
+			covered[pat.Variant] = true
 		}
-		if seen[pat.Variant] {
-			c.report(pat.Line, "duplicate match arm: %s is already handled", pat.Variant)
-		}
-		seen[pat.Variant] = true
 		en, known := c.variantOwner[pat.Variant]
 		if !known || en == "" {
 			// Not an enum this file declares (or an ambiguous name): the match
@@ -849,22 +914,116 @@ func (c *checker) checkMatchArms(m *ast.Match) {
 	if owner == "" {
 		return
 	}
-	variants := c.enums[owner]
-	var missing []string
-	for _, v := range variants {
-		if !seen[v] {
-			missing = append(missing, v)
-		}
+	tally := judgeable
+	if catchAllAt >= 0 {
+		tally = before
 	}
-	if wildcardAt >= 0 {
+	missing, judged := c.missingCases(tally)
+	if !judged {
+		return
+	}
+	if catchAllAt >= 0 {
 		if len(missing) == 0 {
-			c.report(m.Arms[wildcardAt].Pattern.Line, "unreachable match arm: `_` matches nothing, every variant of %s is already handled", owner)
+			c.report(m.Arms[catchAllAt].Pattern.Line, "unreachable match arm: %s matches nothing, every variant of %s is already handled", patternText(m.Arms[catchAllAt].Pattern), owner)
 		}
 		return
 	}
 	if len(missing) > 0 {
 		c.report(m.Line, "match on %s is not exhaustive: missing %s", owner, strings.Join(missing, ", "))
 	}
+}
+
+// missingCases answers, for the set of patterns offered at one position, which
+// values reach none of them. It recurses into payloads, so
+// `Some(Ok(v)), Some(Err(e)), None` is exhaustive over `Opt[Res[..]]` while
+// dropping the `Err` arm reports the value that gets through by name,
+// `Some(Err(...))`.
+//
+// The second result is whether the question could be answered at all. A
+// position holding only literals, or naming a variant of an enum this file
+// cannot see, is not judged -- the checker reports what it can prove, and a
+// guess here would be a false "not exhaustive" on a correct program.
+func (c *checker) missingCases(pats []ast.MatchPattern) ([]string, bool) {
+	byVariant := map[string][]ast.MatchPattern{}
+	whole := map[string]bool{}
+	bools := map[bool]bool{}
+	literals := false
+	owner := ""
+	for _, pat := range pats {
+		switch pat.Kind {
+		case ast.PatBinding:
+			// A binder or `_` at this position takes every value there is.
+			return nil, true
+		case ast.PatLiteral:
+			literals = true
+			if b, ok := pat.Lit.(*ast.BoolLit); ok {
+				bools[b.Value] = true
+			}
+			continue
+		}
+		en, known := c.variantOwner[pat.Variant]
+		if !known || en == "" || (owner != "" && en != owner) {
+			return nil, false
+		}
+		owner = en
+		if pat.Sub == nil || pat.Sub.CatchAll() {
+			whole[pat.Variant] = true
+			continue
+		}
+		byVariant[pat.Variant] = append(byVariant[pat.Variant], *pat.Sub)
+	}
+	if owner == "" {
+		if bools[true] && bools[false] {
+			// Two literals do cover a Bool, and it is the only domain small
+			// enough for that to be true.
+			return nil, true
+		}
+		if literals {
+			// Literals over a domain that is not Bool leave values behind
+			// however many are written, and `...` is what those values are
+			// called in the diagnostic.
+			return []string{"..."}, true
+		}
+		return nil, false
+	}
+	var missing []string
+	for _, v := range c.enums[owner] {
+		if whole[v] {
+			continue
+		}
+		subs, any := byVariant[v]
+		if !any {
+			missing = append(missing, v)
+			continue
+		}
+		inner, judged := c.missingCases(subs)
+		if !judged {
+			return nil, false
+		}
+		for _, m := range inner {
+			missing = append(missing, v+"("+m+")")
+		}
+	}
+	return missing, true
+}
+
+// patternText names a pattern in a diagnostic. It is deliberately shallow: the
+// diagnostics that use it are about which arm, not about what the arm looks
+// like all the way down.
+func patternText(pat ast.MatchPattern) string {
+	switch pat.Kind {
+	case ast.PatBinding:
+		if pat.Binding == "" {
+			return "`_`"
+		}
+		return "`" + pat.Binding + "`"
+	case ast.PatLiteral:
+		return "this literal pattern"
+	}
+	if pat.Sub != nil {
+		return pat.Variant + "(...)"
+	}
+	return pat.Variant
 }
 
 // elementCount multiplies a shape out, when every dimension is known.
@@ -1403,6 +1562,11 @@ func (c *checker) checkFnDef(fn *ast.FnDecl, env *checkEnv) {
 	if c.stack[fn] {
 		return
 	}
+	// A generic function's parameters are in scope for its signature and its
+	// body alike, so `fn first[T](xs: Arr[T]) -> T` reads both the annotation
+	// and the return type in terms of T.
+	doneParams := c.withParams(fn.TypeParams)
+	defer doneParams()
 	scope := newEnv(env)
 	for _, p := range fn.Params {
 		if p.Unit != nil {
@@ -1564,6 +1728,31 @@ func (c *checker) checkStructLit(ex *ast.RecordLit, fields map[string]Type) Type
 		return tRecord{fields: fields}
 	}
 	if _, isStruct := c.structDecls[name]; isStruct {
+		// A generic struct's literal says its arguments by what it is built
+		// from: `Pair { first: b, second: a }` is a `Pair[B, A]`. They are read
+		// out of the field values first, because checking the fields against
+		// the parameters themselves would compare a value against `A` -- a name
+		// that stands for whatever the literal decides -- and report every
+		// correct literal as a mismatch.
+		binding := map[string]Type{}
+		if len(c.typeParams[name]) > 0 {
+			for _, f := range ex.Fields {
+				if want, declared := decl.fields[f.Name]; declared {
+					inferParams(want, fields[f.Name], binding)
+				}
+			}
+			for _, p := range c.typeParams[name] {
+				if _, bound := binding[p]; !bound {
+					binding[p] = tUnknown{}
+				}
+			}
+			decl = substParams(decl, binding).(tRecord)
+			args := make([]Type, len(c.typeParams[name]))
+			for i, p := range c.typeParams[name] {
+				args[i] = binding[p]
+			}
+			decl.args = args
+		}
 		for _, f := range ex.Fields {
 			want, declared := decl.fields[f.Name]
 			if !declared {

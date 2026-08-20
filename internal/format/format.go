@@ -170,13 +170,13 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 				cases[i] += "(" + v.Payload + ")"
 			}
 		}
-		p.lineC(indent, "enum "+st.Name+" { "+strings.Join(cases, ", ")+" }", st.Line)
+		p.lineC(indent, "enum "+st.Name+typeParams(st.TypeParams)+" { "+strings.Join(cases, ", ")+" }", st.Line)
 	case *ast.StructDecl:
 		fields := make([]string, len(st.Fields))
 		for i, f := range st.Fields {
 			fields[i] = f.Name + ": " + f.Type
 		}
-		p.lineC(indent, "struct "+st.Name+" { "+strings.Join(fields, ", ")+" }", st.Line)
+		p.lineC(indent, "struct "+st.Name+typeParams(st.TypeParams)+" { "+strings.Join(fields, ", ")+" }", st.Line)
 	case *ast.Break:
 		p.lineC(indent, "break", st.Line)
 	case *ast.Continue:
@@ -191,7 +191,7 @@ func (p *printer) stmt(s ast.Stmt, indent int) {
 }
 
 func (p *printer) fnDecl(fn *ast.FnDecl, indent int) {
-	sig := "fn " + fn.Name + "(" + p.params(fn.Params) + ")" + p.retPart(fn.Ret, fn.RetUnit, fn.RetType)
+	sig := "fn " + fn.Name + typeParams(fn.TypeParams) + "(" + p.params(fn.Params) + ")" + p.retPart(fn.Ret, fn.RetUnit, fn.RetType)
 	if blk, ok := fn.Body.(*ast.Block); ok {
 		p.blockStmt(indent, sig, blk, fn.Line)
 		return
@@ -441,22 +441,48 @@ func (p *printer) ifExpr(ex *ast.IfExpr) string {
 	return s
 }
 
+// typeParams renders the `[T, U]` a declaration may carry. It is empty for a
+// declaration without them, so nothing changes for the code written before
+// they existed -- and it is not optional: a printer with no case for them
+// deletes them, which turns every generic program into one that means
+// something else.
+func typeParams(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(names, ", ") + "]"
+}
+
 // matchExpr renders a match inline, `match subject { pattern => body, ... }`, the
 // same one-line canonical form the printer gives every block-structured
 // expression. A block-valued arm is inlined with `{ ...; ... }`.
 func (p *printer) matchExpr(ex *ast.Match) string {
 	arms := make([]string, len(ex.Arms))
 	for i, arm := range ex.Arms {
-		pat := arm.Pattern.Variant
-		if arm.Pattern.Wildcard {
-			pat = "_"
-		}
-		if arm.Pattern.Binding != "" {
-			pat += "(" + arm.Pattern.Binding + ")"
+		pat := p.pattern(arm.Pattern)
+		if arm.Guard != nil {
+			pat += " if " + p.expr(arm.Guard)
 		}
 		arms[i] = pat + " => " + p.inlineStmt(arm.Body)
 	}
 	return "match " + p.expr(ex.Subject) + " { " + strings.Join(arms, ", ") + " }"
+}
+
+// pattern renders a match pattern, nesting the way it was parsed.
+func (p *printer) pattern(pat ast.MatchPattern) string {
+	switch pat.Kind {
+	case ast.PatBinding:
+		if pat.Binding == "" {
+			return "_"
+		}
+		return pat.Binding
+	case ast.PatLiteral:
+		return p.expr(pat.Lit)
+	}
+	if pat.Sub == nil {
+		return pat.Variant
+	}
+	return pat.Variant + "(" + p.pattern(*pat.Sub) + ")"
 }
 
 // inlineStmt renders a statement on one line, for a match arm body. The common

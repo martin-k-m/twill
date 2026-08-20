@@ -272,6 +272,10 @@ func (p *parser) parseFnDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
+	typeParams, err := p.parseTypeParams()
+	if err != nil {
+		return nil, err
+	}
 	params, ret, retUnit, retType, err := p.parseSignature()
 	if err != nil {
 		return nil, err
@@ -280,7 +284,7 @@ func (p *parser) parseFnDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FnDecl{Name: name, Params: params, Ret: ret, RetUnit: retUnit, RetType: retType, Body: body, Line: line}, nil
+	return &ast.FnDecl{Name: name, TypeParams: typeParams, Params: params, Ret: ret, RetUnit: retUnit, RetType: retType, Body: body, Line: line}, nil
 }
 
 func (p *parser) parseWhile() (ast.Stmt, error) {
@@ -1113,16 +1117,47 @@ func (p *parser) parseTypeDecl() (ast.Stmt, error) {
 // parseEnumDecl parses `enum Name { Case, Case(Payload), ... }`. A case is a
 // name with an optional single payload type in parentheses; cases are separated
 // by commas and a trailing comma is allowed.
+// parseTypeParams parses the `[T, U]` a declaration may carry after its name.
+// It returns nil when there is none, which is the shape of every declaration
+// written before 1.7. The names are ordinary identifiers; what makes one a type
+// parameter is being listed here, and it is in scope for the declaration only.
+func (p *parser) parseTypeParams() ([]string, error) {
+	if !p.check("[") {
+		return nil, nil
+	}
+	p.next()
+	var names []string
+	for {
+		name, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+		if p.match(",") {
+			continue
+		}
+		if _, err := p.expect("]"); err != nil {
+			return nil, err
+		}
+		break
+	}
+	return names, nil
+}
+
 func (p *parser) parseEnumDecl() (ast.Stmt, error) {
 	line := p.next().Line // 'enum'
 	name, err := p.expectIdent()
 	if err != nil {
 		return nil, err
 	}
+	typeParams, err := p.parseTypeParams()
+	if err != nil {
+		return nil, err
+	}
 	if _, err := p.expect("{"); err != nil {
 		return nil, err
 	}
-	decl := &ast.EnumDecl{Name: name, Line: line}
+	decl := &ast.EnumDecl{Name: name, TypeParams: typeParams, Line: line}
 	for !p.check("}") && !p.atEnd() {
 		vname, err := p.expectIdent()
 		if err != nil {
@@ -1161,10 +1196,14 @@ func (p *parser) parseStructDecl() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
+	typeParams, err := p.parseTypeParams()
+	if err != nil {
+		return nil, err
+	}
 	if _, err := p.expect("{"); err != nil {
 		return nil, err
 	}
-	decl := &ast.StructDecl{Name: name, Line: line}
+	decl := &ast.StructDecl{Name: name, TypeParams: typeParams, Line: line}
 	for !p.check("}") && !p.atEnd() {
 		fname, err := p.expectIdent()
 		if err != nil {
@@ -1205,6 +1244,20 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A guard is `if cond` between the pattern and the arrow. It is parsed
+		// as a grouped expression for the same reason the arm body is: the
+		// condition has no statement boundary of its own here.
+		var guard ast.Expr
+		if p.check("if") {
+			p.next()
+			p.groupDepth++
+			g, err := p.parseExpr()
+			p.groupDepth--
+			if err != nil {
+				return nil, err
+			}
+			guard = g
+		}
 		if _, err := p.expect("=>"); err != nil {
 			return nil, err
 		}
@@ -1235,7 +1288,7 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.Arms = append(m.Arms, ast.MatchArm{Pattern: pat, Body: body})
+		m.Arms = append(m.Arms, ast.MatchArm{Pattern: pat, Guard: guard, Body: body})
 		if !p.match(",") {
 			break
 		}
@@ -1246,23 +1299,41 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 	return m, nil
 }
 
-// parsePattern parses a match arm's pattern: `_` (wildcard), a variant name, or
-// a variant name with a single binding, `Some(x)`. A binding of `_` discards the
-// payload.
+// parsePattern parses a match arm's pattern. A pattern is one of:
+//
+//	_              matches anything, binds nothing
+//	name           matches anything, binds it
+//	3, "s", true   matches by equality
+//	Variant        matches the case, whatever it carries
+//	Variant(pat)   matches the case and matches its payload against pat
+//
+// and the last nests, so `Ok(Some(v))` and `Err(-1)` are patterns. The rule
+// that tells a variant from a binder is the initial letter: `Some` names a
+// case, `some` binds. Every variant in the language and its libraries is
+// upper-case initial, and a lower-case one would previously have been read as
+// a case that no enum declares, which the checker refused to judge.
 func (p *parser) parsePattern() (ast.MatchPattern, error) {
 	t := p.peek(0)
-	if t.Kind == lexer.IDENT && t.Value == "_" {
-		p.next()
-		return ast.MatchPattern{Wildcard: true, Line: t.Line}, nil
+	switch {
+	case t.Kind == lexer.NUMBER, t.Kind == lexer.STRING,
+		t.Kind == lexer.KEYWORD && (t.Value == "true" || t.Value == "false"),
+		t.Value == "-" && p.peek(1).Kind == lexer.NUMBER:
+		lit, err := p.parsePatternLiteral()
+		if err != nil {
+			return ast.MatchPattern{}, err
+		}
+		return ast.MatchPattern{Kind: ast.PatLiteral, Lit: lit, Line: t.Line}, nil
 	}
 	name, err := p.expectIdent()
 	if err != nil {
 		return ast.MatchPattern{}, err
 	}
-	// A variant may be written with its type in front, `Opt.None`, the same way
-	// it is written where a value is constructed. The qualifier only says which
-	// enum the variant belongs to, and variants are resolved by name, so it is
-	// read and dropped -- `Opt.None` and `None` are the same pattern.
+	// A variant may be written with something in front, `Opt.None` or
+	// `ast.EBool(b)`, the same way it is written where a value is constructed.
+	// The qualifier only says where the variant comes from, and variants are
+	// resolved by name, so it is read and dropped. This runs before the
+	// case rule below, because the qualifier is a type name or a module alias
+	// and either may be lower-case: what decides is the name after the dot.
 	if p.check(".") {
 		p.next()
 		variant, err := p.expectIdent()
@@ -1270,23 +1341,71 @@ func (p *parser) parsePattern() (ast.MatchPattern, error) {
 			return ast.MatchPattern{}, err
 		}
 		name = variant
+	} else if !startsUpper(name) {
+		if p.check("(") {
+			return ast.MatchPattern{}, p.errf(p.peek(0), "%s is a binding, not a variant: a case name starts with a capital letter", name)
+		}
+		if name == "_" {
+			return ast.MatchPattern{Kind: ast.PatBinding, Line: t.Line}, nil
+		}
+		return ast.MatchPattern{Kind: ast.PatBinding, Binding: name, Line: t.Line}, nil
 	}
-	pat := ast.MatchPattern{Variant: name, Line: t.Line}
+	pat := ast.MatchPattern{Kind: ast.PatVariant, Variant: name, Line: t.Line}
 	if p.check("(") {
 		p.next()
-		bt := p.peek(0)
-		if bt.Kind != lexer.IDENT {
-			return ast.MatchPattern{}, p.errf(bt, "expected a binding name in the pattern")
+		sub, err := p.parsePattern()
+		if err != nil {
+			return ast.MatchPattern{}, err
 		}
-		p.next()
-		if bt.Value != "_" {
-			pat.Binding = bt.Value
-		}
+		pat.Sub = &sub
 		if _, err := p.expect(")"); err != nil {
 			return ast.MatchPattern{}, err
 		}
 	}
 	return pat, nil
+}
+
+// parsePatternLiteral reads the literal forms a pattern may match by equality.
+// A leading `-` belongs to the number: `Err(-1)` is one pattern, not a
+// negation applied to one.
+func (p *parser) parsePatternLiteral() (ast.Expr, error) {
+	t := p.peek(0)
+	if t.Value == "-" && p.peek(1).Kind == lexer.NUMBER {
+		p.next()
+		n := p.peek(0)
+		num, err := p.patternNumber()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Unary{Op: "-", Operand: num, Line: n.Line}, nil
+	}
+	switch t.Kind {
+	case lexer.NUMBER:
+		return p.patternNumber()
+	case lexer.STRING:
+		p.next()
+		return &ast.StringLit{Value: t.Value, Line: t.Line}, nil
+	}
+	p.next()
+	return &ast.BoolLit{Value: t.Value == "true", Line: t.Line}, nil
+}
+
+// patternNumber reads one numeric literal in a pattern, keeping the digits as
+// written so an I64 above 2^53 compares exactly rather than through an f64.
+func (p *parser) patternNumber() (*ast.NumberLit, error) {
+	t := p.peek(0)
+	p.next()
+	v, err := strconv.ParseFloat(t.Value, 64)
+	if err != nil {
+		return nil, p.errf(t, "invalid number %q", t.Value)
+	}
+	return &ast.NumberLit{Value: v, Text: t.Value, Line: t.Line}, nil
+}
+
+// startsUpper is the variant-versus-binder rule, applied to the first byte.
+// Names in twill are ASCII identifiers.
+func startsUpper(name string) bool {
+	return name != "" && name[0] >= 'A' && name[0] <= 'Z'
 }
 
 // parseShapeAnno parses "[d0, d1, ...]" where each dim is an integer or "_"

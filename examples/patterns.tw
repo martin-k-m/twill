@@ -1,0 +1,139 @@
+mode systems
+
+# The 1.7 pattern language and type parameters, in the one place they were both
+# added for: a small interpreter, which is what a compiler written in twill is
+# made of. Nested patterns take the expression apart, guards say the two cases a
+# shape cannot distinguish, literal patterns pick out the identities worth
+# folding, and the type parameters let one container hold either result.
+
+enum Expr {
+  Num(F64),
+  Add(Pair[Expr, Expr]),
+  Mul(Pair[Expr, Expr]),
+  Neg(Expr),
+}
+
+# A pair of anything. Before 1.7 a declaration could not take a type parameter,
+# so this was one struct per element type.
+struct Pair[A, B] { left: A, right: B }
+
+# A result and what it cost to get. Simplifying answers with an Expr and
+# describing answers with a Str, and one declaration carries either.
+struct Outcome[T] { value: T, steps: I64 }
+
+fn pair(l: Expr, r: Expr) -> Pair[Expr, Expr] = Pair { left: l, right: r }
+
+# fold is the whole point of the release: `Neg(Neg(inner))` and `Neg(Num(v))`
+# below are nested patterns, and `Num(0.0)` and `Num(1.0)` in the two helpers
+# are literal ones. In 1.6 each was a syntax error, and every one of them had to
+# be written as a second `match` inside the arm, or as an `if` over a field.
+fn fold(e: Expr) -> Expr {
+  match e {
+    # An identity, recognised by a literal in the pattern rather than by an `if`
+    # inside the arm.
+    Add(p) => fold_add(fold(p.left), fold(p.right)),
+    Mul(p) => fold_mul(fold(p.left), fold(p.right)),
+    # A double negation cancels. The nested pattern is what sees it: the outer
+    # Neg and the inner one are matched in one place, so the rewrite is written
+    # where it is true rather than discovered by a second match.
+    Neg(Neg(inner)) => fold(inner),
+    Neg(Num(v)) => Num(0.0 - v),
+    Neg(inner) => Neg(fold(inner)),
+    Num(v) => Num(v),
+  }
+}
+
+fn fold_add(l: Expr, r: Expr) -> Expr {
+  match l {
+    Num(0.0) => r,
+    _ => match r {
+      Num(0.0) => l,
+      _ => Add(pair(l, r)),
+    },
+  }
+}
+
+fn fold_mul(l: Expr, r: Expr) -> Expr {
+  match l {
+    Num(0.0) => Num(0.0),
+    Num(1.0) => r,
+    _ => match r {
+      Num(0.0) => Num(0.0),
+      Num(1.0) => l,
+      _ => Mul(pair(l, r)),
+    },
+  }
+}
+
+# Guards say what the shape cannot: whether a multiplication is a squaring is a
+# property of the two operands' values, not of their cases.
+fn describe(e: Expr) -> Str {
+  match e {
+    Num(v) if v < 0.0 => "a negative constant",
+    Num(0.0) => "zero",
+    Num(_) => "a constant",
+    Mul(p) if same_number(p.left, p.right) => "a square",
+    Mul(_) => "a product",
+    Add(_) => "a sum",
+    Neg(_) => "a negation",
+  }
+}
+
+fn same_number(a: Expr, b: Expr) -> Bool {
+  match a {
+    Num(x) => match b {
+      Num(y) => x == y,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn show(e: Expr) -> Str {
+  match e {
+    Num(v) => str(v),
+    Add(p) => "(" + show(p.left) + " + " + show(p.right) + ")",
+    Mul(p) => "(" + show(p.left) + " * " + show(p.right) + ")",
+    Neg(inner) => "-" + show(inner),
+  }
+}
+
+fn size(e: Expr) -> I64 {
+  match e {
+    Num(_) => 1,
+    Neg(inner) => 1 + size(inner),
+    Add(p) => 1 + size(p.left) + size(p.right),
+    Mul(p) => 1 + size(p.left) + size(p.right),
+  }
+}
+
+# The same declaration holding two different things, which is what a type
+# parameter is for: one Outcome carries an Expr and the other a Str.
+fn simplify(e: Expr) -> Outcome[Expr] {
+  let folded: Expr = fold(e)
+  Outcome { value: folded, steps: size(e) - size(folded) }
+}
+
+fn explain(e: Expr) -> Outcome[Str] {
+  Outcome { value: describe(e), steps: size(e) }
+}
+
+fn main() {
+  # ((x * 1) + 0) * --2, with x standing in as the constant 3.
+  let e: Expr = Mul(pair(
+    Add(pair(Mul(pair(Num(3.0), Num(1.0))), Num(0.0))),
+    Neg(Neg(Num(2.0)))))
+
+  print(show(e))
+  let s: Outcome[Expr] = simplify(e)
+  print(show(s.value))
+  print("nodes removed:", s.steps)
+
+  let d: Outcome[Str] = explain(s.value)
+  print(d.value)
+
+  print(describe(Mul(pair(Num(4.0), Num(4.0)))))
+  print(describe(Num(0.0 - 1.0)))
+  print(describe(Num(0.0)))
+  print(show(fold(Neg(Neg(Neg(Num(5.0)))))))
+}

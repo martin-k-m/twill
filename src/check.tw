@@ -79,6 +79,10 @@ struct ListType {
 struct RecordType {
   fields: Dict[Str, Type],
   name: Str,
+  # The type arguments a generic struct was used with: the I64 in `Box[I64]`.
+  # Empty for every non-generic struct, which is what keeps two of those
+  # comparing by name exactly as they did before 1.7.
+  args: Arr[Opt[Type]],
 }
 
 # ---- systems-mode types ----------------------------------------------------
@@ -110,6 +114,8 @@ struct EnumType {
   name: Str,
   args: Arr[Opt[Type]],
 }
+
+struct ParamType { name: Str }
 
 # A payload-carrying variant constructor as a value: calling it yields the
 # enum. `Some` before its argument is one.
@@ -162,6 +168,13 @@ enum Type {
   TEnum(EnumType),
   TCtor(CtorType),
   TFnType(FnTypeAnno),
+  # A declaration's type parameter -- the T in `struct Box[T]` -- standing for a
+  # type the declaration does not name. It survives only inside the declaration
+  # it belongs to: at a use site the parameters are substituted for the
+  # arguments written there, so a Box[I64]'s value field is an I64 and never a
+  # TParam. One reaching a judgement means the use site did not say what T is,
+  # and it judges nothing, the way an unknown does.
+  TParam(ParamType),
 }
 
 fn no_unit() -> Dict[Str, I64] = dict_new()
@@ -580,6 +593,13 @@ struct Checker {
   # The names declared with `struct`, as opposed to `type`. Only a struct
   # literal is checked field by field against its declaration.
   struct_decls: Dict[Str, Bool],
+  # type_params is the `[T, U]` a struct or enum declares, by declaration name.
+  # active_params is the set in scope right now -- while a declaration's own
+  # field and payload types are being read, and while a generic function's
+  # signature and body are being checked -- which is what makes a bare `T` there
+  # resolve to the parameter rather than to an unknown name.
+  type_params: Dict[Str, Arr[Str]],
+  active_params: Dict[Str, Bool],
   # Set while the callee of a call is being inferred. `a.push(v)` is uniform
   # call syntax for `push(a, v)` and works on any value, so a field access
   # there is a function name and not a field at all.
@@ -624,6 +644,8 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     variant_owner: dict_new(),
     payloads: dict_new(),
     struct_decls: dict_new(),
+    type_params: dict_new(),
+    active_params: dict_new(),
     in_callee: false,
   }
   dict_set(c.enums, "Opt", ["Some", "None"])
@@ -752,11 +774,14 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
   for s in prog.body {
     match s {
       SEnum(ed) => {
+        if len(ed.type_params) > 0 { dict_set(c.type_params, ed.name, ed.type_params) }
+        let shadowed: Dict[Str, Bool] = with_params(c, ed.type_params)
         for v in ed.variants {
           if v.has_payload {
             dict_set(c.payloads, v.name, Some(parse_type(c, v.payload)))
           }
         }
+        end_params(c, shadowed)
       },
       _ => unit,
     }
@@ -840,20 +865,21 @@ fn register_type(c: Checker, td: ast.TypeDecl) {
     dict_set(fields, f.name, tensor_of(ast.concrete_dims(f.shape)))
     i = i + 1
   }
-  dict_set(c.types, td.name, RecordType { fields: fields, name: td.name })
+  dict_set(c.types, td.name, RecordType { fields: fields, name: td.name, args: [] })
 }
 
 # A struct registers as a record type whose fields exist but whose field types
 # are advisory (the systems types the bootstrap does not model), so `m.field` is
 # checked for existence and left unknown.
 fn register_struct(c: Checker, sd: ast.StructDecl) {
+  if len(sd.type_params) > 0 { dict_set(c.type_params, sd.name, sd.type_params) }
   let fields: Dict[Str, Type] = dict_new()
   let i: I64 = 0
   while i < len(sd.fields) {
     dict_set(fields, sd.fields[i].name, TUnknown)
     i = i + 1
   }
-  dict_set(c.types, sd.name, RecordType { fields: fields, name: sd.name })
+  dict_set(c.types, sd.name, RecordType { fields: fields, name: sd.name, args: [] })
 }
 
 # is_builtin_ctor reports whether a name is one of the built-in enums' cases,
@@ -868,13 +894,15 @@ fn struct_field_types(c: Checker, prog: ast.Program) {
   for s in prog.body {
     match s {
       SStruct(sd) => {
+        let shadowed: Dict[Str, Bool] = with_params(c, sd.type_params)
         let fields: Dict[Str, Type] = dict_new()
         let i: I64 = 0
         while i < len(sd.fields) {
           dict_set(fields, sd.fields[i].name, parse_type(c, sd.fields[i].type_name))
           i = i + 1
         }
-        dict_set(c.types, sd.name, RecordType { fields: fields, name: sd.name })
+        end_params(c, shadowed)
+        dict_set(c.types, sd.name, RecordType { fields: fields, name: sd.name, args: [] })
         dict_set(c.struct_decls, sd.name, true)
       },
       _ => unit,
@@ -1051,11 +1079,25 @@ fn opt_args(args: Arr[Type]) -> Arr[Opt[Type]] {
 # wins over a built-in name: the self-hosted tensor engine declares its own
 # struct Tensor.
 fn named_type(c: Checker, name: Str, args: Arr[Type]) -> Type {
+  # A type parameter of the declaration being read wins over everything: `T`
+  # inside `struct Box[T]` is the parameter, not a type called T.
+  if dict_has(c.active_params, name) {
+    return TParam(ParamType { name: name })
+  }
   if dict_has(c.enums, name) {
     return TEnum(EnumType { name: name, args: opt_args(args) })
   }
   match dict_get(c.types, name) {
-    Some(rec) => return TRecord(rec),
+    # A generic struct written with arguments -- `Box[I64]` -- is that struct
+    # with its parameters replaced, so the field types the use site sees are the
+    # ones it asked for.
+    Some(rec) => {
+      let out: Type = subst_params(TRecord(rec), param_bindings(c, name, opt_args(args)))
+      match out {
+        TRecord(r) => return TRecord(RecordType { fields: r.fields, name: r.name, args: opt_args(args) }),
+        _ => return out,
+      }
+    },
     None => unit,
   }
   if bytes.equal(name, "I64") or bytes.equal(name, "Byte") { return TInt }
@@ -1078,6 +1120,175 @@ fn named_type(c: Checker, name: Str, args: Arr[Type]) -> Type {
     return TEnum(EnumType { name: name, args: opt_args(args) })
   }
   TUnknown
+}
+
+# ---- generics --------------------------------------------------------------
+#
+# There is no monomorphization: the runtime is the same code whatever T is, so a
+# use site's arguments only ever have to reach the types the checker judges
+# against. That is the whole of what generics do here.
+
+# param_bindings pairs a declaration's type parameters with the arguments a use
+# site supplied. An argument that was not written leaves that parameter unbound,
+# and an unbound parameter substitutes to an unknown, which judges nothing --
+# `Box` on its own says no more than it did before 1.7.
+fn param_bindings(c: Checker, decl: Str, args: Arr[Opt[Type]]) -> Dict[Str, Type] {
+  let binding: Dict[Str, Type] = dict_new()
+  let params: Arr[Str] = match dict_get(c.type_params, decl) {
+    Some(ps) => ps,
+    None => return binding,
+  }
+  let i: I64 = 0
+  while i < len(params) {
+    let bound: Type = TUnknown
+    if i < len(args) {
+      match args[i] {
+        Some(t) => bound = t,
+        None => unit,
+      }
+    }
+    dict_set(binding, params[i], bound)
+    i = i + 1
+  }
+  binding
+}
+
+# subst_params replaces type parameters throughout a type.
+fn subst_params(t: Type, binding: Dict[Str, Type]) -> Type {
+  if len(binding) == 0 { return t }
+  match t {
+    TParam(v) => {
+      match dict_get(binding, v.name) {
+        Some(sub) => sub,
+        None => t,
+      }
+    },
+    TArr(v) => TArr(ArrType { elem: subst_params_opt(v.elem, binding) }),
+    TDict(v) => TDict(DictType { key: subst_params_opt(v.key, binding),
+                                 val: subst_params_opt(v.val, binding) }),
+    TEnum(v) => TEnum(EnumType { name: v.name, args: subst_params_args(v.args, binding) }),
+    TRecord(v) => {
+      let fields: Dict[Str, Type] = dict_new()
+      for name in dict_keys(v.fields) {
+        match dict_get(v.fields, name) {
+          Some(ft) => dict_set(fields, name, subst_params(ft, binding)),
+          None => unit,
+        }
+      }
+      TRecord(RecordType { fields: fields, name: v.name, args: subst_params_args(v.args, binding) })
+    },
+    TFnType(v) => {
+      let params: Arr[Type] = arr_new()
+      for pt in v.params { push(params, subst_params(pt, binding)) }
+      TFnType(FnTypeAnno { params: params, ret: subst_params(v.ret, binding) })
+    },
+    _ => t,
+  }
+}
+
+fn subst_params_opt(t: Opt[Type], binding: Dict[Str, Type]) -> Opt[Type] {
+  match t {
+    Some(v) => Some(subst_params(v, binding)),
+    None => None,
+  }
+}
+
+fn subst_params_args(args: Arr[Opt[Type]], binding: Dict[Str, Type]) -> Arr[Opt[Type]] {
+  let out: Arr[Opt[Type]] = arr_new()
+  for a in args { push(out, subst_params_opt(a, binding)) }
+  out
+}
+
+# infer_params reads a use site's type arguments back out of a value: given the
+# declared payload `T` and an actual `I64`, it learns T is I64, which is how
+# `Leaf(7)` becomes a `Tree[I64]` without the program writing the argument. It
+# matches structurally and gives up quietly where it cannot tell, since a wrong
+# guess here would be a confident wrong type downstream.
+fn infer_params(declared: Type, actual: Type, binding: Dict[Str, Type]) {
+  match declared {
+    TParam(d) => {
+      if not dict_has(binding, d.name) { dict_set(binding, d.name, actual) }
+    },
+    TArr(d) => {
+      match actual {
+        TArr(a) => infer_params_opt(d.elem, a.elem, binding),
+        _ => unit,
+      }
+    },
+    TDict(d) => {
+      match actual {
+        TDict(a) => {
+          infer_params_opt(d.key, a.key, binding)
+          infer_params_opt(d.val, a.val, binding)
+        },
+        _ => unit,
+      }
+    },
+    TRecord(d) => {
+      match actual {
+        TRecord(a) => {
+          if bytes.equal(a.name, d.name) { infer_params_args(d.args, a.args, binding) }
+        },
+        _ => unit,
+      }
+    },
+    TEnum(d) => {
+      match actual {
+        TEnum(a) => {
+          if bytes.equal(a.name, d.name) { infer_params_args(d.args, a.args, binding) }
+        },
+        _ => unit,
+      }
+    },
+    _ => unit,
+  }
+}
+
+fn infer_params_opt(declared: Opt[Type], actual: Opt[Type], binding: Dict[Str, Type]) {
+  match declared {
+    None => unit,
+    Some(d) => {
+      match actual {
+        Some(a) => infer_params(d, a, binding),
+        None => unit,
+      }
+    },
+  }
+}
+
+fn infer_params_args(declared: Arr[Opt[Type]], actual: Arr[Opt[Type]], binding: Dict[Str, Type]) {
+  let i: I64 = 0
+  while i < len(declared) {
+    if i < len(actual) { infer_params_opt(declared[i], actual[i], binding) }
+    i = i + 1
+  }
+}
+
+# with_params brings a declaration's type parameters into scope; end_params
+# takes them out again. They nest by saving what they shadow, so a `T` that was
+# already a parameter of an enclosing declaration comes back afterwards rather
+# than disappearing.
+fn with_params(c: Checker, params: Arr[Str]) -> Dict[Str, Bool] {
+  let shadowed: Dict[Str, Bool] = dict_new()
+  for p in params {
+    dict_set(shadowed, p, dict_has(c.active_params, p))
+    dict_set(c.active_params, p, true)
+  }
+  shadowed
+}
+
+fn end_params(c: Checker, shadowed: Dict[Str, Bool]) {
+  for p in dict_keys(shadowed) {
+    let was: Bool = match dict_get(shadowed, p) {
+      Some(v) => v,
+      None => false,
+    }
+    if was {
+      dict_set(c.active_params, p, true)
+    } else {
+      dict_del(c.active_params, p)
+    }
+  }
 }
 
 # ---- assignability ---------------------------------------------------------
@@ -1111,6 +1322,23 @@ fn assignable_opt(want: Opt[Type], got: Opt[Type]) -> Bool {
 fn assignable(want: Type, got: Type) -> Bool {
   if is_unknown_type(want) { return true }
   if is_unknown_type(got) { return true }
+  # A type parameter that reached here was not substituted, which means the use
+  # site did not say what it stands for. It judges nothing, the same way an
+  # unknown does; the alternative would be to refuse every generic declaration
+  # whose caller left an argument off.
+  match want {
+    TParam(w) => {
+      return match got {
+        TParam(g) => bytes.equal(w.name, g.name),
+        _ => true,
+      }
+    },
+    _ => unit,
+  }
+  match got {
+    TParam(_) => return true,
+    _ => unit,
+  }
   # A constructor or a function value stands wherever a function is expected;
   # nothing else about it is checked here.
   match got {
@@ -1198,7 +1426,21 @@ fn assignable(want: Type, got: Type) -> Bool {
         TRecord(x) => x,
         _ => return false,
       }
-      if len(w.name) > 0 and len(g.name) > 0 { return bytes.equal(w.name, g.name) }
+      if len(w.name) > 0 and len(g.name) > 0 {
+        if not bytes.equal(w.name, g.name) { return false }
+        # Two uses of the same generic struct are the same type only if they
+        # were given the same arguments: a Box[Str] is not a Box[I64]. An
+        # argument that was not written is None and judges nothing, so a bare
+        # `Box` still stands for any of them.
+        let i: I64 = 0
+        while i < len(w.args) {
+          if i < len(g.args) {
+            if not assignable_opt(w.args[i], g.args[i]) { return false }
+          }
+          i = i + 1
+        }
+        return true
+      }
       true
     },
     # Every function-valued got was answered above, so anything reaching here is
@@ -1352,11 +1594,11 @@ fn is_definite_non_record(t: Type) -> Bool {
 
 # match_binding_type is the type a pattern's binding takes: the subject's
 # payload for that case, when the subject's type is known.
-fn match_binding_type(c: Checker, subject: Type, pat: ast.MatchPattern) -> Type {
+fn match_binding_type(c: Checker, subject: Type, variant: Str) -> Type {
   let en: EnumType = match subject {
     TEnum(v) => v,
     _ => {
-      match variant_payload_type(c, pat.variant) {
+      match variant_payload_type(c, variant) {
         Some(t) => return t,
         None => return TUnknown,
       }
@@ -1373,7 +1615,7 @@ fn match_binding_type(c: Checker, subject: Type, pat: ast.MatchPattern) -> Type 
   }
   if bytes.equal(en.name, "Res") {
     let i: I64 = 0
-    if bytes.equal(pat.variant, "Err") { i = 1 }
+    if bytes.equal(variant, "Err") { i = 1 }
     if len(en.args) > i {
       match en.args[i] {
         Some(t) => return t,
@@ -1382,9 +1624,30 @@ fn match_binding_type(c: Checker, subject: Type, pat: ast.MatchPattern) -> Type 
     }
     return TUnknown
   }
-  match variant_payload_type(c, pat.variant) {
-    Some(t) => t,
+  match variant_payload_type(c, variant) {
+    # A user enum's payload may be written in the enum's own type parameters, so
+    # what the arm binds is those replaced by whatever the subject's type
+    # supplied: matching a `Tree[I64]` binds an I64, and matching a `Tree[Str]`
+    # a Str, from one declaration.
+    Some(t) => subst_params(t, param_bindings(c, en.name, en.args)),
     None => TUnknown,
+  }
+}
+
+# bind_pattern defines every name a pattern introduces, typed as far down the
+# tree as the subject's type is known. `Ok(Some(v))` types v from the payload of
+# Ok and then the payload of Some; where either step is unknown the rest of the
+# tree is unknown too, which is the checker's usual "judge nothing you cannot
+# prove".
+fn bind_pattern(c: Checker, pat: ast.MatchPattern, subject: Type, env: CheckEnv) {
+  if pat.kind == ast.PAT_BINDING {
+    if len(pat.binding) > 0 {
+      env_define(env, pat.binding, subject)
+    }
+    return
+  }
+  if pat.kind == ast.PAT_VARIANT and len(pat.sub) > 0 {
+    bind_pattern(c, pat.sub[0], match_binding_type(c, subject, pat.variant), env)
   }
 }
 
@@ -1397,9 +1660,47 @@ fn check_struct_lit(c: Checker, ex: ast.RecordLit, fields: Dict[Str, Type]) -> T
   if dot >= 0 { name = name[dot + 1:len(name)] }
   let decl: RecordType = match dict_get(c.types, name) {
     Some(d) => d,
-    None => return TRecord(RecordType { fields: fields, name: "" }),
+    None => return TRecord(RecordType { fields: fields, name: "", args: [] }),
   }
   if dict_has(c.struct_decls, name) {
+    # A generic struct's literal says its arguments by what it is built from:
+    # `Pair { first: b, second: a }` is a `Pair[B, A]`. They are read out of the
+    # field values first, because checking the fields against the parameters
+    # themselves would compare a value against `A` -- a name that stands for
+    # whatever the literal decides -- and report every correct literal as a
+    # mismatch.
+    let params: Arr[Str] = match dict_get(c.type_params, name) {
+      Some(ps) => ps,
+      None => arr_new(),
+    }
+    if len(params) > 0 {
+      let binding: Dict[Str, Type] = dict_new()
+      for f in ex.fields {
+        match dict_get(decl.fields, f.name) {
+          Some(want) => {
+            match dict_get(fields, f.name) {
+              Some(got) => infer_params(want, got, binding),
+              None => unit,
+            }
+          },
+          None => unit,
+        }
+      }
+      let inferred: Arr[Opt[Type]] = arr_new()
+      for p in params {
+        match dict_get(binding, p) {
+          Some(t) => push(inferred, Some(t)),
+          None => {
+            dict_set(binding, p, TUnknown)
+            push(inferred, Some(TUnknown))
+          },
+        }
+      }
+      match subst_params(TRecord(decl), binding) {
+        TRecord(r) => decl = RecordType { fields: r.fields, name: r.name, args: inferred },
+        _ => unit,
+      }
+    }
     for f in ex.fields {
       let want: Type = match dict_get(decl.fields, f.name) {
         Some(t) => t,
@@ -1847,7 +2148,7 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
         i = i + 1
       }
       if len(ex.type_name) > 0 { return check_struct_lit(c, ex, fields) }
-      TRecord(RecordType { fields: fields, name: "" })
+      TRecord(RecordType { fields: fields, name: "", args: [] })
     },
     EField(ex) => {
       let target: Type = infer_expr(c, ex.target, env)
@@ -1926,8 +2227,9 @@ fn infer_match(c: Checker, ex: ast.Match, env: CheckEnv) -> Type {
   while i < len(ex.arms) {
     let arm: ast.MatchArm = ex.arms[i]
     let scope: CheckEnv = new_env(Some(env))
-    if len(arm.pattern.binding) > 0 {
-      env_define(scope, arm.pattern.binding, match_binding_type(c, subject, arm.pattern))
+    bind_pattern(c, arm.pattern, subject, scope)
+    if len(arm.guard) > 0 {
+      infer_expr(c, arm.guard[0], scope)
     }
     infer_stmt(c, arm.body, scope)
     i = i + 1
@@ -1978,28 +2280,49 @@ fn ret_type_name(ret_type: Str, u: Opt[ast.UnitAnno]) -> Str {
 # checker reports only what it can prove (docs/type-system.md, "match").
 fn check_match_arms(c: Checker, m: ast.Match) {
   let owner: Str = ""
-  let seen: Dict[Str, Bool] = dict_new()
-  let wildcard_at: I64 = -1
+  let covered: Dict[Str, Bool] = dict_new()
+  let catch_all_at: I64 = -1
+  # judgeable is the set of arms exhaustiveness is computed from: the ones whose
+  # running depends on nothing but the value's shape. A guard is a condition
+  # this checker cannot evaluate, so a guarded arm is checked for reachability
+  # and then set aside. `before` is the same set truncated at the catch-all,
+  # because what makes a catch-all redundant is the arms BEFORE it covering
+  # everything already; the arms after it are unreachable and prove nothing.
+  let judgeable: Arr[ast.MatchPattern] = arr_new()
+  let before: Arr[ast.MatchPattern] = arr_new()
   let i: I64 = 0
   while i < len(m.arms) {
     let arm: ast.MatchArm = m.arms[i]
     let pat: ast.MatchPattern = arm.pattern
-    if pat.wildcard {
-      if wildcard_at >= 0 {
-        report(c, pat.line, "duplicate match arm: `_` appears twice")
+    let guarded: Bool = len(arm.guard) > 0
+    if catch_all_at >= 0 {
+      report(c, pat.line, bytes.concat("unreachable match arm: ", bytes.concat(pattern_text(pat),
+        bytes.concat(" comes after ", bytes.concat(pattern_text(m.arms[catch_all_at].pattern),
+        ", which already matches everything")))))
+    }
+    if not guarded {
+      if ast.pat_catch_all(pat) and catch_all_at < 0 {
+        before = arr_copy(judgeable)
+        catch_all_at = i
       }
-      wildcard_at = i
+      push(judgeable, pat)
+    }
+    if ast.pat_catch_all(pat) and not guarded {
       i = i + 1
       continue
     }
-    if wildcard_at >= 0 {
-      report(c, pat.line, bytes.concat("unreachable match arm: ", bytes.concat(pat.variant,
-        " comes after `_`, which already matches everything")))
+    # A literal says nothing about which enum is being matched, and a binder
+    # under a guard covers nothing.
+    if pat.kind != ast.PAT_VARIANT {
+      i = i + 1
+      continue
     }
-    if dict_has(seen, pat.variant) {
-      report(c, pat.line, bytes.concat("duplicate match arm: ", bytes.concat(pat.variant, " is already handled")))
+    if not guarded and ast.pat_covers_case(pat) {
+      if dict_has(covered, pat.variant) {
+        report(c, pat.line, bytes.concat("duplicate match arm: ", bytes.concat(pat.variant, " is already handled")))
+      }
+      dict_set(covered, pat.variant, true)
     }
-    dict_set(seen, pat.variant, true)
     # Not an enum this file declares (or an ambiguous name): the match cannot
     # be judged.
     let en: Str = match dict_get(c.variant_owner, pat.variant) {
@@ -2018,31 +2341,142 @@ fn check_match_arms(c: Checker, m: ast.Match) {
     i = i + 1
   }
   if len(owner) == 0 { return }
-  let variants: Arr[Str] = match dict_get(c.enums, owner) {
-    Some(vs) => vs,
-    None => return,
-  }
-  let missing: Str = ""
-  let n_missing: I64 = 0
-  for v in variants {
-    if not dict_has(seen, v) {
-      if n_missing > 0 { missing = bytes.concat(missing, ", ") }
-      missing = bytes.concat(missing, v)
-      n_missing = n_missing + 1
-    }
-  }
-  if wildcard_at >= 0 {
+  let tally: Arr[ast.MatchPattern] = judgeable
+  if catch_all_at >= 0 { tally = before }
+  let result: Missing = missing_cases(c, tally)
+  if not result.judged { return }
+  let n_missing: I64 = len(result.names)
+  if catch_all_at >= 0 {
     if n_missing == 0 {
-      let w: ast.MatchArm = m.arms[wildcard_at]
-      report(c, w.pattern.line, bytes.concat("unreachable match arm: `_` matches nothing, every variant of ",
-        bytes.concat(owner, " is already handled")))
+      let w: ast.MatchArm = m.arms[catch_all_at]
+      report(c, w.pattern.line, bytes.concat("unreachable match arm: ", bytes.concat(pattern_text(w.pattern),
+        bytes.concat(" matches nothing, every variant of ", bytes.concat(owner, " is already handled")))))
     }
     return
   }
   if n_missing > 0 {
     report(c, m.line, bytes.concat("match on ", bytes.concat(owner,
-      bytes.concat(" is not exhaustive: missing ", missing))))
+      bytes.concat(" is not exhaustive: missing ", bytes.join(result.names, ", ")))))
   }
+}
+
+# arr_copy is a shallow copy of a pattern list. `before` has to be a snapshot:
+# the list it is taken from keeps growing after the catch-all, and sharing the
+# handle would let those later arms count towards a tally that is defined as
+# stopping there.
+fn arr_copy(xs: Arr[ast.MatchPattern]) -> Arr[ast.MatchPattern] {
+  let out: Arr[ast.MatchPattern] = arr_new()
+  for x in xs { push(out, x) }
+  out
+}
+
+# Missing is what missing_cases answers with: the values that reach no pattern,
+# and whether the question could be answered at all.
+struct Missing {
+  names: Arr[Str],
+  judged: Bool,
+}
+
+# pattern_text names a pattern in a diagnostic. It is deliberately shallow: the
+# diagnostics that use it are about which arm, not about what the arm looks like
+# all the way down.
+fn pattern_text(pat: ast.MatchPattern) -> Str {
+  if pat.kind == ast.PAT_BINDING {
+    if len(pat.binding) == 0 { return "`_`" }
+    return bytes.concat("`", bytes.concat(pat.binding, "`"))
+  }
+  if pat.kind == ast.PAT_LITERAL { return "this literal pattern" }
+  if len(pat.sub) > 0 { return bytes.concat(pat.variant, "(...)") }
+  pat.variant
+}
+
+# missing_cases answers, for the set of patterns offered at one position, which
+# values reach none of them. It recurses into payloads, so
+# `Some(Ok(v)), Some(Err(e)), None` is exhaustive over `Opt[Res[..]]` while
+# dropping the `Err` arm reports the value that gets through by name,
+# `Some(Err)`.
+#
+# A position holding only literals, or naming a variant of an enum this file
+# cannot see, is not judged -- the checker reports what it can prove, and a
+# guess here would be a false "not exhaustive" on a correct program. The one
+# exception is Bool, the only domain small enough for a finite set of literals
+# to exhaust.
+fn missing_cases(c: Checker, pats: Arr[ast.MatchPattern]) -> Missing {
+  let by_variant: Dict[Str, Arr[ast.MatchPattern]] = dict_new()
+  let whole: Dict[Str, Bool] = dict_new()
+  let saw_true: Bool = false
+  let saw_false: Bool = false
+  let literals: Bool = false
+  let owner: Str = ""
+  let none: Arr[Str] = arr_new()
+  for pat in pats {
+    if ast.pat_catch_all(pat) {
+      # A binder or `_` at this position takes every value there is.
+      return Missing { names: none, judged: true }
+    }
+    if pat.kind == ast.PAT_LITERAL {
+      literals = true
+      match pat.lit[0] {
+        ast.EBool(b) => {
+          if b.value { saw_true = true } else { saw_false = true }
+        },
+        _ => unit,
+      }
+      continue
+    }
+    let en: Str = match dict_get(c.variant_owner, pat.variant) {
+      Some(name) => name,
+      None => return Missing { names: none, judged: false },
+    }
+    if len(en) == 0 { return Missing { names: none, judged: false } }
+    if len(owner) > 0 and not bytes.equal(en, owner) {
+      return Missing { names: none, judged: false }
+    }
+    owner = en
+    if len(pat.sub) == 0 or ast.pat_catch_all(pat.sub[0]) {
+      dict_set(whole, pat.variant, true)
+      continue
+    }
+    let subs: Arr[ast.MatchPattern] = match dict_get(by_variant, pat.variant) {
+      Some(existing) => existing,
+      None => arr_new(),
+    }
+    push(subs, pat.sub[0])
+    dict_set(by_variant, pat.variant, subs)
+  }
+  if len(owner) == 0 {
+    # Two literals do cover a Bool, and it is the only domain small enough for
+    # that to be true.
+    if saw_true and saw_false { return Missing { names: none, judged: true } }
+    if literals {
+      # Literals over a domain that is not Bool leave values behind however many
+      # are written, and `...` is what those values are called in the
+      # diagnostic.
+      let dots: Arr[Str] = arr_new()
+      push(dots, "...")
+      return Missing { names: dots, judged: true }
+    }
+    return Missing { names: none, judged: false }
+  }
+  let variants: Arr[Str] = match dict_get(c.enums, owner) {
+    Some(vs) => vs,
+    None => return Missing { names: none, judged: false },
+  }
+  let missing: Arr[Str] = arr_new()
+  for v in variants {
+    if dict_has(whole, v) { continue }
+    match dict_get(by_variant, v) {
+      None => push(missing, v),
+      Some(subs) => {
+        let inner: Missing = missing_cases(c, subs)
+        if not inner.judged { return Missing { names: none, judged: false } }
+        for name in inner.names {
+          push(missing, bytes.concat(v, bytes.concat("(", bytes.concat(name, ")"))))
+        }
+      },
+    }
+  }
+  Missing { names: missing, judged: true }
 }
 
 fn as_record(t: Type) -> Opt[RecordType] {
@@ -2914,6 +3348,23 @@ fn call_ctor(c: Checker, ctor: CtorType, line: I64, args: Arr[Type],
   }
   match ctor.payload {
     Some(pl) => {
+      let params: Arr[Str] = match dict_get(c.type_params, ctor.owner) {
+        Some(ps) => ps,
+        None => arr_new(),
+      }
+      if len(params) > 0 {
+        # `Leaf(7)` is a `Tree[I64]`: the argument is read back out of the
+        # payload rather than written at the call, which is the only way a
+        # constructor can produce a generic value at all. A parameter the
+        # payload does not mention stays unknown.
+        let binding: Dict[Str, Type] = dict_new()
+        infer_params(pl, args[0], binding)
+        let inferred: Arr[Opt[Type]] = arr_new()
+        for p in params {
+          push(inferred, dict_get(binding, p))
+        }
+        return TEnum(EnumType { name: ctor.owner, args: inferred })
+      }
       let what: Str = bytes.concat("the payload of ", ctor.variant)
       if check_assignable(c, line, what, pl, args[0]) and len(arg_exprs) == 1 {
         fractional_literal_at_int(c, line, what, pl, arg_exprs[0])
@@ -2969,6 +3420,10 @@ fn param_type(c: Checker, p: ast.Param) -> Type {
 
 fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
   if dict_has(c.stack, fd.id) { return }
+  # A generic function's parameters are in scope for its signature and its body
+  # alike, so `fn first[T](xs: Arr[T]) -> T` reads both the annotation and the
+  # return type in terms of T.
+  let shadowed: Dict[Str, Bool] = with_params(c, fd.type_params)
   let scope: CheckEnv = new_env(Some(env))
   let i: I64 = 0
   while i < len(fd.params) {
@@ -3014,6 +3469,7 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
   }
   check_body_return_type(c, fd.line, fd.name, ret_type_name(fd.ret_type, fd.ret_unit),
     body_type, fd.body)
+  end_params(c, shadowed)
 }
 
 # A body is either a block, whose type is its last expression statement, or a
@@ -3260,7 +3716,7 @@ fn check_arg_unit(c: Checker, line: I64, arg_idx: I64, name: Str,
 # everything the body can ask of it.
 fn check_record_arg(c: Checker, line: I64, arg_idx: I64, name: Str,
                     expected: RecordType, arg: Type) {
-  let rec: RecordType = RecordType { fields: dict_new(), name: "" }
+  let rec: RecordType = RecordType { fields: dict_new(), name: "", args: [] }
   match as_record(arg) {
     Some(r) => rec = r,
     None => {
@@ -3471,9 +3927,11 @@ fn definite_non_tensor(t: Type) -> Bool {
     TCtor(_) => true,
     TFnType(_) => true,
     # An I64 is a number, so it is not a definite non-tensor: it stands where a
-    # scalar is wanted, the same softness the Go checker keeps.
+    # scalar is wanted, the same softness the Go checker keeps. A type parameter
+    # is whatever the use site chose, so it is not definitely anything.
     TInt => false,
     TTensor(_) => false,
+    TParam(_) => false,
     TUnknown => false,
   }
 }
@@ -3528,9 +3986,18 @@ fn type_text(c: Checker, t: Type) -> Str {
     },
     TCtor(v) => bytes.concat("the constructor ", v.variant),
     TRecord(v) => {
-      if len(v.name) > 0 { return v.name }
-      "a record"
+      if len(v.name) == 0 { return "a record" }
+      if len(v.args) == 0 { return v.name }
+      let parts: Arr[Str] = arr_new()
+      for a in v.args {
+        match a {
+          Some(x) => push(parts, type_text(c, x)),
+          None => push(parts, "_"),
+        }
+      }
+      bytes.concat(v.name, bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]")))
     },
+    TParam(v) => v.name,
     TFn(_) => "a function",
     TBuiltin(_) => "a function",
     TFnType(_) => "a function",

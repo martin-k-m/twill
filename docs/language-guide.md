@@ -1,6 +1,6 @@
 # Twill language guide
 
-This is the reference for Twill v1.6. The language is small, so this is short.
+This is the reference for Twill v1.7. The language is small, so this is short.
 
 ## Running programs
 
@@ -1026,11 +1026,53 @@ fn describe(t: Tok) -> Str {
 
 Arms are `pattern => expression`, comma separated, with no braces around each
 arm -- braces would re-enter the block-versus-record ambiguity a `{` already
-carries. A pattern is a case name, a case name with one binding (`Some(v)`, and
-`Some(_)` to discard the payload), or `_` for everything else. `match` is an
-expression, so it has a value, and it is a keyword only at expression position
-in a systems-mode file: a numeric-mode file that writes `let match = 3` keeps
-working.
+carries. `match` is an expression, so it has a value, and it is a keyword only
+at expression position in a systems-mode file: a numeric-mode file that writes
+`let match = 3` keeps working.
+
+### What a pattern is
+
+A pattern is one of five things, and the last nests:
+
+| Pattern | Matches |
+| --- | --- |
+| `_` | anything, binding nothing |
+| `name` | anything, binding it |
+| `3`, `"hi"`, `true`, `-1` | that value, by the equality `==` gives |
+| `Some` | the case, whatever it carries |
+| `Some(pat)` | the case, when its payload matches `pat` |
+
+```rust
+match result {
+  Ok(Some(0)) => "present but empty",
+  Ok(Some(v)) if v > 100 => "large",
+  Ok(Some(v)) => "present",
+  Ok(None) => "absent",
+  Err(msg) => msg,
+}
+```
+
+**A case name starts with a capital letter; anything else binds.** That is the
+rule that tells `Some(x)`, where x is a binder, from `Ok(None)`, where None is a
+case. It also means a catch-all can say what it caught -- `other => str(other)`
+is a `_` with a name -- and that `some(v)` is refused, by name, as a binding
+used where a case was meant.
+
+**A guard is `if cond` between the pattern and the arrow.** It sees the
+pattern's bindings, and a false guard falls through to the arms below rather
+than failing the match. Because a literal pattern matches by ordinary equality,
+a `match` over numbers or strings needs no enum written around it:
+
+```rust
+fn classify(n) {
+  match n {
+    0 => "zero",
+    1 => "one",
+    x if x > 100 => "big",
+    _ => "other",
+  }
+}
+```
 
 **A `match` must cover every case.** The checker knows the enum's cases and
 reports the ones with no arm, by name:
@@ -1050,11 +1092,61 @@ A `_` is right when every unlisted case maps to the same answer for a reason. It
 is wrong when the match is dispatch, because then it is the thing that stops the
 compiler telling you about the case you have not written yet.
 
-What patterns do **not** do, in 1.6: they do not match literals (`3 => ...`),
-they do not nest (`Ok(Some(v))`), and they have no guards. Each is a real
-convenience and none is a hole -- an inner value is matched by a second `match`
--- so they wait until the cost of not having them is measured rather than
-assumed.
+**Exhaustiveness recurses, and counts only what it can prove.** `Some(Ok(v))`,
+`Some(Err(e))` and `None` together cover an `Opt[Res[..]]`; drop the `Err` arm
+and the diagnostic names the value that gets through:
+
+```
+load.tw:14: match on Opt is not exhaustive: missing Some(Err)
+```
+
+An arm counts towards this only when nothing but the value's shape decides
+whether it runs. A guard is a condition the checker cannot evaluate, and a
+narrower nested pattern leaves the rest of its case unmatched, so neither
+proves a case handled -- `Some(v) if v > 3` and `None` is *not* exhaustive, and
+saying so is the point. A position holding only literals is left unjudged,
+since a finite set of them cannot cover a number or a string. `Bool` is the one
+exception: `true` and `false` do exhaust it.
+
+## Type parameters
+
+A `struct`, an `enum` or a `fn` may be written in terms of a type it does not
+name. The parameters go in `[]` after the name, and stand for whatever the use
+site supplies.
+
+```rust
+struct Box[T] { value: T, tag: Str }
+enum Tree[T] { Leaf(T), Branch(Arr[T]), Empty }
+
+fn first[T](xs: Arr[T]) -> T = xs[0]
+```
+
+**They are erased.** The runtime is the same code whatever `T` is, so nothing is
+specialised and nothing is generated: the parameters exist for the checker and
+disappear before the program runs. What they buy is that the checker knows what
+is in the box:
+
+```rust
+let b: Box[I64] = Box { value: 3, tag: "count" }
+let s: Str = b.value      # "s" is declared Str but the value is I64
+```
+
+Substitution goes as deep as the type does, so a `Branch(xs)` arm on a
+`Tree[I64]` binds `xs` as an `Arr[I64]`. Two uses of one declaration are
+different types when their arguments differ -- a `Box[Str]` is refused where a
+`Box[I64]` was declared -- while a non-generic `struct` still compares by name
+alone, as it always has.
+
+**Arguments are read out of the value, not written at the use site**, because
+there is nowhere to write them: a constructor and a struct literal take no type
+arguments. `Leaf(n)` with an `I64` n is a `Tree[I64]`, and inside
+`fn swap[A, B](p: Pair[A, B]) -> Pair[B, A]`, the literal
+`Pair { first: p.second, second: p.first }` is a `Pair[B, A]` by what it is
+built from.
+
+A parameter the use site leaves off is unknown and judges nothing, so a bare
+`Box` is exactly as informative as it was before type parameters existed. There
+are no bounds and no traits.
 
 ## `Opt`, `Res`, and `?`
 

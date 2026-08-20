@@ -95,13 +95,17 @@ type Let struct {
 }
 
 type FnDecl struct {
-	Name    string
-	Params  []Param
-	Ret     *ShapeAnno // shape return
-	RetUnit *UnitAnno  // unit return (`-> USD`)
-	RetType string     // named/qualified type return (`-> Repl`, `-> cp.Caps`); advisory
-	Body    Expr       // Block or single expression
-	Line    int
+	Name string
+	// TypeParams are the names in `fn first[T](xs: Arr[T]) -> T`. They are in
+	// scope for the signature and the body, and stand for a type the caller
+	// chooses.
+	TypeParams []string
+	Params     []Param
+	Ret        *ShapeAnno // shape return
+	RetUnit    *UnitAnno  // unit return (`-> USD`)
+	RetType    string     // named/qualified type return (`-> Repl`, `-> cp.Caps`); advisory
+	Body       Expr       // Block or single expression
+	Line       int
 }
 
 // Assign is `target = value`, where target is an lvalue: a bare name, a field
@@ -196,9 +200,14 @@ func (s *Continue) Pos() int { return s.Line }
 // types are advisory text; records are structural, so the declaration names a
 // type the checker can register without constraining how a record is built.
 type StructDecl struct {
-	Name   string
-	Fields []StructField
-	Line   int
+	Name string
+	// TypeParams are the names in `struct Box[T, U]`. They stand for types the
+	// declaration does not name, and a field whose type is one of them takes
+	// whatever the use site supplies. Empty for a declaration without them,
+	// which is every declaration written before 1.7.
+	TypeParams []string
+	Fields     []StructField
+	Line       int
 }
 
 type StructField struct {
@@ -212,9 +221,11 @@ func (s *StructDecl) Pos() int { return s.Line }
 // case is a variant with an optional single payload. The payload type is kept
 // only as a flag and a name (advisory), since the bootstrap does not check it.
 type EnumDecl struct {
-	Name     string
-	Variants []EnumVariant
-	Line     int
+	Name string
+	// TypeParams are the names in `enum MyOpt[T]`; see StructDecl.TypeParams.
+	TypeParams []string
+	Variants   []EnumVariant
+	Line       int
 }
 
 type EnumVariant struct {
@@ -395,18 +406,68 @@ type Match struct {
 
 type MatchArm struct {
 	Pattern MatchPattern
+	// Guard is the `if cond` a pattern may carry: the arm matches only when the
+	// pattern fits AND the guard is true, with the pattern's bindings in scope
+	// for it. nil when the arm has none. A guarded arm proves nothing about
+	// exhaustiveness, because whether it runs is not a property of the value's
+	// shape.
+	Guard Expr
 	// The arm's body is a statement: an expression, a `return`, an assignment,
 	// or a block. Its value (for an expression arm) is the match's value.
 	Body Stmt
 }
 
-// MatchPattern is `Variant`, `Variant(binding)`, or `_`. Binding is "" when the
-// variant carries no payload or the payload is ignored; Wildcard is the `_` arm.
+// PatKind distinguishes the three things a pattern can be. They nest: a
+// variant's payload is itself a pattern, so `Ok(Some(v))` and `Ok(3)` are a
+// PatVariant whose Sub is a PatVariant and a PatLiteral respectively.
+type PatKind int
+
+const (
+	// PatVariant is `Name` or `Name(sub)`. An identifier starting with an
+	// upper-case letter is read as a variant; that is the rule that keeps
+	// `Some(x)` from reading x as a nullary variant and `Ok(None)` from
+	// reading None as a binder. Every enum variant in the language and its
+	// libraries is upper-case initial.
+	PatVariant PatKind = iota
+	// PatBinding is a lower-case identifier, which binds the value it matches,
+	// or `_`, which matches without binding. Binding is "" for `_`.
+	PatBinding
+	// PatLiteral is a number, string or boolean written in the pattern, and
+	// matches by equality. It is refutable, so it never proves a variant
+	// handled.
+	PatLiteral
+)
+
+// MatchPattern is one pattern. It is a tree: `_`, a binder, a literal, a
+// variant, or a variant carrying another pattern.
 type MatchPattern struct {
-	Variant  string
-	Binding  string
-	Wildcard bool
-	Line     int
+	Kind PatKind
+	// Variant is the case name, for PatVariant.
+	Variant string
+	// Sub is the payload pattern of a PatVariant written with parentheses.
+	// nil when the pattern names the variant alone, which matches the case
+	// whatever it carries.
+	Sub *MatchPattern
+	// Binding is the name a PatBinding introduces; "" is `_`.
+	Binding string
+	// Lit is the literal expression of a PatLiteral: a *NumberLit, *StringLit,
+	// *BoolLit, or a *Unary negation of a number.
+	Lit  Expr
+	Line int
+}
+
+// CatchAll reports whether the pattern matches every value, whether or not it
+// names what it matched. `_` and a bare binder both end a match, which is what
+// the reachability and exhaustiveness rules are written in terms of.
+func (p MatchPattern) CatchAll() bool { return p.Kind == PatBinding }
+
+// CoversCase reports whether a variant pattern handles the whole of the case
+// it names -- `Some`, `Some(v)` and `Some(_)` do, `Some(3)` and `Some(Ok(v))`
+// do not, because each leaves other payloads of the same case unmatched.
+// Whether those narrower arms together cover the case is a question about the
+// whole set of arms, and the checker answers it there.
+func (p MatchPattern) CoversCase() bool {
+	return p.Kind == PatVariant && (p.Sub == nil || p.Sub.CatchAll())
 }
 
 func (e *Match) Pos() int { return e.Line }

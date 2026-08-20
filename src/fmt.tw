@@ -330,7 +330,8 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
         i = i + 1
       }
       line_c(p, indent, bytes.concat("enum ", bytes.concat(st.name,
-        bytes.concat(" { ", bytes.concat(bytes.join(cases, ", "), " }")))), st.line)
+        bytes.concat(type_params(st.type_params),
+        bytes.concat(" { ", bytes.concat(bytes.join(cases, ", "), " }"))))), st.line)
     },
     SStruct(st) => {
       let fields: Arr[Str] = arr_new()
@@ -341,7 +342,8 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
         i = i + 1
       }
       line_c(p, indent, bytes.concat("struct ", bytes.concat(st.name,
-        bytes.concat(" { ", bytes.concat(bytes.join(fields, ", "), " }")))), st.line)
+        bytes.concat(type_params(st.type_params),
+        bytes.concat(" { ", bytes.concat(bytes.join(fields, ", "), " }"))))), st.line)
     },
     SExpr(st) => line_c(p, indent, expr(p, st.x), st.line),
     # A bare block statement prints its contents at the same indent, with no
@@ -371,8 +373,9 @@ fn stmt(p: Printer, s: ast.Stmt, indent: I64) {
 
 fn fn_decl(p: Printer, f: ast.FnDecl, indent: I64) {
   let sig: Str = bytes.concat("fn ", bytes.concat(f.name,
+    bytes.concat(type_params(f.type_params),
     bytes.concat("(", bytes.concat(params(p, f.params),
-      bytes.concat(")", ret_part(f.ret, f.ret_unit, f.ret_type))))))
+      bytes.concat(")", ret_part(f.ret, f.ret_unit, f.ret_type)))))))
   match f.body {
     EBlock(blk) => block_stmt(p, indent, sig, blk, f.line),
     _ => line_c(p, indent, bytes.concat(sig, bytes.concat(" = ", expr(p, f.body))), f.line),
@@ -593,18 +596,37 @@ fn match_expr(p: Printer, x: ast.Match) -> Str {
   let i: I64 = 0
   while i < len(x.arms) {
     let arm: ast.MatchArm = x.arms[i]
-    let pat: Str = arm.pattern.variant
-    if arm.pattern.wildcard {
-      pat = "_"
-    }
-    if len(arm.pattern.binding) > 0 {
-      pat = bytes.concat(pat, bytes.concat("(", bytes.concat(arm.pattern.binding, ")")))
+    let pat: Str = pattern(p, arm.pattern)
+    if len(arm.guard) > 0 {
+      pat = bytes.concat(pat, bytes.concat(" if ", expr(p, arm.guard[0])))
     }
     push(arms, bytes.concat(pat, bytes.concat(" => ", inline_stmt(p, arm.body))))
     i = i + 1
   }
   bytes.concat("match ", bytes.concat(expr(p, x.subject),
     bytes.concat(" { ", bytes.concat(bytes.join(arms, ", "), " }"))))
+}
+
+# type_params renders the `[T, U]` a declaration may carry. It is empty for a
+# declaration without them, so nothing changes for the code written before they
+# existed -- and it is not optional: a printer with no case for them deletes
+# them, which turns every generic program into one that means something else.
+fn type_params(names: Arr[Str]) -> Str {
+  if len(names) == 0 { return "" }
+  bytes.concat("[", bytes.concat(bytes.join(names, ", "), "]"))
+}
+
+# pattern renders a match pattern, nesting the way it was parsed.
+fn pattern(p: Printer, pat: ast.MatchPattern) -> Str {
+  if pat.kind == ast.PAT_BINDING {
+    if len(pat.binding) == 0 { return "_" }
+    return pat.binding
+  }
+  if pat.kind == ast.PAT_LITERAL {
+    return expr(p, pat.lit[0])
+  }
+  if len(pat.sub) == 0 { return pat.variant }
+  bytes.concat(pat.variant, bytes.concat("(", bytes.concat(pattern(p, pat.sub[0]), ")")))
 }
 
 # inline_stmt renders a statement on one line, for a match arm body. The common
