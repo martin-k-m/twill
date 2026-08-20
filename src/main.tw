@@ -290,9 +290,14 @@ fn precheck(path: Str, src: Str) -> I64 {
       let diags: Arr[check.Diagnostic] = check.check(prog)
       if len(diags) > 0 {
         print_diags(path, src, diags)
-        write_err(bytes.concat("twill: ", bytes.concat(str(len(diags)),
-          " shape error(s); not running (use --no-check to run anyway)\n")))
-        return EXIT_ERROR
+        # Only an error refuses. A warning describes the program the author
+        # wrote and is printed above; the program still runs.
+        let n: I64 = count_errors(diags)
+        if n > 0 {
+          write_err(bytes.concat("twill: ", bytes.concat(str(n),
+            " shape error(s); not running (use --no-check to run anyway)\n")))
+          return EXIT_ERROR
+        }
       }
       EXIT_OK
     },
@@ -329,7 +334,10 @@ fn check_only(path: Str) -> I64 {
       # No --no-check trailer here: `check` was asked to report, not to run, so
       # there is nothing to offer to run anyway.
       print_diags(path, src, diags)
-      EXIT_ERROR
+      # A file whose only findings are warnings has nothing wrong with it, so
+      # the check passes. They are still printed: that is the whole point.
+      if count_errors(diags) > 0 { return EXIT_ERROR }
+      EXIT_OK
     },
   }
 }
@@ -399,11 +407,26 @@ fn print_diags(path: Str, src: Str, diags: Arr[check.Diagnostic]) {
   let i: I64 = 0
   while i < len(diags) {
     let d: check.Diagnostic = diags[i]
+    # A warning says so rather than calling itself a shape error, which it is
+    # not: the program means what it says and will run.
+    let label: Str = "shape error"
+    if d.severity != check.SEV_ERROR { label = "warning" }
     write_err(bytes.concat(path, bytes.concat(":", bytes.concat(str(d.line),
-      bytes.concat(": shape error: ", bytes.concat(d.msg, "\n"))))))
+      bytes.concat(": ", bytes.concat(label, bytes.concat(": ", bytes.concat(d.msg, "\n"))))))))
     show_context(src, d.line, 0)
     i = i + 1
   }
+}
+
+# How many of a run's diagnostics are errors. A caller deciding whether to run
+# the program asks this rather than len(diags), because a warning is not a
+# refusal. check.SEV_* is the same pair of codes the Go checker uses.
+fn count_errors(diags: Arr[check.Diagnostic]) -> I64 {
+  let n: I64 = 0
+  for d in diags {
+    if d.severity == check.SEV_ERROR { n = n + 1 }
+  }
+  n
 }
 
 fn report_syntax(path: Str, src: Str, e: lex.SyntaxError) {

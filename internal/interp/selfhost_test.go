@@ -1,6 +1,7 @@
 package interp_test
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,31 @@ func skipUnderShort(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping the self-hosted differential run in short mode")
 	}
+}
+
+// runSelfHostedCheckOut is runSelfHostedCheck plus what the CLI wrote. The
+// self-hosted CLI's diagnostics go through write_err to the real os.Stderr,
+// bypassing the interpreter's sink, so they are captured at the OS level the
+// way cmd/twill/test.go captures a suite's output. A test that reads only the
+// exit code cannot tell a warning from a clean file, since neither fails.
+func runSelfHostedCheckOut(t *testing.T, source string) (int, string) {
+	t.Helper()
+	saved := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		io.Copy(&b, r)
+		done <- b.String()
+	}()
+	code := runSelfHostedCheck(t, source)
+	w.Close()
+	os.Stderr = saved
+	return code, <-done
 }
 
 func runSelfHostedCheck(t *testing.T, source string) int {
@@ -1045,38 +1071,54 @@ print(grads(fn(p, q) = sum(p * q))(c, c))
 // The dtype widening warning (NEEDS-113) was the last thing the self-hosted
 // checker knew that the bootstrap did not: `bf16 * scalar(2.0)` is f64, a
 // correct answer that undoes the reason the operand was narrow. Both checkers
-// must now reach the same verdict on it, and — the harder half — must stay
-// silent on everything that is not a lossy widening, so that a program which
-// never wrote a dtype gains no diagnostics.
+// report it now, and -- since it is a warning and not an error -- neither lets
+// it stop the program. The harder half is that everything which is NOT a lossy
+// widening stays silent, so a program that never wrote a dtype gains nothing.
 func TestSelfHostedCheckDTypeWidening(t *testing.T) {
-	bad := []string{
+	warns := []string{
 		// A narrow float widened by a wider one, through a maker and through a cast.
 		"mode systems\nfn f() {\n  let w = zeros(2, 3, bf16)\n  let y = w * scalar(2.0)\n}\n",
 		"mode systems\nfn f() {\n  let a = zeros(2, 3).to(f16)\n  let b = zeros(2, 3).to(f32)\n  let y = a + b\n}\n",
 	}
-	for _, src := range bad {
-		if code := runSelfHostedCheck(t, src); code != 1 {
-			t.Errorf("check of %q exited %d, want 1", src, code)
+	for _, src := range warns {
+		code, out := runSelfHostedCheckOut(t, src)
+		if code != 0 {
+			t.Errorf("check of %q exited %d, want 0: a warning does not fail a check", src, code)
+		}
+		if !strings.Contains(out, "warning: dtype widening:") {
+			t.Errorf("check of %q did not report the widening as a warning; got %q", src, out)
 		}
 	}
-	good := []string{
+	silent := []string{
 		// Same dtype: not a widening.
 		"mode systems\nfn f() {\n  let a = zeros(2, 3, bf16)\n  let b = ones(2, 3).to(bf16)\n  let y = a * b\n}\n",
 		// f16 meeting bf16 promotes past both to f32, so neither was the wider one.
 		"mode systems\nfn f() {\n  let a = zeros(2, 3, f16)\n  let b = zeros(2, 3, bf16)\n  let y = a * b\n}\n",
 		// An integer meeting a float keeps the float: the lattice doing its job.
 		"mode systems\nfn f() {\n  let a = zeros(2, 3, i8)\n  let b = zeros(2, 3, bf16)\n  let y = a * b\n}\n",
-		// No dtype anywhere. A bare literal deliberately has none, so this is
-		// the promise that dtype-free programs gain nothing.
+		// No dtype anywhere. A bare literal deliberately has none, so this is the
+		// promise that dtype-free programs gain nothing.
 		"mode systems\nfn f() {\n  let a = zeros(2, 3)\n  let y = a * ones(2, 3) + 1.0\n}\n",
-		// A maker keeps every argument before its dtype as shape: the two
-		// checkers used to disagree here because the self-hosted one stripped
-		// the trailing name twice and read zeros(2, 3, bf16) as [2].
+		// A maker keeps every argument before its dtype as shape: the two checkers
+		// used to disagree here because the self-hosted one stripped the trailing
+		// name twice and read zeros(2, 3, bf16) as [2].
 		"mode systems\nfn f() {\n  let a = zeros(2, 3, bf16)\n  let b = ones(2, 3, bf16)\n  let y = a * b\n}\n",
 	}
-	for _, src := range good {
-		if code := runSelfHostedCheck(t, src); code != 0 {
+	for _, src := range silent {
+		code, out := runSelfHostedCheckOut(t, src)
+		if code != 0 {
 			t.Errorf("check of %q exited %d, want 0", src, code)
 		}
+		if strings.Contains(out, "warning") {
+			t.Errorf("check of %q reported a warning it should not have: %q", src, out)
+		}
+	}
+	// An error still refuses, and still calls itself a shape error.
+	code, out := runSelfHostedCheckOut(t, "mode systems\nlet bad: Str = 42\n")
+	if code != 1 {
+		t.Errorf("check of a type error exited %d, want 1", code)
+	}
+	if !strings.Contains(out, "shape error:") {
+		t.Errorf("a type error should print as a shape error; got %q", out)
 	}
 }

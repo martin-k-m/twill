@@ -128,9 +128,14 @@ func runOneTestFile(path string) testResult {
 	if perr != nil {
 		return testResult{ok: false, errMsg: fmt.Sprintf("parse error: %v", perr)}
 	}
-	if diags := checker.CheckFile(prog, path); len(diags) > 0 {
+	// Only an error fails a suite. A warning describes the program rather than
+	// condemning it, and the CLI prints it when the file is checked.
+	if diags := checker.CheckFile(prog, path); checker.CountErrors(diags) > 0 {
 		var b strings.Builder
 		for _, d := range diags {
+			if !d.IsError() {
+				continue
+			}
 			fmt.Fprintf(&b, "%s:%d: shape error: %s\n", path, d.Line, d.Msg)
 		}
 		return testResult{ok: false, errMsg: strings.TrimRight(b.String(), "\n")}

@@ -3278,13 +3278,25 @@ promoting past both to f32 is correct and surprising but nothing was widened
 about the literal's dtype, which is exactly the thing left unknown to keep the
 promise above.
 
-**Still open:** a warning currently blocks a run. Both CLIs print every
-diagnostic as `shape error:` and count it toward "N shape error(s); not
-running", and `src/check.tw` notes that main "does not yet read the severity".
-So a lossy widening -- which this entry says "should be a warning and not an
-error: the program means what it says" -- stops the program. Fixing it means
-giving the Go `Diagnostic` a severity (it has only `Msg` and `Line`) and
-teaching both CLIs to count only errors, byte-identically.
+**Severity is real now, so the warning behaves like one.** This entry asks for
+"a warning and not an error: the program means what it says", and until
+recently both CLIs printed every finding as `shape error:` and counted it
+toward "N shape error(s); not running" -- so a lossy widening stopped the
+program. `src/check.tw` had carried a `severity` field all along and noted that
+main did not read it.
+
+The Go `Diagnostic` gained the same field, and both CLIs now agree on all three
+consequences:
+
+- a warning prints as `warning:`, not `shape error:`;
+- `run` prints it and runs the program anyway, counting only errors in its
+  refusal;
+- `check` prints it and exits 0, because a file whose only findings are
+  warnings has nothing wrong with it.
+
+An error is unchanged in every respect. `twill test` fails a suite only on an
+error, and the LSP publishes a warning as LSP severity 2 rather than painting
+it like a mistake.
 
 ## NEEDS-114: dtype-aware printing and parsing
 
