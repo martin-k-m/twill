@@ -147,6 +147,71 @@ func TestSelfHostedCheckCatchesBadAxis(t *testing.T) {
 // topk/argtopk shorten an axis to k, so a k past the axis length is a runtime
 // error the self-hosted checker must catch too -- and argtopk was unreachable
 // until its name was added to the front end, so this also guards that.
+// The self-hosted checker gained the systems-mode type layer in 1.6.7, so the
+// dialect's own types are now proved on both sides. Each case here is a
+// program the Go checker rejects (or accepts); the self-hosted checker must
+// reach the same verdict, since a type the bootstrap catches and the
+// self-hosted one waves through is exactly the parity gap this layer closed.
+func TestSelfHostedCheckSystemsTypes(t *testing.T) {
+	bad := []string{
+		"mode systems\nlet x: I64 = \"hello\"\n",
+		"mode systems\nlet s: Str = 42\n",
+		"mode systems\nlet b: Bool = 1\n",
+		"mode systems\nlet y: I64 = 2.5\n",
+		"mode systems\nlet xs: Arr[I64] = [\"hello\"]\n",
+		"mode systems\nlet o: Opt[I64] = Some(\"s\")\n",
+		"mode systems\nlet r: Res[I64, Str] = read_file(\"x\")\n",
+		"mode systems\nfn f(x: Bool) -> I64 { x }\n",
+		"mode systems\nfn h(n: I64) -> I64 {\n  if n > 0 { return \"neg\" }\n  n\n}\n",
+		"mode systems\nfn takes(a: Str) -> Unit { print(a) }\nlet r = takes(3)\n",
+		"mode systems\nstruct Lexer { src: Str, i: I64 }\nlet lx: Lexer = Lexer { src: 3, i: 0 }\n",
+		"mode systems\nstruct Lexer { src: Str, i: I64 }\nlet lx: Lexer = Lexer { src: \"a\", i: 0, nope: 1 }\n",
+		"mode systems\nstruct Lexer { src: Str, i: I64 }\nlet lx: Lexer = Lexer { src: \"a\", i: 0 }\nlx.i = \"x\"\n",
+		"mode systems\nenum Tok { Num(I64), Word(Str), Eof }\nlet t: Tok = Num(\"x\")\n",
+		"mode systems\nlet x: I64 = 5\nlet y = x.foo\n",
+		"mode systems\nlet o: Opt[I64] = Some(1)\nlet b = o < 1\n",
+		"mode systems\nlet s: Str = \"a\"\nlet t = s?\n",
+	}
+	for _, src := range bad {
+		if code := runSelfHostedCheck(t, src); code != 1 {
+			t.Errorf("check of %q exited %d, want 1", src, code)
+		}
+	}
+	good := []string{
+		"mode systems\nlet n: I64 = 3\nlet m: F64 = 3\nlet k: I64 = m / 2\n",
+		"mode systems\nlet n: I64 = 9223372036854775807\n",
+		"mode systems\nfn takes(a: Str) -> Unit { print(a) }\nlet s: Str = \"x\"\nlet r = takes(s)\n",
+		"mode systems\nfn head(xs: Arr[I64]) -> I64 = xs[0]\nlet ys: Arr[I64] = arr_new()\nlet r = head(ys)\n",
+		"mode systems\nfn idc(c: cp.Caps) -> cp.Caps = c\nlet x = 1.0\nlet r = idc(x)\n",
+		"mode systems\nlet r: Res[Str, Str] = read_file(\"x\")\nlet o: Opt[I64] = i64_of_str(\"3\")\n",
+		"mode systems\nenum Tok { Num(I64), Word(Str), Eof }\nlet t: Tok = Num(3)\nmatch t { Num(n) => print(n + 1), Word(w) => print(w + \"!\"), Eof => print(\"e\") }\n",
+		"let b: Bool = true\nlet r = b\n",
+		"let n: I64 = 3\nlet r = n\n",
+	}
+	for _, src := range good {
+		if code := runSelfHostedCheck(t, src); code != 0 {
+			t.Errorf("check of %q exited %d, want 0", src, code)
+		}
+	}
+}
+
+// A `fn(...)` type annotation is a parameter type the ecosystem writes and the
+// self-hosted parser could not read: it reported a syntax error where the
+// bootstrap parsed the signature, so nine repositories' worth of files were
+// never checked self-hosted at all. The annotation is advisory text on both
+// sides, so what this guards is that it parses and that a call through it is
+// judged by its arity.
+func TestSelfHostedCheckFunctionTypeAnnotations(t *testing.T) {
+	good := "mode systems\nfn apply(g: fn(I64) -> Str, n: I64) -> Str = g(n)\n"
+	if code := runSelfHostedCheck(t, good); code != 0 {
+		t.Errorf("check of a function-typed parameter exited %d, want 0", code)
+	}
+	bad := "mode systems\nfn apply(g: fn(I64) -> Str) -> Str = g(1)\nlet r = apply(1)\n"
+	if code := runSelfHostedCheck(t, bad); code != 1 {
+		t.Errorf("check of a number passed where a function is declared exited %d, want 1", code)
+	}
+}
+
 func TestSelfHostedCheckCatchesTopKBounds(t *testing.T) {
 	if code := runSelfHostedCheck(t, "let y = topk(zeros(3), 5)\n"); code != 1 {
 		t.Fatalf("check of topk k past the axis exited %d, want 1", code)

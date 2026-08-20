@@ -74,8 +74,56 @@ struct ListType {
   elems: Opt[Arr[Type]],
 }
 
+# name is the declared struct's name, or "" for a bare record literal. A
+# nominal record only stands where the same name is declared.
 struct RecordType {
   fields: Dict[Str, Type],
+  name: Str,
+}
+
+# ---- systems-mode types ----------------------------------------------------
+#
+# The systems dialect names types the numeric lattice above has no case for:
+# I64, Bytes, Arr[T], Dict[K, V], the enums, a variant constructor before its
+# argument, and a declared function type. They mirror internal/checker/
+# systems.go one for one, because the two checkers' diagnostics are compared
+# byte for byte.
+#
+# A None payload is the Go side's nil: a container whose element type is not
+# known. That is different from a known-unknown element, which prints, so the
+# distinction cannot be collapsed into TUnknown.
+
+# Arr[T]. elem None is an array whose element type is not known.
+struct ArrType {
+  elem: Opt[Type],
+}
+
+# Dict[K, V]; key or val None when not known.
+struct DictType {
+  key: Opt[Type],
+  val: Opt[Type],
+}
+
+# A value of an enum: Opt[T], Res[T, E], or a user enum by name. args are the
+# type arguments, each None when not known.
+struct EnumType {
+  name: Str,
+  args: Arr[Opt[Type]],
+}
+
+# A payload-carrying variant constructor as a value: calling it yields the
+# enum. `Some` before its argument is one.
+struct CtorType {
+  owner: Str,
+  variant: Str,
+  payload: Opt[Type],
+}
+
+# A declared function type, `fn(I64) -> F64`: what a parameter or a field
+# annotated with one holds. Distinct from FnType, whose body is known.
+struct FnTypeAnno {
+  params: Arr[Type],
+  ret: Type,
 }
 
 # node_id rather than a node handle: the recursion guard needs identity and
@@ -107,6 +155,13 @@ enum Type {
   TRecord(RecordType),
   TFn(FnType),
   TBuiltin(BuiltinType),
+  TInt,
+  TBytes,
+  TArr(ArrType),
+  TDict(DictType),
+  TEnum(EnumType),
+  TCtor(CtorType),
+  TFnType(FnTypeAnno),
 }
 
 fn no_unit() -> Dict[Str, I64] = dict_new()
@@ -172,6 +227,12 @@ fn is_definite_non_tensor(t: Type) -> Bool {
     TRecord(_) => true,
     TFn(_) => true,
     TBuiltin(_) => true,
+    TArr(_) => true,
+    TDict(_) => true,
+    TEnum(_) => true,
+    TBytes => true,
+    TCtor(_) => true,
+    TFnType(_) => true,
     _ => false,
   }
 }
@@ -511,6 +572,18 @@ struct Checker {
   # the same name and a bare match on it cannot be judged.
   enums: Dict[Str, Arr[Str]],
   variant_owner: Dict[Str, Str],
+  # payloads is each payload-carrying variant's declared payload type, keyed by
+  # variant name. Presence is what says the variant takes an argument at all;
+  # a None value is a payload whose type is not known, which is what the
+  # built-in Some/Ok/Err have.
+  payloads: Dict[Str, Opt[Type]],
+  # The names declared with `struct`, as opposed to `type`. Only a struct
+  # literal is checked field by field against its declaration.
+  struct_decls: Dict[Str, Bool],
+  # Set while the callee of a call is being inferred. `a.push(v)` is uniform
+  # call syntax for `push(a, v)` and works on any value, so a field access
+  # there is a function name and not a field at all.
+  in_callee: Bool,
 }
 
 fn report(c: Checker, line: I64, msg: Str) {
@@ -549,6 +622,9 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
     fn_ret: arr_new(),
     enums: dict_new(),
     variant_owner: dict_new(),
+    payloads: dict_new(),
+    struct_decls: dict_new(),
+    in_callee: false,
   }
   dict_set(c.enums, "Opt", ["Some", "None"])
   dict_set(c.enums, "Res", ["Ok", "Err"])
@@ -556,6 +632,12 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
   dict_set(c.variant_owner, "None", "Opt")
   dict_set(c.variant_owner, "Ok", "Res")
   dict_set(c.variant_owner, "Err", "Res")
+  # The built-in constructors take a payload whose type the declaration does
+  # not name. Presence in payloads is what makes them constructors rather than
+  # bare cases; None is the unknown payload type.
+  dict_set(c.payloads, "Some", None)
+  dict_set(c.payloads, "Ok", None)
+  dict_set(c.payloads, "Err", None)
 
   # Register declared record types and units first so forward references
   # resolve. A file that declares `type Model` at the bottom and uses it at the
@@ -573,6 +655,14 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
   for name in builtin_names() {
     env_define(env, name, TBuiltin(BuiltinType { name: name }))
   }
+  # The built-in enums' cases are values with types, not builtin functions:
+  # Some/Ok/Err are constructors, None is an Opt, and `unit` is the Unit value,
+  # so a match arm or a body that ends in it evaluates to Unit.
+  env_define(env, "Some", TCtor(CtorType { owner: "Opt", variant: "Some", payload: None }))
+  env_define(env, "Ok", TCtor(CtorType { owner: "Res", variant: "Ok", payload: None }))
+  env_define(env, "Err", TCtor(CtorType { owner: "Res", variant: "Err", payload: None }))
+  env_define(env, "None", TEnum(EnumType { name: "Opt", args: arr_new() }))
+  env_define(env, "unit", TUnit)
 
   # An import with no alias brings its names in unqualified, and this checker
   # does not read the imported file, so it cannot know what those names are. One
@@ -636,10 +726,6 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
         while i < len(ed.variants) {
           let v: ast.EnumVariant = ed.variants[i]
           push(names, v.name)
-          match env_get(env, v.name) {
-            Some(_) => unit,
-            None => env_define(env, v.name, TUnknown),
-          }
           # A variant name shared by two enums is ambiguous as a bare name;
           # owner is left unset so a match on it is not judged.
           match dict_get(c.variant_owner, v.name) {
@@ -655,6 +741,46 @@ fn check(prog: ast.Program) -> Arr[Diagnostic] {
           i = i + 1
         }
         dict_set(c.enums, ed.name, names)
+      },
+      _ => unit,
+    }
+  }
+
+  # With every enum and struct named, their payload and field types can be
+  # parsed: a field written `Arr[Tok]` or a payload written `Res[Str, Str]`
+  # resolves only once the names it may mention are all registered.
+  for s in prog.body {
+    match s {
+      SEnum(ed) => {
+        for v in ed.variants {
+          if v.has_payload {
+            dict_set(c.payloads, v.name, Some(parse_type(c, v.payload)))
+          }
+        }
+      },
+      _ => unit,
+    }
+  }
+  struct_field_types(c, prog)
+
+  # Each variant is then bound as the value it is: a constructor for a payload
+  # case, the enum itself for a bare one. A name already bound stays bound,
+  # except for the four built-in cases, which a file's own enum may re-declare
+  # and then owns.
+  for s in prog.body {
+    match s {
+      SEnum(ed) => {
+        for v in ed.variants {
+          let taken: Bool = match env_get(env, v.name) {
+            Some(_) => true,
+            None => false,
+          }
+          if taken and not is_builtin_ctor(v.name) { continue }
+          match enum_value_type(c, v.name) {
+            Some(t) => env_define(env, v.name, t),
+            None => env_define(env, v.name, TUnknown),
+          }
+        }
       },
       _ => unit,
     }
@@ -714,7 +840,7 @@ fn register_type(c: Checker, td: ast.TypeDecl) {
     dict_set(fields, f.name, tensor_of(ast.concrete_dims(f.shape)))
     i = i + 1
   }
-  dict_set(c.types, td.name, RecordType { fields: fields })
+  dict_set(c.types, td.name, RecordType { fields: fields, name: td.name })
 }
 
 # A struct registers as a record type whose fields exist but whose field types
@@ -727,7 +853,57 @@ fn register_struct(c: Checker, sd: ast.StructDecl) {
     dict_set(fields, sd.fields[i].name, TUnknown)
     i = i + 1
   }
-  dict_set(c.types, sd.name, RecordType { fields: fields })
+  dict_set(c.types, sd.name, RecordType { fields: fields, name: sd.name })
+}
+
+# is_builtin_ctor reports whether a name is one of the built-in enums' cases,
+# which a user enum may re-declare and then owns.
+fn is_builtin_ctor(name: Str) -> Bool =
+  bytes.equal(name, "Some") or bytes.equal(name, "None")
+    or bytes.equal(name, "Ok") or bytes.equal(name, "Err")
+
+# struct_field_types parses each declared struct's field types, once every enum
+# and struct name is registered, so a field written `Arr[Tok]` resolves.
+fn struct_field_types(c: Checker, prog: ast.Program) {
+  for s in prog.body {
+    match s {
+      SStruct(sd) => {
+        let fields: Dict[Str, Type] = dict_new()
+        let i: I64 = 0
+        while i < len(sd.fields) {
+          dict_set(fields, sd.fields[i].name, parse_type(c, sd.fields[i].type_name))
+          i = i + 1
+        }
+        dict_set(c.types, sd.name, RecordType { fields: fields, name: sd.name })
+        dict_set(c.struct_decls, sd.name, true)
+      },
+      _ => unit,
+    }
+  }
+}
+
+# variant_payload_type is the declared payload type of an enum case, or None.
+fn variant_payload_type(c: Checker, variant: Str) -> Opt[Type] {
+  match dict_get(c.payloads, variant) {
+    Some(t) => t,
+    None => None,
+  }
+}
+
+# enum_value_type is the type of a variant reached as a value: `None` is an
+# Opt, a user variant its enum. None when the name is not a variant this file
+# knows, or when two enums share it and the owner cannot be named.
+fn enum_value_type(c: Checker, name: Str) -> Opt[Type] {
+  let owner: Str = match dict_get(c.variant_owner, name) {
+    Some(o) => o,
+    None => return None,
+  }
+  if len(owner) == 0 { return None }
+  match dict_get(c.payloads, name) {
+    Some(pl) => return Some(TCtor(CtorType { owner: owner, variant: name, payload: pl })),
+    None => unit,
+  }
+  Some(TEnum(EnumType { name: owner, args: arr_new() }))
 }
 
 # resolve_unit builds a unit map from an annotation and reports any factor that
@@ -747,24 +923,715 @@ fn resolve_unit(c: Checker, a: ast.UnitAnno, line: I64) -> Dict[Str, I64] {
   unit_from_anno(a)
 }
 
+# ---- systems-mode annotations ----------------------------------------------
+#
+# parse_type turns an annotation's text into a type. Anything it does not
+# recognise -- a name from another module, a type alias it cannot see -- is
+# unknown, which judges nothing. It is a hand-written recursive descent over
+# the annotation string, the same one internal/checker/systems.go runs.
+
+struct TypeParser {
+  s: Str,
+  pos: I64,
+  err: Bool,
+}
+
+fn is_space_byte(ch: I64) -> Bool = ch == 32 or ch == 9 or ch == 10 or ch == 13
+
+# The annotation text with leading and trailing whitespace removed. Written out
+# because the string library has no trim and the parser's end-of-input test
+# (the whole text was consumed) depends on there being none.
+fn trim_space(s: Str) -> Str {
+  let a: I64 = 0
+  let b: I64 = len(s)
+  while a < b and is_space_byte(s[a]) { a = a + 1 }
+  while b > a and is_space_byte(s[b - 1]) { b = b - 1 }
+  s[a:b]
+}
+
+fn parse_type(c: Checker, text: Str) -> Type {
+  let p: TypeParser = TypeParser { s: trim_space(text), pos: 0, err: false }
+  let t: Type = tp_parse(c, p)
+  # A trailing remainder means the text was not an annotation this parser
+  # understands, and half of one is not evidence of anything.
+  if p.err or p.pos != len(p.s) { return TUnknown }
+  t
+}
+
+fn tp_skip_space(p: TypeParser) {
+  while p.pos < len(p.s) and (p.s[p.pos] == 32 or p.s[p.pos] == 9) {
+    p.pos = p.pos + 1
+  }
+}
+
+fn tp_ident(p: TypeParser) -> Str {
+  tp_skip_space(p)
+  let start: I64 = p.pos
+  while p.pos < len(p.s) {
+    let ch: I64 = p.s[p.pos]
+    # A dot is part of the name so a qualified name arrives whole.
+    if ch == 95 or ch == 46 or (ch >= 97 and ch <= 122) or (ch >= 65 and ch <= 90)
+      or (ch >= 48 and ch <= 57) {
+      p.pos = p.pos + 1
+      continue
+    }
+    break
+  }
+  p.s[start:p.pos]
+}
+
+fn tp_accept(p: TypeParser, tok: Str) -> Bool {
+  tp_skip_space(p)
+  if bytes.has_prefix(p.s[p.pos:len(p.s)], tok) {
+    p.pos = p.pos + len(tok)
+    return true
+  }
+  false
+}
+
+fn tp_parse(c: Checker, p: TypeParser) -> Type {
+  tp_skip_space(p)
+  if tp_accept(p, "fn(") or tp_accept(p, "Fn(") {
+    let params: Arr[Type] = arr_new()
+    if not tp_accept(p, ")") {
+      while true {
+        # A parameter may be named, as in fn(a: Str, b: Str) -> Bool.
+        let save: I64 = p.pos
+        let pname: Str = tp_ident(p)
+        if len(pname) == 0 or not tp_accept(p, ":") { p.pos = save }
+        push(params, tp_parse(c, p))
+        if tp_accept(p, ",") { continue }
+        if not tp_accept(p, ")") {
+          p.err = true
+          return TUnknown
+        }
+        break
+      }
+    }
+    let ret: Type = TUnit
+    if tp_accept(p, "->") { ret = tp_parse(c, p) }
+    return TFnType(FnTypeAnno { params: params, ret: ret })
+  }
+  let name: Str = tp_ident(p)
+  if len(name) == 0 {
+    p.err = true
+    return TUnknown
+  }
+  let args: Arr[Type] = arr_new()
+  if tp_accept(p, "[") {
+    while true {
+      push(args, tp_parse(c, p))
+      if tp_accept(p, ",") { continue }
+      if not tp_accept(p, "]") {
+        p.err = true
+        return TUnknown
+      }
+      break
+    }
+  }
+  named_type(c, name, args)
+}
+
+# opt_arg is the i-th type argument, or None when the annotation gave fewer
+# than that: a bare Arr says nothing about its elements.
+fn opt_arg(args: Arr[Type], i: I64) -> Opt[Type] {
+  if i < len(args) { return Some(args[i]) }
+  None
+}
+
+fn opt_args(args: Arr[Type]) -> Arr[Opt[Type]] {
+  let out: Arr[Opt[Type]] = arr_new()
+  for a in args {
+    push(out, Some(a))
+  }
+  out
+}
+
+# named_type resolves a type name with its arguments. A declaration in the file
+# wins over a built-in name: the self-hosted tensor engine declares its own
+# struct Tensor.
+fn named_type(c: Checker, name: Str, args: Arr[Type]) -> Type {
+  if dict_has(c.enums, name) {
+    return TEnum(EnumType { name: name, args: opt_args(args) })
+  }
+  match dict_get(c.types, name) {
+    Some(rec) => return TRecord(rec),
+    None => unit,
+  }
+  if bytes.equal(name, "I64") or bytes.equal(name, "Byte") { return TInt }
+  if bytes.equal(name, "F64") { return scalar() }
+  if bytes.equal(name, "Bool") { return TBool }
+  if bytes.equal(name, "Str") { return TStr }
+  if bytes.equal(name, "Bytes") { return TBytes }
+  if bytes.equal(name, "Unit") { return TUnit }
+  # A tensor of any rank. The shape checker's own annotations say the shape;
+  # this name says only that it is one, which is not enough to judge anything
+  # against, so it is unknown here.
+  if bytes.equal(name, "Tensor") { return TUnknown }
+  if bytes.equal(name, "Arr") or bytes.equal(name, "List") {
+    return TArr(ArrType { elem: opt_arg(args, 0) })
+  }
+  if bytes.equal(name, "Dict") {
+    return TDict(DictType { key: opt_arg(args, 0), val: opt_arg(args, 1) })
+  }
+  if bytes.equal(name, "Opt") or bytes.equal(name, "Res") {
+    return TEnum(EnumType { name: name, args: opt_args(args) })
+  }
+  TUnknown
+}
+
+# ---- assignability ---------------------------------------------------------
+#
+# assignable reports whether a value of type got may stand where want is
+# declared. It is true whenever either side is not known well enough to say
+# otherwise, and false only for a definite mismatch. One softness is kept on
+# purpose: I64 and F64 stand for each other, because an I64 annotation converts
+# a number at run time and every caller relies on it.
+
+fn is_fn_type(t: Type) -> Bool {
+  match t {
+    TFnType(_) => true,
+    _ => false,
+  }
+}
+
+# A None on either side is the Go checker's nil: not known, so not a mismatch.
+fn assignable_opt(want: Opt[Type], got: Opt[Type]) -> Bool {
+  let w: Type = match want {
+    Some(x) => x,
+    None => return true,
+  }
+  let g: Type = match got {
+    Some(x) => x,
+    None => return true,
+  }
+  assignable(w, g)
+}
+
+fn assignable(want: Type, got: Type) -> Bool {
+  if is_unknown_type(want) { return true }
+  if is_unknown_type(got) { return true }
+  # A constructor or a function value stands wherever a function is expected;
+  # nothing else about it is checked here.
+  match got {
+    TCtor(_) => return is_fn_type(want),
+    TFn(_) => return is_fn_type(want),
+    TBuiltin(_) => return is_fn_type(want),
+    TFnType(_) => return is_fn_type(want),
+    _ => unit,
+  }
+  match want {
+    TInt => is_number_type(got),
+    TTensor(w) => {
+      if is_scalar(w) { return is_number_type(got) }
+      # A tensor annotation is checked by the shape rules, not here.
+      match got {
+        TTensor(_) => true,
+        _ => is_number_type(got),
+      }
+    },
+    TBool => {
+      match got {
+        TBool => true,
+        _ => false,
+      }
+    },
+    TStr => {
+      match got {
+        TStr => true,
+        _ => false,
+      }
+    },
+    TBytes => {
+      match got {
+        TBytes => true,
+        _ => false,
+      }
+    },
+    TUnit => true,
+    TArr(w) => {
+      match got {
+        TArr(g) => assignable_opt(w.elem, g.elem),
+        TList(g) => {
+          match g.elems {
+            Some(es) => {
+              for e in es {
+                if not assignable_opt(w.elem, Some(e)) { return false }
+              }
+              true
+            },
+            None => true,
+          }
+        },
+        # A bracket literal of numbers is a tensor to the parser and an array at
+        # an Arr annotation, and iterating a rank-n tensor gives rank-(n-1)
+        # tensors, which stand for the inner arrays of a nested one. Both are
+        # what the runtime does at the annotation, so neither is a mismatch.
+        TTensor(_) => true,
+        _ => false,
+      }
+    },
+    TDict(w) => {
+      match got {
+        TDict(g) => assignable_opt(w.key, g.key) and assignable_opt(w.val, g.val),
+        # An empty record literal is a record to the parser and a dictionary at
+        # a Dict annotation.
+        TRecord(g) => len(g.fields) == 0,
+        _ => false,
+      }
+    },
+    TEnum(w) => {
+      let g: EnumType = match got {
+        TEnum(x) => x,
+        _ => return false,
+      }
+      if not bytes.equal(g.name, w.name) { return false }
+      let i: I64 = 0
+      while i < len(w.args) {
+        if i < len(g.args) and not assignable_opt(w.args[i], g.args[i]) { return false }
+        i = i + 1
+      }
+      true
+    },
+    TRecord(w) => {
+      let g: RecordType = match got {
+        TRecord(x) => x,
+        _ => return false,
+      }
+      if len(w.name) > 0 and len(g.name) > 0 { return bytes.equal(w.name, g.name) }
+      true
+    },
+    # Every function-valued got was answered above, so anything reaching here is
+    # not one.
+    TFnType(_) => false,
+    _ => true,
+  }
+}
+
+# is_number_type reports whether a type is a scalar number of either kind: an
+# I64, or a rank-0 tensor (F64 in systems mode). A tensor whose rank is not
+# known counts, since it may be a scalar.
+fn is_number_type(t: Type) -> Bool {
+  match t {
+    TInt => true,
+    TTensor(v) => is_scalar(v) or not fully_known(v),
+    _ => false,
+  }
+}
+
+# check_assignable reports a definite mismatch between a declared type and the
+# value put there. what names the place: a quoted name for a binding, a field
+# of a struct, an argument position.
+fn check_assignable(c: Checker, line: I64, what: Str, want: Type, got: Type) -> Bool {
+  if assignable(want, got) { return true }
+  report(c, line, bytes.concat(what, bytes.concat(" is declared ",
+    bytes.concat(type_text(c, want), bytes.concat(" but the value is ",
+    type_text(c, got))))))
+  false
+}
+
+# fractional_literal_at_int is the one I64/F64 mismatch that is reported: a
+# fractional literal bound where an I64 is declared, since a 2.5 bound as an
+# integer truncates to a number the author did not write.
+fn fractional_literal_at_int(c: Checker, line: I64, what: Str, want: Type, e: ast.Expr) {
+  match want {
+    TInt => unit,
+    _ => return,
+  }
+  # A negated literal is a unary minus over a number, so -2.5 is read through
+  # to the digits under it.
+  let inner: ast.Expr = e
+  match e {
+    EUnary(u) => if bytes.equal(u.op, "-") { inner = u.operand },
+    _ => unit,
+  }
+  let lit: ast.NumberLit = match inner {
+    ENumber(n) => n,
+    _ => return,
+  }
+  # Truncation rather than a round trip through an integer: that conversion is
+  # out of range at or above 2^63 and lands on MIN_I64, so the comparison
+  # disagreed with itself and called MAX_I64, the commonest constant in the
+  # subset, a fraction. Truncation has no range to fall out of, and it reads
+  # 2.5e3 as the whole number it is.
+  if lit.value == f64_trunc(lit.value) { return }
+  report(c, line, bytes.concat(what,
+    bytes.concat(" is declared I64 but the value is the fraction ", lit.text)))
+}
+
+# binding_type is the type a let or a parameter takes from its annotation: the
+# declared type when it is one this checker knows, else the value's own, so an
+# advisory name from another module still lets the value carry what it was.
+fn binding_type(declared: Type, got: Type) -> Type {
+  if is_unknown_type(declared) { return got }
+  # A declared Arr with no element type takes the value's element type when the
+  # value has one; and so on for a Dict and an enum.
+  match declared {
+    TArr(d) => {
+      match d.elem {
+        None => {
+          match got {
+            TArr(_) => return got,
+            _ => unit,
+          }
+        },
+        Some(_) => unit,
+      }
+    },
+    TDict(d) => {
+      match d.key {
+        None => {
+          match got {
+            TDict(_) => return got,
+            _ => unit,
+          }
+        },
+        Some(_) => unit,
+      }
+    },
+    TEnum(d) => {
+      if len(d.args) == 0 {
+        match got {
+          TEnum(_) => return got,
+          _ => unit,
+        }
+      }
+    },
+    _ => unit,
+  }
+  declared
+}
+
+# ---- the wiring the systems types feed -------------------------------------
+
+# unorderable names a type that `<` and its relatives are not defined on, when
+# the checker is sure of it. A type it cannot resolve gives "", so nothing is
+# judged on a guess.
+fn unorderable(c: Checker, t: Type) -> Str {
+  match t {
+    TEnum(_) => type_text(c, t),
+    TArr(_) => type_text(c, t),
+    TDict(_) => type_text(c, t),
+    TRecord(_) => type_text(c, t),
+    TList(_) => type_text(c, t),
+    TBytes => type_text(c, t),
+    TUnit => type_text(c, t),
+    TBool => type_text(c, t),
+    TCtor(_) => type_text(c, t),
+    TFnType(_) => type_text(c, t),
+    TFn(_) => type_text(c, t),
+    TBuiltin(_) => type_text(c, t),
+    TTensor(v) => {
+      # Ordering is scalar-only, so a tensor of known rank above 0 cannot be
+      # ordered and the runtime refuses it. A masking `where(A > 0.0, A, B)` is
+      # the shape this takes in practice, and it failed at run time for every
+      # non-scalar A while the checker, which knew the rank, said nothing.
+      if len(v.dims) > 0 and fully_known(v) { return type_text(c, t) }
+      ""
+    },
+    _ => "",
+  }
+}
+
+# is_definite_non_record reports whether a type certainly has no fields. A
+# tensor is left out on purpose: `t.to(f32)` is a field access syntactically.
+fn is_definite_non_record(t: Type) -> Bool {
+  match t {
+    TInt => true,
+    TStr => true,
+    TBool => true,
+    TBytes => true,
+    TUnit => true,
+    TArr(_) => true,
+    TDict(_) => true,
+    TEnum(_) => true,
+    TList(_) => true,
+    _ => false,
+  }
+}
+
+# match_binding_type is the type a pattern's binding takes: the subject's
+# payload for that case, when the subject's type is known.
+fn match_binding_type(c: Checker, subject: Type, pat: ast.MatchPattern) -> Type {
+  let en: EnumType = match subject {
+    TEnum(v) => v,
+    _ => {
+      match variant_payload_type(c, pat.variant) {
+        Some(t) => return t,
+        None => return TUnknown,
+      }
+    },
+  }
+  if bytes.equal(en.name, "Opt") {
+    if len(en.args) > 0 {
+      match en.args[0] {
+        Some(t) => return t,
+        None => unit,
+      }
+    }
+    return TUnknown
+  }
+  if bytes.equal(en.name, "Res") {
+    let i: I64 = 0
+    if bytes.equal(pat.variant, "Err") { i = 1 }
+    if len(en.args) > i {
+      match en.args[i] {
+        Some(t) => return t,
+        None => unit,
+      }
+    }
+    return TUnknown
+  }
+  match variant_payload_type(c, pat.variant) {
+    Some(t) => t,
+    None => TUnknown,
+  }
+}
+
+# check_struct_lit types a typed record literal against its struct declaration:
+# every field named must exist and its value must be of the declared type. The
+# literal's type is the struct.
+fn check_struct_lit(c: Checker, ex: ast.RecordLit, fields: Dict[Str, Type]) -> Type {
+  let name: Str = ex.type_name
+  let dot: I64 = last_index_of_byte(name, 46)
+  if dot >= 0 { name = name[dot + 1:len(name)] }
+  let decl: RecordType = match dict_get(c.types, name) {
+    Some(d) => d,
+    None => return TRecord(RecordType { fields: fields, name: "" }),
+  }
+  if dict_has(c.struct_decls, name) {
+    for f in ex.fields {
+      let want: Type = match dict_get(decl.fields, f.name) {
+        Some(t) => t,
+        None => {
+          report(c, ex.line, bytes.concat(name, bytes.concat(" has no field ", quoted(f.name))))
+          continue
+        },
+      }
+      let what: Str = bytes.concat("field ", bytes.concat(quoted(f.name),
+        bytes.concat(" of ", name)))
+      let got: Type = match dict_get(fields, f.name) {
+        Some(t) => t,
+        None => TUnknown,
+      }
+      if check_assignable(c, ex.line, what, want, got) {
+        fractional_literal_at_int(c, ex.line, what, want, f.value)
+      }
+    }
+  }
+  TRecord(decl)
+}
+
+fn last_index_of_byte(s: Str, ch: I64) -> I64 {
+  let i: I64 = len(s) - 1
+  while i >= 0 {
+    if s[i] == ch { return i }
+    i = i - 1
+  }
+  -1
+}
+
+# check_body_return_type compares what a function body evaluates to against its
+# declared named return type. A block whose last statement is not an expression
+# (it returned early, or ends in a loop) evaluates to Unit and is not judged,
+# since its `return` statements were checked where they stand.
+fn check_body_return_type(c: Checker, line: I64, name: Str, ret_type: Str,
+                          body_type: Type, body: ast.Expr) {
+  if len(ret_type) == 0 { return }
+  let want: Type = parse_type(c, ret_type)
+  match body_type {
+    TUnit => {
+      match want {
+        TUnit => return,
+        _ => unit,
+      }
+      # A body that evaluates to Unit against a declared value type is a
+      # function that falls off its end, and that is worth reporting -- but only
+      # when there is no `return` in it to have produced the value instead.
+      # `return` statements are checked where they stand, and a body ending in a
+      # loop or an if-without-else evaluates to Unit while still returning
+      # properly from inside.
+      if has_value_return(body) { return }
+    },
+    _ => unit,
+  }
+  if assignable(want, body_type) { return }
+  let who: Str = "function"
+  if len(name) > 0 { who = bytes.concat("function ", quoted(name)) }
+  report(c, line, bytes.concat(who, bytes.concat(" returns ",
+    bytes.concat(type_text(c, body_type), bytes.concat(" but its signature declares ",
+    type_text(c, want))))))
+}
+
+# check_return_type is check_body_return_type for an explicit `return e`,
+# against the return type of the innermost function being checked.
+fn check_return_type(c: Checker, line: I64, got: Type, e: ast.Expr) {
+  if len(c.fn_ret) == 0 { return }
+  let ret: Str = c.fn_ret[len(c.fn_ret) - 1]
+  if len(ret) == 0 { return }
+  let want: Type = parse_type(c, ret)
+  if assignable(want, got) { return }
+  report(c, line, bytes.concat("return gives ", bytes.concat(type_text(c, got),
+    bytes.concat(" but the function declares ", type_text(c, want)))))
+}
+
+# has_value_return reports whether a function body contains a `return` carrying
+# a value, anywhere that is not inside a nested function: a nested function's
+# returns are its own.
+fn has_value_return(e: ast.Expr) -> Bool {
+  match e {
+    EBlock(b) => hvr_block(b),
+    EIf(ex) => {
+      if hvr_block(ex.then_block) { return true }
+      match ex.else_branch {
+        ElseBlock(alt) => hvr_block(alt),
+        ElseIf(alt) => has_value_return(EIf(alt)),
+        NoElse => false,
+      }
+    },
+    EMatch(ex) => {
+      for arm in ex.arms {
+        if hvr_stmt(arm.body) { return true }
+      }
+      false
+    },
+    _ => false,
+  }
+}
+
+fn hvr_block(b: ast.Block) -> Bool {
+  for s in b.body {
+    if hvr_stmt(s) { return true }
+  }
+  false
+}
+
+fn hvr_stmt(s: ast.Stmt) -> Bool {
+  match s {
+    SReturn(st) => {
+      match st.value {
+        Some(_) => true,
+        None => false,
+      }
+    },
+    SBlock(b) => hvr_block(b),
+    SWhile(st) => hvr_block(st.body),
+    SFor(st) => hvr_block(st.body),
+    SExpr(st) => has_value_return(st.x),
+    SLet(st) => has_value_return(st.value),
+    SAssign(st) => has_value_return(st.value),
+    _ => false,
+  }
+}
+
+# ---- systems-mode builtin results ------------------------------------------
+#
+# systems_builtin_result types the systems-mode builtins whose result type is
+# fixed, so a value from one of them can be checked where it lands. Only
+# builtins whose result the shape cases do not already type are here.
+
+fn opt_of(t: Type) -> Type {
+  let a: Arr[Opt[Type]] = arr_new()
+  push(a, Some(t))
+  TEnum(EnumType { name: "Opt", args: a })
+}
+
+fn res_of(ok: Type, err: Type) -> Type {
+  let a: Arr[Opt[Type]] = arr_new()
+  push(a, Some(ok))
+  push(a, Some(err))
+  TEnum(EnumType { name: "Res", args: a })
+}
+
+fn arr_of(elem: Type) -> Type = TArr(ArrType { elem: Some(elem) })
+
+fn systems_builtin_result(name: Str, args: Arr[Type]) -> Opt[Type] {
+  if in_set(name, "i64 i64_of_f64 clock_now_ms mono_ns mtime file_size buf_len buf_get8 rng_open mem_allocs mem_bytes mem_live_bytes mem_tensors") {
+    return Some(TInt)
+  }
+  if in_set(name, "f64 f64_of_i64") { return Some(scalar()) }
+  if in_set(name, "chr str_quote f64_to_str bytes_to_str read_text_or resolve_path f64_hex num_to_text") {
+    return Some(TStr)
+  }
+  if in_set(name, "arr_push push") {
+    if len(args) > 0 {
+      match args[0] {
+        TArr(_) => return Some(args[0]),
+        _ => unit,
+      }
+    }
+    return Some(TArr(ArrType { elem: None }))
+  }
+  if in_set(name, "arr arr_new arr_of_tensor") { return Some(TArr(ArrType { elem: None })) }
+  # slice(x, a, b) is a Str slice, and only a Str: the builtin rejects anything
+  # else. Typing an Arr argument as an Arr result is a reasonable design and not
+  # the one that was implemented, so it propagated a confident wrong type.
+  if bytes.equal(name, "slice") { return Some(TStr) }
+  if bytes.equal(name, "dict_new") { return Some(TDict(DictType { key: None, val: None })) }
+  if bytes.equal(name, "dict_keys") { return Some(arr_of(TStr)) }
+  if bytes.equal(name, "dict_get") {
+    if len(args) > 0 {
+      match args[0] {
+        TDict(d) => {
+          match d.val {
+            Some(v) => return Some(opt_of(v)),
+            None => unit,
+          }
+        },
+        _ => unit,
+      }
+    }
+    let a: Arr[Opt[Type]] = arr_new()
+    push(a, None)
+    return Some(TEnum(EnumType { name: "Opt", args: a }))
+  }
+  if in_set(name, "dict_has is_same is_tty_stdout all_finite path_exists path_is_dir path_is_abs mem_counters_available") {
+    return Some(TBool)
+  }
+  if in_set(name, "path_join path_base path_dir path_ext path_stem path_normalize") {
+    return Some(TStr)
+  }
+  if in_set(name, "mkdir_all remove_file remove_dir remove_all rename") {
+    return Some(res_of(TUnit, TStr))
+  }
+  if in_set(name, "temp_dir cwd read_file_at") { return Some(res_of(TStr, TStr)) }
+  if bytes.equal(name, "bytes_new") { return Some(TBytes) }
+  if bytes.equal(name, "read_file") { return Some(res_of(TStr, TStr)) }
+  if bytes.equal(name, "write_file") { return Some(res_of(TUnit, TStr)) }
+  if bytes.equal(name, "i64_of_str") { return Some(opt_of(TInt)) }
+  if bytes.equal(name, "str_to_f64") { return Some(opt_of(scalar())) }
+  if bytes.equal(name, "env") { return Some(opt_of(TStr)) }
+  if bytes.equal(name, "args") { return Some(arr_of(TStr)) }
+  None
+}
+
 # ---- statements ------------------------------------------------------------
 
 fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
   match s {
     SLet(st) => {
       let rhs: Type = infer_expr(c, st.value, env)
-      if len(st.type_name) > 0 {
-        # A qualified or generic type annotation is always a type, never a unit,
-        # so the binding just takes the value's type.
-        env_define(env, st.name, rhs)
+      # A type annotation, in either slot the parser may have put it: the
+      # binding is declared to be that type, and the value has to be one. A
+      # qualified or generic name arrives as text and a bare one as a
+      # one-factor unit annotation.
+      let type_anno: Bool = len(st.type_name) > 0
+      if not type_anno {
+        match st.unit {
+          Some(u) => type_anno = is_advisory_type_anno(c, u),
+          None => unit,
+        }
+      }
+      if type_anno {
+        let want: Type = parse_type(c, ret_type_name(st.type_name, st.unit))
+        let what: Str = quoted(st.name)
+        if check_assignable(c, st.line, what, want, rhs) {
+          fractional_literal_at_int(c, st.line, what, want, st.value)
+        }
+        env_define(env, st.name, binding_type(want, rhs))
       } else {
       match st.unit {
-        # A systems-mode `let n: I64` names a type the bootstrap has no
-        # definition for; the annotation is advisory, so the binding just takes
-        # the value's type, exactly as an unannotated let does.
-        Some(anno) => if is_advisory_type_anno(c, anno) {
-          env_define(env, st.name, rhs)
-        } else {
+        Some(anno) => {
           let want: Dict[Str, I64] = resolve_unit(c, anno, st.line)
           match as_tensor(rhs) {
             Some(t) => {
@@ -801,8 +1668,28 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
         # A bare name rebinds where it was defined, walking outward.
         EIdent(id) => env_assign(env, id.name, v),
         # A field or index target: infer it so a malformed one is still checked,
-        # but there is no name to rebind.
-        _ => infer_expr(c, st.target, env),
+        # but there is no name to rebind. A struct field keeps its declared type
+        # across the assignment, so the value is checked against it.
+        _ => {
+          let target: Type = infer_expr(c, st.target, env)
+          match st.target {
+            EField(fld) => {
+              match as_record(infer_expr(c, fld.target, env)) {
+                Some(rec) => {
+                  if len(rec.name) > 0 {
+                    let what: Str = bytes.concat("field ", bytes.concat(quoted(fld.name),
+                      bytes.concat(" of ", rec.name)))
+                    if check_assignable(c, st.line, what, target, v) {
+                      fractional_literal_at_int(c, st.line, what, target, st.value)
+                    }
+                  }
+                },
+                None => unit,
+              }
+            },
+            _ => unit,
+          }
+        },
       }
     },
     SWhile(st) => {
@@ -821,7 +1708,7 @@ fn infer_stmt(c: Checker, s: ast.Stmt, env: CheckEnv) {
     },
     SReturn(st) => {
       match st.value {
-        Some(v) => infer_expr(c, v, env),
+        Some(v) => check_return_type(c, st.line, infer_expr(c, v, env), v),
         None => unit,
       }
     },
@@ -880,6 +1767,12 @@ fn elem_type(t: Type) -> Type {
       TUnknown
     },
     TList(_) => TUnknown,
+    TArr(v) => {
+      match v.elem {
+        Some(e) => e,
+        None => TUnknown,
+      }
+    },
     _ => TUnknown,
   }
 }
@@ -953,10 +1846,12 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
         dict_set(fields, f.name, infer_expr(c, f.value, env))
         i = i + 1
       }
-      TRecord(RecordType { fields: fields })
+      if len(ex.type_name) > 0 { return check_struct_lit(c, ex, fields) }
+      TRecord(RecordType { fields: fields, name: "" })
     },
     EField(ex) => {
-      match as_record(infer_expr(c, ex.target, env)) {
+      let target: Type = infer_expr(c, ex.target, env)
+      match as_record(target) {
         Some(rec) => {
           match dict_get(rec.fields, ex.name) {
             Some(ft) => ft,
@@ -966,9 +1861,25 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
             },
           }
         },
-        # Field access on anything the checker could not resolve to a record is
-        # not evidence of a mistake: it is usually a namespaced import.
-        None => TUnknown,
+        None => {
+          # A field of something that cannot have one. The record case above was
+          # checked and this one was not, though the checker knows the type just
+          # as well.
+          #
+          # Not when it is a call's callee, though: `a.push(v)` is uniform call
+          # syntax for `push(a, v)` and works on any value, so a field there is a
+          # function name and not a field at all. A tensor is excluded for the
+          # same family of reasons, since `t.to(f32)` is written this way.
+          if not c.in_callee and is_definite_non_record(target) {
+            report(c, ex.line, bytes.concat("cannot read field ",
+              bytes.concat(quoted(ex.name), bytes.concat(" of ", type_text(c, target)))))
+            return TUnknown
+          }
+          # Field access on anything else the checker could not resolve to a
+          # record is not evidence of a mistake: it is usually a namespaced
+          # import.
+          TUnknown
+        },
       }
     },
     EIf(ex) => infer_if(c, ex, env),
@@ -976,8 +1887,28 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
     # The success payload's type is not tracked (Res/Opt are advisory), so the
     # unwrapped value is left unknown; the subject is still checked.
     ETry(ex) => {
-      infer_expr(c, ex.expr, env)
+      # `?` yields the success payload: a Res[T, E] gives a T and an Opt[T] a T,
+      # so what it is bound to is checked against that.
+      let subject: Type = infer_expr(c, ex.expr, env)
       check_try_context(c, ex.line)
+      match subject {
+        TEnum(en) => {
+          if bytes.equal(en.name, "Res") or bytes.equal(en.name, "Opt") {
+            if len(en.args) > 0 {
+              match en.args[0] {
+                Some(t) => return t,
+                None => return TUnknown,
+              }
+            }
+            return TUnknown
+          }
+        },
+        _ => unit,
+      }
+      if not is_unknown_type(subject) {
+        report(c, ex.line, bytes.concat("`?` needs a Res or an Opt, but the value is ",
+          type_text(c, subject)))
+      }
       TUnknown
     },
     EBlock(b) => infer_block(c, b, new_env(Some(env))),
@@ -989,14 +1920,14 @@ fn infer_expr(c: Checker, e: ast.Expr, env: CheckEnv) -> Type {
 # the payload type is advisory). The match's type is left unknown rather than
 # unified across arms, which keeps the dialect's records-and-enums permissive.
 fn infer_match(c: Checker, ex: ast.Match, env: CheckEnv) -> Type {
-  infer_expr(c, ex.subject, env)
+  let subject: Type = infer_expr(c, ex.subject, env)
   check_match_arms(c, ex)
   let i: I64 = 0
   while i < len(ex.arms) {
     let arm: ast.MatchArm = ex.arms[i]
     let scope: CheckEnv = new_env(Some(env))
     if len(arm.pattern.binding) > 0 {
-      env_define(scope, arm.pattern.binding, TUnknown)
+      env_define(scope, arm.pattern.binding, match_binding_type(c, subject, arm.pattern))
     }
     infer_stmt(c, arm.body, scope)
     i = i + 1
@@ -1269,6 +2200,18 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
 
   let l: Type = infer_expr(c, ex.left, env)
   let r: Type = infer_expr(c, ex.right, env)
+
+  # An I64 is a scalar to the shape and unit rules; what is I64 about it is the
+  # result type. Two I64s (or an I64 and a whole-number literal) give an I64 for
+  # the arithmetic operators; an I64 against a fraction, or against a scalar the
+  # checker cannot tell is whole, is F64.
+  let l_int: Bool = is_int_type(l)
+  let r_int: Bool = is_int_type(r)
+  if l_int { l = scalar() }
+  if r_int { r = scalar() }
+  let int_result: Bool = (l_int and r_int) or (l_int and is_whole_literal(ex.right))
+    or (r_int and is_whole_literal(ex.left))
+
   let lt: Opt[TensorType] = as_tensor(l)
   let rt: Opt[TensorType] = as_tensor(r)
 
@@ -1286,6 +2229,19 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
         }
       },
       None => unit,
+    }
+    # `==` and `!=` are deep equality and are defined on everything. Ordering is
+    # not: it is numbers and strings, and anything else is the runtime's "cannot
+    # compare these values". An `Opt[I64]` compared against 0 is the shape that
+    # mistake takes, so it is worth catching where it is written.
+    if not bytes.equal(op, "==") and not bytes.equal(op, "!=") {
+      let bad: Str = unorderable(c, l)
+      if len(bad) == 0 { bad = unorderable(c, r) }
+      if len(bad) > 0 {
+        report(c, ex.line, bytes.concat("cannot order ", bytes.concat(bad,
+          bytes.concat(" with ", bytes.concat(quoted(op),
+          ": ordering is numbers and strings")))))
+      }
     }
     return TBool
   }
@@ -1347,7 +2303,33 @@ fn infer_binary(c: Checker, ex: ast.Binary, env: CheckEnv) -> Type {
     report(c, ex.line, res.msg)
     return TUnknown
   }
+  if int_result { return TInt }
   set_dtype(with_unit(res.type, arith_unit(c, op, a, b, ex.line)), dt)
+}
+
+fn is_int_type(t: Type) -> Bool {
+  match t {
+    TInt => true,
+    _ => false,
+  }
+}
+
+# is_whole_literal reports whether an expression is an integer literal (or a
+# negated one), which computes as an I64 beside an I64. Truncation rather than a
+# round trip through an integer, for the reason fractional_literal_at_int gives.
+fn is_whole_literal(e: ast.Expr) -> Bool {
+  let inner: ast.Expr = e
+  match e {
+    EUnary(u) => if bytes.equal(u.op, "-") { inner = u.operand },
+    _ => unit,
+  }
+  let lit: ast.NumberLit = match inner {
+    ENumber(n) => n,
+    _ => return false,
+  }
+  if lit.value != f64_trunc(lit.value) { return false }
+  bytes.index_of(lit.text, ".") < 0 and bytes.index_of(lit.text, "e") < 0
+    and bytes.index_of(lit.text, "E") < 0
 }
 
 fn is_comparison(op: Str) -> Bool =
@@ -1837,7 +2819,10 @@ fn infer_call(c: Checker, ex: ast.Call, env: CheckEnv) -> Type {
     Some(t) => return t,
     None => unit,
   }
+  let saved_in_callee: Bool = c.in_callee
+  c.in_callee = true
   let callee: Type = infer_expr(c, ex.callee, env)
+  c.in_callee = saved_in_callee
   # A trailing dtype name on a constructor, `bf16` in `zeros([784, 128],
   # bf16)`, is an argument in the source and not a value in the program. It is
   # not meant to resolve, so inferring it would report a typo that is not one.
@@ -1868,8 +2853,27 @@ fn infer_call(c: Checker, ex: ast.Call, env: CheckEnv) -> Type {
     call_ex = ast.Call { id: ex.id, callee: ex.callee, args: call_args, line: ex.line }
   }
   match callee {
-    TBuiltin(fn_) => infer_builtin_call(c, fn_.name, call_ex, arg_types, ctor_dt),
+    TBuiltin(fn_) => {
+      # A builtin whose result type is fixed is typed from the table, so a value
+      # from one of them can be checked where it lands. The arity check the
+      # shape cases would have made still applies.
+      match systems_builtin_result(fn_.name, arg_types) {
+        Some(t) => {
+          let arity: I64 = builtin_fixed_arity(fn_.name)
+          if arity >= 0 and len(call_ex.args) != arity {
+            report(c, ex.line, bytes.concat(fn_.name, bytes.concat(" expects ",
+              bytes.concat(str(arity), bytes.concat(" argument(s), got ", str(len(call_ex.args)))))))
+            return TUnknown
+          }
+          return t
+        },
+        None => unit,
+      }
+      infer_builtin_call(c, fn_.name, call_ex, arg_types, ctor_dt)
+    },
     TFn(fn_) => infer_user_call(c, fn_, call_ex, arg_types),
+    TCtor(ctor) => call_ctor(c, ctor, ex.line, arg_types, call_ex.args),
+    TFnType(ft) => call_fn_type(c, ft, ex.line, arg_types),
     TUnknown => TUnknown,
     # A number is not callable either, but `f(x)` where f is a tensor is a
     # plausible typo for indexing and worth naming. TFn and TBuiltin are handled
@@ -1879,6 +2883,62 @@ fn infer_call(c: Checker, ex: ast.Call, env: CheckEnv) -> Type {
       TUnknown
     },
   }
+}
+
+# call_ctor is the type of applying a variant constructor to its payload:
+# Some(x) is Opt[type of x], Ok(x) a Res whose error type is not yet known, and
+# a user variant its enum.
+fn call_ctor(c: Checker, ctor: CtorType, line: I64, args: Arr[Type],
+             arg_exprs: Arr[ast.Expr]) -> Type {
+  let bare: Type = TEnum(EnumType { name: ctor.owner, args: arr_new() })
+  if len(args) != 1 {
+    report(c, line, bytes.concat(ctor.variant, bytes.concat(" expects 1 argument(s), got ",
+      str(len(args)))))
+    return bare
+  }
+  if bytes.equal(ctor.owner, "Opt") {
+    let a: Arr[Opt[Type]] = arr_new()
+    push(a, Some(args[0]))
+    return TEnum(EnumType { name: "Opt", args: a })
+  }
+  if bytes.equal(ctor.owner, "Res") {
+    let a: Arr[Opt[Type]] = arr_new()
+    if bytes.equal(ctor.variant, "Ok") {
+      push(a, Some(args[0]))
+      push(a, None)
+    } else {
+      push(a, None)
+      push(a, Some(args[0]))
+    }
+    return TEnum(EnumType { name: "Res", args: a })
+  }
+  match ctor.payload {
+    Some(pl) => {
+      let what: Str = bytes.concat("the payload of ", ctor.variant)
+      if check_assignable(c, line, what, pl, args[0]) and len(arg_exprs) == 1 {
+        fractional_literal_at_int(c, line, what, pl, arg_exprs[0])
+      }
+    },
+    None => unit,
+  }
+  bare
+}
+
+# call_fn_type is a call through a value whose type is a declared function type
+# rather than a body this checker can walk: the arity and the argument types
+# are all it knows, and the result is the declared return type.
+fn call_fn_type(c: Checker, ft: FnTypeAnno, line: I64, arg_types: Arr[Type]) -> Type {
+  if len(ft.params) != len(arg_types) {
+    report(c, line, bytes.concat("function expects ", bytes.concat(str(len(ft.params)),
+      bytes.concat(" argument(s), got ", str(len(arg_types))))))
+    return TUnknown
+  }
+  let i: I64 = 0
+  while i < len(ft.params) {
+    check_assignable(c, line, bytes.concat("argument ", str(i + 1)), ft.params[i], arg_types[i])
+    i = i + 1
+  }
+  ft.ret
 }
 
 # param_type gives a parameter's type from its annotation alone, for checking a
@@ -1899,7 +2959,7 @@ fn param_type(c: Checker, p: ast.Param) -> Type {
       dict_set(u, p.type_name, 1)
       return tensor_with_unit(arr_new(), u)
     }
-    return TUnknown
+    return parse_type(c, p.type_name)
   }
   match p.shape {
     Some(s) => tensor_of(ast.concrete_dims(s)),
@@ -1952,6 +3012,8 @@ fn check_fn_def(c: Checker, fd: ast.FnDecl, env: CheckEnv) {
     Some(u) => if not is_advisory_type_anno(c, u) { check_return_unit(c, fd.line, fd.name, u, body_type) },
     None => unit,
   }
+  check_body_return_type(c, fd.line, fd.name, ret_type_name(fd.ret_type, fd.ret_unit),
+    body_type, fd.body)
 }
 
 # A body is either a block, whose type is its last expression statement, or a
@@ -1978,9 +3040,31 @@ fn infer_fn_body(c: Checker, body: ast.Expr, scope: CheckEnv, ret: Str) -> Type 
 # dialect writes, advisory because the bootstrap has no such type. A `-> USD`
 # where USD is a declared unit stays a unit and is checked; a compound
 # annotation is always a unit; and in numeric mode nothing is advisory.
-fn is_advisory_type_anno(c: Checker, u: ast.UnitAnno) -> Bool =
-  c.systems and len(u.factors) == 1 and u.factors[0].exp == 1
-    and not dict_has(c.units, u.factors[0].name)
+fn is_advisory_type_anno(c: Checker, u: ast.UnitAnno) -> Bool {
+  if len(u.factors) != 1 or u.factors[0].exp != 1 or dict_has(c.units, u.factors[0].name) {
+    return false
+  }
+  if c.systems { return true }
+  # In numeric mode a bare name is ordinarily a unit, and an undeclared one is a
+  # typo worth reporting. A name that is one of the dialect's own types is not:
+  # `let b: Bool = true` is a correct numeric-mode program, and reporting it as
+  # an unknown unit was a false positive in the default mode. The types exist at
+  # run time in both modes; only the annotation syntax is systems-mode.
+  is_known_type_name(u.factors[0].name)
+}
+
+# anno_head_name is a type annotation's head: `Arr` for `Arr[I64]`, and the
+# whole text when there is no argument list.
+fn anno_head_name(text: Str) -> Str {
+  let i: I64 = bytes.index_of(text, "[")
+  if i >= 0 { return text[0:i] }
+  text
+}
+
+# is_known_type_name reports whether a bare annotation names one of the
+# language's types rather than a unit of measure.
+fn is_known_type_name(name: Str) -> Bool =
+  in_set(name, "I64 F64 Bool Str Bytes Byte Unit Arr Dict Opt Res Tensor List")
 
 fn check_return_unit(c: Checker, line: I64, name: Str, ret_unit: ast.UnitAnno, body_type: Type) {
   let want: Dict[Str, I64] = unit_from_anno(ret_unit)
@@ -2046,8 +3130,22 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
             # than pinned to whatever the argument happened to be: pinning would
             # make indexing an `Arr[I64]` param a false error when a scalar was
             # passed. In numeric mode an unknown type name is still reported.
-            if c.systems {
-              env_define(scope, p.name, TUnknown)
+            # A systems-mode type (I64, Str, Arr[I64], fn(I64) -> F64) or a
+            # name from another module (cp.Caps). The argument is checked
+            # against the declared type when the checker knows it, and the
+            # parameter is bound as the declared type, not as whatever the
+            # argument happened to be, so a body indexing an Arr[I64] is not
+            # judged by a scalar a test passed in. A name that is one of the
+            # language's own types is a type in either mode, so numeric mode
+            # does not report it as unknown.
+            if c.systems or is_known_type_name(anno_head_name(p.type_name)) {
+              let want: Type = parse_type(c, p.type_name)
+              let what: Str = bytes.concat("argument ", bytes.concat(str(i + 1),
+                bytes.concat(" (", bytes.concat(quoted(p.name), ")"))))
+              if check_assignable(c, ex.line, what, want, arg_types[i]) and i < len(ex.args) {
+                fractional_literal_at_int(c, ex.line, what, want, ex.args[i])
+              }
+              env_define(scope, p.name, want)
             } else {
               report(c, ex.line, bytes.concat("unknown type ", bytes.concat(quoted(p.type_name),
                 bytes.concat(" on parameter ", quoted(p.name)))))
@@ -2098,6 +3196,8 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
   dict_set(c.stack, fn_.node_id, true)
   let body_type: Type = infer_fn_body(c, fn_.body, scope, ret_type_name(fn_.ret_type, fn_.ret_unit))
   dict_del(c.stack, fn_.node_id)
+  check_body_return_type(c, ex.line, "", ret_type_name(fn_.ret_type, fn_.ret_unit),
+    body_type, fn_.body)
 
   match fn_.ret {
     Some(anno) => {
@@ -2126,6 +3226,13 @@ fn infer_user_call(c: Checker, fn_: FnType, ex: ast.Call, arg_types: Arr[Type]) 
     },
     None => unit,
   }
+  # A declared return type is what the call produces, whatever walking the body
+  # concluded. That matters for a block body ending in `return`, which evaluates
+  # to Unit as an expression: taking that as the call's type made a `read(p)?`
+  # report that `?` needs a Res, on the commonest shape the feature has. The
+  # signature is the contract; the body is checked against it separately.
+  let declared: Type = parse_type(c, ret_type_name(fn_.ret_type, fn_.ret_unit))
+  if not is_unknown_type(declared) { return declared }
   body_type
 }
 
@@ -2153,7 +3260,7 @@ fn check_arg_unit(c: Checker, line: I64, arg_idx: I64, name: Str,
 # everything the body can ask of it.
 fn check_record_arg(c: Checker, line: I64, arg_idx: I64, name: Str,
                     expected: RecordType, arg: Type) {
-  let rec: RecordType = RecordType { fields: dict_new() }
+  let rec: RecordType = RecordType { fields: dict_new(), name: "" }
   match as_record(arg) {
     Some(r) => rec = r,
     None => {
@@ -2328,10 +3435,10 @@ fn builtin_fixed_arity(name: Str) -> I64 {
   if in_set(name, "args arr_new bytes_new clock_now_ms dict_new gpu_available gpu_device_count is_tty_stdout rng_normal rng_uniform window_size") {
     return 0
   }
-  if in_set(name, "relu exp log sin cos tanh sigmoid sqrt square floor ceil round abort abs arr_clear bnot buf_len buf_new bytes_to_str chr columns dict_keys emit_line enumerate env eye f64_bits f64_from_bits f64_hex f64_of_i64 f64_signbit f64_to_str gbm_describe grad grads hessian hvp jvp vjp dtype i64_of_f64 i64_of_str int item jacobian len list_dir load load_value module_source nbytes num_to_text permutation pop read_csv read_file read_frame rng_perm rng_seed scalar seed shape str str_quote str_to_f64 tensor value_and_grad write_err write_out") {
+  if in_set(name, "relu exp log sin cos tanh sigmoid sqrt square floor ceil round abort abs arr_clear bnot buf_len buf_new bytes_to_str chr columns dict_keys emit_line enumerate env eye arr_of_tensor f64_bits f64_bits_hi f64_bits_lo f64_from_bits f64_hex f64_of_i64 f64_signbit f64_to_str gbm_describe grad grads hessian hvp jvp vjp dtype i64_of_f64 i64_of_str int item jacobian len list_dir load load_value module_source nbytes num_to_text permutation pop read_csv read_file read_frame rng_perm rng_seed scalar seed shape str str_quote str_to_f64 tensor value_and_grad write_err write_out") {
     return 1
   }
-  if in_set(name, "matmul dot conv2d maximum minimum greater less greater_equal less_equal equal and or band bor xor shl shr append arr_push buf_get8 bytes_push concat dict_del dict_get dict_has dict_must f64_mod f64_pow field gather is_same linear map map_leaves maxpool2d pow push save save_value write_file write_frame zip_leaves") {
+  if in_set(name, "matmul dot conv2d maximum minimum greater less greater_equal less_equal equal and or band bor xor shl shr append arr_push buf_get8 bytes_push concat dict_del dict_get dict_has dict_must f64_from_halves f64_mod f64_pow field gather is_same linear map map_leaves maxpool2d pow push save save_value write_file write_frame zip_leaves") {
     return 2
   }
   if in_set(name, "arange buf_set8 clip dict_or dict_set fold linspace slice where with_field") {
@@ -2357,24 +3464,76 @@ fn definite_non_tensor(t: Type) -> Bool {
     TRecord(_) => true,
     TFn(_) => true,
     TBuiltin(_) => true,
+    TArr(_) => true,
+    TDict(_) => true,
+    TEnum(_) => true,
+    TBytes => true,
+    TCtor(_) => true,
+    TFnType(_) => true,
+    # An I64 is a number, so it is not a definite non-tensor: it stands where a
+    # scalar is wanted, the same softness the Go checker keeps.
+    TInt => false,
     TTensor(_) => false,
     TUnknown => false,
   }
 }
 
 # A type as a diagnostic names it. The wording matches the Go checker's
-# typeString for every case this lattice can produce, because the two
-# implementations' diagnostics are compared byte for byte.
-fn type_text(t: Type) -> Str {
+# typeString case for case, because the two implementations' diagnostics are
+# compared byte for byte. A rank-0 tensor is F64 in a systems-mode file and
+# "a scalar" elsewhere, which is why the checker is a parameter here.
+fn type_text(c: Checker, t: Type) -> Str {
   match t {
+    TInt => "I64",
+    TTensor(v) => {
+      if is_scalar(v) {
+        if c.systems { return "F64" }
+        return "a scalar"
+      }
+      bytes.concat("a tensor of shape ", dims_string(v))
+    },
     TBool => "Bool",
     TStr => "Str",
+    TBytes => "Bytes",
     TUnit => "Unit",
     TList(_) => "a list",
-    TRecord(_) => "a record",
+    TArr(v) => {
+      match v.elem {
+        Some(e) => bytes.concat("Arr[", bytes.concat(type_text(c, e), "]")),
+        None => "Arr",
+      }
+    },
+    TDict(v) => {
+      let k: Type = match v.key {
+        Some(x) => x,
+        None => return "Dict",
+      }
+      let val: Type = match v.val {
+        Some(x) => x,
+        None => return "Dict",
+      }
+      bytes.concat("Dict[", bytes.concat(type_text(c, k),
+        bytes.concat(", ", bytes.concat(type_text(c, val), "]"))))
+    },
+    TEnum(v) => {
+      if len(v.args) == 0 { return v.name }
+      let parts: Arr[Str] = arr_new()
+      for a in v.args {
+        match a {
+          Some(x) => push(parts, type_text(c, x)),
+          None => push(parts, "_"),
+        }
+      }
+      bytes.concat(v.name, bytes.concat("[", bytes.concat(bytes.join(parts, ", "), "]")))
+    },
+    TCtor(v) => bytes.concat("the constructor ", v.variant),
+    TRecord(v) => {
+      if len(v.name) > 0 { return v.name }
+      "a record"
+    },
     TFn(_) => "a function",
     TBuiltin(_) => "a function",
-    TTensor(_) => "a tensor",
+    TFnType(_) => "a function",
     TUnknown => "an unknown value",
   }
 }
@@ -2403,7 +3562,7 @@ fn infer_builtin_call(c: Checker, name: Str, ex: ast.Call, arg_types: Arr[Type],
     while i < operands and i < len(arg_types) {
       if definite_non_tensor(arg_types[i]) {
         report(c, ex.line, bytes.concat(name, bytes.concat(" expects a tensor, but argument ",
-          bytes.concat(str(i + 1), bytes.concat(" is ", type_text(arg_types[i]))))))
+          bytes.concat(str(i + 1), bytes.concat(" is ", type_text(c, arg_types[i]))))))
         return TUnknown
       }
       i = i + 1

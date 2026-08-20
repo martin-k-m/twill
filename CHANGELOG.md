@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.6.7] - 2026-08-20
+
+### Added
+
+- **The self-hosted checker has the systems-mode type layer.** Until now
+  `src/check.tw` knew nine types and none of them was `I64`, `Arr` or `Dict`,
+  so `let x: I64 = "hello"` was caught by the Go checker and waved through by
+  the self-hosted one. The two checkers are supposed to prove the same things,
+  and on systems-mode annotations they did not.
+
+  Ported from `internal/checker/systems.go`, which is the specification: the
+  seven type cases, the annotation parser, `assignable` with its deliberate
+  softness (`I64` and `F64` stand for each other, an unknown judges nothing),
+  and the wiring into let annotations, parameters, declared return types,
+  struct fields, enum payloads, ordering, and the builtins whose result type is
+  fixed.
+
+  Two things had to be fixed underneath it. The self-hosted parser could not
+  parse `fn(I64) -> I64` in a type position at all, so the checker could never
+  have seen a function type to judge it; it now parses function types wherever
+  a type may appear, and they nest. And `src/builtins.tw` was missing four
+  names the Go interpreter has had all along -- `f64_bits_hi`, `f64_bits_lo`,
+  `f64_from_halves`, `arr_of_tensor` -- a parity gap that predates this work.
+
+  The bar was byte-identical diagnostics, not merely equivalent ones, because
+  equivalent-but-differently-worded is how the two implementations drift apart
+  where nothing is watching. 594 files were checked by both -- all of `std`,
+  `src`, `examples`, `testdata/cases` and the nine ecosystem repositories --
+  and the two checkers agree on every one, character for character.
+
 ## [1.6.6] - 2026-08-19
 
 ### Fixed
