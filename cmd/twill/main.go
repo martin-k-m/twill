@@ -16,7 +16,7 @@ import (
 	"github.com/twill-lang/twill/internal/value"
 )
 
-const version = "1.6.6"
+const version = "1.6.7"
 
 func main() {
 	args := os.Args[1:]

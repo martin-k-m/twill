@@ -310,11 +310,15 @@ fn parse_let(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   let unit: Opt[ast.UnitAnno] = None
   let type_name: Str = ""
   if accept(p, ":") {
-    let u: ast.UnitAnno = parse_unit_expr(p)?
-    if (check(p, ".") or check(p, "[")) and len(u.factors) == 1 and u.factors[0].exp == 1 {
-      type_name = type_suffix(p, u.factors[0].name)?
+    if at_fn_type(p) {
+      type_name = parse_fn_type(p)?
     } else {
-      unit = Some(u)
+      let u: ast.UnitAnno = parse_unit_expr(p)?
+      if (check(p, ".") or check(p, "[")) and len(u.factors) == 1 and u.factors[0].exp == 1 {
+        type_name = type_suffix(p, u.factors[0].name)?
+      } else {
+        unit = Some(u)
+      }
     }
   }
   expect(p, "=")?
@@ -442,7 +446,7 @@ fn parse_struct_decl(p: Parser) -> Res[ast.Stmt, lex.SyntaxError] {
   while not check(p, "}") and not at_end(p) {
     let fname: Str = expect_ident(p)?
     expect(p, ":")?
-    let ftype: Str = parse_type_ref(p)?
+    let ftype: Str = parse_type_expr(p)?
     push(fields, ast.StructField { name: fname, type_name: ftype })
     if not accept(p, ",") {
       break
@@ -918,6 +922,8 @@ fn parse_signature(p: Parser) -> Res[Signature, lex.SyntaxError] {
     # never qualified. The qualified name is lifted into the advisory ret_type.
     if check(p, "[") {
       ret = Some(parse_shape_anno(p)?)
+    } else if at_fn_type(p) {
+      ret_type = parse_fn_type(p)?
     } else {
       let u: ast.UnitAnno = parse_unit_expr(p)?
       if (check(p, ".") or check(p, "[")) and len(u.factors) == 1 and u.factors[0].exp == 1 {
@@ -962,6 +968,53 @@ fn parse_type_ref(p: Parser) -> Res[Str, lex.SyntaxError] {
   type_suffix(p, name)
 }
 
+# at_fn_type reports whether a function type starts here, in either spelling:
+# the `fn` keyword or the capitalised `Fn` that matches every other type name in
+# the systems dialect.
+fn at_fn_type(p: Parser) -> Bool {
+  if check(p, "fn") { return true }
+  let t: lex.Token = peek(p, 0)
+  t.kind == lex.KIND_IDENT and bytes.equal(t.value, "Fn")
+    and bytes.equal(peek(p, 1).value, "(")
+}
+
+# parse_type_expr parses one type in a type position: a function type, or a
+# plain type reference (a name, a qualified name, or a generic). It is what a
+# type argument or a struct field type is, wherever a `fn(...)` may appear
+# alongside an ordinary name.
+fn parse_type_expr(p: Parser) -> Res[Str, lex.SyntaxError] {
+  if at_fn_type(p) { return parse_fn_type(p) }
+  parse_type_ref(p)
+}
+
+# parse_fn_type parses a function-type annotation `fn(T, ...) -> R`. Each
+# argument and the result is itself a type, so function types nest: a
+# higher-order callback is `fn(fn(F64) -> F64) -> F64`. Systems-mode type
+# annotations are advisory, so this returns the type as its text form and the
+# checker resolves that text. It assumes the current token is `fn` or `Fn`.
+fn parse_fn_type(p: Parser) -> Res[Str, lex.SyntaxError] {
+  next_tok(p)
+  expect(p, "(")?
+  let out: Str = "fn("
+  if not check(p, ")") {
+    let first: Bool = true
+    while true {
+      let t: Str = parse_type_expr(p)?
+      if not first { out = bytes.concat(out, ", ") }
+      out = bytes.concat(out, t)
+      first = false
+      if not accept(p, ",") { break }
+    }
+  }
+  expect(p, ")")?
+  out = bytes.concat(out, ")")
+  if accept(p, "->") {
+    let r: Str = parse_type_expr(p)?
+    out = bytes.concat(out, bytes.concat(" -> ", r))
+  }
+  Ok(out)
+}
+
 # parse_type_args reads `[T, U, ...]` after a type name, each T a full type
 # reference, and returns the bracketed text, e.g. "[Str, Arr[I64]]". It assumes
 # the current token is "[".
@@ -970,7 +1023,7 @@ fn parse_type_args(p: Parser) -> Res[Str, lex.SyntaxError] {
   let out: Str = "["
   let first: Bool = true
   while true {
-    let a: Str = parse_type_ref(p)?
+    let a: Str = parse_type_expr(p)?
     if not first {
       out = bytes.concat(out, ", ")
     }
@@ -1009,6 +1062,9 @@ fn parse_param(p: Parser) -> Res[ast.Param, lex.SyntaxError] {
     # from a unit here and does not try: it records the name and moves on.
     if check(p, "[") {
       param.shape = Some(parse_shape_anno(p)?)
+    } else if at_fn_type(p) {
+      # A function-typed parameter, e.g. `step: fn(Tree, Tensor) -> Tree`.
+      param.type_name = parse_fn_type(p)?
     } else {
       let u: ast.UnitAnno = parse_unit_expr(p)?
       if len(u.factors) == 1 and u.factors[0].exp == 1 {
