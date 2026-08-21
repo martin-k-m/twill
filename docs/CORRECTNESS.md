@@ -18,7 +18,7 @@ go test ./internal/checker/ -run TestChecker  -v -count=1
 
 ### What is checked
 
-Every differentiable operator in `internal/tensor`, in 103 cases covering the
+Every differentiable operator in `internal/tensor`, in 105 cases covering the
 broadcasting regimes, both axes of a non-square matrix, and the combinations
 where a bug shows up only in composition. The list is not maintained by hand.
 `TestGradientCheckCoversEveryOperator` parses the package's own source with
@@ -30,8 +30,8 @@ That closure property is the difference between "the full operator set" as a
 claim and as a fact. A new operator cannot be added without someone deciding, in
 writing, whether it carries a gradient.
 
-Current coverage: **63 differentiable operators checked, 26 declared
-non-differentiable, 89 exported in total.**
+Current coverage: **64 differentiable operators checked, 31 declared
+non-differentiable, 95 exported in total.**
 
 The non-differentiable list is not a way of quietly excusing operators. It holds
 the index-valued ones (`argmax`, `argmin`, `argsort`, `argtopk`, whose outputs
@@ -104,7 +104,7 @@ one is a deliberate act rather than a regression nobody notices.
 
 ### The result
 
-**All 103 cases agree.** Worst relative error by case, highest first:
+**All 105 cases agree.** Worst relative error by case, highest first:
 
 | case | worst relative error |
 |---|---|
@@ -274,8 +274,8 @@ ones, and it has been in the suite since before this document.
 
 | Property | Tested by | Result |
 |---|---|---|
-| `grad` matches finite differences, every operator | `TestGradientCheckFullOperatorSet` | 103/103, worst 6.4e-08 |
-| No operator escapes the gradient check | `TestGradientCheckCoversEveryOperator` | 63 checked, 26 exempt with reasons, closed against the source |
+| `grad` matches finite differences, every operator | `TestGradientCheckFullOperatorSet` | 105/105, worst 6.4e-08 |
+| No operator escapes the gradient check | `TestGradientCheckCoversEveryOperator` | 64 checked, 31 exempt with reasons, closed against the source |
 | Kink conventions are stable | `TestGradientKinkConventions` | 4 pinned, 3 differ from PyTorch by choice |
 | Checker reports no false positives | `TestCheckerReportsNoFalsePositives` | 0 in 4,000 |
 | Checker catches decidable errors | `TestCheckerCatchesWhatItCanSee` | 2,646/2,646 |
