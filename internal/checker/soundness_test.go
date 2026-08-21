@@ -192,3 +192,51 @@ func TestCheckerCatchesWhatItCanSee(t *testing.T) {
 		t.Errorf("the checker caught %.1f%% of decidable shape errors, below the 95%% floor this test holds", pct)
 	}
 }
+
+// TestGradIsAShapeBarrier pins a completeness gap that is easy to walk into and
+// easy to lose again: the checker decides a lambda's body when the lambda is
+// applied directly, and stops deciding it when the identical lambda is wrapped
+// in grad.
+//
+// Applied directly, the argument's [2] flows into v and the @ is decidable.
+// Under grad it does not: grad returns a function whose parameter the checker
+// does not relate to the parameter of the lambda it was given, so v is Unknown
+// and the @ becomes undecidable. Annotating the lambda parameter does not help,
+// because the argument that goes wrong is supplied at the application of the
+// returned function rather than inside the body.
+//
+// This is a completeness gap, not a soundness one. The checker still reports
+// nothing false. It is asserted here rather than merely described in
+// docs/CORRECTNESS.md so that closing it is a deliberate act: the direct case
+// must keep being caught, and the day the grad case starts being caught this
+// test fails and says to update the document.
+func TestGradIsAShapeBarrier(t *testing.T) {
+	const direct = "let h = fn(v) = sum(zeros(2, 3) @ v)\nprint(h(zeros(2)))\n"
+	const viaGrad = "let g = grad(fn(v) = sum(zeros(2, 3) @ v))\nprint(g(zeros(2)))\n"
+
+	check := func(src string) []checker.Diagnostic {
+		prog, err := parser.Parse(src)
+		if err != nil {
+			t.Fatalf("parsing:\n%s\n%v", src, err)
+		}
+		return checker.Check(prog)
+	}
+
+	if d := check(direct); len(d) == 0 {
+		t.Error("the directly applied lambda is no longer checked; that is a regression, " +
+			"the argument shape used to flow into the parameter")
+	}
+
+	// Both programs make the same mistake, so both must fail at runtime. If the
+	// grad one stopped failing, the gap would be moot and this test meaningless.
+	if err := runs(viaGrad); err == nil {
+		t.Fatal("the grad program ran clean; it is supposed to be a real shape error")
+	}
+
+	if d := check(viaGrad); len(d) != 0 {
+		t.Errorf("grad is no longer a shape barrier: the checker now reports %q. "+
+			"This is an improvement, not a failure: close the gap, then update the "+
+			"\"grad is a shape barrier\" section of docs/CORRECTNESS.md, which still "+
+			"documents it as open.", d[0].Msg)
+	}
+}
