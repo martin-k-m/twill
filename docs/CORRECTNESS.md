@@ -199,6 +199,52 @@ This is not an obscure corner. Any shape derived from data read at runtime,
 from `read_csv`, from a length, or from a loop-carried value has the same
 property, and those are ordinary things for a program to do.
 
+There is a second entrance to the same gap that has nothing to do with runtime
+data, and it is worth naming because it is easy to walk into: **`grad` is a
+shape barrier.** A lambda applied directly is checked. The identical lambda
+wrapped in `grad` is not.
+
+```rust
+let h = fn(v) = sum(zeros(2, 3) @ v)
+print(h(zeros(2)))
+```
+
+```
+$ twill check direct.tw
+direct.tw:1: shape error: shape mismatch in @: [2, 3] @ [2] (inner 3 != 2)
+  1 | let h = fn(v) = sum(zeros(2, 3) @ v)
+```
+
+```rust
+let g = grad(fn(v) = sum(zeros(2, 3) @ v))
+print(g(zeros(2)))
+```
+
+```
+$ twill check viagrad.tw
+viagrad.tw: no shape problems found
+
+$ twill run viagrad.tw
+viagrad.tw:1: runtime error: shape mismatch in @: [2 3] @ [2] (inner 3 != 2)
+  1 | let g = grad(fn(v) = sum(zeros(2, 3) @ v))
+```
+
+Same body, same argument, same mistake; the only difference is `grad`. In the
+first program the checker pushes the applied argument's `[2]` into `v` and
+decides the `@`. In the second, `grad` returns a function whose parameter shape
+the checker does not relate to the shape of the lambda it was given, so `v`
+types as Unknown and the `@` becomes undecidable.
+
+This is the same Unknown-propagation mechanism as above rather than a new one,
+but it lands in the place twill most advertises, which makes it the version
+worth knowing. It is a completeness gap and not a soundness one: the checker
+still says nothing false. Relating `grad(f)`'s parameter to `f`'s would close it
+and is a bounded change, since `grad` preserves the shape of the argument it
+differentiates with respect to.
+
+Annotating the lambda parameter does not close it either, because the argument
+that goes wrong is supplied at the application of `g`, not inside the body.
+
 ### The claim it does make, tested against the interpreter
 
 Testing "no false positives" on hand-written examples proves little, since the
@@ -279,6 +325,7 @@ ones, and it has been in the suite since before this document.
 | Kink conventions are stable | `TestGradientKinkConventions` | 4 pinned, 3 differ from PyTorch by choice |
 | Checker reports no false positives | `TestCheckerReportsNoFalsePositives` | 0 in 4,000 |
 | Checker catches decidable errors | `TestCheckerCatchesWhatItCanSee` | 2,646/2,646 |
+| `grad` is a shape barrier (a known open gap) | `TestGradIsAShapeBarrier` | direct case caught, grad case not |
 | Examples check clean and run | `TestExamplesRunClean` | all |
 | Forward numerics match the self-hosted implementation | the differential harness, `tools/diff/` | 443 files on `check`, 89 on `fmt` |
 
