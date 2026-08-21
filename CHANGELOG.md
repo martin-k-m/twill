@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.7.1] - 2026-08-21
+
+A checker release. 1.7 gave the language its pattern language and its generics;
+this closes the last thing the two checkers disagreed about, and makes the one
+warning either of them emits behave like a warning.
 
 ### Added
 
