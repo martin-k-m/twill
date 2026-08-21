@@ -57,7 +57,7 @@ European call, S0=100 K=100 r=5% vol=20% T=1y, MC paths: 200000
 landed on the closed-form Greeks. No tape object, no `requires_grad`, no
 `.backward()`. The full program is [`examples/montecarlo_option.tw`](examples/montecarlo_option.tw).
 
-This is an early prototype; the current release is v1.7.1, and as of v1.5.0
+This is an early prototype; the current release is v1.7.1, and as of v1.4.0
 the twill compiler written in twill runs on the Go bootstrap and reproduces the
 reference across every stage (see [twill is being written in
 twill](#twill-is-being-written-in-twill)). The reference implementation is a
@@ -362,15 +362,15 @@ fn predict(m: Model, x: [2]) -> [3] { m.w @ x + m.b }
 
 ## twill is being written in twill
 
-> **As of v1.5.0 this runs. The twill compiler written in twill executes on the
+> **As of v1.4.0 this runs. The twill compiler written in twill executes on the
 > Go bootstrap and matches the reference across every stage.**
 
 The reference implementation is Go. The second one is twill: the lexer, parser,
 checker, evaluator, tensor kernels, formatter and CLI, written in the language
-itself under `src/`. As of v1.5.0 the whole `src/`+`std/` tree type-checks clean
+itself under `src/`. As of v1.4.0 the whole `src/`+`std/` tree type-checks clean
 and runs on the Go bootstrap: `twill check` matched the Go command byte-for-byte
 on every corpus file and `twill fmt` on every one it formats, bar a by-design
-blank-line divergence. Those runs were counted at v1.5.0, at 443 and 89 files;
+blank-line divergence. Those runs were counted at v1.4.0, at 443 and 89 files;
 the corpus has grown since and the counts are a snapshot, not a running total.
 `tools/diff` re-runs the comparison. The self-hosted evaluator runs the entire
 example corpus,
